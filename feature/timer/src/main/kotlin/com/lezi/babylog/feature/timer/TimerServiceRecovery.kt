@@ -123,6 +123,7 @@ internal fun TimerState.retryServiceStartCandidate(
 /**
  * Durable FAILED identity after any non-cancel transition fault.
  * Freezes sides without inventing elapsed time; keeps accum, session, and retry side.
+ * Never invents a side — [requestedSide] stays null when no real L/R intent exists.
  */
 internal fun TimerState.toFailedRetryable(
     failure: TimerServiceFailure = TimerServiceFailure.RUNTIME,
@@ -146,8 +147,8 @@ internal fun TimerState.toFailedRetryable(
 }
 
 /**
- * Publish durable state; on non-cancel write failure fall back to memory only.
- * CancellationException always propagates unchanged (caller stops the service).
+ * Publish durable state; on non-cancel [Exception] fall back to memory only.
+ * [CancellationException] and [Error] always propagate unchanged (caller owns stop).
  */
 internal suspend fun publishTimerStateBestEffort(
     state: TimerState,
@@ -158,14 +159,18 @@ internal suspend fun publishTimerStateBestEffort(
         publish(state)
     } catch (cancelled: CancellationException) {
         throw cancelled
+    } catch (error: Error) {
+        throw error
     } catch (_: Exception) {
         publishMemoryOnly(state)
     }
 }
 
 /**
- * Pause / clear path: always stop FGS. Persist PAUSED/empty; on write failure settle
- * FAILED when session data remains so the UI is never a false PAUSED while disk is wrong.
+ * Pause / clear path: always stop FGS once.
+ * Persist PAUSED/empty; on write failure settle FAILED only when a real retry side exists
+ * (requestedSide / was-running / lastSide). Plan-bind or ambiguous identity → memory PAUSED
+ * (never invent "L"). Use [TimerServiceFailure.STORAGE] so copy is not startup-oriented.
  */
 internal suspend fun settleNonRunningTimerTransition(
     next: TimerState,
@@ -181,30 +186,27 @@ internal suspend fun settleNonRunningTimerTransition(
     )
     try {
         publish(paused)
-        stopService()
     } catch (cancelled: CancellationException) {
         stopService()
         throw cancelled
+    } catch (error: Error) {
+        stopService()
+        throw error
     } catch (_: Exception) {
         stopService()
-        if (paused.hasTimerData() || paused.completionClientUuid != null) {
-            val failed = paused.toFailedRetryable(TimerServiceFailure.RUNTIME)
-            // Prefer a concrete side when pause cleared requestedSide.
-            val withSide = if (failed.requestedSide != null) {
-                failed
-            } else {
-                failed.copy(
-                    requestedSide = when (paused.lastSide) {
-                        "L", "R" -> paused.lastSide
-                        else -> "L"
-                    },
-                )
-            }
-            publishMemoryOnly(withSide)
+        // Prefer lastSide from the pre-clear paused snapshot (publish cleared requestedSide).
+        val failed = paused.toFailedRetryable(TimerServiceFailure.STORAGE)
+        if (failed.requestedSide != null) {
+            publishMemoryOnly(failed)
         } else {
+            // Care-plan bind / uuid-only / no concrete side: keep PAUSED identity, not false FAILED.
             publishMemoryOnly(paused)
         }
+        return
     }
+    // Publish succeeded — stop once outside the publish failure path so a stop Exception
+    // cannot be misclassified as a persist fault or overwrite disk PAUSED with FAILED.
+    stopService()
 }
 
 /** Init / restore outcome after reading durable timer JSON (or failing to). */
@@ -214,10 +216,16 @@ internal data class TimerRestoreDecision(
 )
 
 /**
- * Same stop policy as transitions: only a confirmed live RUNNING session may keep FGS.
- * Read IO / corrupt storage → empty + stop (no fabricated RUNNING).
+ * Decide UI/service restore from durable timer JSON (happy path) or a failed read.
+ *
+ * Stop policy matches transitions: only a confirmed live RUNNING session may keep FGS.
+ * Init is intentionally fail-closed on read IO / corrupt JSON: empty + stop (stronger than
+ * transition keep-session FAILED). Callers may durable-clear via persistLocal(empty); that
+ * wipe is intentional when disk is untrusted, not the same identity as transition FAILED.
+ *
+ * @param readFailed true only when the storage read itself threw; wording is fault-only.
  */
-internal fun restoreTimerAfterStorageFault(
+internal fun decideTimerRestore(
     raw: String?,
     nowElapsed: Long,
     nowWall: Long,
@@ -244,8 +252,8 @@ internal fun restoreTimerAfterStorageFault(
 /**
  * Persists a non-running pending snapshot first and a running snapshot only after service ack.
  * Platform exceptions, timeouts, notification failures, and DataStore IOException share one
- * cover: stop FGS once, settle FAILED (memory first when durable write fails).
- * CancellationException stops then rethrows unchanged.
+ * cover: stop FGS once, settle FAILED via [toFailedRetryable] (try durable, then memory).
+ * CancellationException and Error stop then rethrow unchanged.
  */
 internal suspend fun startTimerWithConfirmation(
     candidate: TimerState,
@@ -261,11 +269,14 @@ internal suspend fun startTimerWithConfirmation(
     } catch (cancelled: CancellationException) {
         stopService()
         throw cancelled
+    } catch (error: Error) {
+        stopService()
+        throw error
     } catch (_: Exception) {
         stopService()
-        val failed = pending.toFailedRetryable(TimerServiceFailure.RUNTIME)
-        publishMemoryOnly(failed)
-        return TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
+        val failed = pending.toFailedRetryable(TimerServiceFailure.STORAGE)
+        publishTimerStateBestEffort(failed, publish, publishMemoryOnly)
+        return TimerServiceStartResult.Failed(TimerServiceFailure.STORAGE)
     }
 
     val result = try {
@@ -273,6 +284,9 @@ internal suspend fun startTimerWithConfirmation(
     } catch (cancelled: CancellationException) {
         stopService()
         throw cancelled
+    } catch (error: Error) {
+        stopService()
+        throw error
     } catch (failure: RuntimeException) {
         TimerServiceStartResult.Failed(failure.toTimerServiceFailure())
     } catch (_: Exception) {
@@ -292,28 +306,22 @@ internal suspend fun startTimerWithConfirmation(
             } catch (cancelled: CancellationException) {
                 stopService()
                 throw cancelled
+            } catch (error: Error) {
+                stopService()
+                throw error
             } catch (_: Exception) {
                 // Service already acknowledged — must stop so UI cannot stay STARTING while FGS runs.
                 stopService()
-                val failed = pending.toFailedRetryable(TimerServiceFailure.RUNTIME)
-                publishMemoryOnly(failed)
-                TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
+                val failed = pending.toFailedRetryable(TimerServiceFailure.STORAGE)
+                publishTimerStateBestEffort(failed, publish, publishMemoryOnly)
+                TimerServiceStartResult.Failed(TimerServiceFailure.STORAGE)
             }
         }
         is TimerServiceStartResult.Failed -> {
             // Shared cover with timeout / nack / platform throw: idempotent stop, then FAILED.
             stopService()
-            val failed = pending.copy(
-                serviceState = TimerServiceState.FAILED,
-                serviceFailure = result.failure,
-            )
-            try {
-                publish(failed)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                publishMemoryOnly(failed)
-            }
+            val failed = pending.toFailedRetryable(result.failure)
+            publishTimerStateBestEffort(failed, publish, publishMemoryOnly)
             result
         }
     }
@@ -328,6 +336,7 @@ internal fun TimerState.serviceFeedbackText(): String? = when (serviceState) {
         TimerServiceFailure.PERMISSION -> "计时服务权限不可用，已安全暂停；检查系统设置后重试。"
         TimerServiceFailure.NOTIFICATION -> "计时通知创建失败，已安全暂停；可重试启动。"
         TimerServiceFailure.TIMEOUT -> "系统未确认计时服务已启动，已安全暂停；可重试启动。"
+        TimerServiceFailure.STORAGE -> "计时状态保存失败，已安全暂停；可重试启动。"
         TimerServiceFailure.RUNTIME, null -> "计时服务启动失败，已安全暂停；可重试启动。"
     }
 }

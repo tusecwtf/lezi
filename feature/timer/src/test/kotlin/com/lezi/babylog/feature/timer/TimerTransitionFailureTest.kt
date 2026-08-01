@@ -38,23 +38,25 @@ class TimerTransitionFailureTest {
         )
 
         assertTrue(result is TimerServiceStartResult.Failed)
-        assertEquals(TimerServiceFailure.RUNTIME, (result as TimerServiceStartResult.Failed).failure)
+        assertEquals(TimerServiceFailure.STORAGE, (result as TimerServiceStartResult.Failed).failure)
         assertEquals(0, serviceStarts)
         assertEquals(1, stops)
+        // Durable FAILED was attempted after stop; both STARTING and FAILED throws → memory settle.
+        assertTrue(published.any { it.serviceState == TimerServiceState.STARTING })
+        assertTrue(published.any { it.serviceState == TimerServiceState.FAILED })
         val failed = requireNotNull(memory)
         assertEquals(TimerServiceState.FAILED, failed.serviceState)
-        assertEquals(TimerServiceFailure.RUNTIME, failed.serviceFailure)
+        assertEquals(TimerServiceFailure.STORAGE, failed.serviceFailure)
         assertEquals("L", failed.requestedSide)
         assertEquals("timer-session", failed.completionClientUuid)
         assertEquals(42L, failed.babyId)
         assertFalse(failed.leftRunning)
         assertFalse(failed.rightRunning)
-        // Durable STARTING must not remain the last successful publish.
         assertTrue(published.none { it.serviceState == TimerServiceState.RUNNING })
     }
 
     @Test
-    fun runningPersistIoExceptionAfterAckStopsServiceAndSettlesFailedInMemory() = runBlocking {
+    fun runningPersistIoExceptionAfterAckStopsServiceAndSettlesFailedDurably() = runBlocking {
         val durable = mutableListOf<TimerState>()
         var memory: TimerState? = null
         var stops = 0
@@ -73,17 +75,48 @@ class TimerTransitionFailureTest {
         )
 
         assertTrue(result is TimerServiceStartResult.Failed)
+        assertEquals(TimerServiceFailure.STORAGE, (result as TimerServiceStartResult.Failed).failure)
         assertEquals(1, stops)
         assertEquals(TimerServiceState.STARTING, durable.first().serviceState)
-        // RUNNING write was attempted then aborted — must not remain the settled UI state.
         assertTrue(durable.any { it.serviceState == TimerServiceState.RUNNING })
+        // Design note 1: try durable FAILED after stop (STARTING was already on disk).
+        val durableFailed = durable.last { it.serviceState == TimerServiceState.FAILED }
+        assertEquals(TimerServiceFailure.STORAGE, durableFailed.serviceFailure)
+        assertEquals("L", durableFailed.requestedSide)
+        assertEquals(5_000L, durableFailed.leftAccumMs)
+        assertEquals("timer-session", durableFailed.completionClientUuid)
+        assertFalse(durableFailed.leftRunning)
+        // Durable FAILED succeeded — memory fallback not required.
+        assertNull(memory)
+    }
+
+    @Test
+    fun runningPersistAndFailedPersistBothThrowStillMemorySettles() = runBlocking {
+        val durable = mutableListOf<TimerState>()
+        var memory: TimerState? = null
+        var stops = 0
+
+        val result = startTimerWithConfirmation(
+            candidate = runningLeftCandidate(leftAccumMs = 5_000L),
+            publish = { next ->
+                durable += next
+                if (next.serviceState == TimerServiceState.RUNNING ||
+                    next.serviceState == TimerServiceState.FAILED
+                ) {
+                    throw IOException("persist failed")
+                }
+            },
+            startService = { TimerServiceStartResult.Started },
+            stopService = { stops += 1 },
+            publishMemoryOnly = { memory = it },
+        )
+
+        assertEquals(TimerServiceStartResult.Failed(TimerServiceFailure.STORAGE), result)
+        assertEquals(1, stops)
         val failed = requireNotNull(memory)
         assertEquals(TimerServiceState.FAILED, failed.serviceState)
-        assertEquals(TimerServiceFailure.RUNTIME, failed.serviceFailure)
+        assertEquals(TimerServiceFailure.STORAGE, failed.serviceFailure)
         assertEquals("L", failed.requestedSide)
-        assertEquals(5_000L, failed.leftAccumMs)
-        assertEquals("timer-session", failed.completionClientUuid)
-        assertFalse(failed.leftRunning)
     }
 
     @Test
@@ -122,6 +155,30 @@ class TimerTransitionFailureTest {
     }
 
     @Test
+    fun serviceNackSettlesFailedViaToFailedRetryable() = runBlocking {
+        val durable = mutableListOf<TimerState>()
+
+        val result = startTimerWithConfirmation(
+            candidate = runningLeftCandidate(leftAccumMs = 2_000L),
+            publish = { durable += it },
+            startService = {
+                TimerServiceStartResult.Failed(TimerServiceFailure.TIMEOUT)
+            },
+            stopService = {},
+            publishMemoryOnly = {},
+        )
+
+        assertEquals(TimerServiceStartResult.Failed(TimerServiceFailure.TIMEOUT), result)
+        val failed = durable.last()
+        assertEquals(TimerServiceState.FAILED, failed.serviceState)
+        assertEquals(TimerServiceFailure.TIMEOUT, failed.serviceFailure)
+        assertEquals("L", failed.requestedSide)
+        assertEquals(2_000L, failed.leftAccumMs)
+        assertFalse(failed.leftRunning)
+        assertNull(failed.leftStartedElapsed)
+    }
+
+    @Test
     fun pausePersistIoExceptionStopsServiceAndSettlesFailedWithSession() = runBlocking {
         val durable = mutableListOf<TimerState>()
         var memory: TimerState? = null
@@ -146,11 +203,10 @@ class TimerTransitionFailureTest {
         )
 
         assertEquals(1, stops)
-        // Durable write may have attempted PAUSED then failed — memory must not stay PAUSED.
         assertTrue(durable.all { it.serviceState == TimerServiceState.PAUSED })
         val failed = requireNotNull(memory)
         assertEquals(TimerServiceState.FAILED, failed.serviceState)
-        assertEquals(TimerServiceFailure.RUNTIME, failed.serviceFailure)
+        assertEquals(TimerServiceFailure.STORAGE, failed.serviceFailure)
         assertEquals("L", failed.requestedSide)
         assertEquals(12_000L, failed.leftAccumMs)
         assertEquals("timer-session", failed.completionClientUuid)
@@ -170,6 +226,85 @@ class TimerTransitionFailureTest {
 
         assertEquals(1, stops)
         assertEquals(TimerState(), memory)
+    }
+
+    @Test
+    fun carePlanBindShapedPublishFailureStaysPausedWithoutInventedSide() = runBlocking {
+        var memory: TimerState? = null
+        var stops = 0
+        val bind = TimerState(
+            babyId = 42L,
+            completionClientUuid = "plan-bind-session",
+            carePlanId = 99L,
+        )
+
+        settleNonRunningTimerTransition(
+            next = bind,
+            publish = { throw IOException("bind persist failed") },
+            stopService = { stops += 1 },
+            publishMemoryOnly = { memory = it },
+        )
+
+        assertEquals(1, stops)
+        val settled = requireNotNull(memory)
+        assertEquals(TimerServiceState.PAUSED, settled.serviceState)
+        assertNull(settled.serviceFailure)
+        assertNull(settled.requestedSide)
+        assertEquals(99L, settled.carePlanId)
+        assertEquals("plan-bind-session", settled.completionClientUuid)
+        assertEquals(42L, settled.babyId)
+    }
+
+    @Test
+    fun uuidOnlyPublishFailureStaysPausedWithoutInventedSide() = runBlocking {
+        var memory: TimerState? = null
+        settleNonRunningTimerTransition(
+            next = TimerState(completionClientUuid = "uuid-only"),
+            publish = { throw IOException("uuid persist failed") },
+            stopService = {},
+            publishMemoryOnly = { memory = it },
+        )
+        val settled = requireNotNull(memory)
+        assertEquals(TimerServiceState.PAUSED, settled.serviceState)
+        assertNull(settled.requestedSide)
+        assertNull(settled.serviceFailure)
+        assertEquals("uuid-only", settled.completionClientUuid)
+    }
+
+    @Test
+    fun pauseWithAccumButNoSideStaysPausedOnPersistFailure() = runBlocking {
+        var memory: TimerState? = null
+        settleNonRunningTimerTransition(
+            next = TimerState(
+                babyId = 42L,
+                completionClientUuid = "timer-session",
+                leftAccumMs = 12_000L,
+            ),
+            publish = { throw IOException("pause persist failed") },
+            stopService = {},
+            publishMemoryOnly = { memory = it },
+        )
+        val settled = requireNotNull(memory)
+        assertEquals(TimerServiceState.PAUSED, settled.serviceState)
+        assertNull(settled.requestedSide)
+        assertEquals(12_000L, settled.leftAccumMs)
+    }
+
+    @Test
+    fun successfulPausePublishStopsAfterPublishNotInsideFailurePath() = runBlocking {
+        val durable = mutableListOf<TimerState>()
+        var stops = 0
+        var memory: TimerState? = null
+        settleNonRunningTimerTransition(
+            next = TimerState(lastSide = "R", leftAccumMs = 1L, completionClientUuid = "s"),
+            publish = { durable += it },
+            stopService = { stops += 1 },
+            publishMemoryOnly = { memory = it },
+        )
+        assertEquals(1, stops)
+        assertEquals(1, durable.size)
+        assertEquals(TimerServiceState.PAUSED, durable.single().serviceState)
+        assertNull(memory)
     }
 
     @Test
@@ -214,6 +349,26 @@ class TimerTransitionFailureTest {
             assertSame(cancelled, thrown)
         }
         assertEquals(0, serviceStarts)
+        assertEquals(1, stops)
+    }
+
+    @Test
+    fun errorOnStartingPublishStopsThenRethrows() = runBlocking {
+        var stops = 0
+        val boom = SimulatedError()
+
+        try {
+            startTimerWithConfirmation(
+                candidate = runningLeftCandidate(),
+                publish = { throw boom },
+                startService = { TimerServiceStartResult.Started },
+                stopService = { stops += 1 },
+                publishMemoryOnly = {},
+            )
+            fail("expected SimulatedError")
+        } catch (thrown: SimulatedError) {
+            assertSame(boom, thrown)
+        }
         assertEquals(1, stops)
     }
 
@@ -263,41 +418,10 @@ class TimerTransitionFailureTest {
     }
 
     @Test
-    fun retryFromFailedKeepsStableSessionAndShowsRunningOnlyAfterSuccess() = runBlocking {
-        val failed = runningLeftCandidate(leftAccumMs = 3_000L)
-            .pausedForServiceStart()
-            .copy(
-                serviceState = TimerServiceState.FAILED,
-                serviceFailure = TimerServiceFailure.RUNTIME,
-            )
-        val retry = failed.retryServiceStartCandidate(
-            nowElapsed = 9_000L,
-            nowWall = 1_700_000_009_000L,
-        )
-        requireNotNull(retry)
-        assertEquals("timer-session", retry.completionClientUuid)
-
-        val published = mutableListOf<TimerState>()
-        startTimerWithConfirmation(
-            candidate = retry,
-            publish = { published += it },
-            startService = { TimerServiceStartResult.Started },
-            stopService = {},
-            publishMemoryOnly = {},
-        )
-
-        assertEquals(TimerServiceState.STARTING, published.first().serviceState)
-        assertEquals(TimerServiceState.RUNNING, published.last().serviceState)
-        assertEquals("timer-session", published.last().completionClientUuid)
-        assertTrue(published.last().leftRunning)
-        assertNull(published.last().serviceFailure)
-    }
-
-    @Test
-    fun storageFaultRestoreMirrorsTransitionFailedStopPolicy() {
+    fun decideTimerRestoreFailClosedOnReadFaultAndCorruptJson() {
         val corruptedRunning = runningLeftCandidate(leftAccumMs = 8_000L)
             .copy(serviceState = TimerServiceState.RUNNING)
-        val settled = restoreTimerAfterStorageFault(
+        val settled = decideTimerRestore(
             raw = corruptedRunning.toJson(
                 savedElapsed = 1_250L,
                 savedWall = 1_700_000_000_250L,
@@ -313,7 +437,7 @@ class TimerTransitionFailureTest {
         assertEquals(TimerState(), settled.state)
         assertTrue(settled.shouldStopService)
 
-        val badJson = restoreTimerAfterStorageFault(
+        val badJson = decideTimerRestore(
             raw = "{not-json",
             nowElapsed = 1_500L,
             nowWall = 1_700_000_000_500L,
@@ -324,7 +448,7 @@ class TimerTransitionFailureTest {
         assertEquals(TimerState(), badJson.state)
         assertTrue(badJson.shouldStopService)
 
-        val recoverable = restoreTimerAfterStorageFault(
+        val recoverable = decideTimerRestore(
             raw = corruptedRunning.toJson(
                 savedElapsed = 1_250L,
                 savedWall = 1_700_000_000_250L,
@@ -340,7 +464,7 @@ class TimerTransitionFailureTest {
         assertEquals("L", recoverable.state.requestedSide)
         assertTrue(recoverable.shouldStopService)
 
-        val live = restoreTimerAfterStorageFault(
+        val live = decideTimerRestore(
             raw = corruptedRunning.toJson(
                 savedElapsed = 1_250L,
                 savedWall = 1_700_000_000_250L,
@@ -357,7 +481,7 @@ class TimerTransitionFailureTest {
     }
 
     @Test
-    fun toFailedRetryableKeepsAccumSideAndSession() {
+    fun toFailedRetryableKeepsAccumSideAndSessionWithoutInventingSide() {
         val pending = runningLeftCandidate(leftAccumMs = 7_000L).pausedForServiceStart()
         val failed = pending.toFailedRetryable(TimerServiceFailure.TIMEOUT)
         assertEquals(TimerServiceState.FAILED, failed.serviceState)
@@ -367,7 +491,27 @@ class TimerTransitionFailureTest {
         assertEquals("timer-session", failed.completionClientUuid)
         assertFalse(failed.leftRunning)
         assertNull(failed.leftStartedElapsed)
+
+        val bindOnly = TimerState(
+            completionClientUuid = "bind",
+            carePlanId = 1L,
+        ).toFailedRetryable(TimerServiceFailure.STORAGE)
+        assertEquals(TimerServiceState.FAILED, bindOnly.serviceState)
+        assertNull(bindOnly.requestedSide)
+        assertEquals(TimerServiceFailure.STORAGE, bindOnly.serviceFailure)
     }
+
+    @Test
+    fun storageFailureCopyIsNotStartupOriented() {
+        val failed = runningLeftCandidate().pausedForServiceStart()
+            .toFailedRetryable(TimerServiceFailure.STORAGE)
+        val text = failed.serviceFeedbackText()
+        requireNotNull(text)
+        assertTrue(text.contains("保存"))
+        assertFalse(text.contains("启动失败"))
+    }
+
+    private class SimulatedError : Error("simulated")
 
     private fun runningLeftCandidate(leftAccumMs: Long = 0L) = TimerState(
         babyId = 42L,

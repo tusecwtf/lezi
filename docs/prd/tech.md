@@ -102,19 +102,23 @@ UI 事件
 开始 → 先持久化暂停的 STARTING 快照 → 请求前台服务与通知
      → 系统真实标记前台服务，且通知权限开启时通知已发布，才回执 RUNNING 并在 UI 走秒
      → 受限启动 / 权限 / 通知 / 超时 / 运行时 / DataStore 持久化失败 → 同一总覆盖：
-       停 FGS 与通知，内存收口 FAILED（保留侧别、累计值、session 与可重试原因）
+       停 FGS 与通知，收口 FAILED（先尝试 durable FAILED，再 memory；保留侧别、累计值、session）
+     → 持久化类失败原因 `STORAGE`（文案「状态保存失败」）；服务启动类仍用 RUNTIME/权限/通知/超时
      → FAILED 再持久化失败时仍先更新内存态，UI 不得长期停在 STARTING/RUNNING 假象
 完成 → domain completeNursing：写 nursing Record；若绑定 carePlanId，同事务读取计划当前
        active 照片并 clone 为 Record 独立 MediaAsset 行，再 complete 计划 + 候选 → 停服务
-     → 完成 / 暂停 / 清空：持久化非运行快照后停服务；持久化失败同样停服并（有会话数据时）FAILED 可重试
-进程被杀 / 坏存储读 → 冻结或清空并停服；仅进程内同 session 见证可保留 RUNNING；不自动重复启动
-CancellationException → 先停服再原样重抛，不得吞成产品错误
+     → 完成 / 暂停 / 清空：先持久化非运行快照再停服；持久化失败同样停服；
+       仅当存在真实可重试侧别（lastSide / 曾运行侧）时内存 `FAILED`；
+       护理计划 bind 或无侧别会话保持内存 `PAUSED`，不得伪造 `"L"`
+进程被杀 / 坏存储读 → 冻结或 **init fail-closed 清空** 并停服（强于 transition 的 keep-session FAILED）；
+       仅进程内同 session 见证可保留 RUNNING；不自动重复启动
+CancellationException / Error → 先停服再原样重抛，不得吞成产品错误
 ```
 
 | 服务态 | 含义 | 持久化失败时 |
 |--------|------|----------------|
-| `PAUSED` | 无前台服务；可开始一侧 | 停服；有会话则内存 `FAILED` 可重试 |
-| `STARTING` | 已写暂停快照，等待系统确认 | 不得启动或继续 FGS；收口 `FAILED` |
+| `PAUSED` | 无前台服务；可开始一侧 | 停服；有真实侧别则内存 `FAILED`/`STORAGE`；bind/无侧别保持 `PAUSED` |
+| `STARTING` | 已写暂停快照，等待系统确认 | 不得启动或继续 FGS；收口 `FAILED`（尽量 durable） |
 | `RUNNING` | 仅服务 ack 后；UI 走秒 | ack 后写盘失败 → 停服 + `FAILED`（非假 RUNNING） |
 | `FAILED` | 已安全暂停，保留 side/累计/session | 写盘再失败仍先更新内存 `FAILED` |
 | `RECOVERABLE` | 进程恢复未见服务见证 | 与 transition 相同：停服，可重试启动 |

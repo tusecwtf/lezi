@@ -28,6 +28,8 @@ enum class TimerServiceFailure {
     NOTIFICATION,
     RUNTIME,
     TIMEOUT,
+    /** Durable DataStore / persist write failed (not a service-start classification). */
+    STORAGE,
 }
 
 data class TimerState(

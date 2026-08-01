@@ -58,7 +58,7 @@ class TimerViewModel @Inject constructor(
             toggleMutex.withLock {
                 val decision = try {
                     val raw = settings.nursingTimerJson.first()
-                    restoreTimerAfterStorageFault(
+                    decideTimerRestore(
                         raw = raw,
                         nowElapsed = SystemClock.elapsedRealtime(),
                         nowWall = System.currentTimeMillis(),
@@ -70,8 +70,9 @@ class TimerViewModel @Inject constructor(
                     serviceController.stop()
                     throw cancelled
                 } catch (_: Exception) {
-                    // DataStore read / unexpected restore fault: same stop policy as transition.
-                    restoreTimerAfterStorageFault(
+                    // DataStore read / unexpected restore fault: fail-closed empty + stop
+                    // (stronger than transition keep-session FAILED; intentional init policy).
+                    decideTimerRestore(
                         raw = null,
                         nowElapsed = SystemClock.elapsedRealtime(),
                         nowWall = System.currentTimeMillis(),

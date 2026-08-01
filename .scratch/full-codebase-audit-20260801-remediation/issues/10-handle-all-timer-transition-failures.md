@@ -9,11 +9,12 @@
 
 ## Design notes (public seams)
 
-1. `startTimerWithConfirmation` — STARTING persist / service ack / RUNNING publish; all non-cancel failures stop FGS once and settle FAILED (memory first if durable write fails).
-2. `settleNonRunningTimerTransition` — pause/clear path: stop FGS even when DataStore `IOException`; keep FAILED retry identity when session data remains.
-3. `publishTimerStateBestEffort` — durable publish with memory fallback; CancellationException rethrown after stop responsibility stays with caller.
-4. `TimerState.toFailedRetryable` / `restoreTimerAfterStorageFault` — pure FAILED identity (accum, side, session, failure reason) shared by transition and init restore.
-5. ViewModel `applyTransition` / `init` — wire the same cover; only rethrow CancellationException after stop.
+1. `startTimerWithConfirmation` — STARTING persist / service ack / RUNNING publish; all non-cancel failures stop FGS once and settle FAILED via `toFailedRetryable` (try durable FAILED, then memory). Persist faults use `TimerServiceFailure.STORAGE`; service nacks keep classified reasons. `CancellationException` / `Error` stop then rethrow.
+2. `settleNonRunningTimerTransition` — pause/clear: try publish then always stop once; on write failure FAILED only when a real retry side exists (requestedSide / was-running / lastSide). Plan-bind or ambiguous identity → memory PAUSED (never invent `"L"`). Copy uses `STORAGE`, not startup-oriented RUNTIME.
+3. `publishTimerStateBestEffort` — durable publish with memory fallback for FAILED settles; CancellationException / Error rethrown; stop responsibility stays with caller.
+4. `TimerState.toFailedRetryable` — pure FAILED identity (accum, optional side, session, failure reason). Never invents a side. Shared by start and non-running settles.
+5. `decideTimerRestore` — init/happy-path restore decision. **Stop** policy matches transitions (only live RUNNING keeps FGS). **Identity** on read IO / corrupt JSON is intentionally fail-closed empty + durable clear (stronger than transition keep-session FAILED)—not the same user-visible state as transition FAILED.
+6. ViewModel `applyTransition` / `init` — wire the same stop cover; only rethrow CancellationException after stop.
 
 ## Acceptance criteria
 
@@ -23,7 +24,7 @@
 - [x] CancellationException 停服务后原样重抛；不能被产品错误吞掉。
 - [x] service start RuntimeException、timeout、notification failure 与 DataStore failure 共享同一总覆盖策略，不产生重复 stop 竞态。
 - [x] retry 从 FAILED/RECOVERABLE 使用稳定 session token，成功后才显示 RUNNING。
-- [x] init restore 遇到坏存储/IO 的用户可见状态和停服策略与 transition 一致。
+- [x] init restore 坏存储/IO：停服策略与 transition 一致；用户可见态为 fail-closed empty（强于 transition 的 keep-session FAILED，见 design note 5）。
 
 ## Validation
 
