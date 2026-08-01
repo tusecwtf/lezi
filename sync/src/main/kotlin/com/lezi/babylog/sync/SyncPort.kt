@@ -4,8 +4,6 @@ import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.SyncStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Privacy-preserving family member projection from the home server.
@@ -268,7 +266,6 @@ interface SyncPort {
     fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     /** Exact foreground/manual member-login checks observed by an open approval UI. */
     fun memberLoginChecks(): Flow<MemberLoginCheckResult> = kotlinx.coroutines.flow.emptyFlow()
-    fun isEnabled(): Boolean
     fun requestSync(trigger: SyncTrigger)
     suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
         SetupProbeResult.Failed.Unreachable
@@ -282,7 +279,6 @@ interface SyncPort {
     suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
     /** Reclaims exact committed media tombstones; logical mutation success is independent. */
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
-    suspend fun saveServer(baseUrl: String): Result<Unit>
     /** Persists an endpoint origin; trust is established separately by setup probe. */
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
     /**
@@ -326,8 +322,6 @@ interface SyncPort {
     /** Owner-only rename of the shared family name; current wire requires non-empty. */
     suspend fun renameFamily(familyName: String?): Result<Unit>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
-    suspend fun pull(familyId: String): Result<Unit>
-    suspend fun push(familyId: String): Result<Unit>
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     /** Owner updates immediately; Member receives a pending approval request. */
     suspend fun updateMyDisplayName(displayName: String): Result<DisplayNameUpdateResult>
@@ -349,7 +343,8 @@ interface SyncPort {
     suspend fun revokeFamilyDevice(deviceId: String): Result<Unit> =
         Result.failure(SyncNotEnabledException())
     suspend fun logoutCurrentDevice(): Result<Unit> = Result.failure(SyncNotEnabledException())
-    suspend fun leave(familyId: String): Result<Unit>
+    /** Leaves the current device's family session (no familyId; always current session). */
+    suspend fun leave(): Result<Unit>
     /** Owner removes another active member by server membership id. */
     suspend fun removeMember(membershipId: String): Result<Unit>
     suspend fun deleteFamily(familyName: String, rootPassword: String): Result<Unit>
@@ -437,17 +432,19 @@ interface SyncPort {
     suspend fun cleanupAppUpdateStaging(): Result<Unit> = Result.success(Unit)
 }
 
-@Singleton
-class NoOpSyncPort @Inject constructor() : SyncPort {
+/**
+ * Test and non-production stub for [SyncPort]. Not bound by Hilt; production uses
+ * [RealSyncPort] via [SyncModule]. Kept public so other modules' JVM tests can
+ * delegate without inventing a second shallow adapter.
+ */
+class NoOpSyncPort : SyncPort {
     private val status = MutableStateFlow(SyncStatus.Disabled)
     private val session = MutableStateFlow(SyncSession())
     override fun status(): Flow<SyncStatus> = status
     override fun session(): Flow<SyncSession> = session
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
-    override fun isEnabled() = false
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
-    override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
     override suspend fun saveEndpointConfig(config: FamilyEndpointConfig) = Result.success(Unit)
     override suspend fun createFamily(
         displayName: String,
@@ -463,13 +460,11 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun renameFamily(familyName: String?) =
         Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
-    override suspend fun pull(familyId: String) = Result.success(Unit)
-    override suspend fun push(familyId: String) = Result.success(Unit)
     override suspend fun listFamilyMembers() =
         Result.failure<List<FamilyMember>>(SyncNotEnabledException())
     override suspend fun updateMyDisplayName(displayName: String) =
         Result.failure<DisplayNameUpdateResult>(SyncNotEnabledException())
-    override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
+    override suspend fun leave() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun revokeFamilyDevice(deviceId: String) =
         Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun logoutCurrentDevice() = Result.failure<Unit>(SyncNotEnabledException())

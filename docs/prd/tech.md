@@ -223,7 +223,7 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 | 模块 | 状态 |
 |------|------|
 | onboarding / log / timer / settings | 当前交付 |
-| family UI；NoOpSync 仅用于未配置状态（非默认 DI） | 当前交付 |
+| family UI；RealSyncPort 默认 DI（含 Disabled）；NoOpSyncPort 仅公开测试桩（无 Hilt） | 当前交付 |
 | summary / growth / search / export TXT / widget | 当前交付 |
 | PDF / custom / food types / CarePlan calendar | 当前交付 |
 | RealSync 家网实现 | 默认 DI；本机 Docker + 双模拟器前台已验收 |

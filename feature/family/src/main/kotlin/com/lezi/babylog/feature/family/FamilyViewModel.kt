@@ -632,8 +632,7 @@ class FamilyViewModel @Inject constructor(
 
     fun leave(onMessage: (String) -> Unit) {
         viewModelScope.launch {
-            val id = ui.value.familyId
-            val result = sync.leave(id)
+            val result = sync.leave()
             onMessage(
                 result.fold(
                     onSuccess = { "已退出家庭" },

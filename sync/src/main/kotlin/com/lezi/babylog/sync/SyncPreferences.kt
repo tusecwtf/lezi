@@ -92,7 +92,6 @@ interface SyncPreferences {
         get() = kotlinx.coroutines.flow.flowOf(null)
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile)
     suspend fun forgetEndpoint()
-    suspend fun saveServer(baseUrl: String)
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
     /** Durably stores a claimed session but keeps it non-pushable until old receipts reset. */
@@ -243,11 +242,6 @@ class DataStoreSyncPreferences @Inject constructor(
             pendingCreatorAcknowledgements =
                 decodeCreatorAcknowledgements(prefs[Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS]),
         )
-    }
-
-    override suspend fun saveServer(baseUrl: String) {
-        val config = FamilyEndpointConfig.fromBaseUrl(baseUrl).withNormalized()
-        saveEndpointConfig(config, clearSessionIfServerChanged = true)
     }
 
     override suspend fun saveEndpointConfig(

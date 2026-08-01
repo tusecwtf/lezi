@@ -7,7 +7,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 internal sealed interface FamilySessionCommand {
-    data class SaveServer(val baseUrl: String) : FamilySessionCommand
     data class SaveEndpointConfig(val config: FamilyEndpointConfig) : FamilySessionCommand
     data class CreateFamily(
         val displayName: String,
@@ -145,7 +144,6 @@ internal class FamilySessionCoordinator(
     suspend fun execute(command: FamilySessionCommand): Result<FamilySessionOutcome> =
         resultOf {
             when (command) {
-                is FamilySessionCommand.SaveServer -> saveServer(command.baseUrl)
                 is FamilySessionCommand.SaveEndpointConfig -> saveEndpointConfig(command.config)
                 is FamilySessionCommand.CreateFamily -> createFamily(command)
                 is FamilySessionCommand.OwnerLogin -> ownerLogin(command)
@@ -184,25 +182,6 @@ internal class FamilySessionCoordinator(
                 is FamilySessionCommand.RemoveMember -> removeMember(command.membershipId)
                 is FamilySessionCommand.DeleteFamily -> deleteFamily(command)
             }
-        }
-
-    private suspend fun saveServer(baseUrl: String): FamilySessionOutcome =
-        withBarrier {
-            val previous = preferences.session.first()
-            val parsed = FamilyEndpointConfig.fromBaseUrl(baseUrl).withNormalized()
-            require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
-            if (previous.baseUrl.isNotBlank() && previous.baseUrl != parsed.baseUrl) {
-                replica.resetLocalSyncReceipts(
-                    previous,
-                    crossingFamilyBoundary = true,
-                )
-            }
-            preferences.saveEndpointConfig(
-                parsed,
-                clearSessionIfServerChanged = true,
-            )
-            onSessionChanged(preferences.session.first())
-            FamilySessionOutcome.Completed
         }
 
     private suspend fun saveEndpointConfig(

@@ -551,15 +551,14 @@ interface SyncPort {
   fun status(): Flow<SyncStatus>
   fun session(): Flow<SyncSession>
 
-  /** 已信任 endpoint 且持有有效设备会话时为 true */
-  fun isEnabled(): Boolean
-
   /** 前台非阻塞触发；未认证时 no-op */
   fun requestSync(trigger: SyncTrigger)
 
   suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult
   suspend fun trustCertificate(candidate: CertificateTrustCandidate): SetupProbeResult
   suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit>
+  /** 持久化 endpoint 原点；信任由 setup probe 另建 */
+  suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
   suspend fun createFamily(displayName: String, deviceName: String, bootstrapSecret: String, familyName: String?): Result<CreateFamilyResult>
   suspend fun ownerLogin(deviceName: String, rootPassword: String, takeover: Boolean): Result<OwnerLoginResult>
   suspend fun requestMemberLogin(displayName: String, deviceName: String): Result<PendingMemberLogin>
@@ -569,23 +568,28 @@ interface SyncPort {
   suspend fun renameFamily(familyName: String): Result<Unit>
   suspend fun deleteFamily(familyName: String, rootPassword: String): Result<Unit>
   suspend fun updateMyDisplayName(displayName: String): Result<Unit>
+  /** 前台/下拉/本机写触发的统一同步；内部 SyncBackend pull/push 不经此面暴露 familyId */
   suspend fun sync(trigger: SyncTrigger): Result<Unit>
-
-  /** 显式触发；内部走同一前台/门闩路径 */
-  suspend fun pull(familyId: String): Result<Unit>
-  suspend fun push(familyId: String): Result<Unit>
 
   /** 当前设备会话所在家庭的 active 成员安全视图（含称呼与 role） */
   suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
-  suspend fun leave(familyId: String): Result<Unit>
+  /** 退出当前设备的家庭会话（无 familyId；始终针对当前会话） */
+  suspend fun leave(): Result<Unit>
   /** 仅 owner：按 membership_id 移除另一 active member */
   suspend fun removeMember(membershipId: String): Result<Unit>
-  suspend fun deleteFamily(): Result<Unit>
 
-  /** 清本机 Record/CarePlan/履行候选及日志媒体；保留宝宝、自定义项目和家庭会话 */
-  suspend fun clearLocalRecords(workflow: LocalClearWorkflow): Result<Unit>
-  /** 全量 wipe（含 outbox/头像媒体）；使用同一耐久 workflow */
-  suspend fun clearAllLocalData(workflow: LocalClearWorkflow): Result<Unit>
+  /**
+   * 在同一 sync barrier 下清除选定的本地域与副本状态。
+   * LocalDataClearScope.AllLocalData 还会移除头像媒体与全部 outbox，避免后续加入推送陈旧残留。
+   */
+  suspend fun clearLocalData(scope: LocalDataClearScope, workflow: LocalClearWorkflow): Result<Unit>
+
+  /** 可信家庭服务器 app-update：检查、强制/可选 surface、安装与 staging 清理 */
+  suspend fun checkAppUpdate(): Result<AppUpdateCheckResult>
+  fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?>
+  fun availableForcedAppUpdate(): Flow<ForcedAppUpdateState?>
+  suspend fun installAvailableAppUpdate(metadata: AppUpdateMetadata): Result<AppUpdateInstallResult>
+  suspend fun cleanupAppUpdateStaging(): Result<Unit>
 }
 ```
 

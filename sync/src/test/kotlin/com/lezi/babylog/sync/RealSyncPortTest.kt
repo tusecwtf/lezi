@@ -1272,7 +1272,7 @@ class RealSyncPortTest {
         )
         rig.awaitStartupRecovery()
 
-        val result = rig.port.leave("family-a")
+        val result = rig.port.leave()
 
         assertThat(result.isSuccess).isTrue()
         assertThat(clearGate.calls).isEqualTo(1)
@@ -1288,7 +1288,7 @@ class RealSyncPortTest {
         failedRemoteRig.awaitStartupRecovery()
         failedRemoteRig.backend.leaveFailure = SyncHttpException(503)
 
-        assertThat(failedRemoteRig.port.leave("family-a").isFailure).isTrue()
+        assertThat(failedRemoteRig.port.leave().isFailure).isTrue()
         assertThat(preferences.current()).isEqualTo(original)
         assertThat(preferences.pendingMembershipDeletionClear).isFalse()
 
@@ -1302,7 +1302,7 @@ class RealSyncPortTest {
             removedDeviceLocalClearGate = interruptedGate,
         )
         interruptedRig.awaitStartupRecovery()
-        assertThat(interruptedRig.port.leave("family-a").isFailure).isTrue()
+        assertThat(interruptedRig.port.leave().isFailure).isTrue()
         assertThat(preferences.current()).isEqualTo(original)
         assertThat(preferences.pendingMembershipDeletionClear).isTrue()
 
@@ -1468,7 +1468,9 @@ class RealSyncPortTest {
         ).isEqualTo(SyncStatus.ReauthRequired)
         assertThat(rig.preferences.current().familyId).isEqualTo("family-a")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(retained.pullCursor)
-        assertThat(rig.port.isEnabled()).isFalse()
+        // Credentials gone: reauth surface, not a joined sync session.
+        assertThat(rig.port.session().first().isJoined).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.ReauthRequired)
     }
 
     @Test
@@ -1770,7 +1772,9 @@ class RealSyncPortTest {
         rig.awaitStartupRecovery()
         rig.pendingDomainRecovery.failures += IllegalStateException("provider unavailable")
 
-        val failure = rig.port.saveServer("https://192.168.1.99:8787").exceptionOrNull()
+        val failure = rig.port.saveEndpointConfig(
+            FamilyEndpointConfig(host = "192.168.1.99", port = 8787),
+        ).exceptionOrNull()
 
         assertThat(failure).hasMessageThat().isEqualTo("provider unavailable")
         assertThat(rig.preferences.current()).isEqualTo(configured)
@@ -2003,7 +2007,9 @@ class RealSyncPortTest {
         rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
         rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
 
-        val failure = rig.port.saveServer("https://192.168.1.99:8787").exceptionOrNull()
+        val failure = rig.port.saveEndpointConfig(
+            FamilyEndpointConfig(host = "192.168.1.99", port = 8787),
+        ).exceptionOrNull()
 
         assertThat(failure).hasMessageThat().isEqualTo("marker unavailable")
         assertThat(rig.preferences.current()).isEqualTo(configured)
@@ -2234,7 +2240,11 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.saveServer("https://192.168.1.99:8787").isSuccess).isTrue()
+        assertThat(
+            rig.port.saveEndpointConfig(
+                FamilyEndpointConfig(host = "192.168.1.99", port = 8787),
+            ).isSuccess,
+        ).isTrue()
         assertThat(rig.records.getByClientUuid(recordUuid)?.familyPublishedUpdatedAt).isNull()
         assertThat(rig.carePlans.getByClientUuid(planUuid)?.familyPublishedUpdatedAt).isNull()
         rig.preferences.saveSession(joinedSession("family-new"))
@@ -2310,7 +2320,11 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.saveServer("https://192.168.1.99:8787").isSuccess).isTrue()
+        assertThat(
+            rig.port.saveEndpointConfig(
+                FamilyEndpointConfig(host = "192.168.1.99", port = 8787),
+            ).isSuccess,
+        ).isTrue()
         rig.preferences.saveSession(
             joinedSession("family-new").copy(membershipId = "membership-new"),
         )
@@ -2372,7 +2386,11 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.saveServer("https://192.168.1.99:8787").isSuccess).isTrue()
+        assertThat(
+            rig.port.saveEndpointConfig(
+                FamilyEndpointConfig(host = "192.168.1.99", port = 8787),
+            ).isSuccess,
+        ).isTrue()
         rig.preferences.saveSession(
             joinedSession("family-new").copy(membershipId = "membership-new"),
         )
@@ -4791,7 +4809,7 @@ class RealSyncPortTest {
         )
         rig.backend.remember("media", avatarUuid)
 
-        assertThat(rig.port.leave("family-a").isSuccess).isTrue()
+        assertThat(rig.port.leave().isSuccess).isTrue()
         rig.preferences.saveSession(session.copy(accessToken = "replacement-token"))
         rig.backend.nextPull = PullResult(
             entities = listOf(
@@ -8387,11 +8405,6 @@ internal class MemorySyncPreferences(
         if (endpointState.value != null) return
         val origin = state.value.baseUrl.takeIf(String::isNotBlank) ?: return
         endpointState.value = TrustedEndpointProfile.systemPki(origin)
-    }
-
-    override suspend fun saveServer(baseUrl: String) {
-        val parsed = FamilyEndpointConfig.fromBaseUrl(baseUrl).withNormalized()
-        saveEndpointConfig(parsed)
     }
 
     override suspend fun saveEndpointConfig(

@@ -290,7 +290,6 @@ class RealSyncPort @Inject constructor(
             Result.failure(error)
         }
 
-    override fun isEnabled(): Boolean = cachedSession.isJoined
     override fun requestSync(trigger: SyncTrigger) {
         if (trigger != SyncTrigger.LocalWrite) {
             pullRequested.set(true)
@@ -304,9 +303,6 @@ class RealSyncPort @Inject constructor(
                 mediaFileCleanup.cleanupTombstones(clientUuids)
             }
         }
-
-    override suspend fun saveServer(baseUrl: String): Result<Unit> =
-        executeFamily(FamilySessionCommand.SaveServer(baseUrl)).map { Unit }
 
     override suspend fun saveEndpointConfig(
         config: FamilyEndpointConfig,
@@ -547,10 +543,7 @@ class RealSyncPort @Inject constructor(
         return mapped
     }
 
-    override suspend fun push(familyId: String) = sync(SyncTrigger.LocalWrite)
-    override suspend fun pull(familyId: String) = sync(SyncTrigger.PullToRefresh)
-
-    override suspend fun leave(familyId: String): Result<Unit> {
+    override suspend fun leave(): Result<Unit> {
         val remote = executeFamily(FamilySessionCommand.Leave)
         val failure = remote.exceptionOrNull()
         if (failure != null && failure !is RemoteMembershipDeletedException) {

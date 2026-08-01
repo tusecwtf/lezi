@@ -389,7 +389,9 @@ class SyncPreferencesTest {
             ),
         )
 
-        preferences.saveServer("https://new-nas:8765")
+        preferences.saveEndpointConfig(
+            FamilyEndpointConfig.fromBaseUrl("https://new-nas:8765"),
+        )
 
         assertThat(preferences.session.first()).isEqualTo(
             SyncSession(
@@ -423,7 +425,9 @@ class SyncPreferencesTest {
         tokens.failNextClear = true
 
         val failure = runCatching {
-            first.saveServer("https://new-nas:8765")
+            first.saveEndpointConfig(
+                FamilyEndpointConfig.fromBaseUrl("https://new-nas:8765"),
+            )
         }.exceptionOrNull()
 
         assertThat(failure).hasMessageThat().contains("secure clear interrupted")

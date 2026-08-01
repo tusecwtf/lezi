@@ -45,7 +45,9 @@ class FamilySessionCoordinatorTest {
         )
 
         val result = coordinator.execute(
-            FamilySessionCommand.SaveServer("https://192.168.1.99:8765"),
+            FamilySessionCommand.SaveEndpointConfig(
+                FamilyEndpointConfig.fromBaseUrl("https://192.168.1.99:8765"),
+            ),
         )
 
         assertThat(result.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
@@ -76,7 +78,9 @@ class FamilySessionCoordinatorTest {
         )
 
         val failure = coordinator.execute(
-            FamilySessionCommand.SaveServer("https://192.168.1.99:8765"),
+            FamilySessionCommand.SaveEndpointConfig(
+                FamilyEndpointConfig.fromBaseUrl("https://192.168.1.99:8765"),
+            ),
         ).exceptionOrNull()
 
         assertThat(failure).hasMessageThat().contains("receipt reset interrupted")
