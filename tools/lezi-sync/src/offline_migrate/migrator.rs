@@ -14,8 +14,8 @@
 //! the same password as `LEZI_BOOTSTRAP_SECRET`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use rand::rngs::OsRng;
@@ -31,7 +31,9 @@ use crate::model::{
 };
 use crate::owner_root_fingerprint;
 use crate::store::{self, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
-use crate::DEFAULT_MAX_MEDIA_BYTES;
+use crate::{
+    write_server_secret, DEFAULT_MAX_MEDIA_BYTES, MIN_BOOTSTRAP_SECRET_LEN, SERVER_SECRET_BYTES,
+};
 
 use super::inventory::{
     entity_validation_context, is_discarded_bundle_status, payload_validation_policy,
@@ -41,11 +43,8 @@ use super::inventory::{
 };
 
 /// Minimum length for the migration-time new root password.
-/// Matches production `LEZI_BOOTSTRAP_SECRET` validation (≥16 characters).
-pub(crate) const MIN_NEW_ROOT_PASSWORD_LEN: usize = 16;
-
-/// Server secret size written under out data dir (`server.secret`).
-const SERVER_SECRET_BYTES: usize = 32;
+/// Alias of crate-level [`MIN_BOOTSTRAP_SECRET_LEN`] (same rule as `LEZI_BOOTSTRAP_SECRET`).
+pub(crate) const MIN_NEW_ROOT_PASSWORD_LEN: usize = MIN_BOOTSTRAP_SECRET_LEN;
 
 /// Human-readable ops fragment for runbooks / CLI help (ticket 04 / 05 / 06).
 ///
@@ -203,7 +202,8 @@ pub(crate) fn migrate_v3_database(
     }
 }
 
-fn validate_new_root_password(password: &str) -> Result<(), MigrateError> {
+/// Password gate shared with the ticket-05 CLI (map to usage exit, not migrate abort).
+pub(crate) fn validate_new_root_password(password: &str) -> Result<(), MigrateError> {
     if password.is_empty() {
         return Err(MigrateError::InvalidRootPassword(
             "must not be empty".to_owned(),
@@ -224,27 +224,8 @@ fn generate_server_secret_bytes() -> Vec<u8> {
 }
 
 fn write_regenerated_server_secret(data_dir: &Path, secret: &[u8]) -> Result<(), MigrateError> {
-    if secret.len() < SERVER_SECRET_BYTES {
-        return Err(MigrateError::Internal(format!(
-            "server.secret must be at least {SERVER_SECRET_BYTES} bytes"
-        )));
-    }
-    let path = data_dir.join("server.secret");
-    let temporary = data_dir.join(format!(".server.secret.{}.tmp", Uuid::new_v4().simple()));
-    let write = (|| -> Result<(), MigrateError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(secret)?;
-        file.sync_all()?;
-        fs::rename(&temporary, &path)?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    write
+    // Shared with startup: temp → secure(0o600) → rename → secure → parent fsync.
+    write_server_secret(data_dir, secret).map_err(MigrateError::Io)
 }
 
 pub(crate) fn remove_db_files(path: &Path) {
@@ -1258,8 +1239,9 @@ fn copy_media_publications(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::offline_migrate::inventory::{
-        target_only_empty_tables, BUNDLE_STATUS_STAGING, SOURCE_V3_SCHEMA_SQL,
+    use crate::offline_migrate::inventory::{target_only_empty_tables, BUNDLE_STATUS_STAGING};
+    use crate::offline_migrate::test_support::{
+        open_v3_fixture, seed_baby_entity, seed_minimal_family, TEST_NEW_ROOT_PASSWORD,
     };
     use crate::owner_root_fingerprint;
     use crate::store::{Store, DATABASE_SCHEMA_VERSION};
@@ -1271,82 +1253,6 @@ mod tests {
     use serde_json::{json, Value};
     use tempfile::tempdir;
     use tower::ServiceExt;
-
-    /// ≥16 chars; known literal for fingerprint / owner-login seams (ticket 04).
-    const TEST_NEW_ROOT_PASSWORD: &str = "ops-new-root-pw!!";
-
-    fn open_v3_fixture(path: &Path) -> Connection {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute_batch(SOURCE_V3_SCHEMA_SQL).unwrap();
-        conn.pragma_update(None, "user_version", 3i64).unwrap();
-        conn
-    }
-
-    fn seed_minimal_family(conn: &Connection) {
-        conn.execute(
-            "INSERT INTO families(id, created_at, create_request_hash, name) VALUES (?1, 100, NULL, '我家')",
-            params!["fam-1"],
-        )
-        .unwrap();
-        conn.execute(
-            "
-            INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
-            VALUES ('mem-owner', 'fam-1', 'owner', 'dev-old-1', '爸爸', NULL)
-            ",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "
-            INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
-            VALUES ('mem-member', 'fam-1', 'member', 'dev-old-2', '妈妈', NULL)
-            ",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 7)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO membership_credentials(token_hash, membership_id, revoked_at) VALUES ('th1', 'mem-owner', NULL)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO invites(code_hash, family_id, expires_at, used_at, joined_device_id) VALUES ('ih1', 'fam-1', 999, NULL, NULL)",
-            [],
-        )
-        .unwrap();
-    }
-
-    fn baby_payload() -> String {
-        serde_json::to_string(&json!({
-            "nickname": "年年",
-            "sex": null,
-            "birthday": "2025-01-02",
-            "avatar_media_uuid": null,
-            "birth_weight_grams": null,
-        }))
-        .unwrap()
-    }
-
-    fn seed_baby_entity(conn: &Connection) {
-        conn.execute(
-            "
-            INSERT INTO entities(
-                family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
-            ) VALUES (
-                'fam-1', 'baby', '11111111-1111-1111-1111-111111111111',
-                200, NULL, ?1, 1
-            )
-            ",
-            params![baby_payload()],
-        )
-        .unwrap();
-    }
 
     fn record_payload(baby_uuid: &str) -> Map<String, Value> {
         json!({
@@ -2156,8 +2062,18 @@ mod tests {
 
         migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
 
-        let secret = fs::read(out.join("server.secret")).expect("server.secret");
+        let secret_path = out.join("server.secret");
+        let secret = fs::read(&secret_path).expect("server.secret");
         assert_eq!(secret.len(), SERVER_SECRET_BYTES);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                secret_path.metadata().unwrap().permissions().mode() & 0o777,
+                0o600,
+                "regenerated server.secret must match write_private_file 0o600"
+            );
+        }
         let conn = Connection::open(&dest).unwrap();
         let stored: String = conn
             .query_row(
@@ -2185,6 +2101,7 @@ mod tests {
         assert!(REAUTH_OPS_NOTE.contains("new root password"));
         assert!(REAUTH_OPS_NOTE.contains("membership_credentials"));
         assert!(REAUTH_OPS_NOTE.contains("LEZI_BOOTSTRAP_SECRET"));
+        assert_eq!(MIN_NEW_ROOT_PASSWORD_LEN, crate::MIN_BOOTSTRAP_SECRET_LEN);
         assert_eq!(MIN_NEW_ROOT_PASSWORD_LEN, 16);
     }
 

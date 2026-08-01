@@ -33,7 +33,8 @@ Environment overrides:
 | `LEZI_FORCE_PACKAGE=1` | rebuild package even if present |
 | `LEZI_SKIP_PACKAGE=1` | only scp+deploy existing `dist/lezi-sync-*-nas` |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
-| `LEZI_BOOTSTRAP_SECRET` | only if no live container to inherit |
+| `LEZI_BOOTSTRAP_SECRET` | only with `LEZI_FORWARD_BOOTSTRAP_SECRET=1` (cutover / no live container to inherit). Ordinary CD leaves this unset so remote-deploy inherits from the live container. |
+| `LEZI_FORWARD_BOOTSTRAP_SECRET=1` | opt-in: SSH-forward local `LEZI_BOOTSTRAP_SECRET` into remote-deploy. Required for offline-migrate cutover after stop/rm. Do **not** set for ordinary CD — a leftover local secret would otherwise rotate `owner_root_fingerprint` and revoke owner devices. Unset both after cutover. |
 | `LEZI_RELEASE_APK` | signed release APK path (default repo `app/build/outputs/apk/release/app-release.apk`) |
 | `LEZI_APP_UPDATE_JSON` | app-update metadata JSON (default `deploy/app-update.json`) |
 

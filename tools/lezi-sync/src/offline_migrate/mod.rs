@@ -10,9 +10,12 @@
 //! - **04** — same DB call requires an ops-provided **new root password**; writes
 //!   `families.owner_root_fingerprint` and regenerates `server.secret` beside the
 //!   dest DB so current lezi-sync can `/ready` and owner can re-login.
-//! - **05** — CLI / process exit codes.
-//!
-//! Until CLI wiring lands the surface is unit-tested (`dead_code` allowed).
+//! - **05** — [`cli`] (`lezi-sync offline-migrate …`): copy-out help, dry-run,
+//!   migrate `--in`/`--out`, validate out/ preflight, process exit codes.
+//! - **06** — [`cutover`]: fixed maintenance-window step order, copy-back help,
+//!   runbook + script pointers (does **not** execute live cutover; see ticket 07).
+//! - **07** — [`live_cutover`]: evidence checklist, APK smoke steps, live-cutover
+//!   help + probe script pointer (execution evidence under tracker `evidence/07/`).
 //!
 //! ## Re-auth after cutover (no silent restore)
 //!
@@ -23,15 +26,34 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod cli;
+pub(crate) mod cutover;
 pub(crate) mod inventory;
+pub(crate) mod live_cutover;
 pub(crate) mod media;
 pub(crate) mod migrator;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 // Re-export for subsequent tickets (`crate::offline_migrate::…`).
+#[allow(unused_imports)]
+pub(crate) use cli::{main_from_args, parse_args, run, validate_out_data_dir, CliCommand};
+#[allow(unused_imports)]
+pub(crate) use cutover::{
+    cutover_help_text, cutover_maintenance_steps, COPY_BACK_RUNBOOK, COPY_BACK_SCRIPT,
+};
 #[allow(unused_imports)]
 pub(crate) use inventory::*;
 #[allow(unused_imports)]
-pub(crate) use media::{media_file_relative_path, migrate_v3_data_dir};
+pub(crate) use live_cutover::{
+    live_cutover_apk_smoke_steps, live_cutover_evidence_required_files, live_cutover_help_text,
+    EVIDENCE_DIR_REL, LIVE_CUTOVER_PROBE_SCRIPT,
+};
+#[allow(unused_imports)]
+pub(crate) use media::{
+    cleanup_migrator_data_dir_outputs, media_file_relative_path, migrate_v3_data_dir,
+};
 #[allow(unused_imports)]
 pub(crate) use migrator::{
     migrate_v3_database, MigrateError, MigrateReport, MIN_NEW_ROOT_PASSWORD_LEN, REAUTH_OPS_NOTE,

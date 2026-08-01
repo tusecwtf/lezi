@@ -50,7 +50,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 ./deploy/push-and-deploy.sh
 ```
 
-**Probe the live protocol before trusting any single health URL** (measured 2026-07-31: family NAS was still plaintext HTTP on 8765; current tree/CD targets HTTPS 8765 + loopback HTTP 8766).
+**Probe the live protocol before trusting any single health URL** (measured 2026-07-31: family NAS was still plaintext HTTP on 8765; current tree/CD targets HTTPS 8765 + **container-internal** HTTP readiness on 8766 — compose does **not** publish host:8766).
 
 ```bash
 # Pre-TLS / still-HTTP live (worked on measured NAS):
@@ -58,10 +58,15 @@ curl -fsS http://192.168.50.4:8765/health
 curl -fsS http://192.168.50.4:8765/ready
 ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 
-# Post-TLS target after deploying current remote-deploy (may fail until cutover):
-# ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8766/health'
+# Post-TLS client-facing (required for APK TOFU):
 # curl --cacert <data-bind>/tls/server.crt -fsS https://192.168.50.4:8765/health
+# mode-700 bind: docker exec lezi-sync cat /data/tls/server.crt > /tmp/lezi.crt
+# or curl -k -fsS https://192.168.50.4:8765/health
+# Container-internal readiness only (optional; image has no curl):
+# ssh -p 10000 13096920600@192.168.50.4 'docker exec lezi-sync lezi-sync healthcheck'
+# Do NOT: ssh … 'curl http://127.0.0.1:8766/health' — nothing listens on host:8766.
 # HTTPS against a plaintext 8765 yields TLS "wrong version number" — treat as drift, not success.
+# Ticket 07 probe: tools/lezi-sync/deploy/live-cutover-probe.sh
 ```
 
 | Variable | Role |
@@ -84,7 +89,7 @@ ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 **2. Propose CD — wait for confirmation before deploy.**
 Explain that the next step will build a `linux/amd64` image, package (or reuse `dist/`), scp to the NAS, and **stop/rm + replace** container `lezi-sync` (compose project `lezi`). The data bind is kept; a live family may briefly lose sync during replace.
 
-Also state the **protocol cutover risk**: a measured family NAS ran **plaintext HTTP on 8765** (no `/data/tls`, no host `8766`). Deploying the current tree via `remote-deploy.sh` is expected to move the public surface to **HTTPS on 8765**, add loopback **HTTP readiness on 8766**, and create a persistent TLS identity under the data bind. Clients must switch endpoint scheme and may need TOFU/SPKI confirmation. **Do not** run `./deploy/push-and-deploy.sh` until the user confirms.
+Also state the **protocol cutover risk**: a measured family NAS ran **plaintext HTTP on 8765** (no `/data/tls`, no host `8766`). Deploying the current tree via `remote-deploy.sh` is expected to move the public surface to **HTTPS on 8765**, keep readiness on **container-internal** HTTP `8766` (not published on the host), and create a persistent TLS identity under the data bind. Clients must switch endpoint scheme and may need TOFU/SPKI confirmation. **Do not** run `./deploy/push-and-deploy.sh` until the user confirms.
 
 Default control plane (override only via env):
 
@@ -94,7 +99,8 @@ Default control plane (override only via env):
 | Remote package dir | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
 | Pre-TLS live health (measured) | `http://192.168.50.4:8765/health` and `/ready` (SSH: `http://127.0.0.1:8765/...`) |
 | Post-TLS LAN endpoint / health | `https://192.168.50.4:8765` (cert under data-bind `tls/`) |
-| Post-TLS on-NAS loopback health | `http://127.0.0.1:8766/health` and `/ready` only (not published to LAN) |
+| Post-TLS client health | `https://192.168.50.4:8765/health` and `/ready` (required) |
+| Post-TLS container readiness | `docker exec lezi-sync lezi-sync healthcheck` (internal :8766; not published on host) |
 | TLS SAN host | `LEZI_TLS_HOST=192.168.50.4` |
 | Data bind | default `LEZI_DATA_HOST_PATH` → `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
 
@@ -109,7 +115,7 @@ Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.ap
 
 **3. 前后端联调 (minimal smoke after deploy)**
 
-1. **Server — probe actual protocol, do not assume.** Prefer post-TLS checks first (`http://127.0.0.1:8766/...` over SSH and/or `https://192.168.50.4:8765/...` with the data-bind cert). If HTTPS fails with TLS wrong-version and HTTP `8765` still answers, report **protocol drift** (live image not the TLS stack). Expect healthy/ready; when `/health` reports a version, it should match the deployed image.
+1. **Server — probe actual protocol, do not assume.** Prefer post-TLS **LAN HTTPS** first (`https://192.168.50.4:8765/...` with the data-bind cert or `curl -k` when mode-700 hides the cert). Optional corroboration: `docker exec lezi-sync lezi-sync healthcheck` (container-internal :8766). Do **not** SSH-curl host `http://127.0.0.1:8766` — compose does not publish it. If HTTPS fails with TLS wrong-version and HTTP `8765` still answers, report **protocol drift** (live image not the TLS stack). Expect healthy/ready; when `/health` reports a version, it should match the deployed image.
 2. **Client**: device or emulator on the same LAN as the NAS. Emulator → NAS uses the real LAN IP, **not** `10.0.2.2` (`10.0.2.2` is only for host-local compose). Install the client if needed (`./gradlew :app:installDebug` or an existing APK). Point the endpoint at the **scheme that health proved** (`https://192.168.50.4:8765` after TLS CD; plaintext only if still on the pre-TLS image). Complete TOFU/SPKI when the trusted-HTTPS path applies. Smoke **only paths touched by the change** (e.g. setup-status, create/join, push-pull, app-update)—not a full dual-device matrix unless the ticket requires it.
 3. **Report** gates, deployed version/package, which health URLs worked, protocol (HTTP vs HTTPS), and client smoke result (or the blocker).
 

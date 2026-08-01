@@ -9,30 +9,60 @@
 //! [`AuthoritativeFailure::MediaFileMissingOrMismatch`] and no copy-back-ready dest.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use super::inventory::AuthoritativeFailure;
 use super::migrator::{migrate_v3_database, remove_db_files, MigrateError, MigrateReport};
 
 /// Relative path under a data dir matching inventory `media/{family_uuid}/{media_uuid}`
 /// and live server final media layout (`data/media/{family}/{uuid}`).
-pub(crate) fn media_file_relative_path(family_id: &str, media_uuid: &str) -> PathBuf {
-    PathBuf::from("media").join(family_id).join(media_uuid)
+///
+/// Both IDs are UUID-parsed and re-stringified (same as live `AppState::media_path`)
+/// so path components cannot contain `..` or other non-UUID text.
+pub(crate) fn media_file_relative_path(
+    family_id: &str,
+    media_uuid: &str,
+) -> Result<PathBuf, MigrateError> {
+    let (family_id, media_uuid) = canonical_media_path_ids(family_id, media_uuid)?;
+    Ok(PathBuf::from("media").join(family_id).join(media_uuid))
+}
+
+fn canonical_media_path_ids(
+    family_id: &str,
+    media_uuid: &str,
+) -> Result<(String, String), MigrateError> {
+    let family_id = Uuid::parse_str(family_id)
+        .map(|id| id.to_string())
+        .map_err(|_| {
+            MigrateError::Internal(format!(
+                "invalid family_id for media path (expected UUID): `{family_id}`"
+            ))
+        })?;
+    let media_uuid = Uuid::parse_str(media_uuid)
+        .map(|id| id.to_string())
+        .map_err(|_| {
+            MigrateError::Internal(format!(
+                "invalid media_uuid for media path (expected UUID): `{media_uuid}`"
+            ))
+        })?;
+    Ok((family_id, media_uuid))
 }
 
 /// One-shot offline: v3 data dir (`lezi.db` + optional `media/`) → current data dir.
 ///
 /// - Transforms `source/lezi.db` via [`migrate_v3_database`] (ops new root password).
-/// - Copies only authority media files into `dest/media/{family}/{uuid}`.
+/// - Wipes any pre-existing `dest/media`, then copies only authority media files
+///   into `dest/media/{family}/{uuid}` so the media tree is exactly this run's set.
 /// - Validates size (entity `byte_size` and/or bundle_media sizes) and `staged_sha256`
 ///   when present.
-/// - On any media failure: removes dest `lezi.db` (+ sidecars) and any media written
-///   this run (`FailureMode::AbortNoCopyBackWithReport`).
+/// - On any media failure: removes dest `lezi.db` (+ sidecars), `server.secret`, and
+///   `media/` written this run (`FailureMode::AbortNoCopyBackWithReport`).
 pub(crate) fn migrate_v3_data_dir(
     source_data_dir: &Path,
     dest_data_dir: &Path,
@@ -40,8 +70,6 @@ pub(crate) fn migrate_v3_data_dir(
 ) -> Result<MigrateReport, MigrateError> {
     let source_db = source_data_dir.join("lezi.db");
     let dest_db = dest_data_dir.join("lezi.db");
-    let source_media_root = source_data_dir.join("media");
-    let dest_media_root = dest_data_dir.join("media");
 
     if !source_db.try_exists()? {
         return Err(MigrateError::Io(io::Error::new(
@@ -53,18 +81,38 @@ pub(crate) fn migrate_v3_data_dir(
     fs::create_dir_all(dest_data_dir)?;
     let mut report = migrate_v3_database(&source_db, &dest_db, new_root_password)?;
 
-    match transfer_authority_media(
-        &source_media_root,
-        &dest_media_root,
-        &dest_db,
-        &mut report,
-    ) {
+    match transfer_authority_media(source_data_dir, dest_data_dir, &dest_db, &mut report) {
         Ok(()) => Ok(report),
         Err(error) => {
-            remove_db_files(&dest_db);
-            // Best-effort wipe of dest media tree written this run.
-            let _ = fs::remove_dir_all(&dest_media_root);
+            cleanup_dest_data_dir_outputs(dest_data_dir, &dest_db);
             Err(error)
+        }
+    }
+}
+
+/// Remove migrator-owned outputs under dest so failures are AbortNoCopyBack.
+///
+/// Wipes `lezi.db` (+ sidecars), `server.secret` (+ secret temps), and `media/`.
+/// Used on media abort and by the ticket-05 CLI when post-migrate validate fails.
+pub(crate) fn cleanup_migrator_data_dir_outputs(dest_data_dir: &Path) {
+    cleanup_dest_data_dir_outputs(dest_data_dir, &dest_data_dir.join("lezi.db"));
+}
+
+/// Remove all migrator-owned outputs under dest so a media failure is AbortNoCopyBack.
+fn cleanup_dest_data_dir_outputs(dest_data_dir: &Path, dest_db: &Path) {
+    remove_db_files(dest_db);
+    let _ = fs::remove_dir_all(dest_data_dir.join("media"));
+    let _ = fs::remove_file(dest_data_dir.join("server.secret"));
+    if let Ok(entries) = fs::read_dir(dest_data_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(s) = name.to_str() else {
+                continue;
+            };
+            if s.starts_with(".server.secret.") && s.ends_with(".tmp") {
+                let _ = fs::remove_file(entry.path());
+            }
+            // Leftover atomic media temps under media/ are removed with remove_dir_all.
         }
     }
 }
@@ -80,11 +128,18 @@ struct MediaAuthority {
 }
 
 fn transfer_authority_media(
-    source_media_root: &Path,
-    dest_media_root: &Path,
+    source_data_dir: &Path,
+    dest_data_dir: &Path,
     dest_db: &Path,
     report: &mut MigrateReport,
 ) -> Result<(), MigrateError> {
+    // out purity: dest/media must be exactly the authority set written this run.
+    // Wipe any pre-existing tree (reuse of out/, leftover non-authority bytes).
+    let dest_media_root = dest_data_dir.join("media");
+    if dest_media_root.try_exists()? {
+        fs::remove_dir_all(&dest_media_root)?;
+    }
+
     let dest = Connection::open_with_flags(
         dest_db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -95,10 +150,10 @@ fn transfer_authority_media(
     }
 
     for ((family_id, media_uuid), auth) in &required {
-        let rel = media_file_relative_path(family_id, media_uuid);
-        // source path is media_root/{family}/{uuid} (media_root already is …/media).
-        let source_path = source_media_root.join(family_id).join(media_uuid);
-        let dest_path = dest_media_root.join(family_id).join(media_uuid);
+        // Single I/O path source: data_dir + media_file_relative_path (UUID-canonical).
+        let rel = media_file_relative_path(family_id, media_uuid)?;
+        let source_path = source_data_dir.join(&rel);
+        let dest_path = dest_data_dir.join(&rel);
 
         validate_and_copy_media_file(
             &source_path,
@@ -139,24 +194,19 @@ fn collect_required_media(
             let (family_id, media_uuid, source) = row?;
             match source.as_str() {
                 "ordinary" | "bundle" => {
-                    let entry = map
-                        .entry((family_id, media_uuid))
-                        .or_default();
+                    let entry = map.entry((family_id, media_uuid)).or_default();
                     entry.required = true;
                 }
                 "bundle_pending" => {
-                    // Dest must not retain these after migrate; if present, fail closed.
-                    return Err(MigrateError::authoritative_failure(
-                        AuthoritativeFailure::MediaFileMissingOrMismatch,
-                        format!(
-                            "dest retains unmappable publication source `bundle_pending` for media `{media_uuid}`"
-                        ),
-                        report.clone(),
-                    ));
+                    // Dest must not retain these after migrate — post-migrate invariant.
+                    return Err(MigrateError::Internal(format!(
+                        "dest retains unmappable publication source `bundle_pending` for media `{media_uuid}`"
+                    )));
                 }
                 other => {
+                    // Illegal publication source domain value on dest.
                     return Err(MigrateError::authoritative_failure(
-                        AuthoritativeFailure::MediaFileMissingOrMismatch,
+                        AuthoritativeFailure::SourceConstrainedValueInvalid,
                         format!(
                             "dest retains unmappable publication source `{other}` for media `{media_uuid}`"
                         ),
@@ -186,17 +236,10 @@ fn collect_required_media(
         })?;
         for row in rows {
             let (family_id, media_uuid, declared, staged_size, staged_sha) = row?;
-            let entry = map
-                .entry((family_id, media_uuid.clone()))
-                .or_default();
+            let entry = map.entry((family_id, media_uuid.clone())).or_default();
             entry.required = true;
-            let size_hint = staged_size.or(declared).and_then(|s| {
-                if s < 0 {
-                    None
-                } else {
-                    Some(s as u64)
-                }
-            });
+            let size_hint =
+                resolve_bundle_media_row_size(&media_uuid, declared, staged_size, report)?;
             if let Some(size) = size_hint {
                 if let Some(existing) = entry.expected_size {
                     if existing != size {
@@ -277,6 +320,58 @@ fn collect_required_media(
     Ok(map)
 }
 
+/// Fail-closed size authority for one `sync_bundle_media` row.
+///
+/// - Negative `declared_byte_size` / `staged_byte_size` → mismatch (corrupt retained row).
+/// - Both present and unequal → mismatch (no silent preference for staged).
+/// - Otherwise the agreed non-negative size, or `None` when both columns are null.
+fn resolve_bundle_media_row_size(
+    media_uuid: &str,
+    declared: Option<i64>,
+    staged: Option<i64>,
+    report: &MigrateReport,
+) -> Result<Option<u64>, MigrateError> {
+    let declared_u = match declared {
+        Some(s) if s < 0 => {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::MediaFileMissingOrMismatch,
+                format!(
+                    "negative declared_byte_size ({s}) for media `{media_uuid}` in sync_bundle_media"
+                ),
+                report.clone(),
+            ));
+        }
+        Some(s) => Some(s as u64),
+        None => None,
+    };
+    let staged_u = match staged {
+        Some(s) if s < 0 => {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::MediaFileMissingOrMismatch,
+                format!(
+                    "negative staged_byte_size ({s}) for media `{media_uuid}` in sync_bundle_media"
+                ),
+                report.clone(),
+            ));
+        }
+        Some(s) => Some(s as u64),
+        None => None,
+    };
+    match (declared_u, staged_u) {
+        (Some(d), Some(s)) if d != s => Err(MigrateError::authoritative_failure(
+            AuthoritativeFailure::MediaFileMissingOrMismatch,
+            format!(
+                "declared_byte_size {d} disagrees with staged_byte_size {s} for media `{media_uuid}`"
+            ),
+            report.clone(),
+        )),
+        (Some(d), Some(_)) => Ok(Some(d)),
+        (Some(d), None) => Ok(Some(d)),
+        (None, Some(s)) => Ok(Some(s)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn validate_and_copy_media_file(
     source_path: &Path,
     dest_path: &Path,
@@ -346,11 +441,48 @@ fn validate_and_copy_media_file(
         }
     }
 
-    if let Some(parent) = dest_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(dest_path, &bytes)?;
+    atomic_write_media_file(dest_path, &bytes)?;
     Ok(())
+}
+
+/// Write media bytes via sibling temp under the dest family dir, sync, then rename.
+/// On error leave no partial final name (match live publish / migrator temp+rename).
+fn atomic_write_media_file(dest_path: &Path, bytes: &[u8]) -> Result<(), MigrateError> {
+    let parent = dest_path.parent().ok_or_else(|| {
+        MigrateError::Internal(format!(
+            "media dest path has no parent: {}",
+            dest_path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+
+    let file_name = dest_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("media");
+    let temporary = parent.join(format!(".{file_name}.migrate.tmp"));
+    let _ = fs::remove_file(&temporary);
+
+    let write = (|| -> Result<(), MigrateError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, dest_path)?;
+        // Durability for the final name + parent directory entry.
+        if let Ok(final_file) = fs::File::open(dest_path) {
+            let _ = final_file.sync_all();
+        }
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = fs::remove_file(&temporary);
+        // Never leave a partial final path from a failed mid-write rename race.
+        let _ = fs::remove_file(dest_path);
+    }
+    write
 }
 
 // ---------------------------------------------------------------------------
@@ -359,20 +491,16 @@ fn validate_and_copy_media_file(
 
 #[cfg(test)]
 mod tests {
-
-    /// Matches migrator tests / production LEZI_BOOTSTRAP_SECRET min length.
-    const TEST_NEW_ROOT_PASSWORD: &str = "test-root-password-ok";
     use super::*;
-    use crate::model::{
-        normalized_display_name_key, Entity, EntityValidationContext, RawEntity,
+    use crate::model::{normalized_display_name_key, Entity, EntityValidationContext, RawEntity};
+    use crate::offline_migrate::test_support::{
+        baby_payload_json, open_v3_fixture, TEST_NEW_ROOT_PASSWORD,
     };
-    use crate::offline_migrate::inventory::SOURCE_V3_SCHEMA_SQL;
     use crate::store::{self, Store, DATABASE_SCHEMA_VERSION};
     use crate::DEFAULT_MAX_MEDIA_BYTES;
     use rusqlite::{params, Connection};
     use serde_json::{json, Map, Value};
     use tempfile::tempdir;
-    use uuid::Uuid;
 
     // Stable fixture IDs (UUID-shaped so path layout matches live server).
     const FAM: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -381,14 +509,6 @@ mod tests {
     const RECORD: &str = "22222222-2222-4222-8222-222222222222";
     const MEDIA: &str = "33333333-3333-4333-8333-333333333333";
     const BUNDLE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-
-    fn open_v3_fixture(path: &Path) -> Connection {
-        let conn = Connection::open(path).unwrap();
-        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-        conn.execute_batch(SOURCE_V3_SCHEMA_SQL).unwrap();
-        conn.pragma_update(None, "user_version", 3i64).unwrap();
-        conn
-    }
 
     fn seed_family(conn: &Connection) {
         conn.execute(
@@ -411,17 +531,6 @@ mod tests {
         .unwrap();
     }
 
-    fn baby_payload() -> String {
-        serde_json::to_string(&json!({
-            "nickname": "年年",
-            "sex": null,
-            "birthday": "2025-01-02",
-            "avatar_media_uuid": null,
-            "birth_weight_grams": null,
-        }))
-        .unwrap()
-    }
-
     fn seed_baby(conn: &Connection) {
         conn.execute(
             "
@@ -429,7 +538,7 @@ mod tests {
                 family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
             ) VALUES (?1, 'baby', ?2, 200, NULL, ?3, 1)
             ",
-            params![FAM, BABY, baby_payload()],
+            params![FAM, BABY, baby_payload_json()],
         )
         .unwrap();
     }
@@ -510,10 +619,12 @@ mod tests {
     }
 
     fn seed_committed_bundle_with_media(conn: &Connection) {
-        let (_root, _media, content_hash, root_payload_json, media_json) =
+        let (root, media, content_hash, root_payload_json, media_json) =
             canonical_record_with_media();
         let size = media_bytes().len() as i64;
         let sha = media_sha256();
+        let media_payload_json = serde_json::to_string(&media[0].payload).unwrap();
+        let root_payload_for_entity = serde_json::to_string(&root.payload).unwrap();
 
         conn.execute(
             "
@@ -565,11 +676,7 @@ mod tests {
                 family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
             ) VALUES (?1, 'media', ?2, 300, NULL, ?3, 2)
             ",
-            params![
-                FAM,
-                MEDIA,
-                serde_json::to_string(&canonical_record_with_media().1[0].payload).unwrap()
-            ],
+            params![FAM, MEDIA, media_payload_json],
         )
         .unwrap();
         // Applied record entity.
@@ -579,28 +686,71 @@ mod tests {
                 family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
             ) VALUES (?1, 'record', ?2, 300, NULL, ?3, 3)
             ",
-            params![
-                FAM,
-                RECORD,
-                serde_json::to_string(&canonical_record_with_media().0.payload).unwrap()
-            ],
+            params![FAM, RECORD, root_payload_for_entity],
         )
         .unwrap();
     }
 
     fn write_source_media(source_dir: &Path, family: &str, media: &str, bytes: &[u8]) {
-        let path = source_dir.join(media_file_relative_path(family, media));
+        let path =
+            source_dir.join(media_file_relative_path(family, media).expect("fixture UUID path"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
     }
 
+    /// Readiness contract aligned with live `media_file_is_ready` + `media_path`:
+    /// UUID-canonical path under data/media, regular file, size > 0, matches declared.
+    fn assert_media_ready_like_server(
+        dest_data_dir: &Path,
+        family_id: &str,
+        media_uuid: &str,
+        declared_size: Option<u64>,
+    ) {
+        let family = Uuid::parse_str(family_id).expect("family UUID").to_string();
+        let media = Uuid::parse_str(media_uuid).expect("media UUID").to_string();
+        // Live media_path: media_root.join(family).join(uuid) with media_root = data/media.
+        let path = dest_data_dir.join("media").join(&family).join(&media);
+        assert_eq!(
+            path,
+            dest_data_dir.join(media_file_relative_path(family_id, media_uuid).unwrap()),
+            "layout must match UUID-canonical media_file_relative_path"
+        );
+        let meta = fs::symlink_metadata(&path).expect("media file metadata");
+        assert!(meta.file_type().is_file(), "must be regular file");
+        let actual = meta.len();
+        assert!(actual > 0, "media_file_is_ready requires size > 0");
+        if let Some(expected) = declared_size {
+            assert_eq!(actual, expected, "media_file_is_ready declared size match");
+        }
+    }
+
+    fn assert_no_copy_back_dest(dest: &Path) {
+        assert!(
+            !dest.join("lezi.db").exists(),
+            "dest lezi.db must be removed"
+        );
+        assert!(!dest.join("media").exists(), "dest media/ must be removed");
+        assert!(
+            !dest.join("server.secret").exists(),
+            "dest server.secret must be removed on media failure"
+        );
+    }
+
     #[test]
     fn media_file_relative_path_matches_inventory_layout() {
-        let p = media_file_relative_path(FAM, MEDIA);
-        assert_eq!(
-            p,
-            PathBuf::from(format!("media/{FAM}/{MEDIA}"))
+        let p = media_file_relative_path(FAM, MEDIA).unwrap();
+        assert_eq!(p, PathBuf::from(format!("media/{FAM}/{MEDIA}")));
+    }
+
+    #[test]
+    fn media_file_relative_path_rejects_path_escape_components() {
+        let err = media_file_relative_path("..", MEDIA).expect_err("must reject");
+        assert!(
+            matches!(err, MigrateError::Internal(_)),
+            "expected Internal, got {err}"
         );
+        let err = media_file_relative_path(FAM, "../escape").expect_err("must reject");
+        assert!(matches!(err, MigrateError::Internal(_)), "{err}");
     }
 
     #[test]
@@ -619,7 +769,8 @@ mod tests {
         }
         write_source_media(&source, FAM, MEDIA, media_bytes());
 
-        let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate data dir");
+        let report =
+            migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate data dir");
         assert_eq!(report.media_files_copied, 1);
         assert_eq!(report.committed_bundles, 1);
         assert_eq!(report.families, 1);
@@ -631,10 +782,12 @@ mod tests {
             .unwrap();
         assert_eq!(version, DATABASE_SCHEMA_VERSION);
 
-        // Output layout matches current server media path convention.
-        let dest_media = dest.join(media_file_relative_path(FAM, MEDIA));
-        assert!(dest_media.is_file(), "expected {}", dest_media.display());
-        assert_eq!(fs::read(&dest_media).unwrap(), media_bytes());
+        // Live media_path + media_file_is_ready contract (UUID parse, size>0, declared match).
+        assert_media_ready_like_server(&dest, FAM, MEDIA, Some(media_bytes().len() as u64));
+        assert_eq!(
+            fs::read(dest.join(media_file_relative_path(FAM, MEDIA).unwrap())).unwrap(),
+            media_bytes()
+        );
 
         // Publication + entity reachable for the record-with-image path.
         let conn = Connection::open(dest.join("lezi.db")).unwrap();
@@ -662,10 +815,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(record_entity, 1);
-
-        // Authoritative path resolution: relative path under dest is servable layout.
-        let resolved = dest.join(media_file_relative_path(FAM, MEDIA));
-        assert_eq!(resolved.metadata().unwrap().len(), media_bytes().len() as u64);
     }
 
     #[test]
@@ -686,15 +835,14 @@ mod tests {
         }
         // No media/ bytes under source.
 
-        let err = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
+        let err =
+            migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
         );
         assert!(err.report().is_some());
-        // No copy-back-ready dest: db removed (sentinel overwritten then cleaned).
-        assert!(!dest.join("lezi.db").exists());
-        assert!(!dest.join("media").exists());
+        assert_no_copy_back_dest(&dest);
     }
 
     #[test]
@@ -713,7 +861,8 @@ mod tests {
         }
         write_source_media(&source, FAM, MEDIA, b"wrong-len");
 
-        let err = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
+        let err =
+            migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
@@ -723,7 +872,84 @@ mod tests {
                 || err.to_string().contains("MediaFileMissingOrMismatch"),
             "{err}"
         );
-        assert!(!dest.join("lezi.db").exists());
+        assert_no_copy_back_dest(&dest);
+    }
+
+    #[test]
+    fn migrate_data_dir_fails_on_declared_vs_staged_size_disagreement() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("backup");
+        let dest = dir.path().join("out");
+        fs::create_dir_all(&source).unwrap();
+
+        {
+            let db = source.join("lezi.db");
+            let conn = open_v3_fixture(&db);
+            seed_family(&conn);
+            seed_baby(&conn);
+            seed_committed_bundle_with_media(&conn);
+            // Corrupt retained row: declared ≠ staged on the same media.
+            conn.execute(
+                "
+                UPDATE sync_bundle_media
+                SET declared_byte_size = 1, staged_byte_size = 2
+                WHERE media_uuid = ?1
+                ",
+                params![MEDIA],
+            )
+            .unwrap();
+        }
+        write_source_media(&source, FAM, MEDIA, media_bytes());
+
+        let err =
+            migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
+        );
+        assert!(
+            err.to_string().contains("disagrees") || err.to_string().contains("declared_byte_size"),
+            "{err}"
+        );
+        assert_no_copy_back_dest(&dest);
+    }
+
+    #[test]
+    fn migrate_data_dir_fails_on_negative_bundle_media_size() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("backup");
+        let dest = dir.path().join("out");
+        fs::create_dir_all(&source).unwrap();
+
+        {
+            let db = source.join("lezi.db");
+            let conn = open_v3_fixture(&db);
+            seed_family(&conn);
+            seed_baby(&conn);
+            seed_committed_bundle_with_media(&conn);
+            conn.execute(
+                "
+                UPDATE sync_bundle_media
+                SET declared_byte_size = -1, staged_byte_size = NULL
+                WHERE media_uuid = ?1
+                ",
+                params![MEDIA],
+            )
+            .unwrap();
+        }
+        write_source_media(&source, FAM, MEDIA, media_bytes());
+
+        let err =
+            migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
+        );
+        assert!(
+            err.to_string().contains("negative declared_byte_size"),
+            "{err}"
+        );
+        assert_no_copy_back_dest(&dest);
     }
 
     #[test]
@@ -746,13 +972,14 @@ mod tests {
         assert_eq!(wrong.len(), media_bytes().len());
         write_source_media(&source, FAM, MEDIA, &wrong);
 
-        let err = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
+        let err =
+            migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
         );
         assert!(err.to_string().contains("sha256"), "{err}");
-        assert!(!dest.join("lezi.db").exists());
+        assert_no_copy_back_dest(&dest);
     }
 
     #[test]
@@ -813,11 +1040,11 @@ mod tests {
         assert_eq!(report.media_files_copied, 1);
         assert_eq!(report.discarded_staging_bundles, 1);
         assert!(dest
-            .join(media_file_relative_path(FAM, MEDIA))
+            .join(media_file_relative_path(FAM, MEDIA).unwrap())
             .is_file());
         assert!(
             !dest
-                .join(media_file_relative_path(FAM, staging_media))
+                .join(media_file_relative_path(FAM, staging_media).unwrap())
                 .exists(),
             "staging-only orphan must not be copied"
         );
@@ -870,9 +1097,40 @@ mod tests {
 
         let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
         assert_eq!(report.media_files_copied, 1);
+        assert_media_ready_like_server(&dest, FAM, ordinary, Some(bytes.len() as u64));
         assert_eq!(
-            fs::read(dest.join(media_file_relative_path(FAM, ordinary))).unwrap(),
+            fs::read(dest.join(media_file_relative_path(FAM, ordinary).unwrap())).unwrap(),
             bytes
+        );
+    }
+
+    #[test]
+    fn migrate_data_dir_wipes_stale_dest_media_when_authority_empty() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("backup");
+        let dest = dir.path().join("out");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        // Pre-existing non-authority media under reused out/.
+        let stale = dest
+            .join("media")
+            .join(FAM)
+            .join("99999999-9999-4999-8999-999999999999");
+        fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        fs::write(&stale, b"stale-leftover").unwrap();
+
+        {
+            let db = source.join("lezi.db");
+            let conn = open_v3_fixture(&db);
+            seed_family(&conn);
+            seed_baby(&conn);
+        }
+        let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        assert_eq!(report.media_files_copied, 0);
+        assert!(dest.join("lezi.db").is_file());
+        assert!(
+            !dest.join("media").exists(),
+            "empty authority must leave no dest/media (including wiped stale)"
         );
     }
 

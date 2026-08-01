@@ -21,8 +21,20 @@ async fn main() {
         )
         .init();
 
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        std::process::exit(if healthcheck() { 0 } else { 1 });
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("healthcheck") => {
+            std::process::exit(if healthcheck() { 0 } else { 1 });
+        }
+        Some("offline-migrate") => {
+            // Private NAS v3→current ops CLI (ticket 05). Remaining argv are
+            // subcommand + flags; never starts the HTTPS server.
+            let rest: Vec<String> = std::iter::once("offline-migrate".to_owned())
+                .chain(args)
+                .collect();
+            std::process::exit(i32::from(lezi_sync::offline_migrate_main(&rest)));
+        }
+        _ => {}
     }
 
     let (certificate, private_key) = tls_files().unwrap_or_else(|error| {

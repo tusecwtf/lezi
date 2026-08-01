@@ -109,13 +109,31 @@ if [[ ! -f "${DIR}/app-update/app-release.apk" || ! -f "${DIR}/app-update/app-up
   exit 1
 fi
 echo "==> install app-update artifacts into ${data_path}"
-mkdir -p "${data_path}"
-install -m 644 "${DIR}/app-update/app-update.json" "${data_path}/app-update.json"
-install -m 644 "${DIR}/app-update/app-release.apk" "${data_path}/app-release.apk"
-# Container runs as 10001:10001; best-effort ownership when deploy user can chown.
-if command -v chown >/dev/null 2>&1; then
-  chown 10001:10001 "${data_path}/app-update.json" "${data_path}/app-release.apk" 2>/dev/null || true
+# Data bind is often mode 700 uid 10001 (SSH user cannot write). Prefer direct
+# install; fall back to docker as uid 10001 with a bind of the package app-update/.
+if mkdir -p "${data_path}" 2>/dev/null \
+  && install -m 644 "${DIR}/app-update/app-update.json" "${data_path}/app-update.json" 2>/dev/null \
+  && install -m 644 "${DIR}/app-update/app-release.apk" "${data_path}/app-release.apk" 2>/dev/null; then
+  if command -v chown >/dev/null 2>&1; then
+    chown 10001:10001 "${data_path}/app-update.json" "${data_path}/app-release.apk" 2>/dev/null || true
+  fi
+else
+  echo "    direct install not writable; docker-copy as 10001:10001" >&2
+  docker run --rm \
+    --user 10001:10001 \
+    -v "${data_path}:/data" \
+    -v "${DIR}/app-update:/src:ro" \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ec 'cp /src/app-update.json /data/app-update.json && cp /src/app-release.apk /data/app-release.apk && chmod 644 /data/app-update.json /data/app-release.apk'
 fi
+# Fail closed: artifacts must exist under the bind (via docker stat as 10001).
+docker run --rm \
+  --user 10001:10001 \
+  -v "${data_path}:/data:ro" \
+  --entrypoint /bin/sh \
+  "${image}" \
+  -ec 'test -f /data/app-update.json && test -f /data/app-release.apk'
 
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
@@ -166,11 +184,31 @@ fi
 
 echo "==> wait for health"
 ok=0
+# Image is debian:bookworm-slim + lezi-sync only (no curl). Prefer host curl with
+# data-bind cert; if the bind is mode 700 (uid 10001 only), use host curl -k on
+# published HTTPS :8765 for JSON bodies, and `lezi-sync healthcheck` inside the
+# container for internal :8766 /ready (container-local only; not published).
 for i in $(seq 1 30); do
-  if curl --cacert "${tls_certificate}" -fsS "${HEALTH_URL}" >/tmp/lezi-health.out 2>/dev/null \
+  if [[ -r "${tls_certificate}" ]] \
+    && curl --cacert "${tls_certificate}" -fsS "${HEALTH_URL}" >/tmp/lezi-health.out 2>/dev/null \
     && curl --cacert "${tls_certificate}" -fsS "${READY_URL}" >/tmp/lezi-ready.out 2>/dev/null; then
     ok=1
     break
+  fi
+  # Host LAN HTTPS without readable cert (mode-700 data bind).
+  if curl -k -fsS "https://127.0.0.1:8765/health" >/tmp/lezi-health.out 2>/dev/null \
+    && curl -k -fsS "https://127.0.0.1:8765/ready" >/tmp/lezi-ready.out 2>/dev/null; then
+    ok=1
+    break
+  fi
+  # Container-internal readiness only (no JSON body; image has no curl).
+  if docker exec "${CONTAINER_NAME}" lezi-sync healthcheck >/dev/null 2>&1; then
+    # Still need version JSON for EXPECTED_VERSION check — retry host HTTPS briefly.
+    if curl -k -fsS "https://127.0.0.1:8765/health" >/tmp/lezi-health.out 2>/dev/null \
+      && curl -k -fsS "https://127.0.0.1:8765/ready" >/tmp/lezi-ready.out 2>/dev/null; then
+      ok=1
+      break
+    fi
   fi
   sleep 1
 done

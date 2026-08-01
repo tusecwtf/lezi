@@ -6,6 +6,14 @@ mod rate_limit;
 mod readiness;
 mod store;
 
+/// Ops entry for `lezi-sync offline-migrate …` (ticket 05).
+///
+/// Not a product/server API — private family-NAS offline pipeline only.
+/// Returns a process exit status byte (`0` ok, `1` migrate/validate fail, `2` usage).
+pub fn offline_migrate_main(args: &[String]) -> u8 {
+    offline_migrate::cli::main_from_args(args)
+}
+
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -73,6 +81,11 @@ pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
 pub const CAPABILITY_DEVICE_SESSIONS: &str = "device_sessions_v1";
 pub const CAPABILITY_MEMBERSHIP_DEVICES: &str = "membership_devices_v1";
+/// Minimum length for `LEZI_BOOTSTRAP_SECRET` when set, and for the offline
+/// migrator's new root password (same product rule).
+pub(crate) const MIN_BOOTSTRAP_SECRET_LEN: usize = 16;
+/// On-disk `server.secret` byte length (HMAC signing material).
+pub(crate) const SERVER_SECRET_BYTES: usize = 32;
 const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
@@ -204,9 +217,11 @@ impl ServerConfig {
         if self
             .bootstrap_secret
             .as_ref()
-            .is_some_and(|secret| secret.len() < 16)
+            .is_some_and(|secret| secret.len() < MIN_BOOTSTRAP_SECRET_LEN)
         {
-            return Err("LEZI_BOOTSTRAP_SECRET must be at least 16 characters when set".to_owned());
+            return Err(format!(
+                "LEZI_BOOTSTRAP_SECRET must be at least {MIN_BOOTSTRAP_SECRET_LEN} characters when set"
+            ));
         }
         if self.member_request_ttl_hours != 24 {
             return Err("LEZI_MEMBER_REQUEST_TTL_HOURS must be exactly 24".to_owned());
@@ -400,7 +415,7 @@ pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
     let bootstrap_secret = config.bootstrap_secret.filter(|value| !value.is_empty());
     let owner_root_fingerprint = bootstrap_secret
         .as_deref()
-        .map(|secret| derive_token(&signing_secret, &format!("owner-root:{secret}")));
+        .map(|secret| owner_root_fingerprint(&signing_secret, secret));
     if bootstrap_secret.is_none() {
         tracing::warn!(
             "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
@@ -2227,48 +2242,73 @@ fn system_epoch_seconds() -> i64 {
 
 fn load_or_create_server_secret(data_dir: &Path) -> Result<Vec<u8>, ApiError> {
     let path = data_dir.join("server.secret");
-    let secret = match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            let mut secret = vec![0u8; 32];
-            OsRng.fill_bytes(&mut secret);
-            file.write_all(&secret)?;
-            file.sync_all()?;
-            secret
+    match fs::read(&path) {
+        Ok(secret) => {
+            secure_file(&path)?;
+            if secret.len() < SERVER_SECRET_BYTES {
+                return Err(ApiError::internal(format!(
+                    "server.secret must contain at least {SERVER_SECRET_BYTES} bytes"
+                )));
+            }
+            Ok(secret)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => fs::read(&path)?,
-        Err(error) => return Err(error.into()),
-    };
-    secure_file(&path)?;
-    if secret.len() < 32 {
-        return Err(ApiError::internal(
-            "server.secret must contain at least 32 bytes",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut secret = vec![0u8; SERVER_SECRET_BYTES];
+            OsRng.fill_bytes(&mut secret);
+            write_server_secret(data_dir, &secret)?;
+            Ok(secret)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Atomically write `{data_dir}/server.secret` with 0o600 permissions.
+///
+/// Temp name is `.server.secret.{uuid}.tmp` so abort cleanup (migrator media
+/// failure) can wipe incomplete signing material alongside the final path.
+pub(crate) fn write_server_secret(data_dir: &Path, secret: &[u8]) -> Result<(), std::io::Error> {
+    if secret.len() < SERVER_SECRET_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("server.secret must contain at least {SERVER_SECRET_BYTES} bytes"),
         ));
     }
-    Ok(secret)
+    let path = data_dir.join("server.secret");
+    let temporary = data_dir.join(format!(".server.secret.{}.tmp", Uuid::new_v4().simple()));
+    write_private_bytes(&path, secret, &temporary)
+}
+
+/// Temp → sync → secure(0o600) → rename → secure → parent fsync.
+/// On error, best-effort remove `temporary` (caller may also wipe path).
+fn write_private_bytes(
+    path: &Path,
+    content: &[u8],
+    temporary: &Path,
+) -> Result<(), std::io::Error> {
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        secure_file(temporary)?;
+        fs::rename(temporary, path)?;
+        secure_file(path)?;
+        if let Some(parent) = path.parent() {
+            sync_directory(parent)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 fn write_private_file(path: &Path, content: &[u8]) -> Result<(), ApiError> {
     let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    let result = (|| -> Result<(), ApiError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(content)?;
-        file.sync_all()?;
-        secure_file(&temporary)?;
-        fs::rename(&temporary, path)?;
-        secure_file(path)?;
-        let parent = path
-            .parent()
-            .ok_or_else(|| ApiError::internal("media path has no parent directory"))?;
-        sync_directory(parent)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    write_private_bytes(path, content, &temporary).map_err(Into::into)
 }
 
 fn collect_orphan_family_media(store: &Store, media_root: &Path) -> Result<(), ApiError> {
@@ -2855,6 +2895,23 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn write_server_secret_is_private_and_leaves_no_temporary() {
+        let directory = tempfile::tempdir().unwrap();
+        let secret = vec![b'S'; SERVER_SECRET_BYTES];
+        write_server_secret(directory.path(), &secret).unwrap();
+        let path = directory.path().join("server.secret");
+        assert_eq!(fs::read(&path).unwrap(), secret);
+        // Only the final name remains (no .server.secret.*.tmp).
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        assert!(write_server_secret(directory.path(), &[0u8; 8]).is_err());
     }
 
     #[cfg(unix)]
