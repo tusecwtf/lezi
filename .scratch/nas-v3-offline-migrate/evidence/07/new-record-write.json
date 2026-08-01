@@ -1,0 +1,10 @@
+{
+  "stage_http": 200,
+  "commit_http": 200,
+  "root_id": "487696df-587f-426f-9a72-f711aaeaf9a7",
+  "bundle_id": "f99126d5-0b98-4afb-b268-448e9d117a4e",
+  "found_on_pull": true,
+  "note": "ticket07 cutover smoke write",
+  "stage_body": "ok",
+  "commit_body": "ok"
+}

@@ -1,0 +1,47 @@
+{
+  "family_name": "redacted",
+  "entity_count": 22,
+  "by_type": {
+    "baby": 2,
+    "record": 17,
+    "care_plan": 2,
+    "media": 1
+  },
+  "alive_records": 16,
+  "sample_alive_or_all_records": [
+    {
+      "client_uuid": "redacted",
+      "deleted_at": null,
+      "catalog_key": "weight",
+      "note_preview": ""
+    },
+    {
+      "client_uuid": "redacted",
+      "deleted_at": null,
+      "catalog_key": "height",
+      "note_preview": ""
+    },
+    {
+      "client_uuid": "redacted",
+      "deleted_at": null,
+      "catalog_key": "formula",
+      "note_preview": ""
+    },
+    {
+      "client_uuid": "redacted",
+      "deleted_at": null,
+      "catalog_key": "pee",
+      "note_preview": ""
+    },
+    {
+      "client_uuid": "redacted",
+      "deleted_at": null,
+      "catalog_key": "sleep",
+      "note_preview": ""
+    }
+  ],
+  "babies": [
+    "redacted"
+  ],
+  "media_count": 1
+}

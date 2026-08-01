@@ -189,7 +189,8 @@
                                     v
                            [本机 out/ 当前 schema data]
                                     |
-                         校验：当前二进制 preflight + ready
+                         校验：CLI preflight（schema + server.secret 长度；票 05）
+                         （/ready 在票 04 夹具与票 06 cutover 过程配置 TLS 后证明）
                                     |
 维护窗：停容器 --> 备份 NAS 再确认 --> 拷回 out/ --> 启 TLS 新镜像
                                     |
