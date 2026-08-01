@@ -3,6 +3,7 @@ package com.lezi.babylog.sync
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxEntity
+import com.lezi.babylog.core.database.matchesPublishedRevision
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -13,9 +14,9 @@ import org.junit.Test
 /**
  * Public seams:
  * - [AtomicMediaBundlePublisher.publish] stages probe metadata on the wire,
- *   uploads, commits, then CAS-writes prepare fields / receipt only.
- * - Concurrent tombstone / revive / localUri replace / higher updatedAt during
- *   a long upload must keep the current row (no full prepare snapshot rewrite).
+ *   uploads, commits the root, then CAS-writes prepare fields / receipt only.
+ * - Concurrent tombstone / path replace / higher updatedAt during a long upload
+ *   must keep the current row (no full prepare snapshot rewrite).
  */
 class AtomicMediaBundlePublisherTest {
     @Test
@@ -48,7 +49,7 @@ class AtomicMediaBundlePublisherTest {
     }
 
     @Test
-    fun publishPreparesManifestUploadsMissingMediaWritesReceiptThenCommits() = runTest {
+    fun publishPreparesManifestUploadsMissingMediaCommitsThenWritesReceipt() = runTest {
         val backend = RecordingAtomicBundleBackend()
         val store = CasMediaStore(
             mediaAsset(
@@ -371,22 +372,10 @@ class AtomicMediaBundlePublisherTest {
     }
 
     @Test
-    fun concurrentReviveWithHigherRevisionRejectsStalePrepareAndReceipt() = runTest {
+    fun concurrentHigherRevisionPathReplaceRejectsStalePrepareAndReceipt() = runTest {
+        // Publish starts against a live revision; mid-upload domain writes a
+        // higher updatedAt + new localUri (path replace / recapture).
         val store = CasMediaStore(
-            mediaAsset(
-                clientUuid = "media-1",
-                mime = "image/png",
-                width = 8,
-                height = 8,
-                byteSize = 2,
-                updatedAt = 2,
-                localUri = "/local/media-1",
-                deletedAt = 1,
-            ),
-        )
-        // Live outbox row is a non-tombstone package for a resurrected path that
-        // still matches prepare-time identity until upload mutates the row.
-        store.replace(
             mediaAsset(
                 clientUuid = "media-1",
                 mime = "image/png",
@@ -399,7 +388,6 @@ class AtomicMediaBundlePublisherTest {
         )
         val backend = RecordingAtomicBundleBackend().apply {
             onPut = {
-                // Domain revived again with a newer path and revision while upload runs.
                 store.replace(
                     mediaAsset(
                         clientUuid = "media-1",
@@ -558,7 +546,8 @@ class AtomicMediaBundlePublisherTest {
 
 /**
  * In-memory CAS surface matching [com.lezi.babylog.core.database.MediaAssetDao]
- * mergePreparedMetadata / writeCommitReceipt predicates (not a full-row @Update).
+ * mergePreparedMetadata / writeCommitReceipt via the shared
+ * [com.lezi.babylog.core.database.matchesPublishedRevision] helper.
  */
 private class CasMediaStore(vararg initial: MediaAssetEntity) {
     private val stored = initial.associateBy { it.clientUuid }.toMutableMap()
@@ -585,9 +574,12 @@ private class CasMediaStore(vararg initial: MediaAssetEntity) {
     ): Int {
         val current = stored[clientUuid] ?: return 0
         if (
-            current.updatedAt != expectedUpdatedAt ||
-            current.localUri != expectedLocalUri ||
-            current.deletedAt != expectedDeletedAt
+            !current.matchesPublishedRevision(
+                expectedClientUuid = clientUuid,
+                expectedUpdatedAt = expectedUpdatedAt,
+                expectedLocalUri = expectedLocalUri,
+                expectedDeletedAt = expectedDeletedAt,
+            )
         ) {
             return 0
         }
@@ -609,9 +601,12 @@ private class CasMediaStore(vararg initial: MediaAssetEntity) {
     ): Int {
         val current = stored[clientUuid] ?: return 0
         if (
-            current.updatedAt != expectedUpdatedAt ||
-            current.localUri != expectedLocalUri ||
-            current.deletedAt != expectedDeletedAt
+            !current.matchesPublishedRevision(
+                expectedClientUuid = clientUuid,
+                expectedUpdatedAt = expectedUpdatedAt,
+                expectedLocalUri = expectedLocalUri,
+                expectedDeletedAt = expectedDeletedAt,
+            )
         ) {
             return 0
         }

@@ -17,6 +17,7 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
+import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
@@ -6295,10 +6296,12 @@ internal class FakeMediaAssetDao : MediaAssetDao {
         var changed = 0
         items.replaceAll {
             if (
-                it.clientUuid == clientUuid &&
-                it.updatedAt == expectedUpdatedAt &&
-                it.localUri == expectedLocalUri &&
-                it.deletedAt == expectedDeletedAt
+                it.matchesPublishedRevision(
+                    expectedClientUuid = clientUuid,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                    expectedLocalUri = expectedLocalUri,
+                    expectedDeletedAt = expectedDeletedAt,
+                )
             ) {
                 changed = 1
                 it.copy(mime = mime, width = width, height = height, byteSize = byteSize)
@@ -6319,10 +6322,12 @@ internal class FakeMediaAssetDao : MediaAssetDao {
         var changed = 0
         items.replaceAll {
             if (
-                it.clientUuid == clientUuid &&
-                it.updatedAt == expectedUpdatedAt &&
-                it.localUri == expectedLocalUri &&
-                it.deletedAt == expectedDeletedAt
+                it.matchesPublishedRevision(
+                    expectedClientUuid = clientUuid,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                    expectedLocalUri = expectedLocalUri,
+                    expectedDeletedAt = expectedDeletedAt,
+                )
             ) {
                 changed = 1
                 it.copy(remoteUri = remoteUri)

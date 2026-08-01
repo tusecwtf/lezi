@@ -820,8 +820,13 @@ interface MediaAssetDao {
 
     /**
      * Merge prepare-time probe fields only when the published domain revision is
-     * still current: same client UUID, updatedAt, localUri, and deletedAt.
-     * Never rewrites ownership, tombstone, remoteUri, syncDirty, or paths.
+     * still current. Never rewrites ownership, tombstone, remoteUri, syncDirty,
+     * or paths.
+     *
+     * **CAS WHERE anchor** ([MEDIA_ASSET_CAS_REVISION_WHERE]): keep this
+     * predicate identical to [writeCommitReceipt]. JVM fakes must use
+     * [MediaAssetEntity.matchesPublishedRevision]. Room regressions:
+     * `MediaAssetCasRoomTest`.
      */
     @Query(
         """
@@ -853,6 +858,11 @@ interface MediaAssetDao {
     /**
      * Write a root-commit receipt only when the published domain revision is
      * still current. Does not re-apply a prepare-time row snapshot.
+     *
+     * **CAS WHERE anchor** ([MEDIA_ASSET_CAS_REVISION_WHERE]): keep this
+     * predicate identical to [mergePreparedMetadata]. JVM fakes must use
+     * [MediaAssetEntity.matchesPublishedRevision]. Room regressions:
+     * `MediaAssetCasRoomTest`.
      */
     @Query(
         """

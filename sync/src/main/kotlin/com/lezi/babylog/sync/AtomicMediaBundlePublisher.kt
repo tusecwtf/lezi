@@ -42,6 +42,7 @@ internal class AtomicMediaBundlePublisher(
     ) -> Int,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
 ) {
+
     suspend fun publish(
         session: SyncSession,
         bundleId: String,
@@ -74,13 +75,15 @@ internal class AtomicMediaBundlePublisher(
             requireRemoteAllowed(session)
             val result = backend.commitBundle(session, bundleId)
             for ((media, _) in prepared.sources) {
-                writeCommitReceipt(
-                    media.clientUuid,
-                    media.updatedAt,
-                    media.localUri,
-                    media.deletedAt,
-                    session.receiptFor(media.clientUuid),
-                )
+                applyFailOpenCas {
+                    writeCommitReceipt(
+                        media.clientUuid,
+                        media.updatedAt,
+                        media.localUri,
+                        media.deletedAt,
+                        session.receiptFor(media.clientUuid),
+                    )
+                }
             }
             return result
         } catch (failure: Throwable) {
@@ -111,16 +114,18 @@ internal class AtomicMediaBundlePublisher(
                 // Probe fields ride the wire for this package even when the local
                 // row advanced; only merge into Room when the published revision
                 // is still current.
-                mergePreparedMetadata(
-                    media.clientUuid,
-                    media.updatedAt,
-                    media.localUri,
-                    media.deletedAt,
-                    mime,
-                    width,
-                    height,
-                    byteSize,
-                )
+                applyFailOpenCas {
+                    mergePreparedMetadata(
+                        media.clientUuid,
+                        media.updatedAt,
+                        media.localUri,
+                        media.deletedAt,
+                        mime,
+                        width,
+                        height,
+                        byteSize,
+                    )
+                }
                 mediaSources += media to prepared
                 val rawObject = Json.parseToJsonElement(payload).jsonObject
                 payload = JsonObject(
@@ -144,6 +149,12 @@ internal class AtomicMediaBundlePublisher(
         return AtomicMediaPackage(mediaEntities, mediaSources)
     }
 }
+
+/**
+ * Runs a conditional media prepare/receipt write. A 0-row result means a
+ * concurrent domain edit won and is fail-open — never treated as publish failure.
+ */
+internal suspend fun applyFailOpenCas(write: suspend () -> Int): Int = write()
 
 private data class AtomicMediaPackage(
     val entities: List<SyncEntity>,

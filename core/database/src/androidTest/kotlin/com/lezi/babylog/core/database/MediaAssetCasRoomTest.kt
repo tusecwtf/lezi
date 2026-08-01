@@ -198,4 +198,145 @@ class MediaAssetCasRoomTest {
         assertNull(tombstone.remoteUri)
         assertEquals(true, tombstone.syncDirty)
     }
+
+    /**
+     * Each CAS key must independently force a miss on **both** prepare and receipt.
+     * Co-mutating updatedAt with localUri/deletedAt would hide a WHERE drift that
+     * dropped one of those columns.
+     */
+    @Test
+    fun eachCasKeyAloneCausesMissOnPrepareAndReceipt() = runBlocking {
+        suspend fun seed(
+            clientUuid: String,
+            updatedAt: Long = 20,
+            localUri: String = "/local/original.jpg",
+            deletedAt: Long? = null,
+        ) {
+            dao.upsert(
+                MediaAssetEntity(
+                    id = 0,
+                    recordId = 1,
+                    clientUuid = clientUuid,
+                    localUri = localUri,
+                    remoteUri = null,
+                    mime = "image/png",
+                    width = 10,
+                    height = 10,
+                    byteSize = 4,
+                    createdAt = 1,
+                    updatedAt = updatedAt,
+                    deletedAt = deletedAt,
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        suspend fun assertBothMiss(
+            clientUuid: String,
+            expectedUpdatedAt: Long,
+            expectedLocalUri: String,
+            expectedDeletedAt: Long?,
+        ) {
+            assertEquals(
+                0,
+                dao.mergePreparedMetadata(
+                    clientUuid = clientUuid,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                    expectedLocalUri = expectedLocalUri,
+                    expectedDeletedAt = expectedDeletedAt,
+                    mime = "image/gif",
+                    width = 1,
+                    height = 1,
+                    byteSize = 1,
+                ),
+            )
+            assertEquals(
+                0,
+                dao.writeCommitReceipt(
+                    clientUuid = clientUuid,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                    expectedLocalUri = expectedLocalUri,
+                    expectedDeletedAt = expectedDeletedAt,
+                    remoteUri = "sync://family/stale",
+                ),
+            )
+            val row = requireNotNull(dao.getByClientUuid(clientUuid))
+            assertEquals("image/png", row.mime)
+            assertEquals(4L, row.byteSize)
+            assertNull(row.remoteUri)
+            assertEquals(true, row.syncDirty)
+        }
+
+        // Same updatedAt + same deletedAt, different localUri only.
+        seed("media-localuri")
+        dao.update(
+            requireNotNull(dao.getByClientUuid("media-localuri")).copy(
+                localUri = "/local/other.jpg",
+            ),
+        )
+        assertBothMiss(
+            clientUuid = "media-localuri",
+            expectedUpdatedAt = 20,
+            expectedLocalUri = "/local/original.jpg",
+            expectedDeletedAt = null,
+        )
+
+        // Same updatedAt + same localUri, different deletedAt only.
+        seed("media-deletedat")
+        dao.update(
+            requireNotNull(dao.getByClientUuid("media-deletedat")).copy(
+                deletedAt = 99,
+            ),
+        )
+        assertBothMiss(
+            clientUuid = "media-deletedat",
+            expectedUpdatedAt = 20,
+            expectedLocalUri = "/local/original.jpg",
+            expectedDeletedAt = null,
+        )
+
+        // Same localUri + same deletedAt, different updatedAt only.
+        seed("media-updatedat")
+        dao.update(
+            requireNotNull(dao.getByClientUuid("media-updatedat")).copy(
+                updatedAt = 50,
+            ),
+        )
+        assertBothMiss(
+            clientUuid = "media-updatedat",
+            expectedUpdatedAt = 20,
+            expectedLocalUri = "/local/original.jpg",
+            expectedDeletedAt = null,
+        )
+
+        // Full match still applies on both APIs (shared WHERE matrix).
+        seed("media-match")
+        assertEquals(
+            1,
+            dao.mergePreparedMetadata(
+                clientUuid = "media-match",
+                expectedUpdatedAt = 20,
+                expectedLocalUri = "/local/original.jpg",
+                expectedDeletedAt = null,
+                mime = "image/jpeg",
+                width = 40,
+                height = 30,
+                byteSize = 99,
+            ),
+        )
+        assertEquals(
+            1,
+            dao.writeCommitReceipt(
+                clientUuid = "media-match",
+                expectedUpdatedAt = 20,
+                expectedLocalUri = "/local/original.jpg",
+                expectedDeletedAt = null,
+                remoteUri = "sync://family/media-match",
+            ),
+        )
+        val matched = requireNotNull(dao.getByClientUuid("media-match"))
+        assertEquals("image/jpeg", matched.mime)
+        assertEquals(99L, matched.byteSize)
+        assertEquals("sync://family/media-match", matched.remoteUri)
+    }
 }

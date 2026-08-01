@@ -17,6 +17,7 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.OutboxEntity
+import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.SyncStatus
@@ -4653,6 +4654,90 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun midUploadMediaRecaptureMissesReceiptKeepsDirtyAndNewerOutbox() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val mediaUuid = testMediaUuid("media-recapture")
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-recapture",
+                payloadJson = """{"amount_ml":80}""",
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/old.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        var publishedMediaOutboxId: Long? = null
+        var observedCasMissRetention = false
+        var putCount = 0
+        rig.backend.onPutBundleMedia = recapture@{ clientUuid ->
+            if (clientUuid != mediaUuid) return@recapture
+            putCount += 1
+            if (putCount == 1) {
+                val published = requireNotNull(
+                    rig.outbox.find("family-a", "media", mediaUuid),
+                )
+                publishedMediaOutboxId = published.id
+                val current = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+                // Domain recapture mid-upload: higher revision + new path + REPLACE outbox.
+                rig.media.update(
+                    current.copy(
+                        updatedAt = 200,
+                        localUri = "photos/new.jpg",
+                        remoteUri = null,
+                        syncDirty = true,
+                    ),
+                )
+                rig.outbox.enqueue(
+                    OutboxEntity(
+                        familyId = "family-a",
+                        entityType = "media",
+                        clientUuid = mediaUuid,
+                        payloadJson = published.payloadJson,
+                        updatedAt = 200,
+                    ),
+                )
+                return@recapture
+            }
+            // Next push cycle after acknowledgeMediaRows: stale receipt missed,
+            // published outbox id is gone, newer outbox retained, media still dirty.
+            if (putCount == 2) {
+                val media = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+                assertThat(media.updatedAt).isEqualTo(200)
+                assertThat(media.localUri).isEqualTo("photos/new.jpg")
+                assertThat(media.remoteUri).isNull()
+                assertThat(media.syncDirty).isTrue()
+                val publishedId = requireNotNull(publishedMediaOutboxId)
+                assertThat(rig.outbox.all().none { it.id == publishedId }).isTrue()
+                val retained = requireNotNull(
+                    rig.outbox.find("family-a", "media", mediaUuid),
+                )
+                assertThat(retained.id).isNotEqualTo(publishedId)
+                assertThat(retained.updatedAt).isEqualTo(200)
+                observedCasMissRetention = true
+            }
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).isNotEmpty()
+        assertThat(putCount).isAtLeast(2)
+        assertThat(observedCasMissRetention).isTrue()
+        // Later cycle may converge the higher revision; CAS-miss retention already locked above.
+    }
+
+    @Test
     fun localRecordPublishLabelUsesRootReceiptAndTruthfulZeroPhotoCopy() {
         assertThat(
             localRecordPublishLabel(
@@ -7305,6 +7390,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val committedBundles = mutableListOf<String>()
     var stageBundleFailure: Throwable? = null
     var putBundleMediaFailure: Throwable? = null
+    var onPutBundleMedia: (suspend (clientUuid: String) -> Unit)? = null
     var commitBundleFailure: Throwable? = null
     var failCommitRootTypeOnce: Pair<String, Throwable>? = null
     var nextCommitRecordAuthors: List<CanonicalRecordAuthor>? = null
@@ -7357,6 +7443,7 @@ internal class RecordingSyncBackend : SyncBackend {
         source: SyncMediaUploadSource,
     ): BundleStageStatus {
         putBundleMediaFailure?.let { throw it }
+        onPutBundleMedia?.invoke(clientUuid)
         operationOrder += "put_bundle_media:$clientUuid"
         bundleMediaUploads += bundleId to clientUuid
         return BundleStageStatus(
@@ -8743,10 +8830,12 @@ internal class MemoryMediaDao : MediaAssetDao {
         var changed = 0
         rows.replaceAll {
             if (
-                it.clientUuid == clientUuid &&
-                it.updatedAt == expectedUpdatedAt &&
-                it.localUri == expectedLocalUri &&
-                it.deletedAt == expectedDeletedAt
+                it.matchesPublishedRevision(
+                    expectedClientUuid = clientUuid,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                    expectedLocalUri = expectedLocalUri,
+                    expectedDeletedAt = expectedDeletedAt,
+                )
             ) {
                 changed = 1
                 it.copy(mime = mime, width = width, height = height, byteSize = byteSize)
@@ -8767,10 +8856,12 @@ internal class MemoryMediaDao : MediaAssetDao {
         var changed = 0
         rows.replaceAll {
             if (
-                it.clientUuid == clientUuid &&
-                it.updatedAt == expectedUpdatedAt &&
-                it.localUri == expectedLocalUri &&
-                it.deletedAt == expectedDeletedAt
+                it.matchesPublishedRevision(
+                    expectedClientUuid = clientUuid,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                    expectedLocalUri = expectedLocalUri,
+                    expectedDeletedAt = expectedDeletedAt,
+                )
             ) {
                 changed = 1
                 it.copy(remoteUri = remoteUri)
