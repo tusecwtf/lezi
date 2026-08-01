@@ -26,6 +26,7 @@ import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.receiptFor
 import com.lezi.babylog.sync.MemoryBabyDao
 import com.lezi.babylog.sync.MemoryCarePlanDao
 import com.lezi.babylog.sync.MemoryCustomItemDao

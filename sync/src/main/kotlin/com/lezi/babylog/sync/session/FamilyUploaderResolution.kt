@@ -1,7 +1,6 @@
 package com.lezi.babylog.sync.session
 
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME
 
 /**
  * Link-key decision (family-identity tickets 01 / 03):

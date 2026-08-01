@@ -9,8 +9,6 @@ import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.ForcedAppUpdateState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
-import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
 
 /** About-panel subtitle for the installed app. */
 fun localAppVersionLabel(versionName: String): String =
@@ -62,6 +60,11 @@ sealed interface AppUpdateUiOutcome {
 /**
  * Maps high-level [AppUpdateCheckResult] (and transport failures) to dialog copy.
  *
+ * Maps only façade-level results: [AppUpdateCheckResult], [ForcedAppUpdateState],
+ * and [ClientUpdateRequiredException] already surfaced by [SyncPort]. Wire-body
+ * re-parse of `client_update_required` stays on the backend helper used by
+ * RealSyncPort — UI copy does not dual-parse HTTP bodies.
+ *
  * When a root force shell is active ([availableForcedAppUpdate] non-null), callers
  * should pass [activeForcedAppUpdate] so Optional/UpToDate cannot surface as a
  * dismissible dialog or "当前已是最新版本" Message (belt-and-suspenders with
@@ -73,10 +76,7 @@ fun appUpdateUiOutcome(
     activeForcedAppUpdate: ForcedAppUpdateState? = null,
 ): AppUpdateUiOutcome {
     val value = result.getOrElse { error ->
-        if (error is ClientUpdateRequiredException ||
-            (error is SyncHttpException &&
-                syncHttpCodeOrNull(error.responseBody) == "client_update_required")
-        ) {
+        if (error is ClientUpdateRequiredException) {
             // Align with ForcedAppUpdateState.PackageUnknown: force shell, not a
             // dismissible "network" Message. Root overlay remains authoritative.
             return AppUpdateUiOutcome.ForcedUpdatePackageUnknown

@@ -1,12 +1,11 @@
 package com.lezi.babylog.sync.engine
 import javax.inject.Inject
 import javax.inject.Singleton
-import com.lezi.babylog.sync.RealSyncPort
 
 /**
  * Invoked after a remote care_plan package (plan + all photos) is fully applied
  * in one Room transaction. Domain uses this to schedule local reminders / system
- * calendar projection without injecting CareLog into [RealSyncPort].
+ * calendar projection without injecting CareLog into the sync port façade.
  *
  * Local reminder prefs and calendar settings never enter the family package;
  * receivers project using their own device configuration only.

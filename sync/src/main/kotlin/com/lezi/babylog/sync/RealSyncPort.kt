@@ -37,6 +37,7 @@ import kotlinx.coroutines.withContext
 import com.lezi.babylog.sync.appupdate.APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE
 import com.lezi.babylog.sync.appupdate.AppUpdateApkIdentityReader
 import com.lezi.babylog.sync.appupdate.AppUpdateInstaller
+import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.appupdate.UnreadableAppUpdateApkIdentityReader
 import com.lezi.babylog.sync.appupdate.appUpdateStagingApk
 import com.lezi.babylog.sync.appupdate.appUpdateStagingDir
@@ -53,10 +54,11 @@ import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
+import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 import com.lezi.babylog.sync.clear.LocalReplicaClearCoordinator
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
+import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncDecision
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
 import com.lezi.babylog.sync.engine.ForegroundSyncRetryPolicy
@@ -81,7 +83,6 @@ import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.matchesOrigin
-import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 
 @Singleton
 class RealSyncPort @Inject constructor(
@@ -564,11 +565,11 @@ class RealSyncPort @Inject constructor(
             }
             else -> {
                 // Wire code may still arrive as SyncHttpException if a backend skips mapping.
-                if (failure is SyncHttpException &&
-                    syncHttpCodeOrNull(failure.responseBody) == "client_update_required"
-                ) {
+                val clientUpdateRequired =
+                    (failure as? SyncHttpException)?.clientUpdateRequiredOrNull()
+                if (clientUpdateRequired != null) {
                     handledClientUpdateRequired = true
-                    handleClientUpdateRequired(ClientUpdateRequiredException())
+                    handleClientUpdateRequired(clientUpdateRequired)
                 } else {
                     result.onFailure(::updateFailureStatus)
                 }
@@ -1157,14 +1158,6 @@ class RealSyncPort @Inject constructor(
     }
 }
 
-/** Test / default installer so JVM unit tests need no PackageInstaller. */
-internal object NoOpAppUpdateInstaller : AppUpdateInstaller {
-    override fun canRequestPackageInstalls(): Boolean = true
-    override fun installFromFile(apkFile: File, expectedPackageName: String) = Unit
-    override fun createManageUnknownSourcesIntent(): android.content.Intent =
-        android.content.Intent()
-}
-
 private inline fun <reified T : Throwable> Throwable.causeChainContains(): Boolean =
     generateSequence(this) { it.cause }.any { it is T }
 
@@ -1191,17 +1184,6 @@ private fun Throwable.startupCancellationCauseOrNull(): CancellationException? {
     }
     return null
 }
-
-private fun ForegroundSyncDecision.userMessage(): String = when (this) {
-    ForegroundSyncDecision.MissingEndpoint -> "请先连接可信家庭服务器"
-    ForegroundSyncDecision.UntrustedEndpoint -> "服务器地址已变化，请重新确认并登录"
-    ForegroundSyncDecision.Background -> "家庭同步仅在前台运行"
-    ForegroundSyncDecision.Allowed -> ""
-}
-
-internal class ForegroundSyncBlockedException(
-    val decision: ForegroundSyncDecision,
-) : IllegalStateException(decision.userMessage())
 
 /**
  * Creator-local publish chrome for a care record that is still waiting on an

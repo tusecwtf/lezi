@@ -665,7 +665,7 @@ class FamilyWizardController(
             flushPendingMemberLoginQrForget()
             val requestVersion = memberLoginQrRequestVersion.incrementAndGet()
             val normalizedDeviceName = runCatching {
-                com.lezi.babylog.sync.backend.requireDeviceName(deviceName)
+                com.lezi.babylog.sync.session.requireDeviceName(deviceName)
             }.getOrElse { error ->
                 mutableState.value = FamilyWizardState.MemberLoginQrReady(
                     snapshot = snapshot,
@@ -848,7 +848,7 @@ class FamilyWizardController(
             return
         }
         val deviceNameError = runCatching {
-            com.lezi.babylog.sync.backend.requireDeviceName(snapshot.deviceName)
+            com.lezi.babylog.sync.session.requireDeviceName(snapshot.deviceName)
         }.exceptionOrNull()?.message
         if (deviceNameError != null) {
             mutableState.value = FamilyWizardState.RetryableFailure(identity, deviceNameError)
@@ -912,7 +912,7 @@ class FamilyWizardController(
             return
         }
         val deviceNameError = runCatching {
-            com.lezi.babylog.sync.backend.requireDeviceName(snapshot.deviceName)
+            com.lezi.babylog.sync.session.requireDeviceName(snapshot.deviceName)
         }.exceptionOrNull()?.message
         if (deviceNameError != null) {
             mutableState.value = FamilyWizardState.RetryableFailure(identity, deviceNameError)
@@ -1049,7 +1049,7 @@ class FamilyWizardController(
     ) {
         val identity = snapshot.copy(step = FamilyWizardStep.Identity)
         val deviceNameError = runCatching {
-            com.lezi.babylog.sync.backend.requireDeviceName(snapshot.deviceName)
+            com.lezi.babylog.sync.session.requireDeviceName(snapshot.deviceName)
         }.exceptionOrNull()?.message
         if (deviceNameError != null) {
             mutableState.value = FamilyWizardState.RetryableFailure(identity, deviceNameError)

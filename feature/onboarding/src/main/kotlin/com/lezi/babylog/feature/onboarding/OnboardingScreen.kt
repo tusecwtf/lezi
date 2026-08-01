@@ -103,7 +103,7 @@ import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
-import com.lezi.babylog.sync.backend.requireDeviceName
+import com.lezi.babylog.sync.session.requireDeviceName
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate

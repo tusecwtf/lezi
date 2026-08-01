@@ -21,6 +21,9 @@ import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
+import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
+import com.lezi.babylog.sync.session.requireDeviceName
+import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 class HttpSyncBackendTest {
     @Test

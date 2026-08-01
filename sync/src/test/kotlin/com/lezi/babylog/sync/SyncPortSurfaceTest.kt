@@ -1,7 +1,6 @@
 package com.lezi.babylog.sync
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
-import com.lezi.babylog.sync.backend.SyncBackend
 
 /**
  * Public SyncPort surface contract (ticket 16): production zero-call and
@@ -16,7 +15,7 @@ class SyncPortSurfaceTest {
 
         assertThat(names).doesNotContain("isEnabled")
         assertThat(names).doesNotContain("saveServer")
-        // familyId-taking push/pull wrappers (not SyncBackend session pull/push).
+        // familyId-taking push/pull wrappers (not backend session pull/push).
         assertThat(names).doesNotContain("pull")
         assertThat(names).doesNotContain("push")
     }

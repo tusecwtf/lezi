@@ -41,11 +41,9 @@ import kotlinx.serialization.json.longOrNull
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncPlan
 import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.backend.normalizeFamilyNameForWire
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
@@ -54,6 +52,8 @@ import com.lezi.babylog.sync.session.FamilySessionReplica
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
+import com.lezi.babylog.sync.session.receiptFor
 
 internal object AtomicBundleId {
     private const val NAMESPACE = "lezi.atomic-bundle.v1"
@@ -2021,26 +2021,7 @@ private fun SyncSession.requireCurrentReplicaSession() {
     require(membershipId.isNotBlank()) { "当前同步会话缺少 membership_id" }
 }
 
-internal fun SyncSession.receiptFor(clientUuid: String): String {
-    val namespace = UUID.nameUUIDFromBytes(
-        "${baseUrl.trimEnd('/')}\n$familyId".toByteArray(Charsets.UTF_8),
-    )
-    return "$RECEIPT_PREFIX$namespace:$clientUuid"
-}
-
-internal fun BundleStageStatus.mediaUuidsToUpload(liveMediaUuids: Set<String>): Set<String> =
-    if (isCommitted) {
-        emptySet()
-    } else {
-        val missing = missingMedia.toSet()
-        val staged = stagedMedia.toSet()
-        require(missing.intersect(staged).isEmpty() && missing + staged == liveMediaUuids) {
-            "家庭服务器返回了无效的原子同步包媒体状态"
-        }
-        missing
-    }
-
-internal fun MediaAssetEntity.hasReceiptFor(session: SyncSession): Boolean =
+private fun MediaAssetEntity.hasReceiptFor(session: SyncSession): Boolean =
     remoteUri == session.receiptFor(clientUuid)
 
 private class LocalMediaEditGuard(
@@ -2082,4 +2063,3 @@ internal const val MAX_PUSH_BATCH_SIZE = 1_000
 /** Normal home libraries are far smaller; reaching this many pages is anomalous. */
 private const val MAX_PULL_PAGE_COUNT = 500
 private const val SYNC_PULL_PAGE_ENTITY_LIMIT = 200
-private const val RECEIPT_PREFIX = "lezi-sync:"

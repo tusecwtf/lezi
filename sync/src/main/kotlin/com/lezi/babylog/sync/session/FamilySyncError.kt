@@ -4,8 +4,8 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.sync.SyncNotEnabledException
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 import com.lezi.babylog.sync.backend.formatSyncHttpFailure
-import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
 
 /** One product-facing error policy shared by all family-session entry points. */
 fun familySyncError(error: Throwable, fallback: String): String {
@@ -21,7 +21,7 @@ fun familySyncError(error: Throwable, fallback: String): String {
     // Message is already product-shaped by [formatSyncHttpFailure]; do not re-filter.
     // client_update_required is remapped so users are not told the NAS is "down".
     if (error is SyncHttpException) {
-        if (syncHttpCodeOrNull(error.responseBody) == "client_update_required") {
+        if (error.clientUpdateRequiredOrNull() != null) {
             return "需要更新乐记后才能继续同步家庭数据"
         }
         return error.message?.trim().orEmpty().ifEmpty {

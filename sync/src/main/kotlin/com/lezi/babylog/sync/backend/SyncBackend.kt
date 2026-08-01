@@ -148,6 +148,23 @@ data class BundleStageStatus(
     val isCommitted: Boolean get() = status == "committed"
 }
 
+/**
+ * Media clientUuids still required before commit for an already-staged package.
+ * Committed stages need no upload; open stages must partition [liveMediaUuids]
+ * into missing vs already staged without overlap or drift.
+ */
+internal fun BundleStageStatus.mediaUuidsToUpload(liveMediaUuids: Set<String>): Set<String> =
+    if (isCommitted) {
+        emptySet()
+    } else {
+        val missing = missingMedia.toSet()
+        val staged = stagedMedia.toSet()
+        require(missing.intersect(staged).isEmpty() && missing + staged == liveMediaUuids) {
+            "家庭服务器返回了无效的原子同步包媒体状态"
+        }
+        missing
+    }
+
 data class BundleCommitResult(
     val bundleId: String,
     val status: String,

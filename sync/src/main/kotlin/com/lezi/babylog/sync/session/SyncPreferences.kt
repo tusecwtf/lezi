@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.backend.MemberLoginReceipt
-import com.lezi.babylog.sync.backend.normalizeFamilyNameForWire
 
 enum class FamilyRole {
     Owner,

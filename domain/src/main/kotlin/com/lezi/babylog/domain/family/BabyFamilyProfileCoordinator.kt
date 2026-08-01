@@ -264,7 +264,7 @@ internal class BabyFamilyProfileCoordinator(
             deviceId = user?.deviceId ?: "—",
             // Cache of membership 家庭称呼 when joined; local-only placeholder otherwise.
             displayName = user?.displayName?.takeIf { it.isNotBlank() }
-                ?: com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME,
+                ?: com.lezi.babylog.sync.session.LOCAL_DEVICE_DISPLAY_NAME,
             familyId = family?.id ?: 1L,
         )
     }
@@ -277,7 +277,7 @@ internal class BabyFamilyProfileCoordinator(
         val existing = localUserDao.get() ?: return
         val normalized = displayName?.trim().orEmpty()
         val stored = normalized.takeIf {
-            it.isNotEmpty() && it != com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME
+            it.isNotEmpty() && it != com.lezi.babylog.sync.session.LOCAL_DEVICE_DISPLAY_NAME
         }
         localUserDao.upsert(existing.copy(displayName = stored))
     }

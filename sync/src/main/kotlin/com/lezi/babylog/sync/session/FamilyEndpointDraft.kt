@@ -1,6 +1,5 @@
 package com.lezi.babylog.sync.session
 
-import com.lezi.babylog.sync.backend.requireMemberDisplayName
 
 /**
  * Shared non-sensitive endpoint draft for onboarding and account connection.

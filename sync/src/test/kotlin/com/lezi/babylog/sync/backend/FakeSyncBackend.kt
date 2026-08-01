@@ -8,6 +8,8 @@ import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
+import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 data class LegacyPushResult(
     val applied: Int,

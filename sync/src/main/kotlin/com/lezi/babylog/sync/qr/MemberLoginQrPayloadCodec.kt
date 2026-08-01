@@ -10,8 +10,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
-import com.lezi.babylog.sync.backend.normalizeFamilyNameForWire
-import com.lezi.babylog.sync.backend.requireMemberDisplayName
+import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
+import com.lezi.babylog.sync.session.requireMemberDisplayName
 import com.lezi.babylog.sync.session.EndpointTrustMode
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 

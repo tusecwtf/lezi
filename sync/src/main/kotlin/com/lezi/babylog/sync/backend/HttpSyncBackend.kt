@@ -2,7 +2,6 @@ package com.lezi.babylog.sync.backend
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
-import java.text.Normalizer
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -36,8 +35,11 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
-import com.lezi.babylog.sync.session.pinnedSslContext
 import com.lezi.babylog.sync.session.matchesOrigin
+import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
+import com.lezi.babylog.sync.session.pinnedSslContext
+import com.lezi.babylog.sync.session.requireDeviceName
+import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 private const val BOOTSTRAP_SECRET_HEADER = "X-Lezi-Bootstrap-Secret"
 internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -48,80 +50,6 @@ private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val MILLIS_PER_SECOND = 1_000L
 /** Attached on authenticated family requests so the server can gate minSupported later. */
 internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"
-
-/** Local-only UI placeholder; must never be uploaded as a real family 称呼. */
-/** Local-only display placeholder; never treated as a real caregiver name. */
-const val LOCAL_DEVICE_DISPLAY_NAME = "我（本机）"
-
-/**
- * Product-required family 称呼 for create / join / self-rename.
- * Blank, whitespace-only, and the device-local placeholder all fail hard.
- */
-internal fun requireMemberDisplayName(displayName: String?): String {
-    require(!displayName.isNullOrBlank()) { "请填写家庭称呼" }
-    require(displayName.none { it.isISOControl() || it.isBidirectionalControl() }) {
-        "家庭称呼不能包含控制字符或双向格式控制符"
-    }
-    val normalized = normalizeHumanFacingName(displayName)
-    require(normalized.isNotEmpty()) { "请填写家庭称呼" }
-    require(normalized != normalizeHumanFacingName(LOCAL_DEVICE_DISPLAY_NAME)) {
-        "请填写家庭称呼，不能使用本机占位名"
-    }
-    require(normalized.codePointCount(0, normalized.length) <= 128) {
-        "家庭称呼最多 128 个字符"
-    }
-    return normalized
-}
-
-fun requireDeviceName(deviceName: String?): String {
-    require(!deviceName.isNullOrBlank()) { "请填写设备称呼" }
-    require(deviceName.none { it.isISOControl() || it.isBidirectionalControl() }) {
-        "设备称呼不能包含控制字符或双向格式控制符"
-    }
-    return normalizeHumanFacingName(deviceName).also {
-        require(it.isNotEmpty()) { "请填写设备称呼" }
-        require(it.codePointCount(0, it.length) <= 128) { "设备称呼最多 128 个字符" }
-    }
-}
-
-private fun normalizeHumanFacingName(value: String): String {
-    val compatibilityNormalized = Normalizer.normalize(value, Normalizer.Form.NFKC).trim()
-    return buildString(compatibilityNormalized.length) {
-        var pendingSpace = false
-        compatibilityNormalized.forEach { character ->
-            if (character.isWhitespace()) {
-                pendingSpace = isNotEmpty()
-            } else {
-                if (pendingSpace) append(' ')
-                append(character)
-                pendingSpace = false
-            }
-        }
-    }
-}
-
-/**
- * Optional shared family name for create / owner rename.
- * Blank becomes null (server stores null; client applies fallback display).
- */
-internal fun normalizeFamilyNameForWire(familyName: String?): String? {
-    if (familyName == null) return null
-    require(familyName.none { it.isISOControl() || it.isBidirectionalControl() }) {
-        "家庭名不能包含控制字符或双向格式控制符"
-    }
-    val normalized = familyName.trim()
-    if (normalized.isEmpty()) return null
-    require(normalized.codePointCount(0, normalized.length) <= 64) {
-        "家庭名最多 64 个字符"
-    }
-    return normalized
-}
-
-private fun Char.isBidirectionalControl(): Boolean =
-    this == '\u061c' ||
-        this in '\u200e'..'\u200f' ||
-        this in '\u202a'..'\u202e' ||
-        this in '\u2066'..'\u206f'
 
 internal fun interface SyncHttpConnectionFactory {
     fun open(url: URL): HttpURLConnection

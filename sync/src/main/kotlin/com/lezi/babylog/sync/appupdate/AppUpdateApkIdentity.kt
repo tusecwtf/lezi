@@ -7,12 +7,6 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.ClientAppVersion
-import com.lezi.babylog.sync.appupdate.getPackageArchiveInfoCompat
-import com.lezi.babylog.sync.appupdate.getPackageInfoCompat
-import com.lezi.babylog.sync.appupdate.versionCodeCompat
-import com.lezi.babylog.sync.appupdate.signingCertSha256Digests
-import com.lezi.babylog.sync.appupdate.packageSigningInfoFlags
-import com.lezi.babylog.sync.appupdate.sha256Hex
 
 /**
  * Identity parsed from a staged APK archive before [AppUpdateInstaller] commit.

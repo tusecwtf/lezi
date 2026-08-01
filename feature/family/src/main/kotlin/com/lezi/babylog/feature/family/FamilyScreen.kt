@@ -77,7 +77,7 @@ import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
-import com.lezi.babylog.sync.backend.requireDeviceName
+import com.lezi.babylog.sync.session.requireDeviceName
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     save = {
         listOf(it.host, it.portText, it.scheme)

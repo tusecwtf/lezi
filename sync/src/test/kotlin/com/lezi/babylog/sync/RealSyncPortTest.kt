@@ -72,10 +72,11 @@ import com.lezi.babylog.sync.backend.SessionBootstrapResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.backend.normalizeFamilyNameForWire
+import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
 import com.lezi.babylog.sync.engine.AtomicBundleId
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
+import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
 import com.lezi.babylog.sync.media.LocalMediaInfo
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
@@ -92,6 +93,7 @@ import com.lezi.babylog.sync.session.SetupFamilyState
 import com.lezi.babylog.sync.session.SetupProbe
 import com.lezi.babylog.sync.session.SetupProbeResult
 import com.lezi.babylog.sync.session.SyncPreferences
+import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError

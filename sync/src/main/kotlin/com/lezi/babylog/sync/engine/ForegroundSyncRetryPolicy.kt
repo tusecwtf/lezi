@@ -3,7 +3,7 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
+import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 
 /** Foreground-only automatic retry policy for durable outbox publication. */
 internal object ForegroundSyncRetryPolicy {
@@ -15,7 +15,7 @@ internal object ForegroundSyncRetryPolicy {
             // Force-upgrade is terminal until the user installs a newer APK.
             is ClientUpdateRequiredException -> false
             is SyncHttpException ->
-                syncHttpCodeOrNull(failure.responseBody) != "client_update_required" &&
+                failure.clientUpdateRequiredOrNull() == null &&
                     (
                         failure.statusCode == 408 ||
                             failure.statusCode == 429 ||

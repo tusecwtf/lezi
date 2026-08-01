@@ -17,7 +17,7 @@ import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.engine.receiptFor
+import com.lezi.babylog.sync.session.receiptFor
 
 /**
  * Public seams:

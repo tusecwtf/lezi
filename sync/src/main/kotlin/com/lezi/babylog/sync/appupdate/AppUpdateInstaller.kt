@@ -145,3 +145,10 @@ class AppUpdateInstallStatusReceiver : BroadcastReceiver() {
         }
     }
 }
+
+/** Test / default installer so JVM unit tests need no PackageInstaller. */
+internal object NoOpAppUpdateInstaller : AppUpdateInstaller {
+    override fun canRequestPackageInstalls(): Boolean = true
+    override fun installFromFile(apkFile: File, expectedPackageName: String) = Unit
+    override fun createManageUnknownSourcesIntent(): Intent = Intent()
+}

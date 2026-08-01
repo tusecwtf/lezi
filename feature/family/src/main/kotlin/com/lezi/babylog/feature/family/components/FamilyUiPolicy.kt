@@ -9,7 +9,7 @@ import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME
+import com.lezi.babylog.sync.session.LOCAL_DEVICE_DISPLAY_NAME
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import java.text.Normalizer

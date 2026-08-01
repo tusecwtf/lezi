@@ -21,9 +21,7 @@ import com.lezi.babylog.sync.backend.SessionBootstrapResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.backend.normalizeFamilyNameForWire
-import com.lezi.babylog.sync.backend.requireDeviceName
-import com.lezi.babylog.sync.backend.requireMemberDisplayName
+
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 
 internal sealed interface FamilySessionCommand {

@@ -9,9 +9,9 @@ import com.lezi.babylog.sync.backend.AtomicBundleDraft
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
+import com.lezi.babylog.sync.backend.mediaUuidsToUpload
 import com.lezi.babylog.sync.session.SyncSession
-import com.lezi.babylog.sync.engine.mediaUuidsToUpload
-import com.lezi.babylog.sync.engine.receiptFor
+import com.lezi.babylog.sync.session.receiptFor
 
 /**
  * Publishes one already-mapped root and its complete media manifest atomically.

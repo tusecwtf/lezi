@@ -30,3 +30,15 @@ class ForegroundSyncGate @Inject constructor() {
         return ForegroundSyncDecision.Allowed
     }
 }
+
+private fun ForegroundSyncDecision.userMessage(): String = when (this) {
+    ForegroundSyncDecision.MissingEndpoint -> "请先连接可信家庭服务器"
+    ForegroundSyncDecision.UntrustedEndpoint -> "服务器地址已变化，请重新确认并登录"
+    ForegroundSyncDecision.Background -> "家庭同步仅在前台运行"
+    ForegroundSyncDecision.Allowed -> ""
+}
+
+/** Raised when [ForegroundSyncGate] rejects a user-facing sync attempt. */
+internal class ForegroundSyncBlockedException(
+    val decision: ForegroundSyncDecision,
+) : IllegalStateException(decision.userMessage())
