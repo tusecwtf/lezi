@@ -81,10 +81,16 @@ internal class RecordComposerSavedState(
 
     fun draftForCleanup(): QuickRecordDraft? = handle[DRAFT_KEY]
 
-    fun savePendingNextFeed(babyId: Long, type: RecordType, suggestedAtMillis: Long) {
+    fun savePendingNextFeed(
+        babyId: Long,
+        type: RecordType,
+        suggestedAtMillis: Long,
+        factMessage: String,
+    ) {
         handle[PENDING_NEXT_FEED_BABY_KEY] = babyId
         handle[PENDING_NEXT_FEED_TYPE_KEY] = type.key
         handle[PENDING_NEXT_FEED_SUGGESTED_AT_KEY] = suggestedAtMillis
+        handle[PENDING_NEXT_FEED_MESSAGE_KEY] = factMessage
     }
 
     fun pendingNextFeed(): PendingNextFeed? {
@@ -92,13 +98,16 @@ internal class RecordComposerSavedState(
         val type = handle.get<String>(PENDING_NEXT_FEED_TYPE_KEY)
             ?.let(RecordType::fromKey) ?: return null
         val suggestedAtMillis = handle.get<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY) ?: return null
-        return PendingNextFeed(babyId, type, suggestedAtMillis)
+        // Message is required for a presentable offer; fall back for partial pre-upgrade rows.
+        val factMessage = handle.get<String>(PENDING_NEXT_FEED_MESSAGE_KEY) ?: "记录已保存"
+        return PendingNextFeed(babyId, type, suggestedAtMillis, factMessage)
     }
 
     fun clearPendingNextFeed() {
         handle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
         handle.remove<String>(PENDING_NEXT_FEED_TYPE_KEY)
         handle.remove<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
+        handle.remove<String>(PENDING_NEXT_FEED_MESSAGE_KEY)
     }
 
     fun clear() {
@@ -114,13 +123,20 @@ internal class RecordComposerSavedState(
         const val PENDING_NEXT_FEED_BABY_KEY = "pending_next_feed_baby"
         const val PENDING_NEXT_FEED_TYPE_KEY = "pending_next_feed_type"
         const val PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "pending_next_feed_suggested_at"
+        const val PENDING_NEXT_FEED_MESSAGE_KEY = "pending_next_feed_message"
     }
 }
 
+/**
+ * Durable post-fact next-feed offer: identity for schedule/reconcile, suggested time, and the
+ * fact-success copy shown while the user chooses whether to plan. Survives request clear and
+ * process recreation independently of the restorable Composer draft.
+ */
 internal data class PendingNextFeed(
     val babyId: Long,
     val type: RecordType,
     val suggestedAtMillis: Long,
+    val factMessage: String,
 )
 
 internal data class RecordComposerUiState(
@@ -145,6 +161,16 @@ internal data class RecordComposerUiState(
     val saving: Boolean = false,
     val deleting: Boolean = false,
     val error: String? = null,
+    /**
+     * Observable next-feed offer after a feed fact succeeds. Single source of truth — not Compose
+     * local rememberSaveable dual-mastered with SavedState identity.
+     */
+    val pendingNextFeedOffer: PendingNextFeed? = null,
+    /**
+     * One-shot finish copy (non-feed success, or next-feed completed/skipped). Host presents once
+     * then acknowledges; re-subscribe must not re-fire after acknowledge.
+     */
+    val pendingFinishMessage: String? = null,
 ) {
     val hasUserChanges: Boolean
         get() = initialDraft?.let { baseline ->

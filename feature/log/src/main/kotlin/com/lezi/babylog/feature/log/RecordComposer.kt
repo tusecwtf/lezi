@@ -31,7 +31,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -144,17 +143,12 @@ fun RecordComposerHost(
     /** Explicit convert confirm; cancel keeps the draft and original record untouched. */
     var confirmConvert by remember(request) { mutableStateOf(false) }
     var confirmDiscard by rememberRecordComposerDiscardPrompt(request)
-    // These outlive request=null so a saved fact can finish its optional next-plan flow after
-    // the restorable root request has already been consumed. rememberSaveable also preserves the
-    // prompt across process recreation without ever reopening the persisted New request.
-    var pendingSavedMessage by rememberSaveable { mutableStateOf<String?>(null) }
-    var pendingSuggestedNextFeedAt by rememberSaveable { mutableStateOf<Long?>(null) }
     val context = LocalContext.current
-    fun finishSaved(message: String) {
-        pendingSavedMessage = null
-        pendingSuggestedNextFeedAt = null
-        onSaved(message)
-    }
+    // Post-save offer + finish copy live in ViewModel/SavedState (single source of truth).
+    // Any new composition after rotation observes state — never dual-mastered rememberSaveable
+    // locals mutated by a late save callback from a disposed composition.
+    val pendingNextFeedOffer = state.pendingNextFeedOffer
+    val pendingFinishMessage = state.pendingFinishMessage
 
     fun finishDismiss() {
         confirmDiscard = false
@@ -210,6 +204,30 @@ fun RecordComposerHost(
         } else {
             vm.open(request)
         }
+    }
+
+    // Consume restorable root as soon as a post-save stage is observable; present finish once.
+    LaunchedEffect(pendingNextFeedOffer, pendingFinishMessage) {
+        consumeComposerPostSavePresentation(
+            pendingNextFeedOffer = pendingNextFeedOffer,
+            pendingFinishMessage = pendingFinishMessage,
+            onConsumeRootRequest = onPersisted,
+            onPresentFinish = { message ->
+                val hasNotificationPermission =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        ) == PackageManager.PERMISSION_GRANTED
+                val finishedMessage = carePlanSaveMessageWithPermission(
+                    baseMessage = message,
+                    notificationPermissionGranted = hasNotificationPermission,
+                    isCarePlanWrite = isCarePlanSaveMessage(message),
+                )
+                onSaved(finishedMessage)
+                vm.acknowledgeFinishMessage()
+            },
+        )
     }
 
     if (request != null) {
@@ -284,29 +302,7 @@ fun RecordComposerHost(
                         if (draft.needsConvertToCarePlan()) {
                             confirmConvert = true
                         } else {
-                            vm.save { message, suggestedNextFeedAt ->
-                                val hasNotificationPermission =
-                                    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-                                        ContextCompat.checkSelfPermission(
-                                            context,
-                                            Manifest.permission.POST_NOTIFICATIONS,
-                                        ) == PackageManager.PERMISSION_GRANTED
-                                val finishedMessage = carePlanSaveMessageWithPermission(
-                                    baseMessage = message,
-                                    notificationPermissionGranted = hasNotificationPermission,
-                                    isCarePlanWrite = isCarePlanSaveMessage(message),
-                                )
-                                dispatchRecordSaveCompletion(
-                                    message = finishedMessage,
-                                    suggestedNextFeedAt = suggestedNextFeedAt,
-                                    onOfferReminder = { savedMessage, suggestedAt ->
-                                        pendingSavedMessage = savedMessage
-                                        pendingSuggestedNextFeedAt = suggestedAt
-                                    },
-                                    onPersisted = onPersisted,
-                                    onFinished = onSaved,
-                                )
-                            }
+                            vm.save()
                         }
                     },
                     onStartNursingTimer = {
@@ -395,29 +391,7 @@ fun RecordComposerHost(
                     enabled = !state.saving,
                     onClick = {
                         confirmConvert = false
-                        vm.save { message, suggestedNextFeedAt ->
-                            val hasNotificationPermission =
-                                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-                                    ContextCompat.checkSelfPermission(
-                                        context,
-                                        Manifest.permission.POST_NOTIFICATIONS,
-                                    ) == PackageManager.PERMISSION_GRANTED
-                            val finishedMessage = carePlanSaveMessageWithPermission(
-                                baseMessage = message,
-                                notificationPermissionGranted = hasNotificationPermission,
-                                isCarePlanWrite = isCarePlanSaveMessage(message),
-                            )
-                            dispatchRecordSaveCompletion(
-                                message = finishedMessage,
-                                suggestedNextFeedAt = suggestedNextFeedAt,
-                                onOfferReminder = { savedMessage, suggestedAt ->
-                                    pendingSavedMessage = savedMessage
-                                    pendingSuggestedNextFeedAt = suggestedAt
-                                },
-                                onPersisted = onPersisted,
-                                onFinished = onSaved,
-                            )
-                        }
+                        vm.save()
                     },
                 ) {
                     Text(if (state.saving) "保存中…" else "转为护理计划")
@@ -434,9 +408,8 @@ fun RecordComposerHost(
         )
     }
 
-    val savedMessage = pendingSavedMessage
-    val suggestedNextFeedAt = pendingSuggestedNextFeedAt
-    if (savedMessage != null && suggestedNextFeedAt != null) {
+    if (pendingNextFeedOffer != null) {
+        val offer = pendingNextFeedOffer
         val notificationPermissionGranted =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                 ContextCompat.checkSelfPermission(
@@ -445,10 +418,10 @@ fun RecordComposerHost(
                 ) == PackageManager.PERMISSION_GRANTED
         val scheduledMessage = nextFeedPlanSuccessMessage(notificationPermissionGranted)
         LeziNextFeedPlanFlow(
-            flowKey = "composer:$suggestedNextFeedAt",
+            flowKey = "composer:${offer.suggestedAtMillis}",
             origin = NextFeedPlanOrigin.RecordComposer,
-            factMessage = savedMessage,
-            suggestedAtMillis = suggestedNextFeedAt,
+            factMessage = offer.factMessage,
+            suggestedAtMillis = offer.suggestedAtMillis,
             scheduledMessage = scheduledMessage,
             minuteStep = state.timeStepMin,
             timePickerStyle = state.timePickerStyle,
@@ -456,12 +429,10 @@ fun RecordComposerHost(
             onSchedule = vm::scheduleNextFeedPlan,
             onReconcile = vm::reconcileNextFeedPlan,
             onFinishedScheduled = {
-                vm.dismissNextFeedPlan()
-                finishSaved(scheduledMessage)
+                vm.completeNextFeedOffer(scheduledMessage)
             },
             onFinishedWithoutPlan = {
-                vm.dismissNextFeedPlan()
-                finishSaved("$savedMessage；未安排下次喂养")
+                vm.completeNextFeedOffer("${offer.factMessage}；未安排下次喂养")
             },
         )
     }

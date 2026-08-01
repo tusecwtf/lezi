@@ -218,6 +218,7 @@ Owner。详细页面、错误和删除恢复见
 
 - 普通母乳、配方奶、挤出乳 Composer 与喂奶计时完成入口只在喂养事实事务成功后，进入同一套可选“安排下次喂养”流程；履行已有护理计划产生的事实不再递归提示。
 - 事实与计划是两个保存边界：此时 Record 已经发生并持久化；“不安排”、计划保存失败或退出提示均不得删除、回滚或改写该 Record。
+- **Composer 恢复顺序（先事实成功，再可恢复地选择计划）**：domain 写事实成功后立刻（1）把 fact message、baby/type、suggested time 写入 ViewModel/`SavedState` 统一 pending offer，（2）消费 restorable Composer request/draft，使进程重建不会重放 New 写事实；随后任意新 composition 只订阅该 observable post-save 阶段呈现/消费 offer，不依赖旧 composition 闭包改本地 `rememberSaveable`。非喂养保存同样经 observable finish message 只展示一次结果。共享 `LeziNextFeedPlanFlow` 仍负责 schedule 成功丢失后的核对、Skip 与配置重建相位。
 - 默认时间按“护理间隔”设置从当前时刻推算。两个入口共用同一日期/时钟输入和未来时间校验；用户可调整后安排，也可明确选择“不安排”。
 - 计划保存中禁用调整、重复提交与退出动作。保存回调失败、丢失，或重组/进程重建恢复到
   未决写入时，不得直接把它当作“未安排”：两个入口通过同一持久化核对 seam 查询该宝宝的
