@@ -4,6 +4,23 @@
 HTTPS interface；服务端以 Axum + Tokio + rustls + rusqlite 运行，NAS 上只需要一个
 Docker 容器和一个持久化目录。
 
+## 源码布局（crate-private）
+
+公开 crate 入口仍是 `build_app` / `build_apps`、`ServerConfig` 与 HTTP 合同；路由组装与
+`AppState` 留在 `src/lib.rs`。Route handlers 按职责落在 crate-private 模块，**不**扩大
+公开 API surface：
+
+| 路径 | 职责 |
+|---|---|
+| `src/lib.rs` | `AppState`、共享鉴权/引导、`build_apps` 路由表（按 `handlers::<domain>::…` 组装，无 barrel 转发清单） |
+| `src/handlers/{health,app_update,identity,sync,media}.rs` | `/health`、app-update、建家/登录/会话、pull、media/bundle；`media` 另含 media-root 启动清理 |
+| `src/members.rs` | 家庭成员与设备管理路由（既有内聚，不回并） |
+| `src/readiness.rs` | `/ready` 与 readiness 缓存 |
+| `src/store.rs` | SQLite 持久化（Store 再拆见后续票） |
+| `src/offline_migrate/` | 离线 v3→current 维护工具（非 live HTTP API） |
+
+公开 HTTP 合同（路径、方法、鉴权、状态码、JSON）不变；本 README 不宣称 live NAS 已验证。
+
 ## 数据目录合同
 
 服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=11`。空数据目录、
