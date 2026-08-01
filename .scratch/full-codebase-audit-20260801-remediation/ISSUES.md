@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**15、17、19、20、21、22、23、25、31**
+**17、19、20、21、22、23、25、31**
 
 ## Tickets
 
@@ -54,7 +54,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [12](./issues/12-restore-composer-next-feed-offer.md) | Audit P1-12 | Composer 保存后恢复下次喂养 offer | — | M | done |
 | [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | done |
 | [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | done |
-| [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | ready-for-agent |
+| [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | done |
 | [16](./issues/16-prune-dead-syncport-surface.md) | Audit P2-02 + readability 04 | 修剪 SyncPort 死公开表面 | 01 | S–M | done |
 | [17](./issues/17-align-tech-md-current-architecture.md) | Audit P2-03 + readability 05 + directory B3 | tech.md 对齐 current 架构真相 | — | S | ready-for-agent |
 | [18](./issues/18-split-sync-capability-ports.md) | Audit P2-04 | 全面拆 SyncPort/RealSyncPort | — | — | wontfix |

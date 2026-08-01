@@ -3,6 +3,7 @@ package com.lezi.babylog.domain
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 
 sealed interface PhotoAttachmentOwner {
@@ -32,11 +33,35 @@ data class PhotoAttachmentMutation(
  * This writer does not open a transaction. Callers must invoke it inside the same domain
  * transaction that writes the owning Record or CarePlan so a DAO failure cannot leave a partial
  * root/attachment state.
+ *
+ * Callers that may attach, revive, or tombstone paths must hold [MediaLocalPathGate] for every
+ * involved `local_uri` **before** opening the Room write lease (lock order: path gate → Room).
+ * Use [withInvolvedPaths] for that outer exclusion; it is shared with reference-aware file GC.
  */
 class PhotoAttachmentReconciler(
     private val mediaAssetDao: MediaAssetDao,
+    private val pathGate: MediaLocalPathGate = MediaLocalPathGate(),
     private val uuidFactory: () -> String = ::newClientUuid,
 ) {
+    /**
+     * Acquires path locks for existing owner media plus [additionalPaths], then runs [block].
+     * Must wrap the Room transaction that calls [reconcile] / [tombstone], never the reverse.
+     */
+    suspend fun <T> withInvolvedPaths(
+        owner: PhotoAttachmentOwner?,
+        additionalPaths: Collection<String> = emptyList(),
+        block: suspend () -> T,
+    ): T {
+        val existing = when (owner) {
+            is PhotoAttachmentOwner.Record ->
+                mediaAssetDao.listForRecord(owner.id).map(MediaAssetEntity::localUri)
+            is PhotoAttachmentOwner.CarePlan ->
+                mediaAssetDao.listForCarePlan(owner.id).map(MediaAssetEntity::localUri)
+            null -> emptyList()
+        }
+        return pathGate.withLocks(existing + additionalPaths, block)
+    }
+
     /** Returns the exact tombstones that may be handed to physical cleanup after commit. */
     suspend fun reconcile(
         owner: PhotoAttachmentOwner,

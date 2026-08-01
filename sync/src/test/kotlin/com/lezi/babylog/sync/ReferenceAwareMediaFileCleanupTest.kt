@@ -2,13 +2,24 @@ package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.MediaLocalPathGate
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
+/**
+ * Public seams under test:
+ * - [ReferenceAwareMediaFileCleanup.cleanupTombstones] / [ReferenceAwareMediaFileCleanup.cleanupPendingTombstones]
+ * - [SyncMediaFileStore.delete] must not run inside [com.lezi.babylog.core.database.DatabaseTransactionRunner.run]
+ * - [MediaLocalPathGate] serializes file reclaim with concurrent path rebinding
+ * - tombstone `localUri` remains durable retry evidence until a matching claim clears it
+ */
 class ReferenceAwareMediaFileCleanupTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder()
@@ -17,11 +28,7 @@ class ReferenceAwareMediaFileCleanupTest {
     fun sharedRecordAndPlanBytesAreDeletedOnlyAfterTheLastActiveReference() = runTest {
         val media = MemoryMediaDao()
         val files = RealTemporaryMediaFileStore()
-        val cleanup = ReferenceAwareMediaFileCleanup(
-            mediaDao = media,
-            mediaFiles = files,
-            transactionRunner = RecordingTransactionRunner(),
-        )
+        val cleanup = newCleanup(media, files)
         val shared = temporaryFolder.newFile("shared.jpg").apply {
             writeBytes(byteArrayOf(1, 2, 3))
         }
@@ -79,11 +86,7 @@ class ReferenceAwareMediaFileCleanupTest {
             ),
         )
         files.deleteFailures += IllegalStateException("disk unavailable")
-        val firstProcess = ReferenceAwareMediaFileCleanup(
-            mediaDao = media,
-            mediaFiles = files,
-            transactionRunner = RecordingTransactionRunner(),
-        )
+        val firstProcess = newCleanup(media, files)
 
         val failure = runCatching {
             firstProcess.cleanupTombstones(setOf(clientUuid))
@@ -93,11 +96,7 @@ class ReferenceAwareMediaFileCleanupTest {
         assertThat(shared.isFile).isTrue()
         assertThat(media.getByClientUuid(clientUuid)?.localUri).isEqualTo(shared.absolutePath)
 
-        val recreated = ReferenceAwareMediaFileCleanup(
-            mediaDao = media,
-            mediaFiles = RealTemporaryMediaFileStore(),
-            transactionRunner = RecordingTransactionRunner(),
-        )
+        val recreated = newCleanup(media, RealTemporaryMediaFileStore())
         recreated.cleanupTombstones(setOf(clientUuid))
 
         assertThat(shared.exists()).isFalse()
@@ -109,11 +108,7 @@ class ReferenceAwareMediaFileCleanupTest {
     fun pendingUploadProtectsSharedBytesAndMissingFilesConvergeIdempotently() = runTest {
         val media = MemoryMediaDao()
         val files = RealTemporaryMediaFileStore()
-        val cleanup = ReferenceAwareMediaFileCleanup(
-            mediaDao = media,
-            mediaFiles = files,
-            transactionRunner = RecordingTransactionRunner(),
-        )
+        val cleanup = newCleanup(media, files)
         val pending = temporaryFolder.newFile("pending.jpg")
         val tombstoneUuid = "44444444-4444-3444-8444-444444444444"
         media.seed(
@@ -170,11 +165,7 @@ class ReferenceAwareMediaFileCleanupTest {
             ),
         )
         files.failureAfterDelete = CancellationException("process cancelled")
-        val interrupted = ReferenceAwareMediaFileCleanup(
-            mediaDao = media,
-            mediaFiles = files,
-            transactionRunner = RecordingTransactionRunner(),
-        )
+        val interrupted = newCleanup(media, files)
 
         val failure = runCatching {
             interrupted.cleanupTombstones(setOf(clientUuid))
@@ -184,14 +175,277 @@ class ReferenceAwareMediaFileCleanupTest {
         assertThat(photo.exists()).isFalse()
         assertThat(media.getByClientUuid(clientUuid)?.localUri).isEqualTo(photo.absolutePath)
 
-        ReferenceAwareMediaFileCleanup(
-            mediaDao = media,
-            mediaFiles = RealTemporaryMediaFileStore(),
-            transactionRunner = RecordingTransactionRunner(),
-        ).cleanupTombstones(setOf(clientUuid))
+        newCleanup(media, RealTemporaryMediaFileStore()).cleanupTombstones(setOf(clientUuid))
 
         assertThat(media.getByClientUuid(clientUuid)?.localUri).isEmpty()
     }
+
+    @Test
+    fun slowDeleteDoesNotHoldRoomWriteTransactionLease() = runTest {
+        val media = MemoryMediaDao()
+        val transactions = RecordingTransactionRunner()
+        val deleteEntered = CompletableDeferred<Unit>()
+        val releaseDelete = CompletableDeferred<Unit>()
+        val files = RealTemporaryMediaFileStore(
+            transactionDepthDuringDelete = { transactions.depth },
+        ).apply {
+            onDelete = {
+                deleteEntered.complete(Unit)
+                releaseDelete.await()
+            }
+        }
+        val photo = temporaryFolder.newFile("slow-delete.jpg").apply {
+            writeBytes(byteArrayOf(7, 8, 9))
+        }
+        val clientUuid = "88888888-8888-3888-8888-888888888888"
+        media.seed(
+            logMedia(
+                clientUuid = clientUuid,
+                localUri = photo.absolutePath,
+                recordId = 7L,
+                deletedAt = 200L,
+                updatedAt = 200L,
+            ),
+        )
+        val cleanup = ReferenceAwareMediaFileCleanup(
+            mediaDao = media,
+            mediaFiles = files,
+            transactionRunner = transactions,
+            pathGate = MediaLocalPathGate(),
+        )
+
+        val job = async {
+            cleanup.cleanupTombstones(setOf(clientUuid))
+        }
+        deleteEntered.await()
+        // While the slow delete is in flight, Room write depth must be zero.
+        assertThat(transactions.depth).isEqualTo(0)
+        assertThat(files.transactionDepthAtDelete).containsExactly(0)
+        releaseDelete.complete(Unit)
+        job.await()
+
+        assertThat(photo.exists()).isFalse()
+        assertThat(media.getByClientUuid(clientUuid)?.localUri).isEmpty()
+        assertThat(transactions.depth).isEqualTo(0)
+    }
+
+    @Test
+    fun abaSamePathWithNewerRevisionDoesNotClearOrDeleteForStaleClaim() = runTest {
+        val media = MemoryMediaDao()
+        val pathGate = MediaLocalPathGate()
+        val transactions = RecordingTransactionRunner()
+        val deleteStarted = CompletableDeferred<Unit>()
+        val releaseDelete = CompletableDeferred<Unit>()
+        val photo = temporaryFolder.newFile("aba.jpg").apply {
+            writeBytes(byteArrayOf(10, 11, 12))
+        }
+        val clientUuid = "99999999-9999-3999-8999-999999999999"
+        media.seed(
+            logMedia(
+                clientUuid = clientUuid,
+                localUri = photo.absolutePath,
+                recordId = 7L,
+                deletedAt = 200L,
+                updatedAt = 200L,
+            ),
+        )
+        val files = RealTemporaryMediaFileStore().apply {
+            onDelete = {
+                // Simulate attach/revive advancing the row revision under the same path
+                // after claim was taken but before marker clear (ABA).
+                val current = requireNotNull(media.getByClientUuid(clientUuid))
+                media.update(
+                    current.copy(
+                        deletedAt = null,
+                        updatedAt = 500L,
+                        syncDirty = true,
+                    ),
+                )
+                deleteStarted.complete(Unit)
+                releaseDelete.await()
+            }
+        }
+        // Without path gate on the simulated revive, we prove revision identity: after
+        // delete of the old bytes, marker clear is skipped because claim no longer matches.
+        val cleanup = ReferenceAwareMediaFileCleanup(
+            mediaDao = media,
+            mediaFiles = files,
+            transactionRunner = transactions,
+            pathGate = pathGate,
+        )
+
+        // Force the race by mutating inside onDelete (holds path gate with cleanup).
+        val job = async { cleanup.cleanupTombstones(setOf(clientUuid)) }
+        deleteStarted.await()
+        releaseDelete.complete(Unit)
+        job.await()
+
+        // File may be gone (delete already ran) but marker must not clear on ABA revive.
+        assertThat(media.getByClientUuid(clientUuid)?.deletedAt).isNull()
+        assertThat(media.getByClientUuid(clientUuid)?.localUri).isEqualTo(photo.absolutePath)
+        assertThat(media.getByClientUuid(clientUuid)?.updatedAt).isEqualTo(500L)
+    }
+
+    @Test
+    fun pathGateBlocksAttachDuringFilePhaseSoNewActiveOwnerIsNotDeleted() = runTest {
+        val media = MemoryMediaDao()
+        val pathGate = MediaLocalPathGate()
+        val transactions = RecordingTransactionRunner()
+        val deleteEntered = CompletableDeferred<Unit>()
+        val releaseDelete = CompletableDeferred<Unit>()
+        val photo = temporaryFolder.newFile("gated.jpg").apply {
+            writeBytes(byteArrayOf(13, 14, 15))
+        }
+        val tombstoneUuid = "aaaaaaaa-aaaa-3aaa-8aaa-aaaaaaaaaaaa"
+        val liveUuid = "bbbbbbbb-bbbb-3bbb-8bbb-bbbbbbbbbbbb"
+        media.seed(
+            logMedia(
+                clientUuid = tombstoneUuid,
+                localUri = photo.absolutePath,
+                recordId = 7L,
+                deletedAt = 200L,
+                updatedAt = 200L,
+            ),
+        )
+        val files = RealTemporaryMediaFileStore().apply {
+            onDelete = {
+                deleteEntered.complete(Unit)
+                releaseDelete.await()
+            }
+        }
+        val cleanup = ReferenceAwareMediaFileCleanup(
+            mediaDao = media,
+            mediaFiles = files,
+            transactionRunner = transactions,
+            pathGate = pathGate,
+        )
+
+        val cleanupJob = async { cleanup.cleanupTombstones(setOf(tombstoneUuid)) }
+        deleteEntered.await()
+
+        // Attach must wait for path gate (same lock order as production domain writers).
+        val attachStarted = CompletableDeferred<Unit>()
+        val attachJob = async {
+            pathGate.withLock(photo.absolutePath) {
+                attachStarted.complete(Unit)
+                media.seed(
+                    logMedia(
+                        clientUuid = liveUuid,
+                        localUri = photo.absolutePath,
+                        carePlanId = 9L,
+                        updatedAt = 400L,
+                    ),
+                )
+            }
+        }
+        // Attach cannot enter the critical section while delete holds the path.
+        delay(50)
+        assertThat(attachStarted.isCompleted).isFalse()
+        assertThat(media.getByClientUuid(liveUuid)).isNull()
+
+        releaseDelete.complete(Unit)
+        cleanupJob.await()
+        attachJob.await()
+
+        // Cleanup claimed with zero active refs and deleted; attach ran after.
+        // Tombstone marker is cleared; live row now owns the (deleted) path string —
+        // production import uses unique paths so this only exercises gate ordering.
+        assertThat(media.getByClientUuid(tombstoneUuid)?.localUri).isEmpty()
+        assertThat(media.getByClientUuid(liveUuid)?.localUri).isEqualTo(photo.absolutePath)
+        assertThat(attachStarted.isCompleted).isTrue()
+    }
+
+    @Test
+    fun newActiveReferenceAfterClaimSkipsDeleteWhenObservedBeforeFilePhase() = runTest {
+        val media = MemoryMediaDao()
+        val files = RealTemporaryMediaFileStore()
+        val transactions = RecordingTransactionRunner()
+        val pathGate = MediaLocalPathGate()
+        val photo = temporaryFolder.newFile("new-active.jpg").apply {
+            writeBytes(byteArrayOf(16, 17, 18))
+        }
+        val tombstoneUuid = "cccccccc-cccc-3ccc-8ccc-cccccccccccc"
+        media.seed(
+            logMedia(
+                clientUuid = tombstoneUuid,
+                localUri = photo.absolutePath,
+                recordId = 7L,
+                deletedAt = 200L,
+                updatedAt = 200L,
+            ),
+        )
+        // Seed a live owner before cleanup so claim phase sees active refs.
+        media.seed(
+            logMedia(
+                clientUuid = "dddddddd-dddd-3ddd-8ddd-dddddddddddd",
+                localUri = photo.absolutePath,
+                carePlanId = 3L,
+            ),
+        )
+        val cleanup = ReferenceAwareMediaFileCleanup(
+            mediaDao = media,
+            mediaFiles = files,
+            transactionRunner = transactions,
+            pathGate = pathGate,
+        )
+
+        cleanup.cleanupTombstones(setOf(tombstoneUuid))
+
+        assertThat(photo.isFile).isTrue()
+        assertThat(files.deletedPaths).isEmpty()
+        assertThat(media.getByClientUuid(tombstoneUuid)?.localUri).isEmpty()
+        assertThat(media.getByClientUuid(tombstoneUuid)?.deletedAt).isEqualTo(200L)
+    }
+
+    @Test
+    fun multipleTombstonesSharingPathRecycleOnlyOnceAndClearEachMarker() = runTest {
+        val media = MemoryMediaDao()
+        val files = RealTemporaryMediaFileStore()
+        val cleanup = newCleanup(media, files)
+        val shared = temporaryFolder.newFile("multi-tombstone.jpg").apply {
+            writeBytes(byteArrayOf(19, 20, 21))
+        }
+        val first = "eeeeeeee-eeee-3eee-8eee-eeeeeeeeeeee"
+        val second = "ffffffff-ffff-3fff-8fff-ffffffffffff"
+        media.seed(
+            logMedia(
+                clientUuid = first,
+                localUri = shared.absolutePath,
+                recordId = 1L,
+                deletedAt = 200L,
+                updatedAt = 200L,
+            ),
+        )
+        media.seed(
+            logMedia(
+                clientUuid = second,
+                localUri = shared.absolutePath,
+                carePlanId = 2L,
+                deletedAt = 210L,
+                updatedAt = 210L,
+            ),
+        )
+
+        cleanup.cleanupTombstones(setOf(first, second))
+
+        assertThat(shared.exists()).isFalse()
+        assertThat(media.getByClientUuid(first)?.localUri).isEmpty()
+        assertThat(media.getByClientUuid(second)?.localUri).isEmpty()
+        // First cleanup deletes; second is missing-file idempotent success.
+        assertThat(files.deletedPaths).containsExactly(shared.absolutePath, shared.absolutePath)
+    }
+
+    private fun newCleanup(
+        media: MemoryMediaDao,
+        files: RealTemporaryMediaFileStore,
+        transactions: RecordingTransactionRunner = RecordingTransactionRunner(),
+        pathGate: MediaLocalPathGate = MediaLocalPathGate(),
+    ) = ReferenceAwareMediaFileCleanup(
+        mediaDao = media,
+        mediaFiles = files,
+        transactionRunner = transactions,
+        pathGate = pathGate,
+    )
 
     private fun logMedia(
         clientUuid: String,
@@ -199,6 +453,7 @@ class ReferenceAwareMediaFileCleanupTest {
         recordId: Long? = null,
         carePlanId: Long? = null,
         deletedAt: Long? = null,
+        updatedAt: Long? = null,
     ): MediaAssetEntity = MediaAssetEntity(
         recordId = recordId,
         carePlanId = carePlanId,
@@ -206,16 +461,20 @@ class ReferenceAwareMediaFileCleanupTest {
         kind = "log",
         localUri = localUri,
         createdAt = 100L,
-        updatedAt = deletedAt ?: 100L,
+        updatedAt = updatedAt ?: deletedAt ?: 100L,
         deletedAt = deletedAt,
         syncDirty = deletedAt != null,
     )
 }
 
-private class RealTemporaryMediaFileStore : SyncMediaFileStore {
+private class RealTemporaryMediaFileStore(
+    private val transactionDepthDuringDelete: () -> Int = { 0 },
+) : SyncMediaFileStore {
     val deleteFailures = ArrayDeque<Throwable>()
     val deletedPaths = mutableListOf<String>()
+    val transactionDepthAtDelete = mutableListOf<Int>()
     var failureAfterDelete: Throwable? = null
+    var onDelete: (suspend (String) -> Unit)? = null
 
     override suspend fun inspect(localUri: String): LocalMediaInfo? = error("not used")
 
@@ -229,7 +488,9 @@ private class RealTemporaryMediaFileStore : SyncMediaFileStore {
     ): String = error("not used")
 
     override suspend fun delete(localUri: String) {
+        transactionDepthAtDelete += transactionDepthDuringDelete()
         deletedPaths += localUri
+        onDelete?.invoke(localUri)
         deleteFailures.removeFirstOrNull()?.let { throw it }
         val file = File(localUri)
         check(!file.exists() || file.delete()) { "failed to delete $localUri" }

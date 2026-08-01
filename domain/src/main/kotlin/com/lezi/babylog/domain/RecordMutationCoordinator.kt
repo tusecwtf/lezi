@@ -91,14 +91,31 @@ internal class RecordMutationCoordinator(
             schemaVersion = schemaVersion,
             updatedAt = now,
         )
-        val id = if (type == RecordType.SLEEP && endTimestamp == null) {
-            sleepMutationMutex.withLock {
+        // Path gate before Room so attach shares exclusion with media file GC.
+        val id = photoAttachmentReconciler.withInvolvedPaths(
+            owner = null,
+            additionalPaths = photos,
+        ) {
+            if (type == RecordType.SLEEP && endTimestamp == null) {
+                sleepMutationMutex.withLock {
+                    transactionRunner.run {
+                        requireActiveBaby(babyId)
+                        healDuplicateOpenSleeps(babyId)
+                        if (recordDao.findOpenSleep(babyId) != null) {
+                            throw SleepStateChangedException()
+                        }
+                        val inserted = insertRecord(record)
+                        photoAttachmentReconciler.reconcile(
+                            PhotoAttachmentOwner.Record(inserted),
+                            photos,
+                            now,
+                        )
+                        inserted
+                    }
+                }
+            } else {
                 transactionRunner.run {
                     requireActiveBaby(babyId)
-                    healDuplicateOpenSleeps(babyId)
-                    if (recordDao.findOpenSleep(babyId) != null) {
-                        throw SleepStateChangedException()
-                    }
                     val inserted = insertRecord(record)
                     photoAttachmentReconciler.reconcile(
                         PhotoAttachmentOwner.Record(inserted),
@@ -107,17 +124,6 @@ internal class RecordMutationCoordinator(
                     )
                     inserted
                 }
-            }
-        } else {
-            transactionRunner.run {
-                requireActiveBaby(babyId)
-                val inserted = insertRecord(record)
-                photoAttachmentReconciler.reconcile(
-                    PhotoAttachmentOwner.Record(inserted),
-                    photos,
-                    now,
-                )
-                inserted
             }
         }
         requestLocalSync()
@@ -142,43 +148,49 @@ internal class RecordMutationCoordinator(
         }
         val photos = photoLocalPaths
         val now = System.currentTimeMillis()
-        val cleanupCandidates = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                val existing = recordDao.get(id) ?: return@run emptySet<String>()
-                requireCanManageRecord(existing)
-                requireActiveBaby(existing.babyId)
-                val type = RecordType.fromKey(existing.type) ?: error("未知记录类型")
-                requireCurrentPayloadDocument(type, existing.payloadJson, existing.schemaVersion)
-                val persistedPayload = requireCurrentPayloadJson(
-                    type = type,
-                    payloadJson = payloadJson,
-                    schemaVersion = schemaVersion,
-                )
-                if (
-                    type == RecordType.SLEEP &&
-                    existing.endTimestamp != null &&
-                    endTimestamp == null
-                ) {
-                    throw IllegalArgumentException("已完成的睡眠不可改为进行中")
-                }
-                validateSleepInterval(type, timestamp, endTimestamp)
-                updateRecordEntity(
-                    existing.copy(
-                        timestamp = timestamp,
-                        endTimestamp = endTimestamp,
-                        note = note,
-                        payloadJson = persistedPayload,
+        val owner = PhotoAttachmentOwner.Record(id)
+        val cleanupCandidates = photoAttachmentReconciler.withInvolvedPaths(
+            owner = owner,
+            additionalPaths = photos.orEmpty(),
+        ) {
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
+                    val existing = recordDao.get(id) ?: return@run emptySet<String>()
+                    requireCanManageRecord(existing)
+                    requireActiveBaby(existing.babyId)
+                    val type = RecordType.fromKey(existing.type) ?: error("未知记录类型")
+                    requireCurrentPayloadDocument(type, existing.payloadJson, existing.schemaVersion)
+                    val persistedPayload = requireCurrentPayloadJson(
+                        type = type,
+                        payloadJson = payloadJson,
                         schemaVersion = schemaVersion,
-                        updatedAt = now,
-                    ),
-                )
-                photos?.let {
-                    photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(id),
-                        it,
-                        now,
                     )
-                }?.tombstonedClientUuids.orEmpty()
+                    if (
+                        type == RecordType.SLEEP &&
+                        existing.endTimestamp != null &&
+                        endTimestamp == null
+                    ) {
+                        throw IllegalArgumentException("已完成的睡眠不可改为进行中")
+                    }
+                    validateSleepInterval(type, timestamp, endTimestamp)
+                    updateRecordEntity(
+                        existing.copy(
+                            timestamp = timestamp,
+                            endTimestamp = endTimestamp,
+                            note = note,
+                            payloadJson = persistedPayload,
+                            schemaVersion = schemaVersion,
+                            updatedAt = now,
+                        ),
+                    )
+                    photos?.let {
+                        photoAttachmentReconciler.reconcile(
+                            owner,
+                            it,
+                            now,
+                        )
+                    }?.tombstonedClientUuids.orEmpty()
+                }
             }
         }
         cleanupCommittedPhotoTombstones(cleanupCandidates)
@@ -219,7 +231,13 @@ internal class RecordMutationCoordinator(
             "该项目不可转为护理计划"
         }
 
-        suspend fun writeConvert(): Pair<Long, Set<String>> = transactionRunner.run {
+        val recordOwner = PhotoAttachmentOwner.Record(recordId)
+        suspend fun writeConvert(): Pair<Long, Set<String>> =
+            photoAttachmentReconciler.withInvolvedPaths(
+                owner = recordOwner,
+                additionalPaths = photos,
+            ) {
+                transactionRunner.run {
             val existing = recordDao.get(recordId) ?: error("记录不存在")
             if (existing.deletedAt != null) error("记录已删除")
             requireCanManageRecord(existing)
@@ -303,7 +321,8 @@ internal class RecordMutationCoordinator(
                 at,
             )
             planId to recordPhotoMutation.tombstonedClientUuids
-        }
+                }
+            }
 
         val (planId, cleanupCandidates) = if (type == RecordType.SLEEP) {
             // Same mutex as soft-delete/open-sleep so convert cannot leave half-live intervals.
@@ -325,23 +344,26 @@ internal class RecordMutationCoordinator(
     }
 
     suspend fun deleteRecord(id: Long): Boolean {
-        val (deleted, cleanupCandidates) = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                val existing = recordDao.get(id)
-                if (existing != null && existing.deletedAt == null) {
-                    requireCanManageRecord(existing)
-                    val deletedAt = nextSyncUpdatedAt(
-                        existing.updatedAt,
-                        System.currentTimeMillis(),
-                    )
-                    recordDao.softDelete(id, deletedAt)
-                    val tombstones = photoAttachmentReconciler.tombstone(
-                        PhotoAttachmentOwner.Record(id),
-                        deletedAt,
-                    ).tombstonedClientUuids
-                    true to tombstones
-                } else {
-                    false to emptySet()
+        val owner = PhotoAttachmentOwner.Record(id)
+        val (deleted, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(owner) {
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
+                    val existing = recordDao.get(id)
+                    if (existing != null && existing.deletedAt == null) {
+                        requireCanManageRecord(existing)
+                        val deletedAt = nextSyncUpdatedAt(
+                            existing.updatedAt,
+                            System.currentTimeMillis(),
+                        )
+                        recordDao.softDelete(id, deletedAt)
+                        val tombstones = photoAttachmentReconciler.tombstone(
+                            owner,
+                            deletedAt,
+                        ).tombstonedClientUuids
+                        true to tombstones
+                    } else {
+                        false to emptySet()
+                    }
                 }
             }
         }
@@ -456,69 +478,75 @@ internal class RecordMutationCoordinator(
         )
         require(completionClientUuid.isNotBlank()) { "计时完成标识不能为空" }
         val now = System.currentTimeMillis()
-        val id = transactionRunner.run {
-            val existing = recordDao.getByClientUuid(completionClientUuid)
-            if (existing != null) {
-                check(existing.deletedAt == null) {
-                    "这次计时记录已删除，请重试或改记"
+        // Ticket 09: explicit seed merge paths; Ticket 08 fallback: live plan media.
+        val recordPhotos = when {
+            photoLocalPaths != null -> photoLocalPaths
+            carePlanId != null -> listCarePlanPhotoPaths(carePlanId)
+            else -> emptyList()
+        }
+        val id = photoAttachmentReconciler.withInvolvedPaths(
+            owner = null,
+            additionalPaths = recordPhotos,
+        ) {
+            transactionRunner.run {
+                val existing = recordDao.getByClientUuid(completionClientUuid)
+                if (existing != null) {
+                    check(existing.deletedAt == null) {
+                        "这次计时记录已删除，请重试或改记"
+                    }
+                    require(existing.babyId == babyId && existing.type == RecordType.NURSING.key) {
+                        "计时完成标识与既有记录冲突"
+                    }
+                    // Idempotent replay: if a plan was linked, ensure it is completed
+                    // against this same record (no second session) and candidate identity.
+                    if (carePlanId != null) {
+                        completeOpenCarePlanWithRecord(
+                            carePlanId,
+                            babyId,
+                            RecordType.NURSING,
+                            existing.clientUuid,
+                            now,
+                            existing.timestamp,
+                        )
+                    }
+                    return@run existing.id
                 }
-                require(existing.babyId == babyId && existing.type == RecordType.NURSING.key) {
-                    "计时完成标识与既有记录冲突"
+                requireActiveBaby(babyId)
+                val recordTimestamp = if (recordMode == "start") startedAt else endedAt
+                val inserted = insertRecord(
+                    RecordEntity(
+                        clientUuid = completionClientUuid,
+                        babyId = babyId,
+                        type = RecordType.NURSING.key,
+                        timestamp = recordTimestamp,
+                        endTimestamp = endedAt.takeIf { recordMode == "start" },
+                        note = note,
+                        payloadJson = payload,
+                        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                        updatedAt = now,
+                    ),
+                )
+                if (recordPhotos.isNotEmpty()) {
+                    // Independent record MediaAsset rows (shared local path with plan when
+                    // overlapping). Plan ownership/order stay unchanged; replay skips clone.
+                    photoAttachmentReconciler.reconcile(
+                        PhotoAttachmentOwner.Record(inserted),
+                        recordPhotos,
+                        now,
+                    )
                 }
-                // Idempotent replay: if a plan was linked, ensure it is completed
-                // against this same record (no second session) and candidate identity.
                 if (carePlanId != null) {
                     completeOpenCarePlanWithRecord(
                         carePlanId,
                         babyId,
                         RecordType.NURSING,
-                        existing.clientUuid,
+                        completionClientUuid,
                         now,
-                        existing.timestamp,
+                        recordTimestamp,
                     )
                 }
-                return@run existing.id
+                inserted
             }
-            requireActiveBaby(babyId)
-            val recordTimestamp = if (recordMode == "start") startedAt else endedAt
-            val inserted = insertRecord(
-                RecordEntity(
-                    clientUuid = completionClientUuid,
-                    babyId = babyId,
-                    type = RecordType.NURSING.key,
-                    timestamp = recordTimestamp,
-                    endTimestamp = endedAt.takeIf { recordMode == "start" },
-                    note = note,
-                    payloadJson = payload,
-                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                    updatedAt = now,
-                ),
-            )
-            val recordPhotos = when {
-                photoLocalPaths != null -> photoLocalPaths
-                carePlanId != null -> listCarePlanPhotoPaths(carePlanId)
-                else -> emptyList()
-            }
-            if (recordPhotos.isNotEmpty()) {
-                // Independent record MediaAsset rows (shared local path with plan when
-                // overlapping). Plan ownership/order stay unchanged; replay skips clone.
-                photoAttachmentReconciler.reconcile(
-                    PhotoAttachmentOwner.Record(inserted),
-                    recordPhotos,
-                    now,
-                )
-            }
-            if (carePlanId != null) {
-                completeOpenCarePlanWithRecord(
-                    carePlanId,
-                    babyId,
-                    RecordType.NURSING,
-                    completionClientUuid,
-                    now,
-                    recordTimestamp,
-                )
-            }
-            inserted
         }
         if (carePlanId != null) {
             reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
@@ -555,60 +583,66 @@ internal class RecordMutationCoordinator(
             payloadJson = payloadJson,
             schemaVersion = schemaVersion,
         )
-        val (id, cleanupCandidates) = sleepMutationMutex.withLock {
-            validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
-            transactionRunner.run {
-                requireActiveBaby(babyId)
-                healDuplicateOpenSleeps(babyId)
-                val currentOpen = recordDao.findOpenSleep(babyId)
-                if (expectedOpenSleepId == null) {
-                    if (currentOpen != null) throw SleepStateChangedException()
-                    val now = System.currentTimeMillis()
-                    val inserted = insertRecord(
-                        RecordEntity(
-                            clientUuid = newClientUuid(),
-                            babyId = babyId,
-                            type = RecordType.SLEEP.key,
-                            timestamp = timestamp,
-                            endTimestamp = endTimestamp,
-                            note = note,
-                            payloadJson = persistedPayload,
-                            schemaVersion = schemaVersion,
-                            updatedAt = now,
-                        ),
-                    )
-                    val photoMutation = photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(inserted),
-                        photos,
-                        now,
-                    )
-                    inserted to photoMutation.tombstonedClientUuids
-                } else {
-                    if (currentOpen?.id != expectedOpenSleepId) {
-                        throw SleepStateChangedException()
+        val ownerHint = expectedOpenSleepId?.let(PhotoAttachmentOwner::Record)
+        val (id, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(
+            owner = ownerHint,
+            additionalPaths = photos,
+        ) {
+            sleepMutationMutex.withLock {
+                validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
+                transactionRunner.run {
+                    requireActiveBaby(babyId)
+                    healDuplicateOpenSleeps(babyId)
+                    val currentOpen = recordDao.findOpenSleep(babyId)
+                    if (expectedOpenSleepId == null) {
+                        if (currentOpen != null) throw SleepStateChangedException()
+                        val now = System.currentTimeMillis()
+                        val inserted = insertRecord(
+                            RecordEntity(
+                                clientUuid = newClientUuid(),
+                                babyId = babyId,
+                                type = RecordType.SLEEP.key,
+                                timestamp = timestamp,
+                                endTimestamp = endTimestamp,
+                                note = note,
+                                payloadJson = persistedPayload,
+                                schemaVersion = schemaVersion,
+                                updatedAt = now,
+                            ),
+                        )
+                        val photoMutation = photoAttachmentReconciler.reconcile(
+                            PhotoAttachmentOwner.Record(inserted),
+                            photos,
+                            now,
+                        )
+                        inserted to photoMutation.tombstonedClientUuids
+                    } else {
+                        if (currentOpen?.id != expectedOpenSleepId) {
+                            throw SleepStateChangedException()
+                        }
+                        requireCurrentPayloadDocument(
+                            RecordType.SLEEP,
+                            currentOpen.payloadJson,
+                            currentOpen.schemaVersion,
+                        )
+                        val now = System.currentTimeMillis()
+                        updateRecordEntity(
+                            currentOpen.copy(
+                                timestamp = timestamp,
+                                endTimestamp = endTimestamp,
+                                note = note,
+                                payloadJson = persistedPayload,
+                                schemaVersion = schemaVersion,
+                                updatedAt = now,
+                            ),
+                        )
+                        val photoMutation = photoAttachmentReconciler.reconcile(
+                            PhotoAttachmentOwner.Record(expectedOpenSleepId),
+                            photos,
+                            now,
+                        )
+                        expectedOpenSleepId to photoMutation.tombstonedClientUuids
                     }
-                    requireCurrentPayloadDocument(
-                        RecordType.SLEEP,
-                        currentOpen.payloadJson,
-                        currentOpen.schemaVersion,
-                    )
-                    val now = System.currentTimeMillis()
-                    updateRecordEntity(
-                        currentOpen.copy(
-                            timestamp = timestamp,
-                            endTimestamp = endTimestamp,
-                            note = note,
-                            payloadJson = persistedPayload,
-                            schemaVersion = schemaVersion,
-                            updatedAt = now,
-                        ),
-                    )
-                    val photoMutation = photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(expectedOpenSleepId),
-                        photos,
-                        now,
-                    )
-                    expectedOpenSleepId to photoMutation.tombstonedClientUuids
                 }
             }
         }

@@ -15,6 +15,7 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.matchesPublishedRevision
@@ -8853,6 +8854,7 @@ private class SyncRig(
         mediaDao = media,
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
+        pathGate = MediaLocalPathGate(),
     )
     val pendingReplicaCleanup = TestPendingReplicaCleanupStore()
     val pendingDomainRecovery = TestLocalClearRecoveryGate()
@@ -9240,10 +9242,18 @@ internal class MemoryCustomItemDao : CustomItemDao {
 
 internal class RecordingTransactionRunner : DatabaseTransactionRunner {
     var runCount = 0
+    var depth = 0
+    var maxDepth = 0
 
     override suspend fun <T> run(block: suspend () -> T): T {
         runCount += 1
-        return block()
+        depth += 1
+        maxDepth = maxOf(maxDepth, depth)
+        return try {
+            block()
+        } finally {
+            depth -= 1
+        }
     }
 }
 

@@ -158,31 +158,36 @@ internal class CarePlanCoordinator(
         )
         requireCustomPayloadMatches(type, persistedPayload, schemaVersion, resolvedCustomItemId)
         val now = System.currentTimeMillis()
-        val id = transactionRunner.run {
-            val planId = carePlanDao.upsert(
-                CarePlanEntity(
-                    clientUuid = newClientUuid(),
-                    babyId = babyId,
-                    type = type.key,
-                    customItemId = resolvedCustomItemId,
-                    scheduledAt = scheduledAt,
-                    scheduledZoneId = zone.id,
-                    note = note,
-                    payloadJson = persistedPayload,
-                    schemaVersion = schemaVersion,
-                    status = CarePlanStatus.PENDING.storageKey,
-                    createdByMembershipId = currentMembershipActorId(),
-                    updatedAt = now,
-                    syncDirty = true,
-                    systemCalendarProjectionEnabled = projectToSystemCalendar,
-                ),
-            )
-            photoAttachmentReconciler.reconcile(
-                PhotoAttachmentOwner.CarePlan(planId),
-                photos,
-                now,
-            )
-            planId
+        val id = photoAttachmentReconciler.withInvolvedPaths(
+            owner = null,
+            additionalPaths = photos,
+        ) {
+            transactionRunner.run {
+                val planId = carePlanDao.upsert(
+                    CarePlanEntity(
+                        clientUuid = newClientUuid(),
+                        babyId = babyId,
+                        type = type.key,
+                        customItemId = resolvedCustomItemId,
+                        scheduledAt = scheduledAt,
+                        scheduledZoneId = zone.id,
+                        note = note,
+                        payloadJson = persistedPayload,
+                        schemaVersion = schemaVersion,
+                        status = CarePlanStatus.PENDING.storageKey,
+                        createdByMembershipId = currentMembershipActorId(),
+                        updatedAt = now,
+                        syncDirty = true,
+                        systemCalendarProjectionEnabled = projectToSystemCalendar,
+                    ),
+                )
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.CarePlan(planId),
+                    photos,
+                    now,
+                )
+                planId
+            }
         }
         // Shared CarePlan is committed and publishable before optional device-local projection.
         requestLocalSync()
@@ -359,7 +364,11 @@ internal class CarePlanCoordinator(
             planPeek.customItemId,
         )
 
-        suspend fun writeFulfill(): Long = transactionRunner.run {
+        suspend fun writeFulfill(): Long = photoAttachmentReconciler.withInvolvedPaths(
+            owner = PhotoAttachmentOwner.CarePlan(carePlanId),
+            additionalPaths = photos,
+        ) {
+            transactionRunner.run {
             val plan = carePlanDao.get(carePlanId)
                 ?: error("护理计划不存在")
             if (plan.deletedAt != null) error("护理计划已删除")
@@ -453,6 +462,7 @@ internal class CarePlanCoordinator(
             // Local multi-candidate sets (rare) re-link the plan to the authority.
             resolveFulfillmentAuthorityForPlan(plan.clientUuid)
             inserted
+            }
         }
 
         val recordId = if (planType == RecordType.SLEEP) {
@@ -684,7 +694,25 @@ internal class CarePlanCoordinator(
     ): Long {
         if (!isFamilyAdmin()) throw ConflictAuditPermissionException()
 
-        suspend fun writeConvert(): Long = transactionRunner.run {
+        suspend fun writeConvert(): Long {
+            val candidatePeek = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
+                ?: error("冲突未采纳履行不存在")
+            val sourcePeek = recordDao.getByClientUuid(candidatePeek.recordClientUuid)
+            val photoPaths = sourcePeek?.let { source ->
+                if (source.deletedAt == null) {
+                    listRecordPhotoPaths(source.id)
+                } else {
+                    mediaAssetDao.listForRecord(source.id)
+                        .map(MediaAssetEntity::localUri)
+                        .filter(String::isNotBlank)
+                        .distinct()
+                }
+            }.orEmpty()
+            return photoAttachmentReconciler.withInvolvedPaths(
+                owner = null,
+                additionalPaths = photoPaths,
+            ) {
+                transactionRunner.run {
             val candidate = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
                 ?: error("冲突未采纳履行不存在")
             if (candidate.deletedAt != null) error("冲突未采纳履行已删除")
@@ -754,6 +782,8 @@ internal class CarePlanCoordinator(
                 )
             }
             inserted
+                }
+            }
         }
 
         val sourceType = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
@@ -828,7 +858,12 @@ internal class CarePlanCoordinator(
         projectToSystemCalendar: Boolean? = null,
     ) {
         val photos = photoLocalPaths
-        val cleanupCandidates = transactionRunner.run {
+        val planOwner = PhotoAttachmentOwner.CarePlan(carePlanId)
+        val cleanupCandidates = photoAttachmentReconciler.withInvolvedPaths(
+            owner = planOwner,
+            additionalPaths = photos.orEmpty(),
+        ) {
+            transactionRunner.run {
             val plan = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
             if (plan.deletedAt != null) error("护理计划已删除")
             val status = CarePlanStatus.fromStorage(plan.status)
@@ -910,6 +945,7 @@ internal class CarePlanCoordinator(
                 )
             }
             photoMutation?.tombstonedClientUuids.orEmpty()
+            }
         }
         // Shared update is committed and publishable before optional local side effects.
         recordMutations.cleanupCommittedPhotoTombstones(cleanupCandidates)
@@ -964,18 +1000,21 @@ internal class CarePlanCoordinator(
         carePlanId: Long,
         nowMillis: Long = System.currentTimeMillis(),
     ): Boolean {
-        val (deleted, cleanupCandidates) = transactionRunner.run {
-            val plan = carePlanDao.get(carePlanId)
-                ?: return@run false to emptySet<String>()
-            if (plan.deletedAt != null) return@run false to emptySet<String>()
-            requireCanManageCarePlan(plan)
-            val deletedAt = nowMillis.coerceAtLeast(plan.updatedAt + 1)
-            carePlanDao.softDelete(carePlanId, deletedAt)
-            val tombstones = photoAttachmentReconciler.tombstone(
-                PhotoAttachmentOwner.CarePlan(carePlanId),
-                deletedAt,
-            ).tombstonedClientUuids
-            true to tombstones
+        val planOwner = PhotoAttachmentOwner.CarePlan(carePlanId)
+        val (deleted, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(planOwner) {
+            transactionRunner.run {
+                val plan = carePlanDao.get(carePlanId)
+                    ?: return@run false to emptySet<String>()
+                if (plan.deletedAt != null) return@run false to emptySet<String>()
+                requireCanManageCarePlan(plan)
+                val deletedAt = nowMillis.coerceAtLeast(plan.updatedAt + 1)
+                carePlanDao.softDelete(carePlanId, deletedAt)
+                val tombstones = photoAttachmentReconciler.tombstone(
+                    planOwner,
+                    deletedAt,
+                ).tombstonedClientUuids
+                true to tombstones
+            }
         }
         if (!deleted) return false
         recordMutations.cleanupCommittedPhotoTombstones(cleanupCandidates)

@@ -5,6 +5,7 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
+import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
@@ -55,6 +56,7 @@ internal class BabyFamilyProfileCoordinator(
     private val transactionRunner: DatabaseTransactionRunner,
     private val reminderProjection: CarePlanReminderProjection,
     private val sleepMutationMutex: Mutex,
+    private val mediaPathGate: MediaLocalPathGate,
     private val healDuplicateOpenSleeps: suspend (Long) -> Unit,
     /** Best-effort post-commit GC; same policy as [RecordMutationCoordinator.cleanupCommittedPhotoTombstones]. */
     private val cleanupCommittedPhotoTombstones: suspend (Set<String>) -> Unit,
@@ -176,37 +178,42 @@ internal class BabyFamilyProfileCoordinator(
         requireCanManageBabyProfiles()
         var deleted = false
         var cleanupCandidates: Set<String> = emptySet()
-        val remaining = transactionRunner.run {
-            val babies = babyDao.listAll()
-            if (babies.size <= 1) return@run emptyList()
-            val target = babies.find { it.id == babyId } ?: return@run emptyList()
-            val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
-            // Tombstone media first so a media write failure never leaves a half-deleted baby.
-            val activeAvatars = mediaAssetDao.listActiveAvatarsForBaby(babyId)
-            val tombstoned = linkedSetOf<String>()
-            activeAvatars.forEach { asset ->
-                val mediaAt = nextSyncUpdatedAt(asset.updatedAt, now)
-                mediaAssetDao.update(
-                    asset.copy(
-                        deletedAt = mediaAt,
-                        updatedAt = mediaAt,
+        val avatarPaths = mediaAssetDao.listActiveAvatarsForBaby(babyId)
+            .map { it.localUri }
+            .filter(String::isNotBlank)
+        val remaining = mediaPathGate.withLocks(avatarPaths) {
+            transactionRunner.run {
+                val babies = babyDao.listAll()
+                if (babies.size <= 1) return@run emptyList()
+                val target = babies.find { it.id == babyId } ?: return@run emptyList()
+                val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
+                // Tombstone media first so a media write failure never leaves a half-deleted baby.
+                val activeAvatars = mediaAssetDao.listActiveAvatarsForBaby(babyId)
+                val tombstoned = linkedSetOf<String>()
+                activeAvatars.forEach { asset ->
+                    val mediaAt = nextSyncUpdatedAt(asset.updatedAt, now)
+                    mediaAssetDao.update(
+                        asset.copy(
+                            deletedAt = mediaAt,
+                            updatedAt = mediaAt,
+                            syncDirty = true,
+                        ),
+                    )
+                    tombstoned += asset.clientUuid
+                }
+                babyDao.update(
+                    target.copy(
+                        deletedAt = now,
+                        updatedAt = now,
                         syncDirty = true,
+                        avatarMediaUuid = null,
+                        avatarPath = null,
                     ),
                 )
-                tombstoned += asset.clientUuid
+                deleted = true
+                cleanupCandidates = tombstoned
+                babyDao.listAll()
             }
-            babyDao.update(
-                target.copy(
-                    deletedAt = now,
-                    updatedAt = now,
-                    syncDirty = true,
-                    avatarMediaUuid = null,
-                    avatarPath = null,
-                ),
-            )
-            deleted = true
-            cleanupCandidates = tombstoned
-            babyDao.listAll()
         }
         if (!deleted) return false
         val currentId = settings.currentBabyId.first()

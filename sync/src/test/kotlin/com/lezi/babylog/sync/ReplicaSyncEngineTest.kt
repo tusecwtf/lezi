@@ -6,6 +6,7 @@ import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.CancellationException
@@ -1013,6 +1014,7 @@ private class ReplicaEngineRig(
         mediaDao = media,
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
+        pathGate = MediaLocalPathGate(),
     )
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))

@@ -8,6 +8,7 @@ import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
+import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.LocalUserDao
@@ -137,6 +138,7 @@ class CareLog @Inject constructor(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
     private val clock: PolicyClock,
+    private val mediaPathGate: MediaLocalPathGate = MediaLocalPathGate(),
 ) {
     private val queries = CareLogQueries(
         babyDao = babyDao,
@@ -144,7 +146,10 @@ class CareLog @Inject constructor(
         carePlanDao = carePlanDao,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
     )
-    private val photoAttachmentReconciler = PhotoAttachmentReconciler(mediaAssetDao)
+    private val photoAttachmentReconciler = PhotoAttachmentReconciler(
+        mediaAssetDao = mediaAssetDao,
+        pathGate = mediaPathGate,
+    )
     private val reminderProjection = CarePlanReminderProjection(
         carePlanDao = carePlanDao,
         babyDao = babyDao,
@@ -229,6 +234,7 @@ class CareLog @Inject constructor(
         transactionRunner = transactionRunner,
         reminderProjection = reminderProjection,
         sleepMutationMutex = sleepMutationMutex,
+        mediaPathGate = mediaPathGate,
         healDuplicateOpenSleeps = recordMutations::healDuplicateOpenSleeps,
         cleanupCommittedPhotoTombstones = recordMutations::cleanupCommittedPhotoTombstones,
         requestLocalSync = ::requestLocalSync,
