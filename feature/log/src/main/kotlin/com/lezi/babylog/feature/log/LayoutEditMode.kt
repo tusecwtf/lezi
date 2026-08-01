@@ -37,6 +37,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.MotionDurationScale
@@ -119,6 +121,12 @@ internal fun LayoutEditCanvas(
     hasSubmittedIntent: Boolean = false,
     cancelDragSignal: Long = 0L,
     undoCandidate: LayoutUndoCandidate? = null,
+    /**
+     * Absolute epoch millis when the current [undoCandidate] offer ends. Recreation
+     * re-shows the snackbar with only the remaining window; null falls back to the
+     * default short offer length from first show.
+     */
+    undoOfferExpiresAtEpochMs: Long? = null,
     onUndo: (Long) -> Unit = {},
     onUndoExpired: (Long) -> Unit = {},
     initialCatalogScroll: LayoutCatalogScrollPosition = LayoutCatalogScrollPosition(),
@@ -426,22 +434,37 @@ internal fun LayoutEditCanvas(
     LaunchedEffect(Unit) {
         doneFocusRequester.requestFocus()
     }
-    LaunchedEffect(undoCandidate?.token) {
+    LaunchedEffect(undoCandidate?.token, undoOfferExpiresAtEpochMs) {
         val candidate = undoCandidate
         undoSnackbarHostState.currentSnackbarData?.dismiss()
         if (candidate == null) return@LaunchedEffect
+        val remainingMs = when {
+            undoOfferExpiresAtEpochMs != null ->
+                (undoOfferExpiresAtEpochMs - System.currentTimeMillis()).coerceAtLeast(0L)
+            else -> LAYOUT_UNDO_OFFER_DURATION_MS
+        }
+        if (remainingMs <= 0L) {
+            onUndoExpired(candidate.token)
+            return@LaunchedEffect
+        }
         val message = when (candidate.kind) {
             LayoutUndoKind.ClearSlot -> "已清空常用槽"
             LayoutUndoKind.MoveToLocalDeleted -> "已移入本机已删除"
         }
-        when (
-            undoSnackbarHostState.showSnackbar(
-                message = message,
-                actionLabel = "撤销",
-                withDismissAction = true,
-                duration = SnackbarDuration.Short,
-            )
-        ) {
+        // Indefinite + deadline dismiss keeps a stable wall-clock expiry across
+        // configuration recreation instead of re-filling SnackbarDuration.Short.
+        val expiryJob = launch {
+            delay(remainingMs)
+            undoSnackbarHostState.currentSnackbarData?.dismiss()
+        }
+        val result = undoSnackbarHostState.showSnackbar(
+            message = message,
+            actionLabel = "撤销",
+            withDismissAction = true,
+            duration = SnackbarDuration.Indefinite,
+        )
+        expiryJob.cancel()
+        when (result) {
             SnackbarResult.ActionPerformed -> onUndo(candidate.token)
             SnackbarResult.Dismissed -> onUndoExpired(candidate.token)
         }

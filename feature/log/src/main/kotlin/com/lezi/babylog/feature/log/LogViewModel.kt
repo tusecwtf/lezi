@@ -87,8 +87,14 @@ class LogViewModel @Inject constructor(
         settingsStore.setDeviceLayoutSnapshot(snapshot)
     }
     private val layoutEditSessions = LayoutEditSessionStore()
+    private val layoutUndoSessions = LayoutUndoSessionStore()
     internal val deviceLayoutWriteState = deviceLayoutWriter.state
     internal val layoutEditSession = layoutEditSessions.state
+    /**
+     * Layout undo candidate / write phase / stable offer deadline. Retained across
+     * configuration recreation with this ViewModel; process death starts Idle.
+     */
+    internal val layoutUndoSession = layoutUndoSessions.state
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState = combine(
@@ -208,6 +214,8 @@ class LogViewModel @Inject constructor(
         guidanceCompleted: Boolean,
     ) {
         layoutEditSessions.open(context, prefs, guidanceCompleted)
+        // Re-entering the editor discards any prior undo offer (same as Idle seed).
+        layoutUndoSessions.clear()
     }
 
     internal fun currentLayoutEditSession(): LayoutEditSession? = layoutEditSessions.current
@@ -234,7 +242,72 @@ class LogViewModel @Inject constructor(
     }
 
     internal fun closeLayoutEditSession() {
+        layoutUndoSessions.reduce(LayoutUndoEvent.EditorExited)
         layoutEditSessions.close()
+    }
+
+    internal fun allocateLayoutUndoToken(): Long = layoutUndoSessions.allocateToken()
+
+    internal fun reduceLayoutUndoEvent(event: LayoutUndoEvent): LayoutUndoReduction =
+        layoutUndoSessions.reduce(event)
+
+    internal fun consumeLayoutUndoAnnouncement(): String? =
+        layoutUndoSessions.consumeAnnouncement()
+
+    /**
+     * Await an original layout write on [viewModelScope] so AwaitingOriginal →
+     * Available/Idle survives composition recreation without the old coroutine scope.
+     */
+    internal fun trackOriginalLayoutWriteForUndo(
+        token: Long,
+        receipt: DeviceLayoutWriteReceipt,
+    ) {
+        viewModelScope.launch {
+            val result = receipt.result.await()
+            val currentSnapshot =
+                currentLayoutEditSession()?.prefs?.toSnapshot() ?: receipt.snapshot
+            layoutUndoSessions.reduce(
+                LayoutUndoEvent.OriginalWriteFinished(
+                    token = token,
+                    succeeded = result.isSuccess,
+                    currentSnapshot = currentSnapshot,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Await an undo restore write on [viewModelScope]. On durable success, applies
+     * the candidate `before` snapshot into the retained editor session.
+     */
+    internal fun trackLayoutUndoWrite(
+        token: Long,
+        receipt: DeviceLayoutWriteReceipt,
+    ) {
+        viewModelScope.launch {
+            completeLayoutUndoWrite(token, receipt.result.await())
+        }
+    }
+
+    internal fun completeLayoutUndoWrite(token: Long, result: Result<Unit>) {
+        val currentSnapshot = currentLayoutEditSession()?.prefs?.toSnapshot()
+        if (currentSnapshot == null) {
+            layoutUndoSessions.clear()
+            return
+        }
+        val reduction = layoutUndoSessions.reduce(
+            LayoutUndoEvent.UndoWriteFinished(
+                token = token,
+                succeeded = result.isSuccess,
+                currentSnapshot = currentSnapshot,
+            ),
+        )
+        reduction.restoredSnapshot?.let { restored ->
+            layoutEditSessions.updatePrefs(
+                prefs = restored.toLayoutPrefs(),
+                hasSubmittedIntent = true,
+            )
+        }
     }
 
     fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {

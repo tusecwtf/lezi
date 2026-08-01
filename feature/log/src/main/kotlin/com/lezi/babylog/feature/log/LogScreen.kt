@@ -96,6 +96,8 @@ fun LogRoute(
     val state by vm.uiState.collectAsStateWithLifecycle()
     val layoutWriteState by vm.deviceLayoutWriteState.collectAsStateWithLifecycle()
     val layoutSession by vm.layoutEditSession.collectAsStateWithLifecycle()
+    val layoutUndoSession by vm.layoutUndoSession.collectAsStateWithLifecycle()
+    val layoutUndoState = layoutUndoSession.state
     val screenTime by rememberRecordScreenTime(clock)
     val layoutUndoScope = rememberCoroutineScope()
     var showMore by remember { mutableStateOf(false) }
@@ -106,8 +108,6 @@ fun LogRoute(
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     var exitAfterLayoutRetry by remember { mutableStateOf(false) }
     var dismissedLayoutFailure by remember { mutableStateOf<Long?>(null) }
-    var layoutUndoState by remember { mutableStateOf<LayoutUndoState>(LayoutUndoState.Idle) }
-    var nextLayoutUndoToken by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
     val timelineListState = rememberLogTimelineListState()
     fun openLayoutEdit() {
@@ -130,7 +130,6 @@ fun LogRoute(
         )
         exitAfterLayoutRetry = false
         dismissedLayoutFailure = null
-        layoutUndoState = LayoutUndoState.Idle
     }
     val dayChartContext = remember(state.baby?.id, state.day) {
         DayChartFilterContext(babyId = state.baby?.id, day = state.day)
@@ -264,34 +263,11 @@ fun LogRoute(
             if (inLayoutEdit) onLayoutEditModeChanged(false)
         }
     }
-    fun completeLayoutUndoWrite(token: Long, result: Result<Unit>) {
-        val currentSnapshot = vm.currentLayoutEditSession()?.prefs?.toSnapshot()
-        if (currentSnapshot == null) {
-            layoutUndoState = LayoutUndoState.Idle
-            return
-        }
-        val reduction = reduceLayoutUndo(
-            layoutUndoState,
-            LayoutUndoEvent.UndoWriteFinished(
-                token = token,
-                succeeded = result.isSuccess,
-                currentSnapshot = currentSnapshot,
-            ),
-        )
-        layoutUndoState = reduction.state
-        reduction.restoredSnapshot?.let { restored ->
-            vm.updateLayoutEditPrefs(
-                prefs = restored.toLayoutPrefs(),
-                hasSubmittedIntent = true,
-            )
-            reduction.announcement?.let(onMessage)
-        }
+    LaunchedEffect(layoutUndoSession.pendingAnnouncement) {
+        val announcement = vm.consumeLayoutUndoAnnouncement() ?: return@LaunchedEffect
+        onMessage(announcement)
     }
     fun closeLayoutEditor() {
-        layoutUndoState = reduceLayoutUndo(
-            layoutUndoState,
-            LayoutUndoEvent.EditorExited,
-        ).state
         vm.closeLayoutEditSession()
         layoutExitInProgress = false
         exitAfterLayoutRetry = false
@@ -301,10 +277,7 @@ fun LogRoute(
         layoutDragCancelSignal += 1L
         if (layoutExitInProgress) return
         if (layoutUndoState !is LayoutUndoState.RestoreFailed) {
-            layoutUndoState = reduceLayoutUndo(
-                layoutUndoState,
-                LayoutUndoEvent.EditorExited,
-            ).state
+            vm.reduceLayoutUndoEvent(LayoutUndoEvent.EditorExited)
         }
         layoutExitInProgress = true
         vm.awaitDeviceLayoutWrites { result ->
@@ -330,17 +303,16 @@ fun LogRoute(
                 }
                 val undoCandidate =
                     (layoutUndoState as? LayoutUndoState.Available)?.candidate
+                val undoOfferExpiresAtEpochMs = layoutUndoSession.offerExpiresAtEpochMs
                 fun applyLayoutIntent(
                     intent: LayoutEditIntent,
                     inputOrigin: LayoutGuidanceInputOrigin,
                 ) {
                     val current = vm.currentLayoutEditSession()?.prefs ?: return
                     val next = reduceLayoutEdit(current, intent, known)
-                    nextLayoutUndoToken += 1L
-                    val token = nextLayoutUndoToken
+                    val token = vm.allocateLayoutUndoToken()
                     val undoStateBeforeIntent = layoutUndoState
-                    val undoReduction = reduceLayoutUndo(
-                        undoStateBeforeIntent,
+                    val undoReduction = vm.reduceLayoutUndoEvent(
                         LayoutUndoEvent.IntentApplied(
                             token = token,
                             intent = intent,
@@ -348,7 +320,6 @@ fun LogRoute(
                             after = next.toSnapshot(),
                         ),
                     )
-                    layoutUndoState = undoReduction.state
                     if (
                         !shouldWriteLayoutIntentResult(
                             undoStateBeforeIntent = undoStateBeforeIntent,
@@ -364,19 +335,11 @@ fun LogRoute(
                         hasSubmittedIntent = true,
                     )
                     val receipt = vm.applyDeviceLayoutPrefs(next)
+                    // Undo phase completion is owned by the ViewModel so rotation
+                    // mid-write does not drop AwaitingOriginal → Available.
+                    vm.trackOriginalLayoutWriteForUndo(token, receipt)
                     layoutUndoScope.launch {
                         val result = receipt.result.await()
-                        val currentSnapshot =
-                            vm.currentLayoutEditSession()?.prefs?.toSnapshot()
-                                ?: receipt.snapshot
-                        layoutUndoState = reduceLayoutUndo(
-                            layoutUndoState,
-                            LayoutUndoEvent.OriginalWriteFinished(
-                                token = token,
-                                succeeded = result.isSuccess,
-                                currentSnapshot = currentSnapshot,
-                            ),
-                        ).state
                         val guidance = vm.currentLayoutEditSession()?.dragGuidance
                         if (
                             guidance != null &&
@@ -435,6 +398,7 @@ fun LogRoute(
                     hasSubmittedIntent = editingSession.hasSubmittedIntent,
                     cancelDragSignal = layoutDragCancelSignal,
                     undoCandidate = undoCandidate,
+                    undoOfferExpiresAtEpochMs = undoOfferExpiresAtEpochMs,
                     initialCatalogScroll = editingSession.catalogScroll,
                     onCatalogScrollChanged = vm::updateLayoutCatalogScroll,
                     configurationSessionKey =
@@ -447,14 +411,12 @@ fun LogRoute(
                     onUndo = { token ->
                         val current = vm.currentLayoutEditSession()?.prefs
                             ?: return@LayoutEditCanvas
-                        val reduction = reduceLayoutUndo(
-                            layoutUndoState,
+                        val reduction = vm.reduceLayoutUndoEvent(
                             LayoutUndoEvent.UndoRequested(
                                 token = token,
                                 currentSnapshot = current.toSnapshot(),
                             ),
                         )
-                        layoutUndoState = reduction.state
                         val restoring = reduction.state as? LayoutUndoState.Restoring
                             ?: return@LayoutEditCanvas
                         vm.updateLayoutEditPrefs(
@@ -464,15 +426,10 @@ fun LogRoute(
                         val receipt = vm.applyDeviceLayoutPrefs(
                             restoring.candidate.before.toLayoutPrefs(),
                         )
-                        layoutUndoScope.launch {
-                            completeLayoutUndoWrite(token, receipt.result.await())
-                        }
+                        vm.trackLayoutUndoWrite(token, receipt)
                     },
                     onUndoExpired = { token ->
-                        layoutUndoState = reduceLayoutUndo(
-                            layoutUndoState,
-                            LayoutUndoEvent.OfferExpired(token),
-                        ).state
+                        vm.reduceLayoutUndoEvent(LayoutUndoEvent.OfferExpired(token))
                     },
                     modifier = Modifier
                         .weight(1f)
@@ -541,25 +498,28 @@ fun LogRoute(
         if (failedLayoutUndo != null) {
             val current = vm.currentLayoutEditSession()?.prefs
             val reduction = current?.let {
-                reduceLayoutUndo(
-                    layoutUndoState,
+                vm.reduceLayoutUndoEvent(
                     LayoutUndoEvent.RetryUndoRequested(
                         token = failedLayoutUndo.candidate.token,
                         currentSnapshot = it.toSnapshot(),
                     ),
                 )
             }
-            layoutUndoState = reduction?.state ?: LayoutUndoState.Idle
             val restoring = reduction?.state as? LayoutUndoState.Restoring
             if (restoring == null) {
+                if (reduction == null) {
+                    vm.reduceLayoutUndoEvent(LayoutUndoEvent.EditorExited)
+                }
                 layoutExitInProgress = false
             } else {
                 val receipt = vm.applyDeviceLayoutPrefs(
                     restoring.candidate.before.toLayoutPrefs(),
                 )
+                // Completion + restored prefs live on viewModelScope so retry mid-
+                // rotation does not lose RestoreFailed / Restoring truth.
+                vm.trackLayoutUndoWrite(failedLayoutUndo.candidate.token, receipt)
                 layoutUndoScope.launch {
                     val result = receipt.result.await()
-                    completeLayoutUndoWrite(failedLayoutUndo.candidate.token, result)
                     layoutExitInProgress = false
                     if (result.isSuccess && exitAfterLayoutRetry) {
                         closeLayoutEditor()

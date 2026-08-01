@@ -182,6 +182,52 @@ class LayoutUndoDeviceTest {
     }
 
     @Test
+    fun stableDeadlineExpiresWithRemainingWindowNotFullRecount() {
+        val offer = LayoutUndoCandidate(
+            token = 51L,
+            kind = LayoutUndoKind.ClearSlot,
+            before = snapshot("pee"),
+            after = snapshot(""),
+        )
+        // Already 3s into a 4s offer: recreation must not re-fill a full Short window.
+        val expiresAt = System.currentTimeMillis() + 1_000L
+        var candidate: LayoutUndoCandidate? by mutableStateOf(offer)
+        val expiredTokens = CopyOnWriteArrayList<Long>()
+        composeRule.mainClock.autoAdvance = false
+        composeRule.setContent {
+            LeziTheme(visualStyle = "warm") {
+                LayoutEditCanvas(
+                    prefs = snapshot("").toLayoutPrefs(),
+                    customItems = emptyList(),
+                    onIntent = {},
+                    onDone = {},
+                    onOpenCustomManage = {},
+                    undoCandidate = candidate,
+                    undoOfferExpiresAtEpochMs = expiresAt,
+                    onUndo = {},
+                    onUndoExpired = {
+                        expiredTokens += it
+                        candidate = null
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("已清空常用槽").fetchSemanticsNode()
+
+        // Remaining ~1s; advancing a full Material Short (4s+) without stable
+        // deadline would still show, but remaining-only must already expire.
+        composeRule.mainClock.advanceTimeBy(1_500L)
+        composeRule.mainClock.autoAdvance = true
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("已清空常用槽").assertDoesNotExist()
+        assertEquals(listOf(51L), expiredTokens.toList())
+    }
+
+    @Test
     fun removingOfferOnExitImmediatelyRemovesItsAction() {
         val prefs = snapshot("").toLayoutPrefs()
         var candidate: LayoutUndoCandidate? by mutableStateOf(

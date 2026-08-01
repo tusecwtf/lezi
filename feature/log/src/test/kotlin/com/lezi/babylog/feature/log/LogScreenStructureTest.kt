@@ -51,6 +51,24 @@ class LogScreenStructureTest {
         assertEquals(1, splitSources.occurrences("fun LogDialogHost("))
     }
 
+    @Test
+    fun layoutUndoTruthLivesOnViewModelSessionNotCompositionRemember() {
+        val host = source("LogScreen.kt")
+        val state = source("LogViewModel.kt")
+        val session = source("LayoutUndoSession.kt")
+
+        assertFalse(
+            "mutableStateOf<LayoutUndoState>" in host ||
+                "mutableStateOf<LayoutUndoState>" in host.replace(" ", ""),
+        )
+        assertFalse("var layoutUndoState by remember" in host)
+        assertFalse("var nextLayoutUndoToken by remember" in host)
+        assertTrue("layoutUndoSession" in host)
+        assertTrue("val layoutUndoSession" in state || "layoutUndoSession =" in state)
+        assertTrue("class LayoutUndoSessionStore" in session)
+        assertTrue("offerExpiresAtEpochMs" in session)
+    }
+
     private fun source(name: String): String = sourceDir.resolve(name).readText()
 
     private fun String.occurrences(needle: String): Int =
