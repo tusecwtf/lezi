@@ -8,9 +8,9 @@
 | 文档–代码 gap 整改（原子同步 / UI / 契约） | [spec](./doc-code-gap-remediation/spec.md) | [ISSUES](./doc-code-gap-remediation/ISSUES.md)（7 票） | complete · 7/7 |
 | Post-0.3.0 code-review 残差 | [spec](./post-0.3.0-code-review-remediation/spec.md) | [票索引](./post-0.3.0-code-review-remediation/ISSUES.md) | complete · 9/9 · fixed-point gates passed |
 | 0.3.0 APK 逐页验收整改 | [spec](./apk-0.3.0-page-acceptance-remediation/spec.md) | [票索引](./apk-0.3.0-page-acceptance-remediation/ISSUES.md) | complete · 1/1 · fixed-point gates passed |
-| 可信同步 endpoint、鉴权与 NAS→VPS 迁移 | [spec](./trusted-sync-endpoint-auth/spec.md) | [ISSUES](./trusted-sync-endpoint-auth/ISSUES.md)（17 票） | active · 15/17 complete · frontier **16 only**（17 **blocked**） |
+| 可信同步 endpoint、鉴权与 NAS→VPS 迁移 | [spec](./trusted-sync-endpoint-auth/spec.md) | [ISSUES](./trusted-sync-endpoint-auth/ISSUES.md)（17 票） | **complete · 17/17** · 0.3.1 artifacts · [evidence/17](./trusted-sync-endpoint-auth/evidence/17/validation.md) |
 | Trusted-sync 实现后 code-review 残差 | [spec](./trusted-sync-review-residuals/spec.md) | [ISSUES](./trusted-sync-review-residuals/ISSUES.md)（13 票） | complete · 13/13 Must · fixed-point gates passed |
-| 审查残差 P1（domain/composer + 网络层 0.3.1 复核） | [spec](./p1-review-residuals/spec.md) | [ISSUES](./p1-review-residuals/ISSUES.md)（8 票） | immediate 01–04 done · 05–08 planned 等 0.3.1 |
+| 审查残差 P1（domain/composer + 网络层 0.3.1 复核） | [spec](./p1-review-residuals/spec.md) | [ISSUES](./p1-review-residuals/ISSUES.md)（8 票） | **complete · 01–04 done · 05–08 cancelled**（0.3.1 cutover 覆盖） |
 | 自托管应用内更新（侧载 APK + NAS 部署带包） | [spec](./self-hosted-app-update/spec.md) | [ISSUES](./self-hosted-app-update/ISSUES.md)（5 票 · 垂直切片） | complete · 5/5 · [evidence/05](./self-hosted-app-update/evidence/05/validation.md) |
 | 应用内更新审查残差（SyncStatus/安装/minSupported/强制 UI） | [spec](./app-update-review-residuals/spec.md) | [ISSUES](./app-update-review-residuals/ISSUES.md)（6 票） | complete · 6/6 · [evidence/06](./app-update-review-residuals/evidence/06/validation.md) |
 | NAS v3 离线一次升级（拷出→本机转换→拷回） | [spec](./nas-v3-offline-migrate/spec.md) | [ISSUES](./nas-v3-offline-migrate/ISSUES.md)（7 票） | **complete · 7/7** · 现网 HTTPS 0.3.0 · [evidence/07](./nas-v3-offline-migrate/evidence/07/RESULT.md) · 实现多在 worktree（skip_commit；01–04 部分已提交） |

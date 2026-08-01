@@ -4,15 +4,21 @@
 
 **Blocked by:** 15 — 收口旧网络与鉴权模型
 
-**Status:** partial
+**Status:** complete
 
 - [x] 固定并记录候选 HEAD；Android 全量 JVM 测试、lint、Release APK 构建、签名检查、哈希、安装、启动和关键页面 smoke 全部通过。
 - [x] Rust `fmt`、锁定依赖测试、Clippy、`linux/amd64` 镜像构建和 NAS 包装通过，并记录镜像与包哈希、`/health` 和 `/ready` 结果。
-- [ ] 使用至少两台客户端验证 System-PKI 与自签名链路、建家、成员申请/审批、既有成员第二设备绑定、成员二维码登录和完整历史同步。
-- [ ] 验证 0–3 张照片原子包、访问凭证轮换、刷新凭证重放处置、撤销单设备、成员彻底删除与匿名化、删除家庭及各设备本地清理。
-- [ ] 验证证书 SPKI 不匹配、非管理员提交根密码、管理员接管、根密码轮换和跨成员越权均按规范失败或收敛。
+- [x] 使用至少两台客户端验证 System-PKI 与自签名链路、建家、成员申请/审批、既有成员第二设备绑定、成员二维码登录和完整历史同步。
+- [x] 验证 0–3 张照片原子包、访问凭证轮换、刷新凭证重放处置、撤销单设备、成员彻底删除与匿名化、删除家庭及各设备本地清理。
+- [x] 验证证书 SPKI 不匹配、非管理员提交根密码、管理员接管、根密码轮换和跨成员越权均按规范失败或收敛。
 - [x] 验收不引入客户端数据迁移；发现阻断项时仅在当前规范边界内修复并重跑受影响门禁，直到候选 HEAD 固定。
 - [x] 形成包含设备、命令、结果、哈希和未运行项的验收记录；只有所有 Must 证据齐全后，才可进入 0.3.1 版本升级票。
+
+## Dual-client closeout · 2026-08-01
+
+- Operator confirmed physical dual-phone E2E against the trusted-sync stack.
+- Closeout note: [`../evidence/16/dual-client-closeout.md`](../evidence/16/dual-client-closeout.md).
+- Ticket 16 is **complete**; ticket 17 may start version bump + rebuild on this acceptance.
 
 ## Evidence classes (do not conflate)
 

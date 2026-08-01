@@ -1,6 +1,6 @@
 # Spec · 审查残差 P1：domain/composer 即时修 + 网络层 0.3.1 复核
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **Source:** 2026-07-31 多 agent 代码审查 + grilling  
 **Related:** [trusted-sync-endpoint-auth](../trusted-sync-endpoint-auth/spec.md)（0.3.1 身份/传输 cutover）
@@ -54,9 +54,9 @@ trusted-sync **实现后**（2026-07-31）独立 code review 残差另见
 
 ## Implementation order
 
-- Frontier：**01、02、04**（可并行）。
-- **03** 等 **02**（同改履行落库）。
-- **05–08** 在 0.3.1 发布前保持 `planned`；trusted-sync 完成后跑 re-verify 清单。
+- Frontier：**无**（01–04 done；05–08 于 2026-08-01 复核后全部 cancelled）。
+- **03** 已随 **02** 完成。
+- **05–08** re-verify 完成：cutover 已覆盖 join 耐久、401 taxonomy、leave/wipe、被踢收敛；详见各票 Comments。
 
 ## Global acceptance gates（immediate lane）
 

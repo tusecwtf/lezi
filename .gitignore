@@ -47,3 +47,6 @@ tools/lezi-sync/*.db-shm
 
 # Local Cargo config (absolute target-dir per machine)
 .cargo/
+
+# Local artifact backups (old dist/)
+/backup/

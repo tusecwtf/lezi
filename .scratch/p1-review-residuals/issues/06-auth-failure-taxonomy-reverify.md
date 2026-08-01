@@ -4,7 +4,7 @@
 
 **Blocked by:** 0.3.1 发布（trusted-sync 会话轮换、撤销与错误码合同）
 
-**Status:** planned
+**Status:** cancelled
 
 **Severity:** P1  
 **Lane:** post-0.3.1-reverify  
@@ -23,8 +23,33 @@
 
 ## Re-verify checklist（0.3.1 后执行）
 
-- [ ] 错误分类表与客户端分支是否存在且有测试。
-- [ ] leave 在「凭证已废但 membership 仍在」时是否仍错误地报告成功离开。
-- [ ] generic 401 是否误 wipe Room。
-- [ ] **若已满足：** `Status: cancelled` + 证据。  
+- [x] 错误分类表与客户端分支是否存在且有测试。
+- [x] leave 在「凭证已废但 membership 仍在」时是否仍错误地报告成功离开。
+- [x] generic 401 是否误 wipe Room。
+- [x] **若已满足：** `Status: cancelled` + 证据。  
 - [ ] **若仍不满足：** 升为 `ready-for-agent` 再实现。
+
+## Comments
+
+**2026-08-01 re-verify → cancelled.** 鉴权失败 taxonomy 与 leave/delete 401 分流已落地。
+
+证据（当前 HEAD）：
+
+1. **Wire → 异常类** — `RefreshingSyncBackend.remoteTerminalRemovalOrNull`：仅 `401` + code ∈ `{device_removed, membership_deleted, family_deleted}` 映射为 `RemoteDeviceRemovedException` / `RemoteMembershipDeletedException` / `RemoteFamilyDeletedException`；其它 401 走 refresh 一次后 `requireReauth()` → `clearDeviceCredentialsForReauth` + `ReauthRequiredException`（保留 familyId/cursor/endpoint）（`RefreshingSyncBackend.kt` ~150–262）。
+2. **Port 分流** — `RealSyncPort.sync` 对三类 terminal 异常分别 `handleRemote*`（标记 pending + `finishPendingTerminalIdentityClear` wipe）；`ReauthRequired` → `SyncStatus.ReauthRequired`，不 wipe Room（~514–531、~1069–1073）。
+3. **leave / delete 合同** — `leave`：remote 失败且**不是** `RemoteMembershipDeletedException` 则直接失败，不本地清；成功或显式 membership_deleted 才 `completeConfirmedMembershipDeletion`（~547–553）。`deleteFamily` 同理仅 success 或 `RemoteFamilyDeletedException` 才 `completeConfirmedFamilyDeletion`（~576–582）。`logoutCurrentDevice` 必须 remote success 才清（~556–559）。
+4. **Coordinator 层** — `FamilySessionCoordinator.leave` 仅 `backend.leave` 成功返回 `Completed`；generic 401 失败且会话仍 joined。
+
+测试：
+
+- `RefreshingSyncBackendTest.invalidRefreshClearsOnlyDeviceCredentialsAndEntersReauthRequired` / `missingRefresh…` / `a401AfterSuccessfulRefreshIsNotRetriedAgainAndRequiresReauth`
+- `explicitDeviceRemovedOnRefresh/Access…`、`explicitMembershipDeleted…`、`explicitFamilyDeleted…`（terminal ≠ reauth；不 clear credentials 为 reauth）
+- `FamilySessionCoordinatorTest.generic401CannotPretendMemberWasHardDeleted`
+- `RealSyncPortTest.repeatedFamilyDeleteConvergesOnlyOnExplicitTerminalReason`（generic 401 delete → failure、clearGate.calls=0）
+- `onlyExplicitDeviceRemovedClearsAfterSyncWhileGeneric401PreservesLocalState`
+- `explicitMembershipDeletedOnTrustedSyncClearsButGeneric401DoesNot` / `explicitFamilyDeletedOnTrustedSyncClearsButGeneric401DoesNot`
+- `retainedIdentityWithoutCredentialsPublishesReauthRequiredNotDeviceRemoved`
+- `HttpSyncBackendTest` code 解析 `device_removed|membership_deleted|family_deleted`
+- UI：`FamilyErrorCopyTest` / `FamilyUiPolicy` ReauthRequired 文案「重新登录或申请」
+
+对照：trusted-sync-endpoint-auth **04**（reauth）、**11–13**（revoke/leave/delete）、US-39 错误码表。**不实现本票。**

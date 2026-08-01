@@ -1,6 +1,6 @@
 # Issues · p1-review-residuals
 
-**Status:** ready-for-agent  
+**Status:** complete  
 **Spec:** [spec.md](./spec.md)
 
 ## Dependency graph
@@ -10,15 +10,16 @@ Immediate (0.3 independent)
   01 记录 ACL ─────────────┐
   02 未来事实时间 ──► 03 next-feed note
   04 Composer 串行 ────────┘  (并行)
+  status: all done
 
 Post-0.3.1 re-verify only (no implement before gate)
-  05 Join 耐久
-  06 401 / 吊销语义
-  07 离开擦除与跨家庭
-  08 被踢端收敛
+  05 Join 耐久            ──► cancelled (2026-08-01)
+  06 401 / 吊销语义       ──► cancelled (2026-08-01)
+  07 离开擦除与跨家庭     ──► cancelled (2026-08-01)
+  08 被踢端收敛           ──► cancelled (2026-08-01)
        ▲
        └── gate: trusted-sync-endpoint-auth / 0.3.1 released
-           then re-verify → cancelled if fixed, else ready-for-agent
+           re-verify complete — cutover covered all four
 ```
 
 ## Tickets
@@ -29,15 +30,15 @@ Post-0.3.1 re-verify only (no implement before gate)
 | [02](./issues/02-close-future-fact-writes.md) | 事实写入关闭未来时间 | immediate | — | done |
 | [03](./issues/03-strip-next-feed-marker-on-fulfill.md) | 履行时剥离 next-feed note marker | immediate | 02 | done |
 | [04](./issues/04-composer-import-save-serialization.md) | Composer 选图与保存串行 | immediate | — | done |
-| [05](./issues/05-join-session-durability-reverify.md) | Join 会话耐久顺序 | post-0.3.1 | 0.3.1 发布 | planned |
-| [06](./issues/06-auth-failure-taxonomy-reverify.md) | 鉴权失败与 leave 401 分类 | post-0.3.1 | 0.3.1 发布 | planned |
-| [07](./issues/07-leave-wipe-cross-family-reverify.md) | 离开/删家擦除与跨家庭隔离 | post-0.3.1 | 0.3.1 发布 | planned |
-| [08](./issues/08-removed-device-local-converge-reverify.md) | 被踢/撤设备本机收敛 | post-0.3.1 | 0.3.1 发布 | planned |
+| [05](./issues/05-join-session-durability-reverify.md) | Join 会话耐久顺序 | post-0.3.1 | 0.3.1 发布 | cancelled |
+| [06](./issues/06-auth-failure-taxonomy-reverify.md) | 鉴权失败与 leave 401 分类 | post-0.3.1 | 0.3.1 发布 | cancelled |
+| [07](./issues/07-leave-wipe-cross-family-reverify.md) | 离开/删家擦除与跨家庭隔离 | post-0.3.1 | 0.3.1 发布 | cancelled |
+| [08](./issues/08-removed-device-local-converge-reverify.md) | 被踢/撤设备本机收敛 | post-0.3.1 | 0.3.1 发布 | cancelled |
 
 ## Frontier
 
-- **现在可领：** （immediate 01–04 均 done）  
-- **不要领：** 05–08（直至 0.3.1 复核）
+- **现在可领：** （无 — tracker complete）
+- **不要领：** （无）
 
 ## Explicitly deferred elsewhere
 

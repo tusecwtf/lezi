@@ -1,6 +1,6 @@
 # Issues · trusted-sync-endpoint-auth
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **Spec:** [`spec.md`](./spec.md)
 
@@ -27,8 +27,8 @@
 | [13](./issues/13-delete-family.md) | 删除家庭 | 05, 11 | complete |
 | [14](./issues/14-foreground-sync-no-ssid.md) | 去除 Wi-Fi 绑定并收敛前台同步体验 | 08, 10, 11, 12, 13 | complete |
 | [15](./issues/15-retire-legacy-network-auth.md) | 收口旧网络与鉴权模型 | 14 | complete |
-| [16](./issues/16-cross-device-release-acceptance.md) | 跨设备发布候选验收 | 15 | partial |
-| [17](./issues/17-release-0.3.1.md) | 升级并交付 0.3.1 | 16 | blocked |
+| [16](./issues/16-cross-device-release-acceptance.md) | 跨设备发布候选验收 | 15 | complete |
+| [17](./issues/17-release-0.3.1.md) | 升级并交付 0.3.1 | 16 | complete |
 
 ## 实现后审查残差（独立 tracker）
 
@@ -39,13 +39,9 @@
 - 全文归档：[REVIEW.md](../trusted-sync-review-residuals/REVIEW.md)
 
 **与 16/17 的关系：** 13/13 residual Must 已于 2026-07-31 完成；01–06 release blocker
-已关闭。16 已于 2026-07-31 将候选 HEAD 刷新到 `ed99c76` 并重跑 Android/Rust/镜像门禁与
-合成 TLS 跨端线缆矩阵（见 `evidence/16/validation.md` + `evidence/16/api-matrix.json`，
-现 **31/31**；含 Owner-add 与 `membership_deleted` 正文；根密码轮换仅 host probe），
-但仍为 **partial**：Spec E2E 要求的 **当前 Release APK 双客户端** 自签名/System-PKI
-TOFU、建家/审批/绑定、Owner add UI、双向历史与照片、相机成员二维码、本地清理、Android
-SPKI 硬阻断等尚未闭合。线缆矩阵与 host QR codec 仅 supporting。
-**Frontier 仅 16；17 状态为 `blocked`，不得开始。**
+已关闭。16 已于 2026-08-01 按操作者实体双机 E2E 确认收口；17 已交付 0.3.1 版本产物与
+合成 HTTPS smoke（见 `evidence/16/dual-client-closeout.md`、`evidence/17/validation.md`）。
+**Frontier 空；tracker complete。** 现网 NAS 替换仍须按 `AGENTS.md` 另行确认 CD。
 
 ## 执行顺序
 
