@@ -101,11 +101,23 @@ UI 事件
 ```text
 开始 → 先持久化暂停的 STARTING 快照 → 请求前台服务与通知
      → 系统真实标记前台服务，且通知权限开启时通知已发布，才回执 RUNNING 并在 UI 走秒
-     → 受限启动 / 权限 / 通知 / 运行时失败则持久化 FAILED，保留侧别与累计值供重试
+     → 受限启动 / 权限 / 通知 / 超时 / 运行时 / DataStore 持久化失败 → 同一总覆盖：
+       停 FGS 与通知，内存收口 FAILED（保留侧别、累计值、session 与可重试原因）
+     → FAILED 再持久化失败时仍先更新内存态，UI 不得长期停在 STARTING/RUNNING 假象
 完成 → domain completeNursing：写 nursing Record；若绑定 carePlanId，同事务读取计划当前
        active 照片并 clone 为 Record 独立 MediaAsset 行，再 complete 计划 + 候选 → 停服务
-进程被杀 → 启动时冻结旧运行快照并标记 RECOVERABLE，不假定服务仍存活、不自动重复启动
+     → 完成 / 暂停 / 清空：持久化非运行快照后停服务；持久化失败同样停服并（有会话数据时）FAILED 可重试
+进程被杀 / 坏存储读 → 冻结或清空并停服；仅进程内同 session 见证可保留 RUNNING；不自动重复启动
+CancellationException → 先停服再原样重抛，不得吞成产品错误
 ```
+
+| 服务态 | 含义 | 持久化失败时 |
+|--------|------|----------------|
+| `PAUSED` | 无前台服务；可开始一侧 | 停服；有会话则内存 `FAILED` 可重试 |
+| `STARTING` | 已写暂停快照，等待系统确认 | 不得启动或继续 FGS；收口 `FAILED` |
+| `RUNNING` | 仅服务 ack 后；UI 走秒 | ack 后写盘失败 → 停服 + `FAILED`（非假 RUNNING） |
+| `FAILED` | 已安全暂停，保留 side/累计/session | 写盘再失败仍先更新内存 `FAILED` |
+| `RECOVERABLE` | 进程恢复未见服务见证 | 与 transition 相同：停服，可重试启动 |
 
 绑定护理计划的计时完成以事务内 plan media 为准（不是打开计时/Composer 时的 UI 快照）；
 计划照片所有权与顺序不变，Record 行独立 `client_uuid`、可共享 `local_uri`；幂等
@@ -115,7 +127,7 @@ UI 事件
 必须门禁，fresh-current 不能被解释为丢弃当前会话恢复。`startForeground()` 正常返回本身不是
 成功凭据（系统 AppOp 可静默忽略）；UI 只有在系统真实确认前台态后才显示“运行中”。Android
 13+ 的通知权限被用户关闭时，前台服务仍可由系统接纳，此时不强求通知出现在应用可见列表；
-`FAILED` / `RECOVERABLE` 明示已安全暂停并提供“重试启动”。
+`FAILED` / `RECOVERABLE` 明示已安全暂停并提供“重试启动”。重试使用稳定 session token，成功 ack 后才显示 RUNNING。
 
 ---
 

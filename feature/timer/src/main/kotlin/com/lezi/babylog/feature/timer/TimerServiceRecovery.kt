@@ -121,37 +121,202 @@ internal fun TimerState.retryServiceStartCandidate(
 }
 
 /**
+ * Durable FAILED identity after any non-cancel transition fault.
+ * Freezes sides without inventing elapsed time; keeps accum, session, and retry side.
+ */
+internal fun TimerState.toFailedRetryable(
+    failure: TimerServiceFailure = TimerServiceFailure.RUNTIME,
+): TimerState {
+    val side = when {
+        requestedSide == "L" || requestedSide == "R" -> requestedSide
+        leftRunning -> "L"
+        rightRunning -> "R"
+        lastSide == "L" || lastSide == "R" -> lastSide
+        else -> null
+    }
+    return copy(
+        leftRunning = false,
+        rightRunning = false,
+        leftStartedElapsed = null,
+        rightStartedElapsed = null,
+        serviceState = TimerServiceState.FAILED,
+        requestedSide = side,
+        serviceFailure = failure,
+    )
+}
+
+/**
+ * Publish durable state; on non-cancel write failure fall back to memory only.
+ * CancellationException always propagates unchanged (caller stops the service).
+ */
+internal suspend fun publishTimerStateBestEffort(
+    state: TimerState,
+    publish: suspend (TimerState) -> Unit,
+    publishMemoryOnly: (TimerState) -> Unit,
+) {
+    try {
+        publish(state)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        publishMemoryOnly(state)
+    }
+}
+
+/**
+ * Pause / clear path: always stop FGS. Persist PAUSED/empty; on write failure settle
+ * FAILED when session data remains so the UI is never a false PAUSED while disk is wrong.
+ */
+internal suspend fun settleNonRunningTimerTransition(
+    next: TimerState,
+    publish: suspend (TimerState) -> Unit,
+    stopService: () -> Unit,
+    publishMemoryOnly: (TimerState) -> Unit,
+) {
+    require(!next.leftRunning && !next.rightRunning)
+    val paused = next.copy(
+        serviceState = TimerServiceState.PAUSED,
+        requestedSide = null,
+        serviceFailure = null,
+    )
+    try {
+        publish(paused)
+        stopService()
+    } catch (cancelled: CancellationException) {
+        stopService()
+        throw cancelled
+    } catch (_: Exception) {
+        stopService()
+        if (paused.hasTimerData() || paused.completionClientUuid != null) {
+            val failed = paused.toFailedRetryable(TimerServiceFailure.RUNTIME)
+            // Prefer a concrete side when pause cleared requestedSide.
+            val withSide = if (failed.requestedSide != null) {
+                failed
+            } else {
+                failed.copy(
+                    requestedSide = when (paused.lastSide) {
+                        "L", "R" -> paused.lastSide
+                        else -> "L"
+                    },
+                )
+            }
+            publishMemoryOnly(withSide)
+        } else {
+            publishMemoryOnly(paused)
+        }
+    }
+}
+
+/** Init / restore outcome after reading durable timer JSON (or failing to). */
+internal data class TimerRestoreDecision(
+    val state: TimerState,
+    val shouldStopService: Boolean,
+)
+
+/**
+ * Same stop policy as transitions: only a confirmed live RUNNING session may keep FGS.
+ * Read IO / corrupt storage → empty + stop (no fabricated RUNNING).
+ */
+internal fun restoreTimerAfterStorageFault(
+    raw: String?,
+    nowElapsed: Long,
+    nowWall: Long,
+    nowBootCount: Long?,
+    activeServiceSession: String?,
+    readFailed: Boolean,
+): TimerRestoreDecision {
+    if (readFailed) {
+        return TimerRestoreDecision(state = TimerState(), shouldStopService = true)
+    }
+    val restored = TimerState.fromJson(
+        raw = raw,
+        nowElapsed = nowElapsed,
+        nowWall = nowWall,
+        nowBootCount = nowBootCount,
+        activeServiceSession = activeServiceSession,
+    )
+    return TimerRestoreDecision(
+        state = restored,
+        shouldStopService = restored.serviceState != TimerServiceState.RUNNING,
+    )
+}
+
+/**
  * Persists a non-running pending snapshot first and a running snapshot only after service ack.
- * A platform exception is converted to the same durable failed state as an explicit service nack.
+ * Platform exceptions, timeouts, notification failures, and DataStore IOException share one
+ * cover: stop FGS once, settle FAILED (memory first when durable write fails).
+ * CancellationException stops then rethrows unchanged.
  */
 internal suspend fun startTimerWithConfirmation(
     candidate: TimerState,
     publish: suspend (TimerState) -> Unit,
     startService: suspend () -> TimerServiceStartResult,
+    stopService: () -> Unit = {},
+    publishMemoryOnly: (TimerState) -> Unit = {},
 ): TimerServiceStartResult {
     require(candidate.leftRunning.xor(candidate.rightRunning))
     val pending = candidate.pausedForServiceStart()
-    publish(pending)
+    try {
+        publish(pending)
+    } catch (cancelled: CancellationException) {
+        stopService()
+        throw cancelled
+    } catch (_: Exception) {
+        stopService()
+        val failed = pending.toFailedRetryable(TimerServiceFailure.RUNTIME)
+        publishMemoryOnly(failed)
+        return TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
+    }
+
     val result = try {
         startService()
     } catch (cancelled: CancellationException) {
+        stopService()
         throw cancelled
     } catch (failure: RuntimeException) {
         TimerServiceStartResult.Failed(failure.toTimerServiceFailure())
+    } catch (_: Exception) {
+        TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
     }
-    val finalState = when (result) {
-        TimerServiceStartResult.Started -> candidate.copy(
-            serviceState = TimerServiceState.RUNNING,
-            requestedSide = null,
-            serviceFailure = null,
-        )
-        is TimerServiceStartResult.Failed -> pending.copy(
-            serviceState = TimerServiceState.FAILED,
-            serviceFailure = result.failure,
-        )
+
+    return when (result) {
+        TimerServiceStartResult.Started -> {
+            val running = candidate.copy(
+                serviceState = TimerServiceState.RUNNING,
+                requestedSide = null,
+                serviceFailure = null,
+            )
+            try {
+                publish(running)
+                result
+            } catch (cancelled: CancellationException) {
+                stopService()
+                throw cancelled
+            } catch (_: Exception) {
+                // Service already acknowledged — must stop so UI cannot stay STARTING while FGS runs.
+                stopService()
+                val failed = pending.toFailedRetryable(TimerServiceFailure.RUNTIME)
+                publishMemoryOnly(failed)
+                TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
+            }
+        }
+        is TimerServiceStartResult.Failed -> {
+            // Shared cover with timeout / nack / platform throw: idempotent stop, then FAILED.
+            stopService()
+            val failed = pending.copy(
+                serviceState = TimerServiceState.FAILED,
+                serviceFailure = result.failure,
+            )
+            try {
+                publish(failed)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                publishMemoryOnly(failed)
+            }
+            result
+        }
     }
-    publish(finalState)
-    return result
 }
 
 internal fun TimerState.serviceFeedbackText(): String? = when (serviceState) {

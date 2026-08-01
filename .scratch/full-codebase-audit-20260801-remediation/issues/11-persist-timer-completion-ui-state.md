@@ -3,8 +3,8 @@
 **What to build:** 把 completion draft、Saving、结果/错误与 pending next-feed 放进 TimerViewModel 可观察状态；新 composition 订阅状态，不依赖旧 composition 捕获的一次性 lambda。
 
 **Source:** `AUDIT-20260801-P1-11`  
-**Blocked by:** 10 — transition failure state must be total first  
-**Status:** blocked
+**Blocked by:** 10 — transition failure state must be total first (done)  
+**Status:** ready-for-agent  
 **Size:** M
 
 ## Acceptance criteria

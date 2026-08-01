@@ -4,18 +4,26 @@
 
 **Source:** `AUDIT-20260801-P1-10`  
 **Blocked by:** None — can start immediately  
-**Status:** ready-for-agent  
+**Status:** done  
 **Size:** S–M
+
+## Design notes (public seams)
+
+1. `startTimerWithConfirmation` — STARTING persist / service ack / RUNNING publish; all non-cancel failures stop FGS once and settle FAILED (memory first if durable write fails).
+2. `settleNonRunningTimerTransition` — pause/clear path: stop FGS even when DataStore `IOException`; keep FAILED retry identity when session data remains.
+3. `publishTimerStateBestEffort` — durable publish with memory fallback; CancellationException rethrown after stop responsibility stays with caller.
+4. `TimerState.toFailedRetryable` / `restoreTimerAfterStorageFault` — pure FAILED identity (accum, side, session, failure reason) shared by transition and init restore.
+5. ViewModel `applyTransition` / `init` — wire the same cover; only rethrow CancellationException after stop.
 
 ## Acceptance criteria
 
-- [ ] 回归注入 STARTING persist、service ack 后 RUNNING persist 与 pause/clear persist 的 `IOException`。
-- [ ] 任一非取消失败都停止 FGS/通知，并把内存态收口为 FAILED（保留累计值、side、session 与可重试原因）。
-- [ ] FAILED 持久化再次失败时仍先更新 `_state`，UI 不会永久显示 STARTING/RUNNING 假象。
-- [ ] CancellationException 停服务后原样重抛；不能被产品错误吞掉。
-- [ ] service start RuntimeException、timeout、notification failure 与 DataStore failure 共享同一总覆盖策略，不产生重复 stop 竞态。
-- [ ] retry 从 FAILED/RECOVERABLE 使用稳定 session token，成功后才显示 RUNNING。
-- [ ] init restore 遇到坏存储/IO 的用户可见状态和停服策略与 transition 一致。
+- [x] 回归注入 STARTING persist、service ack 后 RUNNING persist 与 pause/clear persist 的 `IOException`。
+- [x] 任一非取消失败都停止 FGS/通知，并把内存态收口为 FAILED（保留累计值、side、session 与可重试原因）。
+- [x] FAILED 持久化再次失败时仍先更新 `_state`，UI 不会永久显示 STARTING/RUNNING 假象。
+- [x] CancellationException 停服务后原样重抛；不能被产品错误吞掉。
+- [x] service start RuntimeException、timeout、notification failure 与 DataStore failure 共享同一总覆盖策略，不产生重复 stop 竞态。
+- [x] retry 从 FAILED/RECOVERABLE 使用稳定 session token，成功后才显示 RUNNING。
+- [x] init restore 遇到坏存储/IO 的用户可见状态和停服策略与 transition 一致。
 
 ## Validation
 

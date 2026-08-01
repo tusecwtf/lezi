@@ -56,15 +56,41 @@ class TimerViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             toggleMutex.withLock {
-                val restored = TimerState.fromJson(
-                    raw = settings.nursingTimerJson.first(),
-                    nowBootCount = currentBootCount(app),
-                    activeServiceSession = NursingTimerServiceRuntime.activeSession(),
-                )
+                val decision = try {
+                    val raw = settings.nursingTimerJson.first()
+                    restoreTimerAfterStorageFault(
+                        raw = raw,
+                        nowElapsed = SystemClock.elapsedRealtime(),
+                        nowWall = System.currentTimeMillis(),
+                        nowBootCount = currentBootCount(app),
+                        activeServiceSession = NursingTimerServiceRuntime.activeSession(),
+                        readFailed = false,
+                    )
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    serviceController.stop()
+                    throw cancelled
+                } catch (_: Exception) {
+                    // DataStore read / unexpected restore fault: same stop policy as transition.
+                    restoreTimerAfterStorageFault(
+                        raw = null,
+                        nowElapsed = SystemClock.elapsedRealtime(),
+                        nowWall = System.currentTimeMillis(),
+                        nowBootCount = currentBootCount(app),
+                        activeServiceSession = NursingTimerServiceRuntime.activeSession(),
+                        readFailed = true,
+                    )
+                }
                 // Only an in-process service witness with the same session may remain RUNNING.
                 // Process restoration has no witness and therefore becomes RECOVERABLE.
-                persistLocal(restored)
-                if (restored.serviceState != TimerServiceState.RUNNING) {
+                try {
+                    persistLocal(decision.state)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    if (decision.shouldStopService) serviceController.stop()
+                    throw cancelled
+                } catch (_: Exception) {
+                    _state.value = decision.state
+                }
+                if (decision.shouldStopService) {
                     serviceController.stop()
                 }
             }
@@ -82,16 +108,18 @@ class TimerViewModel @Inject constructor(
         _state.value = s
     }
 
+    private fun publishMemoryOnly(s: TimerState) {
+        _state.value = s
+    }
+
     private suspend fun applyTransition(next: TimerState) {
         if (!next.leftRunning && !next.rightRunning) {
-            persistLocal(
-                next.copy(
-                    serviceState = TimerServiceState.PAUSED,
-                    requestedSide = null,
-                    serviceFailure = null,
-                ),
+            settleNonRunningTimerTransition(
+                next = next,
+                publish = ::persistLocal,
+                stopService = { serviceController.stop() },
+                publishMemoryOnly = ::publishMemoryOnly,
             )
-            serviceController.stop()
             return
         }
         try {
@@ -99,23 +127,13 @@ class TimerViewModel @Inject constructor(
                 candidate = next,
                 publish = ::persistLocal,
                 startService = { serviceController.startAndConfirm(next) },
+                stopService = { serviceController.stop() },
+                publishMemoryOnly = ::publishMemoryOnly,
             )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            // startTimerWithConfirmation already stopped; belt-and-suspenders for outer cancel.
             serviceController.stop()
             throw cancelled
-        } catch (_: RuntimeException) {
-            serviceController.stop()
-            val pending = _state.value
-            val failed = if (pending.serviceState == TimerServiceState.STARTING) {
-                pending.copy(
-                    serviceState = TimerServiceState.FAILED,
-                    serviceFailure = TimerServiceFailure.RUNTIME,
-                )
-            } else {
-                pending
-            }
-            runCatching { persistLocal(failed) }
-                .onFailure { _state.value = failed }
         }
     }
 

@@ -9,9 +9,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **8**（01、02、03、04、05、06、07、08）
+- Done: **9**（01、02、03、04、05、06、07、08、10）
 - Current frontier (ready-for-agent): **11**
-- Blocked by dependency: **12**
+- Blocked by dependency: **11**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**10、12、13、14、16、17、19、20、22、23、25**
+**11、12、13、14、16、17、19、20、22、23、25**
 
 ## Tickets
 
@@ -49,8 +49,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | done |
 | [08](./issues/08-carry-plan-photos-through-timer-fulfillment.md) | Audit P1-08 | 计时履行继承护理计划照片 | — | M | done |
 | [09](./issues/09-transfer-composer-draft-to-timer-safely.md) | Audit P1-09 | Composer→Timer 安全转移草稿 | 08 | M | blocked |
-| [10](./issues/10-handle-all-timer-transition-failures.md) | Audit P1-10 | Timer transition 覆盖全部非取消异常 | — | S–M | ready-for-agent |
-| [11](./issues/11-persist-timer-completion-ui-state.md) | Audit P1-11 | 计时完成态跨配置重建 | 10 | M | blocked |
+| [10](./issues/10-handle-all-timer-transition-failures.md) | Audit P1-10 | Timer transition 覆盖全部非取消异常 | — | S–M | done |
+| [11](./issues/11-persist-timer-completion-ui-state.md) | Audit P1-11 | 计时完成态跨配置重建 | 10 | M | ready-for-agent |
 | [12](./issues/12-restore-composer-next-feed-offer.md) | Audit P1-12 | Composer 保存后恢复下次喂养 offer | — | M | ready-for-agent |
 | [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | ready-for-agent |
 | [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | ready-for-agent |
