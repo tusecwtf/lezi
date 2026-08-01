@@ -14,8 +14,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{
-    normalized_device_name_key, Entity, MAX_BUNDLE_MEDIA_ENTITIES,
-    MAX_OPEN_STAGING_BUNDLES_PER_FAMILY,
+    care_plan_fulfillment_pair_issue, normalized_device_name_key, Entity,
+    MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_PER_FAMILY,
 };
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
@@ -413,6 +413,10 @@ pub enum StoreError {
     TimestampOutOfRange,
     #[error("entity is too large for a bounded pull page")]
     PullEntityTooLarge,
+    /// Closed CarePlan status↔fulfillment-pair schema invariant (not a missing ref).
+    /// Maps to HTTP 422 so defense-in-depth matches the model wire boundary.
+    #[error("{0}")]
+    InvalidCarePlanFulfillmentPair(&'static str),
     #[error("{0}")]
     UnresolvedReference(String),
     #[error("stored entity payload is invalid")]
@@ -4244,10 +4248,10 @@ fn freeze_care_plan_fulfillment_binding(
     Ok(())
 }
 
-/// Push-path CarePlan fulfillment pair invariant (mirrors model wire rules).
-/// Completed requires both fields; non-completed forbids either; partial pairs
-/// reject. When the bound record already exists in-family, babies must match.
-/// Forward references (CarePlan before Record) remain allowed.
+/// Push-path CarePlan fulfillment pair invariant.
+/// Shape rules use the shared model predicate → [`StoreError::InvalidCarePlanFulfillmentPair`]
+/// (HTTP 422). Same-baby on an already-present record stays
+/// [`StoreError::UnresolvedReference`] (HTTP 409). Forward refs remain allowed.
 fn validate_care_plan_fulfillment_pair_on_push(
     entity: &Entity,
     effective_records: &HashMap<String, Map<String, Value>>,
@@ -4257,32 +4261,20 @@ fn validate_care_plan_fulfillment_pair_on_push(
         .get("status")
         .and_then(Value::as_str)
         .ok_or(StoreError::InvalidStoredPayload)?;
+    // Empty string treated as absent (model rejects empty UUID before this seam).
     let fulfilled_record = entity
         .payload
         .get("fulfilled_record_client_uuid")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty());
-    let fulfilled_at = entity.payload.get("fulfilled_at").and_then(Value::as_i64);
     let has_record = fulfilled_record.is_some();
-    let has_at = fulfilled_at.is_some();
-    if has_record != has_at {
-        return Err(StoreError::UnresolvedReference(
-            "fulfilled_record_client_uuid and fulfilled_at must both be set or both null"
-                .to_owned(),
-        ));
-    }
-    if status == "completed" {
-        if !has_record {
-            return Err(StoreError::UnresolvedReference(
-                "completed care plan requires fulfilled_record_client_uuid and fulfilled_at"
-                    .to_owned(),
-            ));
-        }
-    } else if has_record {
-        return Err(StoreError::UnresolvedReference(
-            "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at"
-                .to_owned(),
-        ));
+    let has_at = entity
+        .payload
+        .get("fulfilled_at")
+        .and_then(Value::as_i64)
+        .is_some();
+    if let Some(issue) = care_plan_fulfillment_pair_issue(status, has_record, has_at) {
+        return Err(StoreError::InvalidCarePlanFulfillmentPair(issue.detail()));
     }
     if let Some(record_id) = fulfilled_record {
         if let Some(record_payload) = effective_records.get(record_id) {
@@ -6392,7 +6384,7 @@ mod tests {
         )
         .unwrap();
 
-        // completed without full pair — reject (no complete-then-bind window).
+        // completed without full pair — schema shape → InvalidCarePlanFulfillmentPair.
         for (record, at) in [
             (None, None),
             (Some(record_id), None),
@@ -6411,13 +6403,13 @@ mod tests {
                         ),
                         10,
                     ),
-                    Err(StoreError::UnresolvedReference(_))
+                    Err(StoreError::InvalidCarePlanFulfillmentPair(_))
                 ),
-                "completed without full pair must reject"
+                "completed without full pair must reject as pair shape, not unresolved ref"
             );
         }
 
-        // Partial or full pair on non-completed — fail closed.
+        // Partial or full pair on non-completed — fail closed as pair shape.
         for status in ["pending", "missed", "skipped"] {
             assert!(
                 matches!(
@@ -6432,13 +6424,13 @@ mod tests {
                         ),
                         10,
                     ),
-                    Err(StoreError::UnresolvedReference(_))
+                    Err(StoreError::InvalidCarePlanFulfillmentPair(_))
                 ),
                 "{status} must not carry fulfillment pair"
             );
         }
 
-        // Cross-baby existing record — reject.
+        // Cross-baby existing record — true reference conflict.
         assert!(matches!(
             publish_root(
                 &store,

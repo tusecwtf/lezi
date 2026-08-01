@@ -9586,7 +9586,18 @@ async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner
     let mut completed_without_pair = first_completion.clone();
     completed_without_pair["fulfilled_record_client_uuid"] = Value::Null;
     completed_without_pair["fulfilled_at"] = Value::Null;
-    for (updated_at, payload) in [(6i64, partial_clear), (8, completed_without_pair)] {
+    for (updated_at, payload, detail) in [
+        (
+            6i64,
+            partial_clear,
+            "fulfilled_record_client_uuid and fulfilled_at must both be set or both null",
+        ),
+        (
+            8,
+            completed_without_pair,
+            "completed care plan requires fulfilled_record_client_uuid and fulfilled_at",
+        ),
+    ] {
         let (status, body) = publish_root_bundle(
             &rig.app,
             creator_token,
@@ -9594,6 +9605,7 @@ async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body, json!({"detail": detail}));
     }
 
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
@@ -9611,6 +9623,85 @@ async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner
     assert!(entities
         .iter()
         .all(|entity| entity["client_uuid"] != rebound_record_id));
+}
+
+/// First atomic publish of a completed root without a full pair (or a
+/// non-completed root carrying a full pair) must 422 at the model/API boundary
+/// with the known detail — not only on rewrite of an already-frozen plan.
+#[tokio::test]
+async fn first_publish_care_plan_fulfillment_pair_is_required_at_api_boundary() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "pair-first-publish-owner",
+        "pair-first-publish-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let fulfilled_at = 1_700_000_100_000i64;
+
+    let completed_missing =
+        "completed care plan requires fulfilled_record_client_uuid and fulfilled_at";
+    let partial = "fulfilled_record_client_uuid and fulfilled_at must both be set or both null";
+    let non_completed =
+        "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at";
+
+    // First root: pending→completed missing either/both fields → 422.
+    for (record, at, detail) in [
+        (Value::Null, Value::Null, completed_missing),
+        (json!(record_id), Value::Null, partial),
+        (Value::Null, json!(fulfilled_at), partial),
+    ] {
+        let plan_id = Uuid::new_v4().to_string();
+        let mut payload = care_plan_payload(&baby_id, "bath");
+        payload["status"] = json!("completed");
+        payload["fulfilled_record_client_uuid"] = record;
+        payload["fulfilled_at"] = at;
+        let (status, body) = publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("care_plan", &plan_id, 1, payload, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body, json!({"detail": detail}));
+    }
+
+    // First root: non-completed carrying a full pair → 422.
+    for status_value in ["pending", "missed", "skipped"] {
+        let plan_id = Uuid::new_v4().to_string();
+        let mut payload = care_plan_payload(&baby_id, "bath");
+        payload["status"] = json!(status_value);
+        payload["fulfilled_record_client_uuid"] = json!(record_id);
+        payload["fulfilled_at"] = json!(fulfilled_at);
+        let (status, body) = publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("care_plan", &plan_id, 1, payload, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body, json!({"detail": non_completed}));
+    }
+
+    // Control: first completed root with full pair (forward-ref record) accepts.
+    let ok_plan_id = Uuid::new_v4().to_string();
+    let mut ok_payload = care_plan_payload(&baby_id, "bath");
+    ok_payload["status"] = json!("completed");
+    ok_payload["fulfilled_record_client_uuid"] = json!(record_id);
+    ok_payload["fulfilled_at"] = json!(fulfilled_at);
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("care_plan", &ok_plan_id, 1, ok_payload, None),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

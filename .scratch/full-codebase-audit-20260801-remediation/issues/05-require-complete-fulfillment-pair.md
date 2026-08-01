@@ -20,7 +20,7 @@
 
 - [x] `status=completed` 且两字段任一为空/缺失时在 model/API 边界拒绝，不能先 completed 后补绑。
 - [x] 两字段必须同时为空或同时非空；非 completed 状态携带 fulfillment pair 的合法性按 current contract 明确并 fail closed。
-- [x] 从 pending/missed 到 completed 的单个 atomic root 同时写完整 pair，并验证 record 存在、同家庭、同宝宝。
+- [x] 从 pending/missed 到 completed 的单个 atomic root 同时写完整 pair；bound record 已在家庭内时要求同宝宝，CarePlan→Record forward ref 仍允许（record 可尚未存在）。
 - [x] 已持久化 completed pair 的 record UUID、fulfilled_at、清空与 partial rewrite 全部拒绝；精确 replay 幂等。
 - [x] stage 与 commit 间的并发 completed/rebind 仍由 commit 时冻结检查拦截。
 - [x] Android 正常管理者履行与 candidate 仲裁路径继续生成 current schema 可接受的完整 pair。

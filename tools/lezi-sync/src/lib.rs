@@ -2752,6 +2752,10 @@ fn map_bundle_policy_store_error(error: StoreError) -> Result<StoreError, ApiErr
         StoreError::ImmutableMediaAssociation => Err(ApiError::conflict(
             "Media kind and association are immutable",
         )),
+        // Schema shape (status↔pair), not a missing cross-entity ref → 422.
+        StoreError::InvalidCarePlanFulfillmentPair(message) => {
+            Err(ApiError::unprocessable(message))
+        }
         StoreError::UnresolvedReference(message) => Err(ApiError::conflict(message)),
         StoreError::PullEntityTooLarge => Err(ApiError::unprocessable(
             "entity payload is too large for bounded sync pull",

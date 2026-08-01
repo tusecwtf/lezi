@@ -890,6 +890,54 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
     Ok(())
 }
 
+/// Wire invariant failure for CarePlan `status` ↔ fulfillment pair.
+/// Shared by model validation and store push defense-in-depth so detail text
+/// and both-or-neither edge handling cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CarePlanFulfillmentPairIssue {
+    Partial,
+    CompletedMissing,
+    NonCompletedCarries,
+}
+
+impl CarePlanFulfillmentPairIssue {
+    pub(crate) const fn detail(self) -> &'static str {
+        match self {
+            Self::Partial => {
+                "fulfilled_record_client_uuid and fulfilled_at must both be set or both null"
+            }
+            Self::CompletedMissing => {
+                "completed care plan requires fulfilled_record_client_uuid and fulfilled_at"
+            }
+            Self::NonCompletedCarries => {
+                "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at"
+            }
+        }
+    }
+}
+
+/// Pure status↔pair both-or-neither invariant.
+///
+/// Callers decide field presence after seam-specific type/empty handling
+/// (`model` rejects empty UUID via parse; `store` treats empty string as absent).
+pub(crate) fn care_plan_fulfillment_pair_issue(
+    status: &str,
+    has_record: bool,
+    has_at: bool,
+) -> Option<CarePlanFulfillmentPairIssue> {
+    if has_record != has_at {
+        return Some(CarePlanFulfillmentPairIssue::Partial);
+    }
+    if status == "completed" {
+        if !has_record {
+            return Some(CarePlanFulfillmentPairIssue::CompletedMissing);
+        }
+    } else if has_record {
+        return Some(CarePlanFulfillmentPairIssue::NonCompletedCarries);
+    }
+    None
+}
+
 /// CarePlan wire: `fulfilled_record_client_uuid` + `fulfilled_at` must be both
 /// null or both non-null. `status=completed` requires the full pair; any other
 /// status must carry neither field (fail closed).
@@ -897,31 +945,17 @@ fn validate_care_plan_fulfillment_pair(
     payload: &Map<String, Value>,
     status: &str,
 ) -> Result<(), ApiError> {
-    let fulfilled_record = optional_string_value(payload, "fulfilled_record_client_uuid")?;
-    let fulfilled_at =
-        match payload.get("fulfilled_at") {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(value.as_i64().ok_or_else(|| {
-                ApiError::unprocessable("fulfilled_at must be an integer or null")
-            })?),
-        };
-    let has_record = fulfilled_record.is_some();
-    let has_at = fulfilled_at.is_some();
-    if has_record != has_at {
-        return Err(ApiError::unprocessable(
-            "fulfilled_record_client_uuid and fulfilled_at must both be set or both null",
-        ));
-    }
-    if status == "completed" {
-        if !has_record {
-            return Err(ApiError::unprocessable(
-                "completed care plan requires fulfilled_record_client_uuid and fulfilled_at",
-            ));
-        }
-    } else if has_record {
-        return Err(ApiError::unprocessable(
-            "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at",
-        ));
+    // Presence only — UUID/integer type already checked by optional_* above.
+    let has_record = matches!(
+        payload.get("fulfilled_record_client_uuid"),
+        Some(Value::String(_))
+    );
+    let has_at = payload
+        .get("fulfilled_at")
+        .and_then(Value::as_i64)
+        .is_some();
+    if let Some(issue) = care_plan_fulfillment_pair_issue(status, has_record, has_at) {
+        return Err(ApiError::unprocessable(issue.detail()));
     }
     Ok(())
 }
