@@ -200,6 +200,16 @@ sealed interface FamilyWizardState {
     ) : FamilyWizardState
 }
 
+/**
+ * In-flight network work that should disable form submits and dialog dismissals.
+ * Shared by onboarding + account hosts so the four-state predicate cannot drift.
+ */
+val FamilyWizardState.isBusy: Boolean
+    get() = this is FamilyWizardState.Submitting ||
+        this is FamilyWizardState.ProbingEndpoint ||
+        this is FamilyWizardState.VerifyingMemberLoginQr ||
+        this is FamilyWizardState.ClaimingMemberLoginQr
+
 /** Side-effect seam kept narrow so the state machine can be exercised without Android or Hilt. */
 interface FamilyWizardGateway {
     suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult

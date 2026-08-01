@@ -7,8 +7,11 @@ import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.domain.family.FamilyWizardStep
+import com.lezi.babylog.domain.family.familyNameValidationError
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.session.FamilyEndpointDraft
+import com.lezi.babylog.sync.session.memberDisplayNameValidationError
+import com.lezi.babylog.sync.session.requireDeviceName
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -29,7 +32,51 @@ internal enum class OnboardingCreateBabySource {
     OfflineMode,
 }
 
+/**
+ * Choose-family primary CTAs (order: connect first). Production buttons must use these
+ * labels so copy cannot drift from the pure surface.
+ */
 internal fun onboardingFamilyActions(): List<String> = listOf("连接家庭服务器")
+
+/** Default connect CTA when no pending join and no trusted endpoint. */
+internal fun onboardingConnectFamilyAction(): String = onboardingFamilyActions().first()
+
+/**
+ * Client-side identity gates for create-family — same rule set as Account
+ * ([memberDisplayNameValidationError] / [familyNameValidationError] / [requireDeviceName]).
+ */
+internal fun onboardingCreateFamilySubmitError(
+    displayName: String,
+    familyName: String,
+    deviceName: String,
+    bootstrapSecret: String,
+): String? {
+    memberDisplayNameValidationError(displayName)?.let { return it }
+    familyNameValidationError(familyName)?.let { return it }
+    runCatching { requireDeviceName(deviceName) }.exceptionOrNull()?.message?.let { return it }
+    if (bootstrapSecret.isBlank()) return "请填写管理员根密码"
+    return null
+}
+
+/** Client-side identity gates for member join request. */
+internal fun onboardingMemberJoinSubmitError(
+    displayName: String,
+    deviceName: String,
+): String? {
+    memberDisplayNameValidationError(displayName)?.let { return it }
+    runCatching { requireDeviceName(deviceName) }.exceptionOrNull()?.message?.let { return it }
+    return null
+}
+
+/** Client-side gates for owner login / takeover (device + root password). */
+internal fun onboardingOwnerLoginSubmitError(
+    deviceName: String,
+    rootPassword: String,
+): String? {
+    runCatching { requireDeviceName(deviceName) }.exceptionOrNull()?.message?.let { return it }
+    if (rootPassword.isBlank()) return "请填写管理员根密码"
+    return null
+}
 
 internal fun onboardingChooseFamilyBody(): String =
     "可新建或加入家庭，也可先用离线模式在本机记录；连家庭之后再到账户里完成。"

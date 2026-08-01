@@ -27,6 +27,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardState
+import com.lezi.babylog.domain.family.isBusy
 import com.lezi.babylog.domain.family.projectMemberLoginQrDialog
 import com.lezi.babylog.feature.family.baby.FamilyBabyDialog
 import com.lezi.babylog.feature.family.components.FamilyDialog
@@ -167,10 +168,7 @@ fun FamilyRoute(
         mutableStateOf(draftFromEndpointSeed())
     }
     val pendingMemberLogin = overview.pendingMemberLogin
-    val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
-        familyWizardState is FamilyWizardState.ProbingEndpoint ||
-        familyWizardState is FamilyWizardState.VerifyingMemberLoginQr ||
-        familyWizardState is FamilyWizardState.ClaimingMemberLoginQr
+    val familyWizardBusy = familyWizardState.isBusy
     val wizardSessionActive = isWizardSessionDialog(dialog)
     LaunchedEffect(
         endpointSeed.serverHost,

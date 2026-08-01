@@ -7,7 +7,7 @@ import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 
 /** Outcome of mapping camera text before launching controller verify. */
-sealed class OnboardingMemberLoginScanOutcome {
+internal sealed class OnboardingMemberLoginScanOutcome {
     data object Empty : OnboardingMemberLoginScanOutcome()
     data class Ready(val payload: MemberLoginQrPayload) : OnboardingMemberLoginScanOutcome()
     data class Rejected(val message: String) : OnboardingMemberLoginScanOutcome()

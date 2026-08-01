@@ -31,7 +31,8 @@ class OnboardingFamilyWizardAdapterTest {
         )
 
         assertEquals(FamilyWizardEntry.Onboarding, snapshot.entry)
-        assertEquals(listOf("连接家庭服务器"), onboardingFamilyActions())
+        assertEquals(listOf(onboardingConnectFamilyAction()), onboardingFamilyActions())
+        assertEquals("连接家庭服务器", onboardingConnectFamilyAction())
         assertEquals(draft, snapshot.toEndpointDraft())
         assertEquals("妈妈", snapshot.displayName)
         assertEquals(FamilyWizardJoinRole.Member, snapshot.joinRole)

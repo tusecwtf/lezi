@@ -177,7 +177,7 @@ internal fun OnboardingMemberJoinDialog(
                     .dismissKeyboardOnTap()
                     .verticalScroll(rememberScrollState())
                     .imePadding(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 OutlinedTextField(
                     value = joinDisplayName,

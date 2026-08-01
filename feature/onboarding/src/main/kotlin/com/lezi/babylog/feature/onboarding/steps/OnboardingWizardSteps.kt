@@ -39,21 +39,22 @@ import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.designsystem.LeziBabyTheme
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.normalizeBabyThemeArgb
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.onboarding.OnboardingCreateBabySource
 import com.lezi.babylog.feature.onboarding.onboardingChooseFamilyBody
+import com.lezi.babylog.feature.onboarding.onboardingConnectFamilyAction
 import com.lezi.babylog.feature.onboarding.onboardingCreateBabyBody
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.SetupProbeResult
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 
-private val ThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
-    com.lezi.babylog.designsystem.normalizeBabyThemeArgb(it)
-}
-private val ThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
+private val ThemePalette = LeziBabyTheme.PaletteArgb.map { normalizeBabyThemeArgb(it) }
+private val ThemePaletteLabels = LeziBabyTheme.Labels
 
 @Composable
 internal fun OnboardingChooseFamilyStep(
@@ -86,7 +87,7 @@ internal fun OnboardingChooseFamilyStep(
         Text(
             when {
                 pendingMemberLogin != null -> "查看加入申请"
-                verifiedEndpoint == null -> "连接家庭服务器"
+                verifiedEndpoint == null -> onboardingConnectFamilyAction()
                 else -> "继续登录"
             },
         )
@@ -118,7 +119,7 @@ internal fun OnboardingChooseFamilyStep(
 
 @Composable
 internal fun OnboardingConnectServerStep(
-    familyWizardState: FamilyWizardState,
+    model: ConnectServerStepModel,
     familyWizardBusy: Boolean,
     endpointDraft: String,
     onEndpointDraftChange: (String) -> Unit,
@@ -126,75 +127,53 @@ internal fun OnboardingConnectServerStep(
     onReturnToAddress: () -> Unit,
     onKeepOffline: () -> Unit,
 ) {
-    val approval = familyWizardState as? FamilyWizardState.CertificateApprovalRequired
-    val ready = familyWizardState as? FamilyWizardState.EndpointReady
-    val failure = familyWizardState as? FamilyWizardState.EndpointFailure
-    val certificateChanged =
-        failure?.reason == SetupProbeResult.Failed.CertificateChanged
-    Text(
-        when {
-            familyWizardState is FamilyWizardState.ProbingEndpoint ->
-                "正在确认家庭服务器…"
-            approval != null -> "确认家庭服务器证书"
-            certificateChanged -> "服务器安全信息已变化"
-            ready?.snapshot?.mode == FamilyWizardMode.Create -> "这里还没有家庭"
-            ready != null -> "已找到家庭"
-            failure != null -> failure.message
-            else -> "连接家庭服务器"
-        },
-        style = MaterialTheme.typography.titleMedium,
-    )
-    if (approval != null) {
-        Text("这个服务器的证书尚未被手机系统认识。")
-        Text("请向部署服务器的人确认以下指纹。首次确认仍存在连接到错误服务器的风险。")
-        SelectionContainer {
-            Text(approval.candidate.fingerprint)
+    Text(model.title, style = MaterialTheme.typography.titleMedium)
+    when (val primary = model.primary) {
+        is ConnectServerPrimary.Trust -> {
+            Text("这个服务器的证书尚未被手机系统认识。")
+            Text("请向部署服务器的人确认以下指纹。首次确认仍存在连接到错误服务器的风险。")
+            SelectionContainer {
+                Text(primary.candidate.fingerprint)
+            }
         }
-    } else if (certificateChanged) {
-        Text("已固定的服务器公钥与当前连接不一致。为保护登录凭证，连接已停止。")
-    } else if (ready == null) {
-        Text("请输入部署乐记家庭后台的完整 HTTPS 地址")
-        OutlinedTextField(
-            value = endpointDraft,
-            onValueChange = onEndpointDraftChange,
-            enabled = !familyWizardBusy,
-            label = { Text("https://family.example.com") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    } else {
-        Text(ready.endpoint.origin)
+        ConnectServerPrimary.ForgetAndReconnect -> {
+            Text("已固定的服务器公钥与当前连接不一致。为保护登录凭证，连接已停止。")
+        }
+        is ConnectServerPrimary.ContinueWithReady -> {
+            Text(primary.origin)
+        }
+        ConnectServerPrimary.Connect -> {
+            Text("请输入部署乐记家庭后台的完整 HTTPS 地址")
+            OutlinedTextField(
+                value = endpointDraft,
+                onValueChange = onEndpointDraftChange,
+                enabled = !familyWizardBusy,
+                label = { Text("https://family.example.com") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
-    failure?.takeUnless { certificateChanged }
-        ?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
+    model.failureMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     Button(
-        enabled = !familyWizardBusy &&
-            (approval != null || certificateChanged || ready != null || endpointDraft.isNotBlank()),
+        enabled = model.primaryEnabled(familyWizardBusy, endpointDraft),
         onClick = onPrimaryAction,
         modifier = Modifier.fillMaxWidth().height(52.dp),
     ) {
-        Text(
-            when {
-                approval != null -> "信任此证书"
-                certificateChanged -> "忘记此服务器并重新连接"
-                ready?.snapshot?.mode == FamilyWizardMode.Create -> "新建家庭"
-                ready?.snapshot?.mode == FamilyWizardMode.Join -> "加入家庭"
-                else -> if (familyWizardBusy) "正在连接…" else "连接"
-            },
-        )
+        Text(model.primaryLabel(familyWizardBusy))
     }
-    if (approval != null) {
+    if (model.primary is ConnectServerPrimary.Trust) {
         TextButton(
             onClick = onReturnToAddress,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("返回修改地址") }
     }
     TextButton(
-        enabled = familyWizardState !is FamilyWizardState.Submitting,
+        enabled = model.keepOfflineEnabled,
         onClick = onKeepOffline,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(if (certificateChanged) "返回" else "暂不连接，保持离线")
+        Text(model.keepOfflineLabel)
     }
 }
 
@@ -440,12 +419,68 @@ internal fun OnboardingRecoveryCompleteStep() {
     )
 }
 
-/** Shared helpers re-exported for shell validation of create-baby form. */
-internal fun onboardingThemePalette(): List<Int> = ThemePalette
-
+/** Shared helpers for shell validation of create-baby form. */
 internal fun onboardingLimitNickname(input: String): String = limitBabyNicknameInput(input)
 
 internal fun onboardingBirthWeightError(grams: Int?): String? = birthWeightValidationError(grams)
+
+/**
+ * Single projection for connect-step titles, primary CTA, and shell action wiring.
+ * Labels and [onPrimaryAction] must both consume this so meaning cannot dual-source.
+ */
+internal data class ConnectServerStepModel(
+    val title: String,
+    val primary: ConnectServerPrimary,
+    val failureMessage: String?,
+    val keepOfflineLabel: String,
+    val keepOfflineEnabled: Boolean,
+) {
+    fun primaryLabel(busy: Boolean): String = when (val decision = primary) {
+        is ConnectServerPrimary.Trust -> "信任此证书"
+        ConnectServerPrimary.ForgetAndReconnect -> "忘记此服务器并重新连接"
+        is ConnectServerPrimary.ContinueWithReady -> when (decision.mode) {
+            FamilyWizardMode.Create -> "新建家庭"
+            FamilyWizardMode.Join -> "加入家庭"
+        }
+        ConnectServerPrimary.Connect -> if (busy) "正在连接…" else "连接"
+    }
+
+    fun primaryEnabled(busy: Boolean, endpointDraft: String): Boolean {
+        if (busy) return false
+        return when (primary) {
+            is ConnectServerPrimary.Trust,
+            ConnectServerPrimary.ForgetAndReconnect,
+            is ConnectServerPrimary.ContinueWithReady,
+            -> true
+            ConnectServerPrimary.Connect -> endpointDraft.isNotBlank()
+        }
+    }
+}
+
+internal fun connectServerStepModel(
+    familyWizardState: FamilyWizardState,
+): ConnectServerStepModel {
+    val primary = connectServerPrimaryDecision(familyWizardState)
+    val failure = familyWizardState as? FamilyWizardState.EndpointFailure
+    val certificateChanged = primary is ConnectServerPrimary.ForgetAndReconnect
+    val title = when {
+        familyWizardState is FamilyWizardState.ProbingEndpoint -> "正在确认家庭服务器…"
+        primary is ConnectServerPrimary.Trust -> "确认家庭服务器证书"
+        certificateChanged -> "服务器安全信息已变化"
+        primary is ConnectServerPrimary.ContinueWithReady &&
+            primary.mode == FamilyWizardMode.Create -> "这里还没有家庭"
+        primary is ConnectServerPrimary.ContinueWithReady -> "已找到家庭"
+        failure != null -> failure.message
+        else -> "连接家庭服务器"
+    }
+    return ConnectServerStepModel(
+        title = title,
+        primary = primary,
+        failureMessage = failure?.takeUnless { certificateChanged }?.message,
+        keepOfflineLabel = if (certificateChanged) "返回" else "暂不连接，保持离线",
+        keepOfflineEnabled = familyWizardState !is FamilyWizardState.Submitting,
+    )
+}
 
 /** Exposed for connect-step primary action wiring without re-deriving state in shell. */
 internal fun connectServerPrimaryDecision(

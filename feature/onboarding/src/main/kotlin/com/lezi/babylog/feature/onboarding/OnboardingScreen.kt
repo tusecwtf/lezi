@@ -47,6 +47,7 @@ import com.lezi.babylog.domain.family.FamilyWizardJoinRole
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.domain.family.FamilyWizardStep
+import com.lezi.babylog.domain.family.isBusy
 import com.lezi.babylog.domain.family.projectMemberLoginQrDialog
 import com.lezi.babylog.feature.onboarding.qr.OnboardingMemberLoginQrConfirm
 import com.lezi.babylog.feature.onboarding.qr.OnboardingMemberLoginScanOutcome
@@ -58,7 +59,7 @@ import com.lezi.babylog.feature.onboarding.steps.OnboardingCreateBabyStep
 import com.lezi.babylog.feature.onboarding.steps.OnboardingCreateFamilyStep
 import com.lezi.babylog.feature.onboarding.steps.OnboardingRecoveryCompleteStep
 import com.lezi.babylog.feature.onboarding.steps.OnboardingRecoveryPendingStep
-import com.lezi.babylog.feature.onboarding.steps.connectServerPrimaryDecision
+import com.lezi.babylog.feature.onboarding.steps.connectServerStepModel
 import com.lezi.babylog.feature.onboarding.steps.onboardingBirthWeightError
 import com.lezi.babylog.feature.onboarding.steps.onboardingLimitNickname
 import com.lezi.babylog.feature.onboarding.wizard.OnboardingJoinRoleDialog
@@ -69,7 +70,6 @@ import com.lezi.babylog.feature.onboarding.wizard.OnboardingOwnerTakeoverDialog
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
-import com.lezi.babylog.sync.session.requireDeviceName
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -129,10 +129,7 @@ fun OnboardingRoute(
     val familyWizardState by vm.familyWizardState.collectAsState()
     val pendingMemberLogin by vm.pendingMemberLogin.collectAsState()
     val verifiedEndpoint by vm.verifiedEndpoint.collectAsState(initial = null)
-    val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
-        familyWizardState is FamilyWizardState.ProbingEndpoint ||
-        familyWizardState is FamilyWizardState.VerifyingMemberLoginQr ||
-        familyWizardState is FamilyWizardState.ClaimingMemberLoginQr
+    val familyWizardBusy = familyWizardState.isBusy
     val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
     val novice = remember { FamilyEndpointConfig.emptyDraft() }
     var joinDraft by rememberSaveable(stateSaver = FamilyEndpointDraftSaver) {
@@ -154,7 +151,6 @@ fun OnboardingRoute(
         // Do not overwrite a non-blank draft the user is editing with a prior trusted origin.
         if (endpointDraft.isBlank()) endpointDraft = verifiedEndpoint?.origin.orEmpty()
     }
-    fun runForegroundAction(action: () -> Unit) = action()
     fun applyScannedMemberLogin(raw: String) {
         when (
             val outcome = parseOnboardingMemberLoginQrScan(
@@ -293,8 +289,9 @@ fun OnboardingRoute(
                 )
             }
             OnboardingStep.ConnectServer -> {
+                val connectModel = connectServerStepModel(familyWizardState)
                 OnboardingConnectServerStep(
-                    familyWizardState = familyWizardState,
+                    model = connectModel,
                     familyWizardBusy = familyWizardBusy,
                     endpointDraft = endpointDraft,
                     onEndpointDraftChange = {
@@ -304,7 +301,7 @@ fun OnboardingRoute(
                         }
                     },
                     onPrimaryAction = {
-                        when (val decision = connectServerPrimaryDecision(familyWizardState)) {
+                        when (val decision = connectModel.primary) {
                             is ConnectServerPrimary.Trust ->
                                 vm.trustCertificate(decision.candidate)
                             ConnectServerPrimary.ForgetAndReconnect -> {
@@ -348,22 +345,29 @@ fun OnboardingRoute(
                     formError = formError,
                     familyWizardBusy = familyWizardBusy,
                     onSubmit = {
-                        formError = null
                         val oneTimeRootPassword = bootstrapSecret
-                        runForegroundAction {
-                            vm.submitFamilyWizard(
-                                snapshot = onboardingFamilyWizardSnapshot(
-                                    mode = FamilyWizardMode.Create,
-                                    step = FamilyWizardStep.Identity,
-                                    draft = joinDraft,
-                                    displayName = createDisplayName,
-                                    familyName = createFamilyName,
-                                    deviceName = createDeviceName,
-                                ),
-                                bootstrapSecret = oneTimeRootPassword,
-                            )
-                            bootstrapSecret = ""
+                        onboardingCreateFamilySubmitError(
+                            displayName = createDisplayName,
+                            familyName = createFamilyName,
+                            deviceName = createDeviceName,
+                            bootstrapSecret = oneTimeRootPassword,
+                        )?.let {
+                            formError = it
+                            return@OnboardingCreateFamilyStep
                         }
+                        formError = null
+                        vm.submitFamilyWizard(
+                            snapshot = onboardingFamilyWizardSnapshot(
+                                mode = FamilyWizardMode.Create,
+                                step = FamilyWizardStep.Identity,
+                                draft = joinDraft,
+                                displayName = createDisplayName,
+                                familyName = createFamilyName,
+                                deviceName = createDeviceName,
+                            ),
+                            bootstrapSecret = oneTimeRootPassword,
+                        )
+                        bootstrapSecret = ""
                     },
                     onBack = {
                         bootstrapSecret = ""
@@ -510,43 +514,33 @@ fun OnboardingRoute(
             formError = formError,
             familyWizardBusy = familyWizardBusy,
             onLogin = {
-                runCatching { requireDeviceName(ownerDeviceName) }
-                    .exceptionOrNull()?.message?.let {
-                        formError = it
-                        return@OnboardingOwnerLoginDialog
-                    }
                 val rootPassword = ownerRootPassword
-                if (rootPassword.isBlank()) {
-                    formError = "请填写管理员根密码"
+                onboardingOwnerLoginSubmitError(ownerDeviceName, rootPassword)?.let {
+                    formError = it
                     return@OnboardingOwnerLoginDialog
                 }
-                runForegroundAction {
-                    vm.submitFamilyWizard(
-                        snapshot = onboardingFamilyWizardSnapshot(
-                            mode = FamilyWizardMode.Join,
-                            step = FamilyWizardStep.Identity,
-                            draft = joinDraft,
-                            displayName = "",
-                            deviceName = ownerDeviceName,
-                            joinRole = FamilyWizardJoinRole.Owner,
-                        ),
-                        bootstrapSecret = rootPassword,
-                    )
-                    ownerRootPassword = ""
-                }
+                formError = null
+                vm.submitFamilyWizard(
+                    snapshot = onboardingFamilyWizardSnapshot(
+                        mode = FamilyWizardMode.Join,
+                        step = FamilyWizardStep.Identity,
+                        draft = joinDraft,
+                        displayName = "",
+                        deviceName = ownerDeviceName,
+                        joinRole = FamilyWizardJoinRole.Owner,
+                    ),
+                    bootstrapSecret = rootPassword,
+                )
+                ownerRootPassword = ""
             },
             onTakeover = {
-                runCatching { requireDeviceName(ownerDeviceName) }
-                    .exceptionOrNull()?.message?.let {
-                        formError = it
-                        return@OnboardingOwnerLoginDialog
-                    }
-                if (ownerRootPassword.isBlank()) {
-                    formError = "请填写管理员根密码"
-                } else {
-                    showOwnerLogin = false
-                    showOwnerTakeover = true
+                onboardingOwnerLoginSubmitError(ownerDeviceName, ownerRootPassword)?.let {
+                    formError = it
+                    return@OnboardingOwnerLoginDialog
                 }
+                formError = null
+                showOwnerLogin = false
+                showOwnerTakeover = true
             },
             onBack = {
                 ownerRootPassword = ""
@@ -573,21 +567,20 @@ fun OnboardingRoute(
                     showOwnerLogin = true
                     return@OnboardingOwnerTakeoverDialog
                 }
-                runForegroundAction {
-                    vm.submitFamilyWizard(
-                        snapshot = onboardingFamilyWizardSnapshot(
-                            mode = FamilyWizardMode.Join,
-                            step = FamilyWizardStep.Identity,
-                            draft = joinDraft,
-                            displayName = "",
-                            deviceName = ownerDeviceName,
-                            joinRole = FamilyWizardJoinRole.Owner,
-                        ),
-                        bootstrapSecret = rootPassword,
-                        ownerTakeover = true,
-                    )
-                    ownerRootPassword = ""
-                }
+                formError = null
+                vm.submitFamilyWizard(
+                    snapshot = onboardingFamilyWizardSnapshot(
+                        mode = FamilyWizardMode.Join,
+                        step = FamilyWizardStep.Identity,
+                        draft = joinDraft,
+                        displayName = "",
+                        deviceName = ownerDeviceName,
+                        joinRole = FamilyWizardJoinRole.Owner,
+                    ),
+                    bootstrapSecret = rootPassword,
+                    ownerTakeover = true,
+                )
+                ownerRootPassword = ""
             },
             onCancel = {
                 if (!familyWizardBusy) {
@@ -613,28 +606,21 @@ fun OnboardingRoute(
             formError = formError,
             familyWizardBusy = familyWizardBusy,
             onSubmit = {
-                if (joinDisplayName.isBlank()) {
-                    formError = "请填写家庭称呼"
+                onboardingMemberJoinSubmitError(joinDisplayName, memberDeviceName)?.let {
+                    formError = it
                     return@OnboardingMemberJoinDialog
                 }
-                runCatching { requireDeviceName(memberDeviceName) }
-                    .exceptionOrNull()?.message?.let {
-                        formError = it
-                        return@OnboardingMemberJoinDialog
-                    }
-                runForegroundAction {
-                    formError = null
-                    vm.submitFamilyWizard(
-                        snapshot = onboardingFamilyWizardSnapshot(
-                            mode = FamilyWizardMode.Join,
-                            step = FamilyWizardStep.Identity,
-                            draft = joinDraft,
-                            displayName = joinDisplayName,
-                            deviceName = memberDeviceName,
-                            joinRole = FamilyWizardJoinRole.Member,
-                        ),
-                    )
-                }
+                formError = null
+                vm.submitFamilyWizard(
+                    snapshot = onboardingFamilyWizardSnapshot(
+                        mode = FamilyWizardMode.Join,
+                        step = FamilyWizardStep.Identity,
+                        draft = joinDraft,
+                        displayName = joinDisplayName,
+                        deviceName = memberDeviceName,
+                        joinRole = FamilyWizardJoinRole.Member,
+                    ),
+                )
             },
             onKeepOffline = {
                 showJoin = false
@@ -659,7 +645,7 @@ fun OnboardingRoute(
                 showMemberWaiting = false
                 step = OnboardingStep.ChooseFamily
             },
-            onCheckResult = { runForegroundAction { vm.checkMemberApproval() } },
+            onCheckResult = { vm.checkMemberApproval() },
             onDismiss = { showMemberWaiting = false },
         )
     }
