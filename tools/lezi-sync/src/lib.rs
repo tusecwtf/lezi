@@ -1532,6 +1532,16 @@ async fn stage_bundle(
                 "Completed care plan fulfillment binding is immutable",
             ))
         }
+        Err(StoreError::ImmutableFulfillmentCandidateEvidence) => {
+            return Err(ApiError::conflict(
+                "Fulfillment candidate evidence is immutable",
+            ))
+        }
+        Err(StoreError::FulfillmentCandidateTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted fulfillment candidate cannot be resurrected",
+            ))
+        }
         Err(StoreError::CustomItemTombstoneResurrection) => {
             return Err(ApiError::conflict(
                 "Deleted custom item cannot be resurrected",
@@ -1868,6 +1878,16 @@ async fn commit_bundle(
         Err(StoreError::ImmutableCarePlanFulfillmentBinding) => {
             return Err(ApiError::conflict(
                 "Completed care plan fulfillment binding is immutable",
+            ))
+        }
+        Err(StoreError::ImmutableFulfillmentCandidateEvidence) => {
+            return Err(ApiError::conflict(
+                "Fulfillment candidate evidence is immutable",
+            ))
+        }
+        Err(StoreError::FulfillmentCandidateTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted fulfillment candidate cannot be resurrected",
             ))
         }
         Err(StoreError::CustomItemTombstoneResurrection) => {

@@ -1198,9 +1198,10 @@ fn canonicalize_stool_defaults(payload: &mut Map<String, Value>) {
     }
 }
 
-/// Fulfillment candidate for multi-member offline fulfills (ticket 23 freeze).
-/// Submitter membership/role/confirmed_at are server-stamped; clients cannot
-/// forge evidence. Winner selection is a later ticket — this only stores candidates.
+/// Fulfillment candidate for multi-member offline fulfills.
+/// Submitter membership/role/confirmed_at are server-stamped on first accept;
+/// plan/record/actual_timestamp freeze with those stamps as immutable evidence.
+/// Clients cannot forge or splice-rewrite. Winner selection is client-side.
 fn validate_fulfillment_candidate(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     payload
         .entry("actual_timestamp".to_owned())

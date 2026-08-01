@@ -44,6 +44,14 @@ _Avoid_: 自动记录、自动完成
 用户确认计划已经履行的不可编辑时刻，用于家庭同步中多个履行结果的稳定裁决；它不同于可修改的实际发生时间和到达服务器的时间。
 _Avoid_: 记录时间、同步时间
 
+**履行候选证据**：
+家庭服务器首次接受某 `fulfillment_candidate` 后冻结的不可拼接改写元组：关联
+`care_plan_client_uuid`、`record_client_uuid`、候选上的 `actual_timestamp` 快照，以及
+服务端盖章的 `submitter_membership_id`、`submitter_role`、`confirmed_at`。同一 UUID
+后续只允许精确幂等 replay；改写任一字段 fail closed（含 Owner）；tombstone 不得借
+机改证据，禁止复活。
+_Avoid_: 可 LWW 改绑的候选、混合他人戳与改写业务字段、用到达序代替盖章证据
+
 **冲突未采纳履行**：
 家庭同步裁决中未成为唯一事实的履行结果；它不参与正常记录与汇总，但保留可审计内容，并可由管理员转为独立护理记录。
 _Avoid_: 已删除记录、重复事实

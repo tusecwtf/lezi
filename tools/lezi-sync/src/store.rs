@@ -403,6 +403,10 @@ pub enum StoreError {
     CarePlanTombstoneResurrection,
     #[error("completed care plan fulfillment binding is immutable")]
     ImmutableCarePlanFulfillmentBinding,
+    #[error("fulfillment candidate evidence is immutable")]
+    ImmutableFulfillmentCandidateEvidence,
+    #[error("deleted fulfillment candidate cannot be resurrected")]
+    FulfillmentCandidateTombstoneResurrection,
     #[error("media kind and association are immutable")]
     ImmutableMediaAssociation,
     #[error("entity updated_at is outside the accepted time range")]
@@ -4257,7 +4261,9 @@ fn is_open_next_feed_payload(payload: &Map<String, Value>) -> bool {
 }
 
 /// Any active member may submit a fulfillment candidate for any plan. Server
-/// freezes submitter membership, role, and confirmed_at; clients cannot forge.
+/// freezes the full evidence tuple after first accept: plan/record/actual time
+/// plus submitter membership, role, and confirmed_at. Clients cannot forge or
+/// splice-rewrite evidence. Exact replay is a no-op (no revision advance).
 fn stamp_fulfillment_candidates(
     role: &str,
     membership_id: &str,
@@ -4275,36 +4281,26 @@ fn stamp_fulfillment_candidates(
             entity.client_uuid.clone(),
         );
         if let Some(current) = existing.get(&key) {
-            // Freeze submitter evidence after first write.
+            if current.deleted_at.is_some() && entity.deleted_at.is_none() {
+                return Err(StoreError::FulfillmentCandidateTombstoneResurrection);
+            }
             let submitter = current
                 .payload
                 .get("submitter_membership_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+                .and_then(Value::as_str);
             if submitter.is_none() && role != "owner" {
                 return Err(StoreError::ForbiddenAnonymousFact);
             }
-            let submitter_role = current
-                .payload
-                .get("submitter_role")
-                .and_then(Value::as_str)
-                .unwrap_or(role)
-                .to_owned();
-            let frozen_at = current
-                .payload
-                .get("confirmed_at")
-                .and_then(Value::as_i64)
-                .unwrap_or(confirmed_at);
-            entity.payload.insert(
-                "submitter_membership_id".to_owned(),
-                submitter.map_or(Value::Null, Value::String),
-            );
-            entity
-                .payload
-                .insert("submitter_role".to_owned(), Value::String(submitter_role));
-            entity
-                .payload
-                .insert("confirmed_at".to_owned(), Value::Number(frozen_at.into()));
+            freeze_fulfillment_candidate_evidence(current, entity)?;
+            // Exact evidence + same tombstone state → force LWW no-op so
+            // exact replay does not advance revision or rewrite content.
+            if entity.deleted_at == current.deleted_at {
+                entity.updated_at = current.updated_at;
+                entity.payload = current.payload.clone();
+            } else {
+                // Live → tombstone is allowed only with frozen evidence payload.
+                entity.payload = current.payload.clone();
+            }
         } else {
             entity.payload.insert(
                 "submitter_membership_id".to_owned(),
@@ -4319,6 +4315,52 @@ fn stamp_fulfillment_candidates(
             );
         }
     }
+    Ok(())
+}
+
+/// Business pair + actual time are immutable after first accept. Submitter
+/// stamps are restored from the published row (clients cannot forge). Owner
+/// and peers cannot splice a rewritten pair under the original stamps.
+fn freeze_fulfillment_candidate_evidence(
+    current: &ExistingEntity,
+    entity: &mut Entity,
+) -> Result<(), StoreError> {
+    for field in [
+        "care_plan_client_uuid",
+        "record_client_uuid",
+        "actual_timestamp",
+    ] {
+        let current_value = current.payload.get(field).unwrap_or(&Value::Null);
+        let incoming_value = entity.payload.get(field).unwrap_or(&Value::Null);
+        if current_value != incoming_value {
+            return Err(StoreError::ImmutableFulfillmentCandidateEvidence);
+        }
+    }
+
+    let submitter = current
+        .payload
+        .get("submitter_membership_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let submitter_role = current
+        .payload
+        .get("submitter_role")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let frozen_at = current.payload.get("confirmed_at").and_then(Value::as_i64);
+
+    entity.payload.insert(
+        "submitter_membership_id".to_owned(),
+        submitter.map_or(Value::Null, Value::String),
+    );
+    entity.payload.insert(
+        "submitter_role".to_owned(),
+        submitter_role.map_or(Value::Null, Value::String),
+    );
+    entity.payload.insert(
+        "confirmed_at".to_owned(),
+        frozen_at.map_or(Value::Null, |value| Value::Number(value.into())),
+    );
     Ok(())
 }
 
@@ -6215,6 +6257,352 @@ mod tests {
                 .status,
             "staging"
         );
+    }
+
+    #[test]
+    fn fulfillment_candidate_business_evidence_is_frozen_after_first_accept() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let owner = owner_principal(&family_id);
+        let member = Principal {
+            family_id: family_id.clone(),
+            role: "member".to_owned(),
+            membership_id: "m-member".to_owned(),
+            device_id: "d-member".to_owned(),
+        };
+        let peer = Principal {
+            family_id: family_id.clone(),
+            role: "member".to_owned(),
+            membership_id: "m-peer".to_owned(),
+            device_id: "d-peer".to_owned(),
+        };
+        let baby_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        let other_plan_id = Uuid::new_v4();
+        let record_id = Uuid::new_v4();
+        let other_record_id = Uuid::new_v4();
+        let candidate_id = Uuid::new_v4();
+        let actual_timestamp = 1_700_000_000_100i64;
+        let baby_payload = json!({
+            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+            "avatar_media_uuid":null,"birth_weight_grams":3200
+        });
+        let plan_payload = |plan_note: &str| {
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,
+                "scheduled_at":1_700_000_000_000i64,
+                "scheduled_zone_id":"Asia/Shanghai",
+                "status":"pending","payload_json":{},"schema_version":2,
+                "note":plan_note,"created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":null,"fulfilled_at":null
+            })
+        };
+        let record_payload = || {
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,"timestamp":actual_timestamp,
+                "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+            })
+        };
+        let candidate_payload = |plan: Uuid, record: Uuid, actual: Option<i64>| {
+            json!({
+                "care_plan_client_uuid": plan,
+                "record_client_uuid": record,
+                "actual_timestamp": actual,
+                "submitter_membership_id": "forged",
+                "submitter_role": "owner",
+                "confirmed_at": 1,
+            })
+        };
+
+        publish_root(&store, &owner, entity("baby", baby_id, 1, baby_payload), 10).unwrap();
+        publish_root(
+            &store,
+            &owner,
+            entity("care_plan", plan_id, 1, plan_payload("primary")),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &owner,
+            entity("care_plan", other_plan_id, 1, plan_payload("other")),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &member,
+            entity("record", record_id, 2, record_payload()),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &member,
+            entity("record", other_record_id, 2, record_payload()),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            publish_root(
+                &store,
+                &member,
+                entity(
+                    "fulfillment_candidate",
+                    candidate_id,
+                    3,
+                    candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+        let after_first = store.pull(&family_id, 0).unwrap();
+        let frozen = after_first
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.entity_type == "fulfillment_candidate"
+                    && entity.client_uuid == candidate_id.to_string()
+            })
+            .expect("candidate published");
+        assert_eq!(frozen.payload["submitter_membership_id"], "m-member");
+        assert_eq!(frozen.payload["submitter_role"], "member");
+        assert_ne!(frozen.payload["confirmed_at"], 1);
+        assert_eq!(frozen.payload["care_plan_client_uuid"], json!(plan_id));
+        assert_eq!(frozen.payload["record_client_uuid"], json!(record_id));
+        assert_eq!(frozen.payload["actual_timestamp"], actual_timestamp);
+        let frozen_confirmed_at = frozen.payload["confirmed_at"].clone();
+        let frozen_rev = frozen.rev;
+        let baseline_cursor = after_first.cursor;
+
+        // Exact replay (higher updated_at, forged stamps) by original submitter,
+        // peer member, and owner: idempotent success, no content/revision change.
+        for (principal, updated_at) in [(&member, 30i64), (&peer, 40), (&owner, 50)] {
+            assert_eq!(
+                publish_root(
+                    &store,
+                    principal,
+                    entity(
+                        "fulfillment_candidate",
+                        candidate_id,
+                        updated_at,
+                        candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                    ),
+                    100,
+                )
+                .unwrap()
+                .applied,
+                0
+            );
+            let pulled = store.pull(&family_id, 0).unwrap();
+            assert_eq!(pulled.cursor, baseline_cursor);
+            let candidate = pulled
+                .entities
+                .iter()
+                .find(|entity| entity.client_uuid == candidate_id.to_string())
+                .unwrap();
+            assert_eq!(candidate.rev, frozen_rev);
+            assert_eq!(candidate.payload["submitter_membership_id"], "m-member");
+            assert_eq!(candidate.payload["submitter_role"], "member");
+            assert_eq!(candidate.payload["confirmed_at"], frozen_confirmed_at);
+            assert_eq!(candidate.payload["care_plan_client_uuid"], json!(plan_id));
+            assert_eq!(candidate.payload["record_client_uuid"], json!(record_id));
+            assert_eq!(candidate.payload["actual_timestamp"], actual_timestamp);
+        }
+
+        // Owner cannot rewrite plan, record, or actual time under original stamps.
+        for payload in [
+            candidate_payload(other_plan_id, record_id, Some(actual_timestamp)),
+            candidate_payload(plan_id, other_record_id, Some(actual_timestamp)),
+            candidate_payload(plan_id, record_id, Some(actual_timestamp + 1)),
+            candidate_payload(plan_id, record_id, None),
+        ] {
+            assert!(matches!(
+                publish_root(
+                    &store,
+                    &owner,
+                    entity("fulfillment_candidate", candidate_id, 60, payload),
+                    100,
+                ),
+                Err(StoreError::ImmutableFulfillmentCandidateEvidence)
+            ));
+            assert_eq!(store.pull(&family_id, 0).unwrap().cursor, baseline_cursor);
+        }
+
+        // Stage re-runs freeze: rewrite package is rejected before commit.
+        let staged_rewrite_bundle = Uuid::new_v4().to_string();
+        assert!(matches!(
+            store.stage_bundle(
+                &owner,
+                &staged_rewrite_bundle,
+                entity(
+                    "fulfillment_candidate",
+                    candidate_id,
+                    65,
+                    candidate_payload(other_plan_id, record_id, Some(actual_timestamp)),
+                ),
+                vec![],
+                1_700_000_000,
+            ),
+            Err(StoreError::ImmutableFulfillmentCandidateEvidence)
+        ));
+
+        // Exact staged replay commits as no-op (applied=0, cursor unchanged).
+        let staged_exact_bundle = Uuid::new_v4().to_string();
+        assert_eq!(
+            store
+                .stage_bundle(
+                    &owner,
+                    &staged_exact_bundle,
+                    entity(
+                        "fulfillment_candidate",
+                        candidate_id,
+                        66,
+                        candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                    ),
+                    vec![],
+                    1_700_000_000,
+                )
+                .unwrap()
+                .status,
+            "staging"
+        );
+        let exact_commit = store
+            .commit_bundle(
+                &owner,
+                &staged_exact_bundle,
+                &BTreeMap::new(),
+                100,
+                1_700_000_001,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(exact_commit.applied, 0);
+        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, baseline_cursor);
+
+        // Commit re-runs freeze: a package staged before first accept cannot
+        // overwrite the winning evidence when it finally commits.
+        let raced_candidate_id = Uuid::new_v4();
+        let raced_bundle = Uuid::new_v4().to_string();
+        assert_eq!(
+            store
+                .stage_bundle(
+                    &peer,
+                    &raced_bundle,
+                    entity(
+                        "fulfillment_candidate",
+                        raced_candidate_id,
+                        10,
+                        candidate_payload(
+                            other_plan_id,
+                            other_record_id,
+                            Some(actual_timestamp + 5)
+                        ),
+                    ),
+                    vec![],
+                    1_700_000_000,
+                )
+                .unwrap()
+                .status,
+            "staging"
+        );
+        assert_eq!(
+            publish_root(
+                &store,
+                &member,
+                entity(
+                    "fulfillment_candidate",
+                    raced_candidate_id,
+                    5,
+                    candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                ),
+                100,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+        let raced_baseline = store.pull(&family_id, 0).unwrap().cursor;
+        assert!(matches!(
+            store.commit_bundle(&peer, &raced_bundle, &BTreeMap::new(), 100, 1_700_000_002,),
+            Err(StoreError::ImmutableFulfillmentCandidateEvidence)
+        ));
+        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, raced_baseline);
+        let raced_frozen = store
+            .pull(&family_id, 0)
+            .unwrap()
+            .entities
+            .into_iter()
+            .find(|entity| entity.client_uuid == raced_candidate_id.to_string())
+            .unwrap();
+        assert_eq!(raced_frozen.payload["submitter_membership_id"], "m-member");
+        assert_eq!(
+            raced_frozen.payload["care_plan_client_uuid"],
+            json!(plan_id)
+        );
+        assert_eq!(raced_frozen.payload["record_client_uuid"], json!(record_id));
+        assert_eq!(raced_frozen.payload["actual_timestamp"], actual_timestamp);
+
+        // Tombstone keeps frozen evidence; resurrection is rejected; rewrite via
+        // tombstone cannot change business fields.
+        let mut tombstone = entity(
+            "fulfillment_candidate",
+            candidate_id,
+            70,
+            candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+        );
+        tombstone.deleted_at = Some(70);
+        assert_eq!(
+            publish_root(&store, &owner, tombstone, 100)
+                .unwrap()
+                .applied,
+            1
+        );
+        let after_tombstone = store.pull(&family_id, 0).unwrap();
+        let tombstoned = after_tombstone
+            .entities
+            .iter()
+            .find(|entity| entity.client_uuid == candidate_id.to_string())
+            .unwrap();
+        assert_eq!(tombstoned.deleted_at, Some(70));
+        assert_eq!(tombstoned.payload["submitter_membership_id"], "m-member");
+        assert_eq!(tombstoned.payload["care_plan_client_uuid"], json!(plan_id));
+        assert_eq!(tombstoned.payload["record_client_uuid"], json!(record_id));
+        assert_eq!(tombstoned.payload["actual_timestamp"], actual_timestamp);
+        let tombstone_cursor = after_tombstone.cursor;
+
+        let mut resurrect = entity(
+            "fulfillment_candidate",
+            candidate_id,
+            80,
+            candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+        );
+        resurrect.deleted_at = None;
+        assert!(matches!(
+            publish_root(&store, &owner, resurrect, 100),
+            Err(StoreError::FulfillmentCandidateTombstoneResurrection)
+        ));
+        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, tombstone_cursor);
+
+        let mut rewrite_via_tombstone = entity(
+            "fulfillment_candidate",
+            candidate_id,
+            90,
+            candidate_payload(other_plan_id, other_record_id, Some(actual_timestamp + 9)),
+        );
+        rewrite_via_tombstone.deleted_at = Some(90);
+        assert!(matches!(
+            publish_root(&store, &owner, rewrite_via_tombstone, 100),
+            Err(StoreError::ImmutableFulfillmentCandidateEvidence)
+        ));
+        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, tombstone_cursor);
     }
 
     #[test]

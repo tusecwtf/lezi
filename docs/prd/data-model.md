@@ -396,13 +396,19 @@ tombstone marker 不属于开放计划。
 
 ### 3.11.1 FulfillmentCandidate（NAS 契约 + 本机）
 
-`entity_type = fulfillment_candidate`：`care_plan_client_uuid`,
-`record_client_uuid`, `actual_timestamp?`, 以及服务端首次接受时盖章且不可改写的
-`submitter_membership_id`, `submitter_role`, `confirmed_at`。任意活动成员可提交；
-跨家庭/缺失引用以冲突拒绝。权威裁决键（客户端纯函数，与到达序无关）：
+`entity_type = fulfillment_candidate`：不可拼接改写的审计证据。业务字段
+`care_plan_client_uuid`、`record_client_uuid`、`actual_timestamp?` 与服务端首次接受时
+盖章的 `submitter_membership_id`、`submitter_role`、`confirmed_at` 共同构成证据元组；
+**首次写入后整元组冻结**，后续同一 candidate UUID 只允许精确幂等 replay（任意活动
+成员或 Owner），不得改写任一业务字段或提交者戳，也不推进 revision。Owner 亦不能
+改写历史证据。stage 与 commit 均重新执行冻结与 ACL，角色变化或并发 staged package
+不能绕过。跨家庭/缺失 plan/record 引用以冲突拒绝且不泄露其它家庭是否存在某 UUID；
+关联 plan/record 必须同家庭、同宝宝。tombstone 可软删整行但不得改证据字段，禁止
+复活。权威裁决键（客户端纯函数，与到达序无关）：
 1) 提交者是否管理员（`owner`/`admin`）；2) 较早的不可编辑 `confirmed_at`；
-3) 候选 `client_uuid` 升序。NAS 到达时间、可编辑实际发生时间、设备 `updated_at`
-与后续角色变化不参与比较。
+3) 候选 `client_uuid` 升序。NAS 到达时间、设备 `updated_at` 与后续角色变化不参与
+比较。候选上的 `actual_timestamp` 是首次提交时的证据快照（冻结），不同于护理记录上
+仍可编辑的实际发生时间。
 请求省略 `actual_timestamp` 时 NAS 规范为显式 `null`，保证 current pull 与 Android
 exact-key parser 使用同一 canonical shape。
 

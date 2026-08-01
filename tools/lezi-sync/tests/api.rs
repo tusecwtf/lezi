@@ -10347,6 +10347,163 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
             .unwrap()["payload"]["confirmed_at"],
         frozen_owner_at
     );
+    // Exact replay must not advance the family cursor / candidate revision.
+    let member_rev = m2["rev"].as_i64().unwrap();
+    let cursor_after_first_replays = pull2["cursor"].as_i64().unwrap();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            owner_token,
+            entity_wire(
+                "fulfillment_candidate",
+                &member_cand,
+                120,
+                json!({
+                    "care_plan_client_uuid": plan_id,
+                    "record_client_uuid": member_record,
+                    "submitter_membership_id": "owner-forged",
+                    "submitter_role": "owner",
+                    "confirmed_at": 42,
+                }),
+                None
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, pull_exact) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert_eq!(
+        pull_exact["cursor"].as_i64().unwrap(),
+        cursor_after_first_replays
+    );
+    let m_exact = pull_exact["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == member_cand)
+        .unwrap();
+    assert_eq!(m_exact["rev"].as_i64().unwrap(), member_rev);
+    assert_eq!(
+        m_exact["payload"]["submitter_membership_id"],
+        member["membership_id"]
+    );
+    assert_eq!(m_exact["payload"]["record_client_uuid"], member_record);
+
+    // Attack: cannot leave original submitter stamps + rewritten business fields.
+    let immutable_detail = "Fulfillment candidate evidence is immutable";
+    for payload in [
+        json!({
+            "care_plan_client_uuid": plan_id,
+            "record_client_uuid": owner_record,
+            "actual_timestamp": 1_700_000_000_100i64,
+            "submitter_membership_id": member["membership_id"],
+            "submitter_role": "member",
+            "confirmed_at": frozen_member_at,
+        }),
+        json!({
+            "care_plan_client_uuid": Uuid::new_v4().to_string(),
+            "record_client_uuid": member_record,
+            "submitter_membership_id": member["membership_id"],
+            "submitter_role": "member",
+            "confirmed_at": frozen_member_at,
+        }),
+        json!({
+            "care_plan_client_uuid": plan_id,
+            "record_client_uuid": member_record,
+            "actual_timestamp": 9_999_999_999i64,
+            "submitter_membership_id": member["membership_id"],
+            "submitter_role": "member",
+            "confirmed_at": frozen_member_at,
+        }),
+    ] {
+        let (status, body) = publish_root_bundle(
+            &rig.app,
+            owner_token,
+            entity_wire("fulfillment_candidate", &member_cand, 200, payload, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, json!({"detail": immutable_detail}));
+    }
+    let (_, pull_after_attack) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert_eq!(
+        pull_after_attack["cursor"].as_i64().unwrap(),
+        cursor_after_first_replays
+    );
+    let still = pull_after_attack["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == member_cand)
+        .unwrap();
+    assert_eq!(still["payload"]["record_client_uuid"], member_record);
+    assert_eq!(
+        still["payload"]["submitter_membership_id"],
+        member["membership_id"]
+    );
+    assert_eq!(still["payload"]["confirmed_at"], frozen_member_at);
+
+    // Tombstone keeps evidence; resurrection fails closed.
+    let (tombstone_status, tombstone_body) = publish_root_bundle(
+        &rig.app,
+        owner_token,
+        entity_wire(
+            "fulfillment_candidate",
+            &member_cand,
+            210,
+            json!({
+                "care_plan_client_uuid": plan_id,
+                "record_client_uuid": member_record,
+            }),
+            Some(210),
+        ),
+    )
+    .await;
+    assert_eq!(tombstone_status, StatusCode::OK, "{tombstone_body}");
+    let (resurrect_status, resurrect_body) = publish_root_bundle(
+        &rig.app,
+        owner_token,
+        entity_wire(
+            "fulfillment_candidate",
+            &member_cand,
+            220,
+            json!({
+                "care_plan_client_uuid": plan_id,
+                "record_client_uuid": member_record,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resurrect_status, StatusCode::CONFLICT, "{resurrect_body}");
+    assert_eq!(
+        resurrect_body,
+        json!({"detail": "Deleted fulfillment candidate cannot be resurrected"})
+    );
+
+    // Unknown plan/record refs stay family-scoped conflict (no cross-family leak).
+    let foreign_cand = Uuid::new_v4().to_string();
+    let (bad_ref_status, bad_ref_body) = publish_root_bundle(
+        &rig.app,
+        member_token,
+        entity_wire(
+            "fulfillment_candidate",
+            &foreign_cand,
+            300,
+            json!({
+                "care_plan_client_uuid": Uuid::new_v4().to_string(),
+                "record_client_uuid": member_record,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(bad_ref_status, StatusCode::CONFLICT, "{bad_ref_body}");
+    assert_eq!(
+        bad_ref_body["detail"],
+        "fulfillment_candidate care_plan_client_uuid does not exist"
+    );
 }
 
 #[tokio::test]

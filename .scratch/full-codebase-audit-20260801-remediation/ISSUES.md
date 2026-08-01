@@ -42,7 +42,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [01](./issues/01-preserve-forced-update-shell.md) | Audit P1-01 | 保留 CUR 强制更新壳 | — | S–M | implemented |
 | [02](./issues/02-cas-media-commit-receipts.md) | Audit P1-02 | 用条件回写确认媒体 commit | — | M | done |
 | [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | blocked |
-| [04](./issues/04-freeze-fulfillment-candidate-evidence.md) | Audit P1-04 | 冻结履行候选业务证据 | — | M | ready-for-agent |
+| [04](./issues/04-freeze-fulfillment-candidate-evidence.md) | Audit P1-04 | 冻结履行候选业务证据 | — | M | done |
 | [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | blocked |
 | [06](./issues/06-clear-nursing-timer-with-local-data.md) | Audit P1-06 | 本机清空同步停止并清除计时器 | — | M | ready-for-agent |
 | [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | blocked |
