@@ -112,8 +112,7 @@ object CareAggregation {
                 }
                 return@forEach
             }
-            // Point facts: not yet occurred under the aggregation clock.
-            if (record.timestamp > now) return@forEach
+            if (!pointFactOccurred(record, now)) return@forEach
 
             val date = Instant.ofEpochMilli(record.timestamp).atZone(zone).toLocalDate()
             val index = ChronoUnit.DAYS.between(startDate, date).toInt()
@@ -146,7 +145,7 @@ object CareAggregation {
     ): WidgetSummaryDto {
         val day = day(records, date, zone, now)
         val latest = records.asSequence()
-            .filter { it.deletedAt == null && it.timestamp <= now }
+            .filter { it.deletedAt == null && pointFactOccurred(it, now) }
             .maxByOrNull(Record::timestamp)
         return WidgetSummaryDto(
             babyName = babyName,
@@ -202,8 +201,7 @@ object CareAggregation {
                 }
                 return@forEach
             }
-            // Point facts: not yet occurred under the aggregation clock.
-            if (record.timestamp > now) return@forEach
+            if (!pointFactOccurred(record, now)) return@forEach
             if (record.timestamp < dayStart || record.timestamp >= dayEnd) return@forEach
 
             when (record.type) {
@@ -440,6 +438,13 @@ private const val MINUTE_MILLIS = 60_000L
 /** Closed or open sleep end, never past the aggregation clock. */
 private fun sleepIntervalEnd(record: Record, now: Long): Long =
     minOf(record.endTimestamp ?: now, now)
+
+/**
+ * Point-fact eligibility under the aggregation clock: inclusive at equality.
+ * KDoc on [CareAggregation] / PRD own the semantic; call sites share this predicate.
+ */
+private fun pointFactOccurred(record: Record, now: Long): Boolean =
+    record.timestamp <= now
 
 private fun MutableList<Float>.incrementFor(timestamp: Long, zone: ZoneId) {
     val hour = Instant.ofEpochMilli(timestamp).atZone(zone).hour

@@ -62,36 +62,18 @@ class CareAggregationFutureFactsTest {
         assertThat(careDay.bucket.poop).isEqualTo(0)
         assertThat(careDay.bucket.temps).containsExactly(36.5)
         assertThat(careDay.bucket.nursingMin).isEqualTo(0)
-        // Boundary formula lands in the 06–12 bucket (hour 12 → index 2? 12/6=2).
-        // hour 11 (now-1h would be different); at noon UTC hour=12 → index 2.
+        // past (11:59) → index 1 (06–12); at-now noon hour=12 → index 2 (12–18).
         assertThat(careDay.feedTimeBuckets.sum()).isEqualTo(2f)
+        assertThat(careDay.feedTimeBuckets[1]).isEqualTo(1f)
+        assertThat(careDay.feedTimeBuckets[2]).isEqualTo(1f)
     }
 
     @Test
     fun day_sleepClipsToNow_andFutureStartProducesNoSegment() {
-        val closedPastEndInFuture = rec(
-            id = 1,
-            type = RecordType.SLEEP,
-            ts = now - 30 * 60_000L,
-            payload = """{"is_nap":false,"anomaly_flag":false}""",
-            end = now + 15 * 60_000L,
-        )
-        val futureStart = rec(
-            id = 2,
-            type = RecordType.SLEEP,
-            ts = now + 10 * 60_000L,
-            payload = """{"is_nap":false,"anomaly_flag":false}""",
-            end = now + 40 * 60_000L,
-        )
-        val openSleep = rec(
-            id = 3,
-            type = RecordType.SLEEP,
-            ts = now - 20 * 60_000L,
-            payload = """{"is_nap":false,"anomaly_flag":false}""",
-        )
+        val records = sleepClipFixture()
 
         val careDay = CareAggregation.day(
-            records = listOf(closedPastEndInFuture, futureStart, openSleep),
+            records = records,
             date = day,
             zone = zone,
             now = now,
@@ -101,6 +83,20 @@ class CareAggregationFutureFactsTest {
         assertThat(careDay.bucket.sleepMin).isEqualTo(30 + 20)
         // Two physical starts that fall at/before now (future start excluded by clip).
         assertThat(careDay.sleepSegments).isEqualTo(2)
+    }
+
+    @Test
+    fun window_sleepClipsToNow_matchesDayUnderSameClock() = runTest {
+        val records = sleepClipFixture()
+
+        val careDay = CareAggregation.day(records, day, zone, now)
+        val windowDay = CareAggregation.window(records, day, 1, zone, now).days[0]
+
+        // Public seam: window() uses the same sleepIntervalEnd clock as day().
+        assertThat(windowDay.bucket.sleepMin).isEqualTo(careDay.bucket.sleepMin)
+        assertThat(windowDay.sleepSegments).isEqualTo(careDay.sleepSegments)
+        assertThat(windowDay.bucket.sleepMin).isEqualTo(30 + 20)
+        assertThat(windowDay.sleepSegments).isEqualTo(2)
     }
 
     @Test
@@ -210,6 +206,30 @@ class CareAggregationFutureFactsTest {
             CareAggregation.day(records, dstDay.plusDays(1), ny, localNow).bucket.feedMl,
         ).isEqualTo(0)
     }
+
+    /** Closed end past now, open sleep, and future start — shared day/window fixture. */
+    private fun sleepClipFixture(): List<Record> = listOf(
+        rec(
+            id = 1,
+            type = RecordType.SLEEP,
+            ts = now - 30 * 60_000L,
+            payload = """{"is_nap":false,"anomaly_flag":false}""",
+            end = now + 15 * 60_000L,
+        ),
+        rec(
+            id = 2,
+            type = RecordType.SLEEP,
+            ts = now + 10 * 60_000L,
+            payload = """{"is_nap":false,"anomaly_flag":false}""",
+            end = now + 40 * 60_000L,
+        ),
+        rec(
+            id = 3,
+            type = RecordType.SLEEP,
+            ts = now - 20 * 60_000L,
+            payload = """{"is_nap":false,"anomaly_flag":false}""",
+        ),
+    )
 
     private fun rec(
         id: Long,
