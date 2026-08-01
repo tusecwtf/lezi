@@ -16,8 +16,7 @@
 用户确认可信 HTTPS endpoint，管理员根密码只用于建家/管理员登录，普通成员经审批或管理员
 签发的单次登录授权取得独立设备会话；同步只在 App 前台触发。旧网络身份、明文协议、邀请
 加入和长期家庭凭证已整体退役且无兼容旁路。物理 NAS、双真机和相机扫码仍须按发布门提供
-实机证据；服务器地址搬迁由部署完成，App 不提供迁移/恢复协议或页面。历史处置见
-[sync-home-lan.md](./sync-home-lan.md)。
+实机证据；服务器地址搬迁由部署完成，App 不提供迁移/恢复协议或页面。
 
 合入后的行为以本目录为准；进行中的票在 [`.scratch/`](../../.scratch/)（见
 [`docs/agents/issue-tracker.md`](../agents/issue-tracker.md)）。闭合票不长期归档，
@@ -29,7 +28,6 @@
 |------|------|
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
-| [sync-home-lan.md](./sync-home-lan.md) | **历史处置**：旧网络与鉴权基线已取代，不是实现合同 |
 | [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |

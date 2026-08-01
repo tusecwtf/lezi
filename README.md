@@ -185,7 +185,7 @@ tools/lezi-sync
 
 开 PR：`git push -u github HEAD` 后 `gh pr create --base master`；模板见
 [`.github/pull_request_template.md`](.github/pull_request_template.md)。  
-同步契约变更对照 [`docs/prd/sync-home-lan.md`](docs/prd/sync-home-lan.md)。
+同步契约变更对照 [`docs/prd/sync-trusted-endpoint.md`](docs/prd/sync-trusted-endpoint.md)。
 
 ## 许可
 

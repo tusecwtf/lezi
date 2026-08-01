@@ -571,7 +571,7 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 | 删一条记录 | `deleted_at` 软删并进入 Outbox |
 | 成员退出 | membership 标记离开并吊销其全部 credentials；**NAS 业务数据保留** |
 | 清除本机全部 | 多重确认后清空本地库；**默认仅本地** |
-| 管理员删除家庭数据 | 多重确认后清空 NAS entities + `DATA_DIR/media/`（见 sync-home-lan） |
+| 管理员删除家庭数据 | 多重确认后清空 NAS entities + `DATA_DIR/media/`（见 [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md)） |
 
 ---
 

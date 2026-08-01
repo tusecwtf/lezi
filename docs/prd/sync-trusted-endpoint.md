@@ -4,12 +4,8 @@
 > 实现基线：`39426a037986df574d16b0512a3db10f7c225382`
 > 架构决策：[ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
-> 研究依据：[同步网络、鉴权与身份研究](../design/2026-07-30-sync-network-auth-architecture-research.md)
 
-本文定义家庭同步下一条 fresh-current 产品合同。它取代
-[`sync-home-lan.md`](./sync-home-lan.md) 中的 SSID 门闩、cleartext HTTP、长期 family token、
-邀请码、一设备一 membership 与旧成员软删除行为；未明确改变的 Room/Outbox、本地优先、
-同步实体、原子照片包、冲突裁决和 ACL 仍沿用该基线。
+本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；未改变的 Room/Outbox、本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线。
 
 ## 1. 一句话合同
 
@@ -364,7 +360,7 @@ App 不提供 NAS→VPS 迁移、handoff、备份恢复、server identity 搬迁
 ## 12. 文档与代码处置
 
 - 本文与 ADR-0011 是当前合同；ADR-0009、ADR-0010 已被取代。
-- `sync-home-lan.md` 只保留历史处置说明，不得据其恢复旧 wire、配置或界面。
+- 旧 `sync-home-lan` 合同已删除；不得据 git 历史中的旧文恢复旧 wire、配置或界面。
 - 0.3.1 已完成 fresh-current 收口：生产只保留可信 HTTPS、每设备会话、成员申请/审批与
   单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。
 - 拆票输入曾在 `.scratch/trusted-sync-endpoint-auth/`（0.3.1 后已清出工作区）；实现与证据见 git 历史（如 `aa7d3df`）。不得按已删除旧票重开旁路路径。

@@ -60,7 +60,7 @@ remote, and treat any published APK signed with a leaked keystore as untrusted.
 - Do not map port `8765` to the public internet without an operator-reviewed
   firewall and certificate setup. The loopback-only plaintext health port is
   operational infrastructure, not a business API.
-- Details: [`docs/prd/sync-home-lan.md`](docs/prd/sync-home-lan.md).
+- Details: [`docs/prd/sync-trusted-endpoint.md`](docs/prd/sync-trusted-endpoint.md).
 
 ## Medical disclaimer
 

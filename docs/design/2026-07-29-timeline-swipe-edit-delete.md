@@ -4,7 +4,7 @@
 |------|-----|
 | **Date** | 2026-07-29 |
 | **Status** | Implemented |
-| **Related** | `docs/prd/ui.md` §5.2、§5.4、§7；`docs/adr/0001-separate-care-plans-from-care-records.md`；Composer 删除确认 |
+| **Related** | `docs/prd/ui.md` §5.2、§5.4、§7；Composer 删除确认 |
 
 ## Overview
 

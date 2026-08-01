@@ -1,6 +1,6 @@
 # 乐记 — Android 技术说明
 
-> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 当前同步合同：[`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) · 历史处置：[`sync-home-lan.md`](./sync-home-lan.md)
+> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 当前同步合同：[`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md)
 
 ---
 
@@ -193,8 +193,7 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 **进程会话内**「稍后」不再刷屏。强制更新：根全屏（含 onboarding 之上）消费系统返回键并遮罩主功能；有包时
 立即安装（同一装前身份门），元数据暂缺时仅「重试检查更新」。详细同步门槛与错误语义见
 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md)；部署 runbook 见
-[`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)。调研笔记：
-[`docs/design/2026-07-31-android-apk-in-app-update-research.md`](../design/2026-07-31-android-apk-in-app-update-research.md)。
+[`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)。
 
 ---
 

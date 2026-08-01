@@ -22,11 +22,21 @@
 | [adr/](./adr/) | 架构决策记录（含状态索引） |
 | [agents/](./agents/) | 本地 issue tracker、triage 标签、domain 消费规则、GitHub PR 约定 |
 | [design/](./design/) | 未完全写回 PRD 的中等粒度设计（非 tracker） |
+| [dev/](./dev/) | 开发机工具备忘（如 Cargo worktree 共享 target 示例） |
 | [../CONTEXT.md](../CONTEXT.md) | 领域术语表 |
 | [../.scratch/](../.scratch/) | 进行中的 spec 与票（见 [agents/issue-tracker.md](./agents/issue-tracker.md)） |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | 贡献 / 分支 / 双 remote |
 | [../SECURITY.md](../SECURITY.md) | 漏洞报告与密钥约定 |
 | [../LICENSE](../LICENSE) | MIT |
+
+## 真源优先级
+
+1. 合入后产品行为 → `docs/prd/`（同步唯一合同：`prd/sync-trusted-endpoint.md`）
+2. 难逆架构决策 → `docs/adr/` 中 **accepted** 行（见 `adr/README` 状态表）；superseded ADR 只作决策史
+3. 领域用词 → 根 `CONTEXT.md`
+4. 未写回 PRD 的交互细则 → `docs/design/` 中 Status 为 Active / Implemented（Draft 非正式合同）
+5. 进行中的票 → `.scratch/`
+6. **禁止**当前合同文档链回历史处置文或已 Folded 的 design；历史文若暂留只允许单向指向当前合同
 
 ## 不要放进仓库（gitignore / 临时目录）
 
