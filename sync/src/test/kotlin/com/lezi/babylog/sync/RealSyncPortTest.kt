@@ -5551,6 +5551,63 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun standaloneLogConcurrentEditToExactlyPublishedKeepsDirtyAndBody() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-standalone-pub-clock",
+                updatedAt = 400,
+                familyPublishedUpdatedAt = 400,
+                note = "original",
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-standalone-pub-clock")
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/pub-clock.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        // Package elevates to 401; concurrent edit lands on that same LWW clock.
+        rig.backend.afterCommit = {
+            rig.backend.afterCommit = null
+            val current = requireNotNull(
+                rig.records.getByClientUuid("record-standalone-pub-clock"),
+            )
+            rig.records.update(
+                current.copy(
+                    updatedAt = 401,
+                    note = "edited-to-published-clock",
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val concurrent = requireNotNull(
+            rig.records.getByClientUuid("record-standalone-pub-clock"),
+        )
+        assertThat(concurrent.updatedAt).isEqualTo(401)
+        assertThat(concurrent.note).isEqualTo("edited-to-published-clock")
+        assertThat(concurrent.syncDirty).isTrue()
+        assertThat(concurrent.familyPublishedUpdatedAt).isEqualTo(401)
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.records.listPendingSync().map { it.clientUuid })
+            .contains("record-standalone-pub-clock")
+    }
+
+    @Test
     fun standaloneLogCrashAfterRemoteCommitRetriesSameBundleIdAndConverges() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
@@ -5600,6 +5657,218 @@ class RealSyncPortTest {
         assertThat(published.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
+    @Test
+    fun standaloneCarePlanConcurrentRootEditKeepsContentDirtyAndMonotonicReceipt() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val planId = rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-standalone-concurrent",
+                updatedAt = 800,
+                familyPublishedUpdatedAt = 800,
+                payloadJson = """{"amount_ml":1}""",
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-plan-standalone-concurrent")
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/plan-concurrent.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 150,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.afterCommit = {
+            rig.backend.afterCommit = null
+            val current = requireNotNull(
+                rig.carePlans.getByClientUuid("plan-standalone-concurrent"),
+            )
+            rig.carePlans.update(
+                current.copy(
+                    updatedAt = 950,
+                    payloadJson = """{"amount_ml":99}""",
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val concurrent = requireNotNull(
+            rig.carePlans.getByClientUuid("plan-standalone-concurrent"),
+        )
+        assertThat(concurrent.updatedAt).isEqualTo(950)
+        assertThat(concurrent.payloadJson).isEqualTo("""{"amount_ml":99}""")
+        assertThat(concurrent.syncDirty).isTrue()
+        // max(nextPackageVersion(800), media 150) = 801
+        assertThat(concurrent.familyPublishedUpdatedAt).isEqualTo(801)
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.carePlans.listPendingSync().map { it.clientUuid })
+            .contains("plan-standalone-concurrent")
+    }
+
+    @Test
+    fun standaloneCarePlanCrashAfterRemoteCommitRetriesSameBundleIdAndConverges() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val planId = rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-standalone-crash",
+                updatedAt = 700,
+                familyPublishedUpdatedAt = 700,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-plan-standalone-crash")
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/plan-crash.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 120,
+                syncDirty = true,
+            ),
+        )
+        val expectedBundleId = AtomicBundleId.forCarePlan("plan-standalone-crash", 701)
+        rig.backend.afterCommit = {
+            throw IllegalStateException("crash after remote commit before local ack")
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        assertThat(rig.backend.committedBundles).containsExactly(expectedBundleId)
+        assertThat(rig.carePlans.getByClientUuid("plan-standalone-crash")?.updatedAt)
+            .isEqualTo(700)
+        assertThat(rig.carePlans.getByClientUuid("plan-standalone-crash")?.familyPublishedUpdatedAt)
+            .isEqualTo(700)
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isTrue()
+
+        rig.backend.afterCommit = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.committedBundles.count { it == expectedBundleId }).isEqualTo(2)
+        val published = requireNotNull(rig.carePlans.getByClientUuid("plan-standalone-crash"))
+        assertThat(published.updatedAt).isEqualTo(701)
+        assertThat(published.familyPublishedUpdatedAt).isEqualTo(701)
+        assertThat(published.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
+    @Test
+    fun avatarOnlyBabyConcurrentRootEditKeepsContentDirty() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val avatarUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-avatar-concurrent",
+                updatedAt = 300,
+                nickname = "原昵称",
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "avatars/concurrent.jpg",
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                babyId = babyId,
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                localUri = "avatars/concurrent.jpg",
+                mime = "image/jpeg",
+                byteSize = 2,
+                createdAt = 100,
+                updatedAt = 250,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.afterCommit = {
+            rig.backend.afterCommit = null
+            val current = requireNotNull(
+                rig.babies.getByClientUuid("baby-avatar-concurrent"),
+            )
+            rig.babies.update(
+                current.copy(
+                    updatedAt = 900,
+                    nickname = "并发昵称",
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val concurrent = requireNotNull(rig.babies.getByClientUuid("baby-avatar-concurrent"))
+        assertThat(concurrent.updatedAt).isEqualTo(900)
+        assertThat(concurrent.nickname).isEqualTo("并发昵称")
+        assertThat(concurrent.syncDirty).isTrue()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
+        assertThat(rig.babies.listPendingSync().map { it.clientUuid })
+            .contains("baby-avatar-concurrent")
+    }
+
+    @Test
+    fun avatarOnlyBabyCrashAfterRemoteCommitRetriesSameBundleIdAndConverges() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val avatarUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-avatar-crash",
+                updatedAt = 300,
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "avatars/crash.jpg",
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                babyId = babyId,
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                localUri = "avatars/crash.jpg",
+                mime = "image/jpeg",
+                byteSize = 2,
+                createdAt = 100,
+                updatedAt = 250,
+                syncDirty = true,
+            ),
+        )
+        val expectedBundleId = AtomicBundleId.forBaby("baby-avatar-crash", 301)
+        rig.backend.afterCommit = {
+            throw IllegalStateException("crash after remote commit before local ack")
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        assertThat(rig.backend.committedBundles).containsExactly(expectedBundleId)
+        assertThat(rig.babies.getByClientUuid("baby-avatar-crash")?.updatedAt).isEqualTo(300)
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isTrue()
+
+        rig.backend.afterCommit = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.committedBundles.count { it == expectedBundleId }).isEqualTo(2)
+        val baby = requireNotNull(rig.babies.getByClientUuid("baby-avatar-crash"))
+        assertThat(baby.updatedAt).isEqualTo(301)
+        assertThat(baby.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.remoteUri).isNotNull()
         assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 

@@ -98,7 +98,7 @@ class SyntheticRootPublicationRoomTest {
     }
 
     @Test
-    fun carePlanMarkSyncedSemanticsMatchRecordSyntheticReceipt() = runBlocking {
+    fun carePlanSyntheticAckMatchesRecordReceiptSemantics() = runBlocking {
         carePlans.upsert(
             CarePlanEntity(
                 clientUuid = "plan-syn",
@@ -127,7 +127,66 @@ class SyntheticRootPublicationRoomTest {
     }
 
     @Test
-    fun babySyntheticAckIsEquivalentWatermarkViaUpdatedAtAndMarkSynced() = runBlocking {
+    fun recordConcurrentEditToExactlyPublishedKeepsDirtyAndBody() = runBlocking {
+        records.upsert(
+            RecordEntity(
+                clientUuid = "rec-pub-conc",
+                babyId = 1,
+                type = "formula",
+                timestamp = 1,
+                payloadJson = """{"amount_ml":2}""",
+                note = "edited-to-published-clock",
+                updatedAt = 401,
+                familyPublishedUpdatedAt = 400,
+                syncDirty = true,
+            ),
+        )
+
+        assertFalse(
+            records.acknowledgeSyntheticRootPublication(
+                clientUuid = "rec-pub-conc",
+                expectedLocalUpdatedAt = 400,
+                publishedUpdatedAt = 401,
+            ),
+        )
+        val row = requireNotNull(records.getByClientUuid("rec-pub-conc"))
+        assertEquals(401L, row.updatedAt)
+        assertEquals("edited-to-published-clock", row.note)
+        assertTrue(row.syncDirty)
+        assertEquals(401L, row.familyPublishedUpdatedAt)
+    }
+
+    @Test
+    fun carePlanConcurrentEditToExactlyPublishedKeepsDirty() = runBlocking {
+        carePlans.upsert(
+            CarePlanEntity(
+                clientUuid = "plan-pub-conc",
+                babyId = 1,
+                type = "formula",
+                scheduledAt = 9_000_000_000_000L,
+                scheduledZoneId = "Asia/Shanghai",
+                payloadJson = """{"amount_ml":3}""",
+                updatedAt = 801,
+                familyPublishedUpdatedAt = 800,
+                syncDirty = true,
+            ),
+        )
+
+        assertFalse(
+            carePlans.acknowledgeSyntheticRootPublication(
+                clientUuid = "plan-pub-conc",
+                expectedLocalUpdatedAt = 800,
+                publishedUpdatedAt = 801,
+            ),
+        )
+        val row = requireNotNull(carePlans.getByClientUuid("plan-pub-conc"))
+        assertEquals(801L, row.updatedAt)
+        assertTrue(row.syncDirty)
+        assertEquals(801L, row.familyPublishedUpdatedAt)
+    }
+
+    @Test
+    fun babySyntheticAckAdvancesWatermarkAndKeepsConcurrentDirty() = runBlocking {
         babies.upsert(
             BabyEntity(
                 familyId = 1,
@@ -164,5 +223,19 @@ class SyntheticRootPublicationRoomTest {
         assertEquals("新昵称", concurrent.nickname)
         assertEquals(90L, concurrent.updatedAt)
         assertTrue(concurrent.syncDirty)
+
+        // Concurrent edit that lands exactly on published clock keeps dirty.
+        babies.update(concurrent.copy(nickname = "同刻", updatedAt = 71, syncDirty = true))
+        assertFalse(
+            babies.acknowledgeSyntheticRootPublication(
+                clientUuid = "baby-syn",
+                expectedLocalUpdatedAt = 70,
+                publishedUpdatedAt = 71,
+            ),
+        )
+        val atPublished = requireNotNull(babies.getByClientUuid("baby-syn"))
+        assertEquals("同刻", atPublished.nickname)
+        assertEquals(71L, atPublished.updatedAt)
+        assertTrue(atPublished.syncDirty)
     }
 }
