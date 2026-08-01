@@ -35,7 +35,7 @@ class ContractSupersededSurfacesTest {
             "feature/onboarding/src/main/kotlin/com/lezi/babylog/feature/onboarding/OnboardingScreen.kt",
         )
         val account = source(
-            "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/FamilyViewModel.kt",
+            "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/wizard/AccountFamilyWizardHost.kt",
         )
         val composer = source(
             "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordComposer.kt",
@@ -151,7 +151,7 @@ class ContractSupersededSurfacesTest {
             assertThat(it).contains("syncPort.sync(SyncTrigger.PullToRefresh)")
         }
         assertThat(source(
-            "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/FamilySharingContent.kt",
+            "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/overview/FamilySharingContent.kt",
         )).doesNotContain("立即同步")
     }
 

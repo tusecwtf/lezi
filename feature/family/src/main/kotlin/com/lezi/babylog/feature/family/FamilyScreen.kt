@@ -48,6 +48,9 @@ import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.optionalUpdateDialogBody
 import com.lezi.babylog.sync.requireDeviceName
 import com.lezi.babylog.domain.projectMemberLoginQrDialog
+import com.lezi.babylog.feature.family.members.MembersDevicesHost
+import com.lezi.babylog.feature.family.overview.AccountOverviewHost
+import com.lezi.babylog.feature.family.wizard.AccountFamilyWizardHost
 import androidx.compose.ui.window.DialogProperties
 
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
@@ -63,15 +66,23 @@ private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     },
 )
 
+/**
+ * Account navigation shell: composes [AccountOverviewHost], [MembersDevicesHost], and
+ * [AccountFamilyWizardHost] without reintroducing a five-flow God ViewModel surface.
+ */
 @Composable
 fun FamilyRoute(
     onAddBaby: () -> Unit = {},
-    vm: FamilyViewModel = hiltViewModel(),
+    overviewHost: AccountOverviewHost = hiltViewModel(),
+    membersHost: MembersDevicesHost = hiltViewModel(),
+    wizardHost: AccountFamilyWizardHost = hiltViewModel(),
 ) {
-    val ui by vm.ui.collectAsStateWithLifecycle()
-    val appUpdateOutcome by vm.appUpdateOutcome.collectAsStateWithLifecycle()
-    val checkingAppUpdate by vm.checkingAppUpdate.collectAsStateWithLifecycle()
-    val installingAppUpdate by vm.installingAppUpdate.collectAsStateWithLifecycle()
+    val overview by overviewHost.ui.collectAsStateWithLifecycle()
+    val members by membersHost.ui.collectAsStateWithLifecycle()
+    val ui = remember(overview, members) { familyUiFromHosts(overview, members) }
+    val appUpdateOutcome by overviewHost.appUpdateOutcome.collectAsStateWithLifecycle()
+    val checkingAppUpdate by overviewHost.checkingAppUpdate.collectAsStateWithLifecycle()
+    val installingAppUpdate by overviewHost.installingAppUpdate.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
     var retainedWizardMode by rememberSaveable { mutableStateOf<String?>(null) }
@@ -111,8 +122,8 @@ fun FamilyRoute(
     var deleteFamilyFeedback by remember { mutableStateOf<String?>(null) }
     var deletingFamily by remember { mutableStateOf(false) }
 
-    val familyWizardState by vm.familyWizardState.collectAsStateWithLifecycle()
-    val verifiedEndpoint by vm.verifiedEndpoint.collectAsStateWithLifecycle(initialValue = null)
+    val familyWizardState by wizardHost.familyWizardState.collectAsStateWithLifecycle()
+    val verifiedEndpoint by wizardHost.verifiedEndpoint.collectAsStateWithLifecycle(initialValue = null)
     val novice = remember { FamilyEndpointConfig.emptyDraft() }
     fun draftFromUiOrNovice(): FamilyEndpointDraft {
         val saved = when {
@@ -195,7 +206,7 @@ fun FamilyRoute(
     fun runForegroundAction(action: () -> Unit) = action()
 
     LaunchedEffect(ui.enabled, ui.familyId) {
-        if (ui.enabled) vm.refreshMembers(showErrors = false)
+        if (ui.enabled) membersHost.refreshMembers(showErrors = false)
     }
 
     fun openEndpointConnection() {
@@ -210,7 +221,7 @@ fun FamilyRoute(
     }
 
     fun useManualJoinFor(memberLogin: MemberLoginQrPayload) {
-        vm.cancelMemberLoginQr()
+        wizardHost.cancelMemberLoginQr()
         endpointDraft = memberLogin.endpoint.origin
         dialog = FamilyDialog.ConnectEndpoint
     }
@@ -226,7 +237,7 @@ fun FamilyRoute(
             }
             memberQrDeviceName = defaultAndroidDeviceName(context)
             dialog = null
-            vm.verifyMemberLoginQr(memberLogin)
+            wizardHost.verifyMemberLoginQr(memberLogin)
             return
         }
         showMessage("这不是可用的成员登录二维码")
@@ -322,7 +333,7 @@ fun FamilyRoute(
                     // Keep projecting the QR recovery surface until recovery succeeds.
                     return@LaunchedEffect
                 }
-                vm.consumeFamilyWizardCompletion()?.let { consumed ->
+                wizardHost.consumeFamilyWizardCompletion()?.let { consumed ->
                     bootstrapSecret = ""
                     bootstrapSecretFeedback = null
                     createDisplayName = ""
@@ -338,6 +349,7 @@ fun FamilyRoute(
                     ownerRootPasswordFeedback = null
                     retainedWizardMode = null
                     retainedWizardStep = null
+                    membersHost.refreshMembers(showErrors = true)
                     dialog = FamilyDialog.Message(familyWizardOutcomeCopy(consumed))
                 }
             }
@@ -368,7 +380,7 @@ fun FamilyRoute(
             FamilyOverview(
                 ui = ui,
                 onAddBaby = onAddBaby,
-                onSetCurrent = vm::setCurrent,
+                onSetCurrent = overviewHost::setCurrent,
                 onEditBaby = { dialog = FamilyDialog.EditBaby(it) },
                 onMergeBaby = { dialog = FamilyDialog.MergeBaby(it) },
                 onDeleteBaby = { dialog = FamilyDialog.DeleteBaby(it) },
@@ -379,7 +391,7 @@ fun FamilyRoute(
                 endpointConfigured = endpointConfigured,
                 onOpenMembers = {
                     runForegroundAction {
-                        vm.refreshMembers(showErrors = true)
+                        membersHost.refreshMembers(showErrors = true)
                         dialog = FamilyDialog.MembersList
                     }
                 },
@@ -389,11 +401,11 @@ fun FamilyRoute(
                 onLeaveFamily = { dialog = FamilyDialog.ConfirmLeave },
                 onDeleteFamily = {
                     resetDeleteFamilyConfirmation()
-                    vm.refreshMembers(showErrors = true)
+                    membersHost.refreshMembers(showErrors = true)
                     dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
                 },
-                onOpenOptionalAppUpdate = vm::openOptionalAppUpdate,
-                onDismissOptionalAppUpdate = vm::dismissOptionalAppUpdate,
+                onOpenOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
+                onDismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
             )
         }
     }
@@ -402,13 +414,13 @@ fun FamilyRoute(
         is AppUpdateUiOutcome.Message -> {
             AlertDialog(
                 onDismissRequest = {
-                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
+                    if (!installingAppUpdate) overviewHost.dismissAppUpdateOutcome()
                 },
                 title = { Text(outcome.title) },
                 text = { Text(outcome.body) },
                 confirmButton = {
                     TextButton(
-                        onClick = vm::dismissAppUpdateOutcome,
+                        onClick = overviewHost::dismissAppUpdateOutcome,
                         enabled = !installingAppUpdate,
                     ) {
                         Text(if (installingAppUpdate) "请稍候" else "知道了")
@@ -419,13 +431,13 @@ fun FamilyRoute(
         is AppUpdateUiOutcome.OptionalUpdate -> {
             AlertDialog(
                 onDismissRequest = {
-                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
+                    if (!installingAppUpdate) overviewHost.dismissAppUpdateOutcome()
                 },
                 title = { Text("发现新版本") },
                 text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
                 confirmButton = {
                     TextButton(
-                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        onClick = { overviewHost.installOptionalUpdate(outcome.metadata) },
                         enabled = !installingAppUpdate,
                     ) {
                         Text(if (installingAppUpdate) "安装中…" else "立即更新")
@@ -433,7 +445,7 @@ fun FamilyRoute(
                 },
                 dismissButton = {
                     TextButton(
-                        onClick = vm::dismissAppUpdateOutcome,
+                        onClick = overviewHost::dismissAppUpdateOutcome,
                         enabled = !installingAppUpdate,
                     ) {
                         Text("稍后")
@@ -453,7 +465,7 @@ fun FamilyRoute(
                 text = { Text(forcedUpdateDialogBody(outcome.metadata)) },
                 confirmButton = {
                     TextButton(
-                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        onClick = { overviewHost.installOptionalUpdate(outcome.metadata) },
                         enabled = !installingAppUpdate,
                     ) {
                         Text(if (installingAppUpdate) "安装中…" else "立即更新")
@@ -473,7 +485,7 @@ fun FamilyRoute(
                 text = { Text(forcedUpdatePackageUnknownBody()) },
                 confirmButton = {
                     TextButton(
-                        onClick = vm::checkAppUpdate,
+                        onClick = overviewHost::checkAppUpdate,
                         enabled = !checkingAppUpdate && !installingAppUpdate,
                     ) {
                         Text(
@@ -489,7 +501,7 @@ fun FamilyRoute(
         }
         AppUpdateUiOutcome.NeedsInstallPermission -> {
             AlertDialog(
-                onDismissRequest = vm::dismissAppUpdateOutcome,
+                onDismissRequest = overviewHost::dismissAppUpdateOutcome,
                 title = { Text("需要安装权限") },
                 text = {
                     Text("请允许乐记安装应用，然后再试一次立即更新。")
@@ -502,14 +514,14 @@ fun FamilyRoute(
                                 Uri.parse("package:${context.packageName}"),
                             )
                             runCatching { context.startActivity(intent) }
-                            vm.dismissAppUpdateOutcome()
+                            overviewHost.dismissAppUpdateOutcome()
                         },
                     ) {
                         Text("去设置")
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = vm::dismissAppUpdateOutcome) {
+                    TextButton(onClick = overviewHost::dismissAppUpdateOutcome) {
                         Text("取消")
                     }
                 },
@@ -525,11 +537,11 @@ fun FamilyRoute(
             onEndpointDraftChange = {
                 endpointDraft = it
                 if (familyWizardState is FamilyWizardState.EndpointFailure) {
-                    vm.keepOffline()
+                    wizardHost.keepOffline()
                 }
             },
-            onConnect = { vm.connectEndpoint(endpointDraft) },
-            onTrustCertificate = vm::trustCertificate,
+            onConnect = { wizardHost.connectEndpoint(endpointDraft) },
+            onTrustCertificate = wizardHost::trustCertificate,
             onContinue = { snapshot ->
                 val endpoint = snapshot.endpointDraft
                 val identity = snapshot.copy(
@@ -542,23 +554,23 @@ fun FamilyRoute(
                     portText = "443",
                     scheme = "https",
                 )
-                vm.beginFamilyWizard(identity)
+                wizardHost.beginFamilyWizard(identity)
                 if (identity.mode == FamilyWizardMode.Join) joinRoleName = null
                 showWizard(identity.mode, identity.step)
             },
             onForget = {
-                vm.forgetEndpoint()
+                wizardHost.forgetEndpoint()
                 endpointDraft = ""
             },
-            onReturnToAddress = { vm.keepOffline() },
+            onReturnToAddress = { wizardHost.keepOffline() },
             onKeepOffline = {
-                vm.keepOffline()
+                wizardHost.keepOffline()
                 dialog = null
             },
         )
         FamilyDialog.MembersList -> if (ui.enabled) FamilyMembersListSheet(
             ui = ui,
-            onRefreshMembers = { runForegroundAction { vm.refreshMembers(showErrors = true) } },
+            onRefreshMembers = { runForegroundAction { membersHost.refreshMembers(showErrors = true) } },
             onEditMyDisplayName = {
                 editDisplayName = ui.displayName.takeUnless {
                     it == LOCAL_FAMILY_DISPLAY_NAME
@@ -590,7 +602,7 @@ fun FamilyRoute(
             onCreateMemberLoginQr = if (ui.role == FamilyRole.Owner) {
                 { membershipId ->
                     runForegroundAction {
-                        vm.createMemberLoginQr(membershipId) { result ->
+                        membersHost.createMemberLoginQr(membershipId) { result ->
                             result.fold(
                                 onSuccess = { dialog = FamilyDialog.MemberLoginQrCode(it) },
                                 onFailure = {
@@ -635,7 +647,7 @@ fun FamilyRoute(
             onReviewRename = if (ui.role == FamilyRole.Owner) {
                 { request, approve ->
                     runForegroundAction {
-                        vm.decideMemberRename(request, approve) { _, copy ->
+                        membersHost.decideMemberRename(request, approve) { _, copy ->
                             showMessage(copy, resume = FamilyDialog.MembersList)
                         }
                     }
@@ -664,7 +676,7 @@ fun FamilyRoute(
                 busy = decidingMemberRequest,
                 onBindExisting = { membershipId ->
                     decidingMemberRequest = true
-                    vm.bindExistingMemberLogin(
+                    membersHost.bindExistingMemberLogin(
                         active.request.requestId,
                         membershipId,
                         ::finishDecision,
@@ -672,11 +684,11 @@ fun FamilyRoute(
                 },
                 onApproveNew = {
                     decidingMemberRequest = true
-                    vm.approveNewMemberLogin(active.request.requestId, ::finishDecision)
+                    membersHost.approveNewMemberLogin(active.request.requestId, ::finishDecision)
                 },
                 onReject = {
                     decidingMemberRequest = true
-                    vm.rejectMemberLogin(active.request.requestId, ::finishDecision)
+                    membersHost.rejectMemberLogin(active.request.requestId, ::finishDecision)
                 },
                 onDismiss = {
                     if (!decidingMemberRequest) dialog = FamilyDialog.MembersList
@@ -689,7 +701,7 @@ fun FamilyRoute(
             onConfirm = {
                 runForegroundAction {
                     removingMember = true
-                    vm.removeMember(
+                    membersHost.removeMember(
                         membershipId = active.membershipId,
                         displayName = active.displayName,
                     ) { success, copy ->
@@ -716,10 +728,10 @@ fun FamilyRoute(
                 feedback = (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
                     ?.feedback,
                 onCheck = {
-                    runForegroundAction { vm.checkMemberApproval() }
+                    runForegroundAction { wizardHost.checkMemberApproval() }
                 },
                 onCancel = {
-                    vm.cancelMemberApproval()
+                    wizardHost.cancelMemberApproval()
                     finalWizardDismiss()
                 },
                 onKeepOffline = ::finalWizardDismiss,
@@ -797,7 +809,7 @@ fun FamilyRoute(
                                 return@OwnerLoginDialog
                             }
                             runForegroundAction {
-                                vm.submitFamilyWizard(
+                                wizardHost.submitFamilyWizard(
                                     snapshot = accountFamilyWizardSnapshot(
                                         mode = FamilyWizardMode.Join,
                                         step = FamilyWizardStep.Identity,
@@ -864,7 +876,7 @@ fun FamilyRoute(
                         runForegroundAction {
                             joinDisplayNameError = null
                             memberDeviceNameError = null
-                            vm.submitFamilyWizard(
+                            wizardHost.submitFamilyWizard(
                                 accountFamilyWizardSnapshot(
                                     mode = FamilyWizardMode.Join,
                                     step = FamilyWizardStep.Identity,
@@ -939,7 +951,7 @@ fun FamilyRoute(
                             bootstrapSecretFeedback = null
                             createDisplayNameError = null
                             createFamilyNameError = null
-                            vm.submitFamilyWizard(
+                            wizardHost.submitFamilyWizard(
                                 snapshot = accountFamilyWizardSnapshot(
                                     mode = FamilyWizardMode.Create,
                                     step = FamilyWizardStep.Identity,
@@ -974,7 +986,7 @@ fun FamilyRoute(
                     showWizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
                 } else {
                     runForegroundAction {
-                        vm.submitFamilyWizard(
+                        wizardHost.submitFamilyWizard(
                             snapshot = accountFamilyWizardSnapshot(
                                 mode = FamilyWizardMode.Join,
                                 step = FamilyWizardStep.Identity,
@@ -1010,7 +1022,7 @@ fun FamilyRoute(
                     }
                     runForegroundAction {
                         savingFamilyName = true
-                        vm.renameFamily(renameFamilyName) { success, copy ->
+                        membersHost.renameFamily(renameFamilyName) { success, copy ->
                             savingFamilyName = false
                             if (success) {
                                 renameFamilyName = ""
@@ -1047,7 +1059,7 @@ fun FamilyRoute(
                 }
                 runForegroundAction {
                     savingDisplayName = true
-                    vm.addFamilyMember(editDisplayName) { success, copy ->
+                    membersHost.addFamilyMember(editDisplayName) { success, copy ->
                         savingDisplayName = false
                         if (success) {
                             editDisplayName = ""
@@ -1082,7 +1094,7 @@ fun FamilyRoute(
                 }
                 runForegroundAction {
                     savingDisplayName = true
-                    vm.renameFamilyMember(active.membershipId, editDisplayName) { success, copy ->
+                    membersHost.renameFamilyMember(active.membershipId, editDisplayName) { success, copy ->
                         savingDisplayName = false
                         if (success) {
                             dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
@@ -1117,7 +1129,7 @@ fun FamilyRoute(
                 }
                 runForegroundAction {
                     savingDisplayName = true
-                    vm.renameFamilyDevice(active.deviceId, editDisplayName) { success, copy ->
+                    membersHost.renameFamilyDevice(active.deviceId, editDisplayName) { success, copy ->
                         savingDisplayName = false
                         if (success) {
                             dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
@@ -1155,7 +1167,7 @@ fun FamilyRoute(
                 }
                 runForegroundAction {
                     savingDisplayName = true
-                    vm.updateMyDisplayName(editDisplayName) { success, copy ->
+                    membersHost.updateMyDisplayName(editDisplayName) { success, copy ->
                         savingDisplayName = false
                         if (success) {
                             dialog = FamilyDialog.Message(copy)
@@ -1176,7 +1188,7 @@ fun FamilyRoute(
             onConfirm = {
                 dialog = null
                 runForegroundAction {
-                    vm.logoutCurrentDevice { _, message -> showMessage(message) }
+                    membersHost.logoutCurrentDevice { _, message -> showMessage(message) }
                 }
             },
             onDismiss = { dialog = null },
@@ -1187,7 +1199,7 @@ fun FamilyRoute(
             onConfirm = {
                 dialog = null
                 runForegroundAction {
-                    vm.revokeFamilyDevice(
+                    membersHost.revokeFamilyDevice(
                         active.deviceId,
                         active.deviceName,
                         active.isCurrent,
@@ -1199,7 +1211,7 @@ fun FamilyRoute(
         FamilyDialog.ConfirmLeave -> LeaveFamilyDialog(
             onConfirm = {
                 dialog = null
-                runForegroundAction { vm.leave { showMessage(it) } }
+                runForegroundAction { membersHost.leave { showMessage(it) } }
             },
             onDismiss = { dialog = null },
         )
@@ -1222,7 +1234,7 @@ fun FamilyRoute(
             onConfirm = {
                 runForegroundAction {
                     deletingFamily = true
-                    vm.deleteFamily(
+                    membersHost.deleteFamily(
                         deleteFamilyName,
                         deleteFamilyRootPassword,
                     ) { success, message ->
@@ -1240,7 +1252,7 @@ fun FamilyRoute(
             onRefreshFamilyInfo = {
                 resetDeleteFamilyConfirmation()
                 dialog = null
-                vm.refreshFamilyForDeletion()
+                membersHost.refreshFamilyForDeletion()
             },
             onDismiss = {
                 resetDeleteFamilyConfirmation()
@@ -1259,10 +1271,10 @@ fun FamilyRoute(
             onDismiss = { dialog = null },
             onDelete = { id ->
                 dialog = null
-                vm.deleteBaby(id) { showMessage(it) }
+                overviewHost.deleteBaby(id) { showMessage(it) }
             },
             onPreviewMerge = { sourceId, targetId ->
-                vm.previewMerge(sourceId, targetId) { preview ->
+                overviewHost.previewMerge(sourceId, targetId) { preview ->
                     dialog = if (preview == null) {
                         FamilyDialog.Message("无法生成合并预览，请刷新后重试")
                     } else FamilyDialog.MergePreview(preview)
@@ -1270,10 +1282,10 @@ fun FamilyRoute(
             },
             onMerge = { preview ->
                 dialog = null
-                vm.merge(preview) { showMessage(it) }
+                overviewHost.merge(preview) { showMessage(it) }
             },
             onUpdate = { baby, update, onFinished ->
-                vm.updateBaby(
+                overviewHost.updateBaby(
                     baby.id,
                     update.nickname,
                     update.sex,
@@ -1315,12 +1327,12 @@ fun FamilyRoute(
             onConfirm = {
                 when {
                     memberLoginQrModel.verificationRetryRequired && payload != null ->
-                        vm.verifyMemberLoginQr(payload)
+                        wizardHost.verifyMemberLoginQr(payload)
                     memberLoginQrModel.recoveryRetryRequired ->
-                        vm.retryMemberLoginQrRecovery()
+                        wizardHost.retryMemberLoginQrRecovery()
                     payload != null ->
                         // Controller owns device-name validation → Ready.feedback.
-                        vm.claimMemberLoginQr(payload, memberQrDeviceName)
+                        wizardHost.claimMemberLoginQr(payload, memberQrDeviceName)
                 }
             },
             onManualJoin = {
@@ -1330,7 +1342,7 @@ fun FamilyRoute(
                 when (val dismissState = familyWizardState) {
                     is FamilyWizardState.Completed -> {
                         val claimed = dismissState.outcome as? FamilyWizardOutcome.MemberLoginQrClaimed
-                        vm.consumeFamilyWizardCompletion()
+                        wizardHost.consumeFamilyWizardCompletion()
                         if (claimed != null) {
                             dialog = FamilyDialog.Message(familyWizardOutcomeCopy(claimed))
                         } else {
@@ -1347,7 +1359,7 @@ fun FamilyRoute(
                         }
                     }
                     else -> {
-                        vm.cancelMemberLoginQr()
+                        wizardHost.cancelMemberLoginQr()
                         dialog = null
                     }
                 }
