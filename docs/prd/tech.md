@@ -54,7 +54,7 @@ Gradle module，亦无已交付表述）。
 :core:ui
 :designsystem
 :domain
-:sync                 # SyncPort + NoOpSync + RealSyncPort 家网实现（deep façade 留根）
+:sync                 # SyncPort + NoOpSyncPort（测试桩）+ RealSyncPort 家网实现（保留 deep 公开面于模块根）
 :feature:onboarding
 :feature:log          # 记录首页、编辑、图标网格
 :feature:timer
@@ -67,23 +67,28 @@ Gradle module，亦无已交付表述）。
 :feature:widget
 ```
 
-目标依赖方向：`app → feature → domain → core`；feature **互不**依赖（feature 之间无
-`project(":feature:…")` 边；共享只经 domain / core / designsystem）。
+目标依赖方向：`app → feature → domain → core`，且 `domain|feature|app → :sync` 为有意
+sideways seam（非分层违规；完整边表见 §2.2）。feature 之间无 `project(":feature:…")`
+边；共享只经 domain / core / designsystem / `:sync`（按 §2.2 允许的调用方）。
 
-### 2.1 稳定原则（Gradle 图 + 模块内 locality）
+### 2.1 稳定原则（Gradle 图 + 模块内就近归拢）
 
 本节目的是固定 **current** 架构边界与防回潮规则；**不**把尚未落地的目标子包路径写成
-已交付事实（包内 locality 落地后由后续文档回写，不在本文件链接 `.scratch/` 目标）。
+已交付事实（包内就近归拢落地后由后续文档回写，不在本文件链接 `.scratch/` 目标）。
 
 | 原则 | 含义 |
 |------|------|
 | **Gradle 模块图保持** | 新增能力优先落入现有 module；**不因分包新增 Gradle module**，也不合并现有 feature module |
 | **feature 互不依赖** | 跨 feature 协作经 domain / composition root，禁止 feature↔feature 工程依赖 |
-| **模块内 locality** | 分区只发生在现有 module 的 package/file 内，按调用流或能力归拢；目录名以已落地职责为准 |
+| **模块内就近归拢** | 分区只发生在现有 module 的 package/file 内，按调用流或能力归拢；目录名以已落地职责为准 |
 | **Deep façade 保留** | 保留 `CareLog`、`SyncPort` / `RealSyncPort`（及 lezi-sync `Store`）的 deep 公开面；**不拆** `SyncPort` / `CareLog` 为浅 capability port 表面 |
 | **文档只描述 current** | 本文件只描述已交付 tree 与上表规则；不以本地 tracker 草案路径作为长期产品真相 |
+| **`:sync` 为允许的横向依赖** | `app` / `domain` / 若干 feature 可直接 `implementation(project(":sync"))`（§2.2）；这是有意 seam，不是对 `app → feature → domain → core` 的违规 |
 
-计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
+运行时 `TimerState` 落在 `:feature:timer`；持久化计时 blob / clear-epoch 策略在
+`core`（datastore + model）与 domain 清空端口；log ↔ timer 协作经 `core:model` 的
+`TimerHandoffSeed` 与 app composition root，**禁止** feature:log ↔ feature:timer 工程依赖；
+完成写记录经 domain。
 
 ### 2.2 有意的 `project(":sync")` 直接依赖边
 
@@ -307,7 +312,7 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 - 睡眠配对与 `anomaly_flag`
 - 便便枚举边界；尿尿 `pee_amount` 1–3；排泄图标资源存在性（designsystem）
 - `client_uuid` 幂等合并
-- NoOpSync 不抛未捕获异常
+- NoOpSyncPort 不抛未捕获异常
 - fresh Room 创建当前 schema；force-stop/重启后当前数据、Outbox、TimerState 与提醒清理状态保持
 - APK 原地替换先经过本地数据升级门禁；相邻迁移先按受影响域创建校验快照，失败不得自动清库
 - 基线之前、未来版、空间不足或不一致数据稳定进入恢复界面；业务、提醒、Widget 不得提前打开持久化
