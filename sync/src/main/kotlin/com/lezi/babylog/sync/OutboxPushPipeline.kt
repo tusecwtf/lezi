@@ -183,7 +183,13 @@ internal class OutboxPushPipeline(
             val baby = media.babyId?.let { babyDao.getIncludingDeleted(it) }
                 ?: error("头像缺少本地宝宝根")
             // Do not package a live avatar against a deleted baby root (orphan / bypass defense).
+            // Capture refuses re-enqueue of the same shape, so a pre-fix residual outbox
+            // row would otherwise re-enter standaloneLogRows and fail require(kind == "log"),
+            // aborting residual push for the whole batch. Drop the outbox row (mirror
+            // unauthorized-member residual deletion) and keep media.syncDirty for domain repair.
             if (baby.deletedAt != null && media.deletedAt == null) {
+                outboxDao.deleteIds(listOf(avatarRow.id))
+                consumed += avatarRow.id
                 continue
             }
             pushBabyAtomicBundle(session, baby, babyRow = null, listOf(avatarRow))

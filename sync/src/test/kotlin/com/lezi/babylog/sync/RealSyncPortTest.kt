@@ -3097,6 +3097,80 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun preSeededLiveOrphanAvatarOutboxIsDroppedWithoutAbortingResidualPush() = runTest {
+        // Pre-07 residual poison: outbox still holds a live avatar media row against a
+        // deleted baby. Capture skips re-enqueue of that orphan, so REPLACE never clears
+        // the row; residual push must drop it without routing into standalone log media.
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val liveOrphanUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        val deletedAt = 450L
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-deleted-preseed-orphan",
+                nickname = "已删预种",
+                avatarMediaUuid = liveOrphanUuid,
+                avatarPath = "baby_avatars/preseed-orphan.jpg",
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                // Baby already acknowledged; only the stale avatar outbox row remains.
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = liveOrphanUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/preseed-orphan.jpg",
+                mime = "image/jpeg",
+                byteSize = 10,
+                createdAt = 100,
+                updatedAt = 200,
+                deletedAt = null,
+                syncDirty = true,
+            ),
+        )
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = "family-a",
+                entityType = "media",
+                clientUuid = liveOrphanUuid,
+                payloadJson =
+                    """{"kind":"avatar","baby_client_uuid":"baby-deleted-preseed-orphan"}""",
+                updatedAt = 200,
+            ),
+        )
+        rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-after-orphan",
+                familyId = 1,
+                name = "后续定义",
+                iconSlot = 1,
+                updatedAt = 500,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        // Orphan outbox gone; media stays local dirty for domain repair.
+        assertThat(rig.outbox.find("family-a", "media", liveOrphanUuid)).isNull()
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.deletedAt).isNull()
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.syncDirty).isTrue()
+        assertThat(
+            rig.backend.stagedBundles.none { draft ->
+                draft.media.any { it.clientUuid == liveOrphanUuid } ||
+                    draft.root.clientUuid == liveOrphanUuid
+            },
+        ).isTrue()
+        // Later residual (custom_item) still pushes; poison row did not abort the batch.
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+            .contains("custom-after-orphan")
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+        assertThat(rig.customItems.getByClientUuid("custom-after-orphan")?.syncDirty).isFalse()
+    }
+
+    @Test
     fun deletedBabyAvatarPushFailThenRetryKeepsTombstonesAndNullPointer() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
