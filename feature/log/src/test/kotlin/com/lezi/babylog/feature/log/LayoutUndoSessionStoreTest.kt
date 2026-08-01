@@ -2,7 +2,9 @@ package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -52,13 +54,13 @@ class LayoutUndoSessionStoreTest {
     }
 
     @Test
-    fun originalAndUndoWritePhasesSurviveRecreationWithoutResetToIdle() {
-        val store = LayoutUndoSessionStore(nowMs = { 10_000L })
+    fun writePhaseTransitionsAndRetainedStoreIdentitySurviveSimulatedRecreation() {
+        val retained = LayoutUndoSessionStore(nowMs = { 10_000L })
         val before = simpleSnapshot("pee")
         val after = simpleSnapshot("")
-        val token = store.allocateToken()
+        val token = retained.allocateToken()
 
-        store.reduce(
+        retained.reduce(
             LayoutUndoEvent.IntentApplied(
                 token = token,
                 intent = LayoutEditIntent.ClearSlot(0),
@@ -66,35 +68,66 @@ class LayoutUndoSessionStoreTest {
                 after = after,
             ),
         )
-        assertTrue(store.current.state is LayoutUndoState.AwaitingOriginal)
+        assertTrue(retained.current.state is LayoutUndoState.AwaitingOriginal)
 
-        // "Rotation" mid-original-write keeps AwaitingOriginal.
-        assertTrue(store.current.state is LayoutUndoState.AwaitingOriginal)
+        // Simulated configuration recreation keeps the same store identity + phase.
+        val afterRotate = retained
+        assertSame(retained, afterRotate)
+        assertTrue(afterRotate.current.state is LayoutUndoState.AwaitingOriginal)
 
-        store.reduce(
+        retained.reduce(
             LayoutUndoEvent.OriginalWriteFinished(
                 token = token,
                 succeeded = true,
                 currentSnapshot = after,
             ),
         )
-        store.reduce(
+        retained.reduce(
             LayoutUndoEvent.UndoRequested(
                 token = token,
                 currentSnapshot = after,
             ),
         )
-        assertTrue(store.current.state is LayoutUndoState.Restoring)
+        assertTrue(retained.current.state is LayoutUndoState.Restoring)
+        assertSame(retained, afterRotate)
+        assertTrue(afterRotate.current.state is LayoutUndoState.Restoring)
 
-        store.reduce(
+        retained.reduce(
             LayoutUndoEvent.UndoWriteFinished(
                 token = token,
                 succeeded = false,
                 currentSnapshot = after,
             ),
         )
-        assertTrue(store.current.state is LayoutUndoState.RestoreFailed)
-        assertEquals(token, (store.current.state as LayoutUndoState.RestoreFailed).candidate.token)
+        assertTrue(retained.current.state is LayoutUndoState.RestoreFailed)
+        assertEquals(token, (retained.current.state as LayoutUndoState.RestoreFailed).candidate.token)
+
+        // Distinct cold store never invents the failed restore.
+        val cold = LayoutUndoSessionStore(nowMs = { 10_000L })
+        assertEquals(LayoutUndoState.Idle, cold.current.state)
+        assertFalse(cold === retained)
+    }
+
+    @Test
+    fun dismissedFailureAndExitChromeSurviveRecreationUntilCleared() {
+        val retained = LayoutUndoSessionStore(nowMs = { 0L })
+        retained.dismissLayoutFailure(sequence = 9L)
+        retained.setExitFlushInProgress(true)
+        retained.setExitAfterLayoutRetry(true)
+
+        assertEquals(9L, retained.current.dismissedLayoutFailureSequence)
+        assertTrue(retained.current.exitFlushInProgress)
+        assertTrue(retained.current.exitAfterLayoutRetry)
+
+        // Same store after "rotation".
+        assertEquals(9L, retained.current.dismissedLayoutFailureSequence)
+        assertTrue(retained.current.exitFlushInProgress)
+
+        retained.clear()
+        assertNull(retained.current.dismissedLayoutFailureSequence)
+        assertFalse(retained.current.exitFlushInProgress)
+        assertFalse(retained.current.exitAfterLayoutRetry)
+        assertEquals(LayoutUndoState.Idle, LayoutUndoSessionStore().current.state)
     }
 
     @Test

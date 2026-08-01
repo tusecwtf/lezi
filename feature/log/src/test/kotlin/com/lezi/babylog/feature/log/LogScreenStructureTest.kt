@@ -56,6 +56,8 @@ class LogScreenStructureTest {
         val host = source("LogScreen.kt")
         val state = source("LogViewModel.kt")
         val session = source("LayoutUndoSession.kt")
+        val tracker = source("LayoutUndoWriteTracker.kt")
+        val canvas = source("LayoutEditMode.kt")
 
         assertFalse(
             "mutableStateOf<LayoutUndoState>" in host ||
@@ -63,10 +65,23 @@ class LogScreenStructureTest {
         )
         assertFalse("var layoutUndoState by remember" in host)
         assertFalse("var nextLayoutUndoToken by remember" in host)
+        assertFalse("var dismissedLayoutFailure by remember" in host)
+        assertFalse("var layoutExitInProgress by remember" in host)
+        assertFalse("var exitAfterLayoutRetry by remember" in host)
         assertTrue("layoutUndoSession" in host)
         assertTrue("val layoutUndoSession" in state || "layoutUndoSession =" in state)
+        assertTrue("applyLayoutEditIntent" in state)
+        assertTrue("requestLayoutUndo" in state)
+        assertTrue("discardLayoutUndoUnlessRestoreInFlight" in state)
         assertTrue("class LayoutUndoSessionStore" in session)
         assertTrue("offerExpiresAtEpochMs" in session)
+        assertTrue("dismissedLayoutFailureSequence" in session)
+        assertTrue("viewModelScope" in state)
+        assertTrue("class LayoutUndoWriteTracker" in tracker)
+        assertTrue("scope.launch" in tracker)
+        assertTrue("undoRemainingOfferMs" in canvas)
+        assertFalse("System.currentTimeMillis()" in canvas)
+        assertTrue("remainingLayoutUndoOfferMs" in host || "remainingLayoutUndoOfferMs" in state)
     }
 
     private fun source(name: String): String = sourceDir.resolve(name).readText()

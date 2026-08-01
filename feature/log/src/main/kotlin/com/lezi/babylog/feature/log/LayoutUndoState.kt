@@ -168,3 +168,12 @@ internal fun reduceLayoutUndo(
     }
     LayoutUndoEvent.EditorExited -> LayoutUndoReduction(LayoutUndoState.Idle)
 }
+
+/**
+ * While a reverse write is in flight or its failure dialog is open, exit must not
+ * reduce [LayoutUndoEvent.EditorExited] — that would drop Restoring so
+ * UndoWriteFinished cannot re-enter RestoreFailed or apply [restoredSnapshot].
+ */
+internal fun shouldHoldLayoutUndoAcrossEditorExit(state: LayoutUndoState): Boolean =
+    state is LayoutUndoState.Restoring || state is LayoutUndoState.RestoreFailed
+

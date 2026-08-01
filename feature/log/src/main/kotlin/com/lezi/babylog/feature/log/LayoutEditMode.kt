@@ -122,11 +122,11 @@ internal fun LayoutEditCanvas(
     cancelDragSignal: Long = 0L,
     undoCandidate: LayoutUndoCandidate? = null,
     /**
-     * Absolute epoch millis when the current [undoCandidate] offer ends. Recreation
-     * re-shows the snackbar with only the remaining window; null falls back to the
-     * default short offer length from first show.
+     * Remaining wall-clock ms for the current [undoCandidate] offer, computed by
+     * the ViewModel session (same clock as the stable deadline). Null falls back
+     * to the default short offer length from first show.
      */
-    undoOfferExpiresAtEpochMs: Long? = null,
+    undoRemainingOfferMs: Long? = null,
     onUndo: (Long) -> Unit = {},
     onUndoExpired: (Long) -> Unit = {},
     initialCatalogScroll: LayoutCatalogScrollPosition = LayoutCatalogScrollPosition(),
@@ -434,15 +434,14 @@ internal fun LayoutEditCanvas(
     LaunchedEffect(Unit) {
         doneFocusRequester.requestFocus()
     }
-    LaunchedEffect(undoCandidate?.token, undoOfferExpiresAtEpochMs) {
+    LaunchedEffect(undoCandidate?.token, undoRemainingOfferMs) {
         val candidate = undoCandidate
         undoSnackbarHostState.currentSnackbarData?.dismiss()
         if (candidate == null) return@LaunchedEffect
-        val remainingMs = when {
-            undoOfferExpiresAtEpochMs != null ->
-                (undoOfferExpiresAtEpochMs - System.currentTimeMillis()).coerceAtLeast(0L)
-            else -> LAYOUT_UNDO_OFFER_DURATION_MS
-        }
+        // remaining is owned by LayoutUndoSessionStore.nowMs — do not recompute
+        // with a second wall clock here.
+        val remainingMs = (undoRemainingOfferMs ?: LAYOUT_UNDO_OFFER_DURATION_MS)
+            .coerceAtLeast(0L)
         if (remainingMs <= 0L) {
             onUndoExpired(candidate.token)
             return@LaunchedEffect

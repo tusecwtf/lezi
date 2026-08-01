@@ -189,8 +189,7 @@ class LayoutUndoDeviceTest {
             before = snapshot("pee"),
             after = snapshot(""),
         )
-        // Already 3s into a 4s offer: recreation must not re-fill a full Short window.
-        val expiresAt = System.currentTimeMillis() + 1_000L
+        // Already 3s into a 4s offer: session remaining is 1s, not a full Short window.
         var candidate: LayoutUndoCandidate? by mutableStateOf(offer)
         val expiredTokens = CopyOnWriteArrayList<Long>()
         composeRule.mainClock.autoAdvance = false
@@ -203,7 +202,7 @@ class LayoutUndoDeviceTest {
                     onDone = {},
                     onOpenCustomManage = {},
                     undoCandidate = candidate,
-                    undoOfferExpiresAtEpochMs = expiresAt,
+                    undoRemainingOfferMs = 1_000L,
                     onUndo = {},
                     onUndoExpired = {
                         expiredTokens += it

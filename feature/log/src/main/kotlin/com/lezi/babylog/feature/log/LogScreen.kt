@@ -98,16 +98,17 @@ fun LogRoute(
     val layoutSession by vm.layoutEditSession.collectAsStateWithLifecycle()
     val layoutUndoSession by vm.layoutUndoSession.collectAsStateWithLifecycle()
     val layoutUndoState = layoutUndoSession.state
+    val layoutExitInProgress = layoutUndoSession.exitFlushInProgress ||
+        layoutUndoState is LayoutUndoState.Restoring
+    val exitAfterLayoutRetry = layoutUndoSession.exitAfterLayoutRetry
+    val dismissedLayoutFailure = layoutUndoSession.dismissedLayoutFailureSequence
     val screenTime by rememberRecordScreenTime(clock)
-    val layoutUndoScope = rememberCoroutineScope()
+    val layoutGuidanceScope = rememberCoroutineScope()
     var showMore by remember { mutableStateOf(false) }
     var showCustomManage by remember { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
-    var layoutExitInProgress by remember { mutableStateOf(false) }
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
-    var exitAfterLayoutRetry by remember { mutableStateOf(false) }
-    var dismissedLayoutFailure by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
     val timelineListState = rememberLogTimelineListState()
     fun openLayoutEdit() {
@@ -128,8 +129,6 @@ fun LogRoute(
             prefs = snapshot.toLayoutPrefs(),
             guidanceCompleted = state.settings.layoutDragGuidanceCompleted,
         )
-        exitAfterLayoutRetry = false
-        dismissedLayoutFailure = null
     }
     val dayChartContext = remember(state.baby?.id, state.day) {
         DayChartFilterContext(babyId = state.baby?.id, day = state.day)
@@ -269,24 +268,21 @@ fun LogRoute(
     }
     fun closeLayoutEditor() {
         vm.closeLayoutEditSession()
-        layoutExitInProgress = false
-        exitAfterLayoutRetry = false
-        dismissedLayoutFailure = null
     }
     fun requestLayoutExit() {
         layoutDragCancelSignal += 1L
-        if (layoutExitInProgress) return
-        if (layoutUndoState !is LayoutUndoState.RestoreFailed) {
-            vm.reduceLayoutUndoEvent(LayoutUndoEvent.EditorExited)
-        }
-        layoutExitInProgress = true
+        if (layoutUndoSession.exitFlushInProgress) return
+        // Hold Restoring / RestoreFailed so in-flight reverse writes still settle;
+        // Available/AwaitingOriginal drop immediately so the snackbar does not linger.
+        vm.discardLayoutUndoUnlessRestoreInFlight()
+        vm.setLayoutExitFlushInProgress(true)
         vm.awaitDeviceLayoutWrites { result ->
-            layoutExitInProgress = false
+            vm.setLayoutExitFlushInProgress(false)
             if (result.isSuccess) {
                 closeLayoutEditor()
             } else {
-                exitAfterLayoutRetry = true
-                dismissedLayoutFailure = null
+                vm.setExitAfterLayoutRetry(true)
+                vm.clearDismissedLayoutFailure()
             }
         }
     }
@@ -303,49 +299,25 @@ fun LogRoute(
                 }
                 val undoCandidate =
                     (layoutUndoState as? LayoutUndoState.Available)?.candidate
-                val undoOfferExpiresAtEpochMs = layoutUndoSession.offerExpiresAtEpochMs
+                // Session clock only — never recompute with System.currentTimeMillis.
+                val undoRemainingOfferMs = undoCandidate?.let {
+                    vm.remainingLayoutUndoOfferMs()
+                }
                 fun applyLayoutIntent(
                     intent: LayoutEditIntent,
                     inputOrigin: LayoutGuidanceInputOrigin,
                 ) {
-                    val current = vm.currentLayoutEditSession()?.prefs ?: return
-                    val next = reduceLayoutEdit(current, intent, known)
-                    val token = vm.allocateLayoutUndoToken()
-                    val undoStateBeforeIntent = layoutUndoState
-                    val undoReduction = vm.reduceLayoutUndoEvent(
-                        LayoutUndoEvent.IntentApplied(
-                            token = token,
-                            intent = intent,
-                            before = current.toSnapshot(),
-                            after = next.toSnapshot(),
-                        ),
-                    )
-                    if (
-                        !shouldWriteLayoutIntentResult(
-                            undoStateBeforeIntent = undoStateBeforeIntent,
-                            undoStateAfterIntent = undoReduction.state,
-                            before = current.toSnapshot(),
-                            after = next.toSnapshot(),
-                        )
-                    ) {
-                        return
-                    }
-                    vm.updateLayoutEditPrefs(
-                        prefs = next,
-                        hasSubmittedIntent = true,
-                    )
-                    val receipt = vm.applyDeviceLayoutPrefs(next)
-                    // Undo phase completion is owned by the ViewModel so rotation
-                    // mid-write does not drop AwaitingOriginal → Available.
-                    vm.trackOriginalLayoutWriteForUndo(token, receipt)
-                    layoutUndoScope.launch {
-                        val result = receipt.result.await()
+                    val write = vm.applyLayoutEditIntent(intent, known) ?: return
+                    // Drag-guidance completion is the only composition-local await;
+                    // undo phase is owned by LayoutUndoWriteTracker on viewModelScope.
+                    layoutGuidanceScope.launch {
+                        val result = write.receipt.result.await()
                         val guidance = vm.currentLayoutEditSession()?.dragGuidance
                         if (
                             guidance != null &&
                             shouldRequestLayoutDragGuidanceCompletion(
                                 state = guidance,
-                                changed = next != current,
+                                changed = write.nextPrefs != write.previousPrefs,
                                 inputOrigin = inputOrigin,
                                 layoutReceiptSucceeded = result.isSuccess,
                             )
@@ -398,7 +370,7 @@ fun LogRoute(
                     hasSubmittedIntent = editingSession.hasSubmittedIntent,
                     cancelDragSignal = layoutDragCancelSignal,
                     undoCandidate = undoCandidate,
-                    undoOfferExpiresAtEpochMs = undoOfferExpiresAtEpochMs,
+                    undoRemainingOfferMs = undoRemainingOfferMs,
                     initialCatalogScroll = editingSession.catalogScroll,
                     onCatalogScrollChanged = vm::updateLayoutCatalogScroll,
                     configurationSessionKey =
@@ -409,24 +381,7 @@ fun LogRoute(
                     },
                     onDragGuidanceClose = ::closeLayoutDragGuidance,
                     onUndo = { token ->
-                        val current = vm.currentLayoutEditSession()?.prefs
-                            ?: return@LayoutEditCanvas
-                        val reduction = vm.reduceLayoutUndoEvent(
-                            LayoutUndoEvent.UndoRequested(
-                                token = token,
-                                currentSnapshot = current.toSnapshot(),
-                            ),
-                        )
-                        val restoring = reduction.state as? LayoutUndoState.Restoring
-                            ?: return@LayoutEditCanvas
-                        vm.updateLayoutEditPrefs(
-                            prefs = current,
-                            hasSubmittedIntent = true,
-                        )
-                        val receipt = vm.applyDeviceLayoutPrefs(
-                            restoring.candidate.before.toLayoutPrefs(),
-                        )
-                        vm.trackLayoutUndoWrite(token, receipt)
+                        vm.requestLayoutUndo(token)
                     },
                     onUndoExpired = { token ->
                         vm.reduceLayoutUndoEvent(LayoutUndoEvent.OfferExpired(token))
@@ -490,50 +445,45 @@ fun LogRoute(
     val layoutFailure = layoutWriteState as? DeviceLayoutWriteState.Failed
     val failedLayoutUndo = layoutUndoState as? LayoutUndoState.RestoreFailed
     fun dismissLayoutFailure() {
-        dismissedLayoutFailure = layoutFailure?.sequence
-        exitAfterLayoutRetry = false
+        vm.dismissLayoutFailure(layoutFailure?.sequence)
     }
     fun retryLayoutFailure() {
-        layoutExitInProgress = true
         if (failedLayoutUndo != null) {
-            val current = vm.currentLayoutEditSession()?.prefs
-            val reduction = current?.let {
-                vm.reduceLayoutUndoEvent(
-                    LayoutUndoEvent.RetryUndoRequested(
-                        token = failedLayoutUndo.candidate.token,
-                        currentSnapshot = it.toSnapshot(),
-                    ),
-                )
-            }
-            val restoring = reduction?.state as? LayoutUndoState.Restoring
-            if (restoring == null) {
-                if (reduction == null) {
+            vm.setLayoutExitFlushInProgress(true)
+            val started = vm.retryFailedLayoutUndo()
+            if (!started) {
+                // Session/editor gone or snapshot drifted: drop failed undo chrome.
+                if (vm.currentLayoutEditSession() == null) {
                     vm.reduceLayoutUndoEvent(LayoutUndoEvent.EditorExited)
                 }
-                layoutExitInProgress = false
-            } else {
-                val receipt = vm.applyDeviceLayoutPrefs(
-                    restoring.candidate.before.toLayoutPrefs(),
-                )
-                // Completion + restored prefs live on viewModelScope so retry mid-
-                // rotation does not lose RestoreFailed / Restoring truth.
-                vm.trackLayoutUndoWrite(failedLayoutUndo.candidate.token, receipt)
-                layoutUndoScope.launch {
-                    val result = receipt.result.await()
-                    layoutExitInProgress = false
-                    if (result.isSuccess && exitAfterLayoutRetry) {
-                        closeLayoutEditor()
-                    }
-                }
+                vm.setLayoutExitFlushInProgress(false)
+                return
             }
+            // Busy chrome is projected from Restoring / exitFlushInProgress on the
+            // retained session; completion runs on viewModelScope. Watch session for
+            // exit-after-retry without a second composition await of the receipt.
         } else {
+            vm.setLayoutExitFlushInProgress(true)
             vm.retryDeviceLayoutWrite { result ->
-                layoutExitInProgress = false
+                vm.setLayoutExitFlushInProgress(false)
                 if (result.isSuccess && exitAfterLayoutRetry) {
                     closeLayoutEditor()
                 }
             }
         }
+    }
+    // After a restore settles to Idle while the user had already tried to leave,
+    // close the editor. Busy chrome is cleared by LayoutUndoWriteTracker on settle.
+    LaunchedEffect(
+        layoutUndoState,
+        layoutUndoSession.exitAfterLayoutRetry,
+        layoutWriteState,
+    ) {
+        if (!layoutUndoSession.exitAfterLayoutRetry) return@LaunchedEffect
+        if (layoutUndoState !is LayoutUndoState.Idle) return@LaunchedEffect
+        if (layoutWriteState is DeviceLayoutWriteState.Failed) return@LaunchedEffect
+        if (layoutWriteState is DeviceLayoutWriteState.Saving) return@LaunchedEffect
+        closeLayoutEditor()
     }
     fun dismissListDelete() {
         listDeleteTarget = null

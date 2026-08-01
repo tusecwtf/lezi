@@ -317,6 +317,37 @@ class LayoutUndoStateTest {
         )
     }
 
+    @Test
+    fun editorExitHoldsRestoringAndRestoreFailedSoInFlightUndoCanSettle() {
+        val candidate = LayoutUndoCandidate(
+            token = 9L,
+            kind = LayoutUndoKind.ClearSlot,
+            before = simpleSnapshot("pee"),
+            after = simpleSnapshot(""),
+        )
+        assertTrue(shouldHoldLayoutUndoAcrossEditorExit(LayoutUndoState.Restoring(candidate)))
+        assertTrue(shouldHoldLayoutUndoAcrossEditorExit(LayoutUndoState.RestoreFailed(candidate)))
+        assertFalse(shouldHoldLayoutUndoAcrossEditorExit(LayoutUndoState.Idle))
+        assertFalse(
+            shouldHoldLayoutUndoAcrossEditorExit(LayoutUndoState.Available(candidate)),
+        )
+        assertFalse(
+            shouldHoldLayoutUndoAcrossEditorExit(LayoutUndoState.AwaitingOriginal(candidate)),
+        )
+
+        // Holding Restoring means EditorExited is not applied; a late failure still lands.
+        val stillRestoring = LayoutUndoState.Restoring(candidate)
+        val failed = reduceLayoutUndo(
+            stillRestoring,
+            LayoutUndoEvent.UndoWriteFinished(
+                token = 9L,
+                succeeded = false,
+                currentSnapshot = candidate.after,
+            ),
+        ).state
+        assertEquals(LayoutUndoState.RestoreFailed(candidate), failed)
+    }
+
     private fun snapshot(
         slots: List<String>,
         hidden: Set<String>,
