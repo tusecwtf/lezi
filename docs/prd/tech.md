@@ -41,39 +41,68 @@
 
 ## 2. 模块划分
 
+Current Gradle modules（与根 `settings.gradle.kts` 的 `include` **一一对应**）。下列为已
+include 的交付模块；**不存在**未 include 的幽灵交付（例如 **`:core:image` 不是** 产品
+Gradle module，亦无已交付表述）。
+
 ```text
 :app
 :core:model
+:core:common
 :core:database
 :core:datastore
-:core:common
 :core:ui
 :designsystem
 :domain
-:sync                 # SyncPort + NoOpSync + RealSyncPort 家网实现
+:sync                 # SyncPort + NoOpSync + RealSyncPort 家网实现（deep façade 留根）
 :feature:onboarding
 :feature:log          # 记录首页、编辑、图标网格
 :feature:timer
-:feature:summary
-:feature:growth
 :feature:family       # 账户 / 共享 UI
 :feature:settings
+:feature:summary
+:feature:growth
 :feature:export
 :feature:search
 :feature:widget
 ```
 
-目标依赖方向：`app → feature → domain → core`；feature **互不**依赖。
+目标依赖方向：`app → feature → domain → core`；feature **互不**依赖（feature 之间无
+`project(":feature:…")` 边；共享只经 domain / core / designsystem）。
 
-当前已存在的额外边（有意 seam，后续可下沉端口接口）：
+### 2.1 稳定原则（Gradle 图 + 模块内 locality）
+
+本节目的是固定 **current** 架构边界与防回潮规则；**不**把尚未落地的目标子包路径写成
+已交付事实（包内 locality 落地后由后续文档回写，不在本文件链接 `.scratch/` 目标）。
+
+| 原则 | 含义 |
+|------|------|
+| **Gradle 模块图保持** | 新增能力优先落入现有 module；**不因分包新增 Gradle module**，也不合并现有 feature module |
+| **feature 互不依赖** | 跨 feature 协作经 domain / composition root，禁止 feature↔feature 工程依赖 |
+| **模块内 locality** | 分区只发生在现有 module 的 package/file 内，按调用流或能力归拢；目录名以已落地职责为准 |
+| **Deep façade 保留** | 保留 `CareLog`、`SyncPort` / `RealSyncPort`（及 lezi-sync `Store`）的 deep 公开面；**不拆** `SyncPort` / `CareLog` 为浅 capability port 表面 |
+| **文档只描述 current** | 本文件只描述已交付 tree 与上表规则；不以本地 tracker 草案路径作为长期产品真相 |
+
+计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
+
+### 2.2 有意的 `project(":sync")` 直接依赖边
+
+下列边与各 module `build.gradle.kts` 中 `implementation(project(":sync"))` **一致**（有意
+seam）。**不得**为迎合文档而静默删改 Gradle 边；亦不得在文档中遗漏合法调用方。
 
 | 边 | 用途 |
 |----|------|
-| `domain → sync` | 本地写后的同步触发 |
-| `feature:log → sync` | Composer / 日志路径触发 sync |
-| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理与退出 |
+| `app → sync` | composition root：前台生命周期 / `ForegroundState`、强制更新壳、`SyncPort` 注入、本地数据升级相关凭证存储 |
+| `domain → sync` | CareLog 与协调器：本地写后的同步触发、家庭向导网关、会话/角色、本机清空与家庭权威回调 |
+| `feature:log → sync` | 时间轴下拉刷新触发 sync；记录/计划本地发布文案 |
+| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理、可选更新横幅与退出 |
+| `feature:onboarding → sync` | 引导内连接家庭服务器、TOFU / 成员登录 QR、setup probe |
+| `feature:growth → sync` | 成长页下拉刷新触发 sync |
+| `feature:settings → sync` | 关于区检查更新 / 安装更新与相关文案 |
+| `feature:summary → sync` | 汇总页下拉刷新触发 sync |
 
-计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
+无直接 `project(":sync")` 的 feature（`timer` / `export` / `search` / `widget`）经 domain
+间接参与同步，不直连 sync 模块。
 
 **运行环境 / 验收状态**：自动化覆盖可信 endpoint、建家/登录、成员申请审批、独立设备
 会话、撤销与同步协议。物理 NAS 生产、双真机和相机扫码仍需按发布门执行；完整同步验收
