@@ -3,11 +3,17 @@
 本目录是 **active** 规格与票单的工作区（约定见
 [`docs/agents/issue-tracker.md`](../docs/agents/issue-tracker.md)）。
 
-**当前：`local-data-upgrade-protection` 已完成实现与本机验收。**
+**当前 active：**
+
+| Tracker | 说明 |
+|---------|------|
+| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | 全库审计 P1/P2 正确性与结构债 |
+| [`architecture-readability-optimization`](./architecture-readability-optimization/) | 架构可读性：StructureTest 删除、Family 三缝、QR 下沉、SyncPort 死表面、tech.md 边（与审计 16/17 协调；不做 18 大拆） |
+
+`local-data-upgrade-protection` 已完成实现与本机验收，保留到下一次严格清理。
 
 产品权威仍在 [`docs/prd/`](../docs/prd/)、[`docs/adr/`](../docs/adr/)、
 [`CONTEXT.md`](../CONTEXT.md)。已关闭票的实现与证据在 git 历史中，不在本目录长期堆放。
-
 ---
 
 ## 本轮清掉了什么
@@ -52,6 +58,13 @@
 
 已完成：[`local-data-upgrade-protection`](./local-data-upgrade-protection/) 将 Android
 0.3.0 / 本地数据契约 v1 固化为永久兼容基线，并为后续 APK 原地替换增加无破坏升级门禁。
+
+## 当前 active tracker
+
+| Tracker | 状态 | Frontier | 说明 |
+|---------|------|----------|------|
+| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | ready-for-agent | 见该目录 ISSUES | 21 票 P1/P2；与本表下一行在 16/17 上 once-only |
+| [`architecture-readability-optimization`](./architecture-readability-optimization/) | ready-for-agent | 01、02、04、05、06 | 审查面压缩；03 依赖 02；lezi-sync 文件拆分 Later |
 
 **未自动做的运维：** 家庭 NAS 上的 `push-and-deploy.sh` 容器替换仍须按根目录
 `AGENTS.md` 维护窗确认后再跑。
