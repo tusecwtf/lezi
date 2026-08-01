@@ -419,5 +419,5 @@ Joined
 
 ## 13. 拆票边界
 
-本文只描述最终体验。旧 `.scratch/trusted-sync-endpoint-auth/issues/` 在依据新 Spec 重新拆票前
-不再有效；尤其不应实现独立同步/安全页、Wi-Fi 偏好、管理员 QR 登录或客户端迁移 UI。
+本文只描述最终体验。`.scratch/trusted-sync-endpoint-auth/` 拆票已在 0.3.1 收口后清出工作区
+（见 git 历史）；尤其不应再实现独立同步/安全页、Wi-Fi 偏好、管理员 QR 登录或客户端迁移 UI。

@@ -367,4 +367,4 @@ App 不提供 NAS→VPS 迁移、handoff、备份恢复、server identity 搬迁
 - `sync-home-lan.md` 只保留历史处置说明，不得据其恢复旧 wire、配置或界面。
 - 0.3.1 已完成 fresh-current 收口：生产只保留可信 HTTPS、每设备会话、成员申请/审批与
   单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。
-- `.scratch/trusted-sync-endpoint-auth/spec.md` 是拆票输入；旧票在重新拆分前不得实施。
+- 拆票输入曾在 `.scratch/trusted-sync-endpoint-auth/`（0.3.1 后已清出工作区）；实现与证据见 git 历史（如 `aa7d3df`）。不得按已删除旧票重开旁路路径。

@@ -4,9 +4,9 @@
 - Status：**Implemented**（自托管通道已落地；合同写回 [tech.md §4.2](../prd/tech.md)、
   [sync-trusted-endpoint.md §7.4](../prd/sync-trusted-endpoint.md)、
   [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)；
-  tracker [`.scratch/self-hosted-app-update/`](../../.scratch/self-hosted-app-update/spec.md)）
+  原 tracker `.scratch/self-hosted-app-update/` 已在 0.3.1 收口后清出工作区，细节见 git 历史）
 - 问题：如何在 APK 内做「检测到版本低 → 服务端推送/下发新 APK → 提示用户升级」的替换升级；尽量复用业界成熟 API 与最佳实践。
-- 与 Lezi 相关背景：当前 `versionName=0.3.0` / `versionCode=6`（见 `docs/prd/tech.md`）；家庭 LAN/自托管同步为主；实现使用 `REQUEST_INSTALL_PACKAGES` + 鉴权 `GET /v1/app-update` / `apk` + `PackageInstaller`。
+- 与 Lezi 相关背景：当前 `versionName=0.3.1` / `versionCode=7`（见 `docs/prd/tech.md` / `app/build.gradle.kts`）；家庭 LAN/自托管同步为主；实现使用 `REQUEST_INSTALL_PACKAGES` + 鉴权 `GET /v1/app-update` / `apk` + `PackageInstaller`。
 
 ## 结论（可直接指导选型）
 
