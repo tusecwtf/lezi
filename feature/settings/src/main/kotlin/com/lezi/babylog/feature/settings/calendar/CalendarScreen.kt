@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image

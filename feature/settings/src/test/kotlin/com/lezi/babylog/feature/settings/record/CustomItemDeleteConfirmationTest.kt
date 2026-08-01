@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.record
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking

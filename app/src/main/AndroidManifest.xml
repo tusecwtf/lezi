@@ -89,7 +89,7 @@
         </service>
 
         <receiver
-            android:name="com.lezi.babylog.feature.settings.BootReceiver"
+            android:name="com.lezi.babylog.feature.settings.calendar.BootReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -103,7 +103,7 @@
             </intent-filter>
         </receiver>
         <receiver
-            android:name="com.lezi.babylog.feature.settings.CarePlanReminderReceiver"
+            android:name="com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver"
             android:exported="false" />
         <receiver
             android:name="com.lezi.babylog.feature.widget.CareWidgetReceiver"

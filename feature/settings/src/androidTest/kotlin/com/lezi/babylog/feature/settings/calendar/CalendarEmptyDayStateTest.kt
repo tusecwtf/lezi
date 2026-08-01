@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.junit4.createComposeRule

@@ -107,9 +107,9 @@ import com.lezi.babylog.feature.log.composer.RecordComposerRequest
 import com.lezi.babylog.feature.log.dock.quickDockSnackbarBottomInset
 import com.lezi.babylog.feature.onboarding.OnboardingRoute
 import com.lezi.babylog.feature.search.SearchRoute
-import com.lezi.babylog.feature.settings.CalendarRoute
 import com.lezi.babylog.feature.settings.SettingsRoute
-import com.lezi.babylog.feature.settings.SystemCalendarSetupDialog
+import com.lezi.babylog.feature.settings.calendar.CalendarRoute
+import com.lezi.babylog.feature.settings.calendar.SystemCalendarSetupDialog
 import com.lezi.babylog.feature.summary.SummaryRoute
 import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.feature.timer.TimerRoute
@@ -256,11 +256,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         val id = intent.getLongExtra(
-            com.lezi.babylog.feature.settings.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_ID,
+            com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_ID,
             0L,
         )
         val uuid = intent.getStringExtra(
-            com.lezi.babylog.feature.settings.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_UUID,
+            com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_UUID,
         ).orEmpty()
         if (id <= 0L && uuid.isBlank()) return null
         return PendingFulfillPlan(planId = id.takeIf { it > 0L }, clientUuid = uuid)

@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.record
 
 import androidx.compose.runtime.Composable
 import com.lezi.babylog.core.common.productUiError

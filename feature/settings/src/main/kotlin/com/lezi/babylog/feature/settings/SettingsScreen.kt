@@ -84,6 +84,8 @@ import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
 import com.lezi.babylog.domain.localdata.LocalDataClearScope
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
+import com.lezi.babylog.feature.settings.calendar.*
+import com.lezi.babylog.feature.settings.record.*
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
 import com.lezi.babylog.sync.ClientAppVersion

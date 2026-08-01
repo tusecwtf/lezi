@@ -173,7 +173,7 @@ internal fun isCarePlanSaveMessage(message: String): Boolean =
 /**
  * Permission denial never blocks plan persistence; surface a clear local-reminder
  * degradation so users know why they may not get a notification.
- * Keeps parity with [com.lezi.babylog.feature.settings.carePlanReminderPermissionDeniedStatus].
+ * Keeps parity with [com.lezi.babylog.feature.settings.calendar.carePlanReminderPermissionDeniedStatus].
  */
 internal fun carePlanSaveMessageWithPermission(
     baseMessage: String,

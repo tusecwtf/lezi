@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

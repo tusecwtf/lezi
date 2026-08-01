@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.record
 
 internal data class ClearRecordsConfirmationCopy(
     val firstPrompt: String,

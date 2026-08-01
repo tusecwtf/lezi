@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import java.util.concurrent.Executors
 import kotlinx.coroutines.CompletableDeferred

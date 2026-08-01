@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import com.lezi.babylog.core.model.CarePlanStatus
 import org.junit.Assert.assertFalse

@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import com.lezi.babylog.domain.calendar.SystemCalendarEventState
 import com.lezi.babylog.domain.calendar.SystemCalendarOwnedEventLookup

@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.settings
+package com.lezi.babylog.feature.settings.calendar
 
 import com.lezi.babylog.core.model.RecordTime
 import java.time.Instant
