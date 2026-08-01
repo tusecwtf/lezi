@@ -5,15 +5,42 @@
 
 **Source:** merged readability 06
 **Blocked by:** None — can start immediately
-**Status:** ready-for-agent
+**Status:** done
 **Size:** S–M
 
 ## Acceptance criteria
 
-- [ ] `FakeSyncBackendTest` 删除自证 fake 的断言，或改为同一 `SyncBackend` contract suite 的真实价值测试。
-- [ ] `RecordSettingsMenuTest` 删除反射/源码 rename detector；若存在用户菜单合同，以 public seam 行为测试表达。
-- [ ] `UiPlaceholders` 无生产调用则删除；只有单一调用时内联并移除噪音 API。
-- [ ] 不删除 failure、并发、恢复或用户可观察行为测试；无坏引用和替代 StructureTest。
+- [x] `FakeSyncBackendTest` 删除自证 fake 的断言，或改为同一 `SyncBackend` contract suite 的真实价值测试。
+- [x] `RecordSettingsMenuTest` 删除反射/源码 rename detector；若存在用户菜单合同，以 public seam 行为测试表达。
+- [x] `UiPlaceholders` 无生产调用则删除；只有单一调用时内联并移除噪音 API。
+- [x] 不删除 failure、并发、恢复或用户可观察行为测试；无坏引用和替代 StructureTest。
+
+## design_notes (seams)
+
+Public seams kept (not rewritten as structure guards):
+
+- `SyncBackend` / production path contracts remain in `HttpSyncBackendTest`, `RealSyncPortTest`,
+  `AtomicMediaBundlePublisherTest`, `RefreshingSyncBackendTest` (use Fake only as double).
+- Thin `FakeSyncBackendTest` fidelity suite pins double drift for equal-updatedAt LWW, member
+  avatar ACL + ref integrity, fulfillment freeze vs forged stamps, dual-client stage→commit
+  package isolation, and canonical author stamping — not self-tautology rename/wire-only cases.
+- Settings record knobs: `RecordAndShortcutSettingsTest` calls `core.ui` /
+  `RecordType.availableForNewEntry` directly (no production-main test helpers);
+  dialog is single-page `RecordSettingsDialog` → `PerItemSettingsBody` + `PlanCalendarSettingsBody`
+  (no multi-destination hub left to test).
+- Compose semantics: `UiTags` (ROOT / ONBOARDING / ONBOARDING_OFFLINE_MODE / LOG_HOME) — multi-site
+  production `testTag` callers; file renamed from misleading `UiPlaceholders.kt`.
+
+Removed (low value only):
+
+- Self-proving / portable-wire-only Fake cases (rename, pure push/pull cursor smoke without dual-client
+  or ACL/freeze/LWW pin). High-value Fake fidelity cases retained as thin contract suite above.
+- Entire `RecordSettingsMenuTest` — reflection rename detector for
+  `recordShortcutHubDestinations` + tautological enum.entries listing.
+- Dead test-only `RecordSettingsSection` / `recordSettingsSections()` and production-main
+  `tryMoveItemAcrossCategory` / `builtInKeysInSection` test helpers.
+
+No new StructureTest / reflection guards added.
 
 ## Validation
 

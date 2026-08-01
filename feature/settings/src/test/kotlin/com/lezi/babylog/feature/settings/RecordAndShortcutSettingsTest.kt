@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.settings
 
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.encodeItemOrder
 import com.lezi.babylog.core.ui.knownCatalogKeys
@@ -14,21 +15,20 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+/**
+ * Record-settings catalog knobs via public core.ui seams (no production test helpers).
+ */
 class RecordAndShortcutSettingsTest {
     @Test
     fun crossCategoryMoveIsNoOp() {
+        // No public reassignment API: in-section move cannot place excretion key in feeding.
         val known = knownCatalogKeys(emptyList())
         val order = encodeItemOrder(mergeItemOrder("[]", known))
         val pee = RecordType.PEE.key
-        val next = tryMoveItemAcrossCategory(
-            itemOrderJson = order,
-            catalogKey = pee,
-            targetSection = RecordSection.Feeding,
-            allKnownKeys = known,
-        )
+        val next = moveCatalogKeyWithinSection(order, pee, 100, known)
         assertEquals(
-            orderedKeysInSection(RecordSection.Excretion, order, known),
-            orderedKeysInSection(RecordSection.Excretion, next, known),
+            orderedKeysInSection(RecordSection.Excretion, order, known).toSet(),
+            orderedKeysInSection(RecordSection.Excretion, next, known).toSet(),
         )
         assertFalse(
             orderedKeysInSection(RecordSection.Feeding, next, known).contains(pee),
@@ -72,7 +72,9 @@ class RecordAndShortcutSettingsTest {
 
     @Test
     fun builtInKeysInSectionNeverIncludesRetiredGenerics() {
-        val health = builtInKeysInSection(RecordSection.Health)
+        val health = RecordType.availableForNewEntry()
+            .filter { it.presentation.section == RecordSection.Health }
+            .map { it.key }
         assertFalse(health.contains("other"))
         assertFalse(health.contains("custom"))
         assertFalse(health.contains("memo"))

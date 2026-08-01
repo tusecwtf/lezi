@@ -19,30 +19,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
-import com.lezi.babylog.core.model.availableForNewEntry
-import com.lezi.babylog.core.ui.RecordSection
-import com.lezi.babylog.core.ui.catalogSectionForKey
-import com.lezi.babylog.core.ui.encodeItemOrder
-import com.lezi.babylog.core.ui.mergeItemOrder
-import com.lezi.babylog.core.ui.moveCatalogKeyWithinSection
-import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
-
-/**
- * Sections inside single-page「记录设置」(no layout / quick-slot destinations).
- * Layout is edited on the record page (布局编辑态); these are non-layout knobs only.
- */
-internal enum class RecordSettingsSection(val title: String, val subtitle: String) {
-    PerItem("分项目设置", "母乳计时、奶量步进、发热提示等"),
-    PlanCalendar("护理计划与日历", "本机提醒、系统日历与内容披露"),
-}
-
-/** Pure navigation surface for tests: only non-layout record settings. */
-internal fun recordSettingsSections(): List<RecordSettingsSection> =
-    RecordSettingsSection.entries.toList()
 
 /**
  * Single-page 记录设置: 分项目 + 护理计划/日历 in one dialog.
@@ -233,24 +212,3 @@ internal fun PlanCalendarSettingsBody(
         }
     }
 }
-
-/** Test helper: refuse cross-category item moves (returns unchanged order). */
-internal fun tryMoveItemAcrossCategory(
-    itemOrderJson: String,
-    catalogKey: String,
-    targetSection: RecordSection,
-    allKnownKeys: Collection<String>,
-): String {
-    val current = catalogSectionForKey(catalogKey) ?: return itemOrderJson
-    if (current == targetSection) {
-        return moveCatalogKeyWithinSection(itemOrderJson, catalogKey, 1, allKnownKeys)
-    }
-    // Cross-category moves are intentionally no-ops.
-    return encodeItemOrder(mergeItemOrder(itemOrderJson, allKnownKeys))
-}
-
-/** Types that still appear under built-in sections (for tests / docs). */
-internal fun builtInKeysInSection(section: RecordSection): List<String> =
-    RecordType.availableForNewEntry()
-        .filter { it.presentation.section == section }
-        .map { it.key }

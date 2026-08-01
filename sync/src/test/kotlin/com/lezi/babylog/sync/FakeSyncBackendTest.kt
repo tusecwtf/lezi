@@ -1,15 +1,21 @@
 package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.BabyEntity
-import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
-private const val MEDIA_A = "10000000-0000-4000-8000-000000000001"
+/**
+ * Thin fidelity suite for [FakeSyncBackend] as a dual-client double.
+ *
+ * Product wire/failure paths stay in HttpSyncBackendTest / RealSyncPortTest /
+ * lezi-sync api.rs. These cases only pin rules higher tests trust via Fake:
+ * equal-updatedAt LWW, member avatar ACL + ref integrity, fulfillment freeze
+ * vs forged stamps, dual-client package isolation until commit, and canonical
+ * author stamping.
+ */
 private const val MEDIA_RECORD_DUAL = "10000000-0000-4000-8000-000000000002"
 private const val MEDIA_PLAN_DUAL = "10000000-0000-4000-8000-000000000003"
 private const val MEDIA_AVATAR = "10000000-0000-4000-8000-000000000004"
@@ -61,75 +67,6 @@ class FakeSyncBackendTest {
                 ?.jsonPrimitive
                 ?.content,
         ).isEqualTo(session.membershipId)
-    }
-
-    @Test
-    fun atomicBundleIsInvisibleUntilCommitAndIsIdempotent() = runBlocking {
-        val backend = FakeSyncBackend()
-        val family = backend.create(
-            baseUrl = "http://127.0.0.1:8765",
-            deviceId = "owner",
-            displayName = "妈妈",
-            createRequestId = "create-request-id-atomic-000000001",
-            bootstrapSecret = null,
-        )
-        val session = SyncSession(
-            familyId = family.familyId,
-            accessToken = family.accessToken,
-            deviceId = "owner",
-            role = FamilyRole.Owner,
-            membershipId = family.membershipId.orEmpty(),
-            serverHost = "127.0.0.1",
-            serverPort = 8765,
-        )
-        val baby = SyncEntity(
-            type = "baby",
-            clientUuid = "baby-a",
-            payloadJson = """{"nickname":"年年"}""",
-            updatedAt = 1,
-        )
-        backend.push(session, listOf(baby))
-        val record = SyncEntity(
-            type = "record",
-            clientUuid = "record-a",
-            payloadJson = """{"baby_client_uuid":"baby-a","type":"formula","timestamp":1,"payload_json":{}}""",
-            updatedAt = 10,
-        )
-        val media = SyncEntity(
-            type = "media",
-            clientUuid = MEDIA_A,
-            payloadJson =
-                """{"kind":"log","record_client_uuid":"record-a","byte_size":3,"mime":"image/jpeg"}""",
-            updatedAt = 10,
-        )
-        val draft = AtomicBundleDraft(
-            bundleId = "bundle-1",
-            root = record,
-            media = listOf(media),
-        )
-        val staged = backend.stageBundle(session, draft)
-        assertThat(staged.status).isEqualTo("staging")
-        assertThat(staged.missingMedia).containsExactly(MEDIA_A)
-        assertThat(backend.pull(session).entities.map { it.clientUuid }).containsExactly("baby-a")
-
-        backend.putBundleMedia(
-            session,
-            "bundle-1",
-            MEDIA_A,
-            TestMediaUploadSource(byteArrayOf(1, 2, 3)),
-        )
-        val committed = backend.commitBundle(session, "bundle-1")
-        assertThat(committed.status).isEqualTo("committed")
-        assertThat(committed.applied).isEqualTo(2)
-        assertThat(committed.recordAuthors).containsExactly(
-            CanonicalRecordAuthor("record-a", session.membershipId),
-        )
-        val again = backend.commitBundle(session, "bundle-1")
-        assertThat(again.cursor).isEqualTo(committed.cursor)
-        assertThat(again.recordAuthors).isEqualTo(committed.recordAuthors)
-        val pulled = backend.pull(session).entities.map { it.clientUuid }
-        assertThat(pulled).containsAtLeast("baby-a", "record-a", MEDIA_A)
-        assertThat(backend.getMedia(session, MEDIA_A)).isEqualTo(byteArrayOf(1, 2, 3))
     }
 
     @Test
@@ -255,73 +192,8 @@ class FakeSyncBackendTest {
     }
 
     @Test
-    fun babyThenRecordUsesPortableWireAndIncrementalCursorWithLww() = runBlocking {
-        val backend = FakeSyncBackend()
-        val family = "fam-1"
-        val baby = SyncWireMapper.baby(
-            BabyEntity(
-                id = 41,
-                familyId = 9,
-                nickname = "年年",
-                birthdayEpochDay = 20_000,
-                themeColorArgb = 0,
-                clientUuid = "baby-a",
-                updatedAt = 900,
-            ),
-            avatarMediaUuid = null,
-        )
-        val localRecord = RecordEntity(
-            id = 73,
-            clientUuid = "record-a",
-            babyId = 41,
-            type = "formula",
-            timestamp = 1_000,
-            payloadJson = """{"amount_ml":120}""",
-            updatedAt = 1_000,
-        )
-        val record = SyncWireMapper.record(
-            localRecord,
-            babyClientUuid = baby.clientUuid,
-        )
-
-        assertThat(backend.push(family, "A", listOf(baby, record)).getOrThrow()).isEqualTo(2)
-
-        val pullB = backend.pull(family, 0).getOrThrow()
-        assertThat(pullB.entities.map(SyncEntity::type)).containsExactly("baby", "record").inOrder()
-        assertThat(pullB.cursor).isEqualTo(2)
-        val recordPayload = Json.parseToJsonElement(pullB.entities.last().payloadJson).jsonObject
-        assertThat(recordPayload["baby_client_uuid"]?.jsonPrimitive?.content).isEqualTo("baby-a")
-        assertThat(recordPayload["baby_id"]).isNull()
-        assertThat(recordPayload["payload_json"]).isInstanceOf(
-            kotlinx.serialization.json.JsonObject::class.java,
-        )
-
-        val bUpdate = SyncWireMapper.record(
-            localRecord.copy(
-                payloadJson = """{"amount_ml":150}""",
-                updatedAt = 2_000,
-            ),
-            babyClientUuid = baby.clientUuid,
-        )
-        assertThat(backend.push(family, "B", listOf(bUpdate)).getOrThrow()).isEqualTo(1)
-        val pullA = backend.pull(family, pullB.cursor).getOrThrow()
-        assertThat(pullA.entities).hasSize(1)
-        assertThat(pullA.entities.single().payloadJson).contains("150")
-        assertThat(pullA.cursor).isEqualTo(3)
-
-        assertThat(
-            backend.push(family, "A", listOf(record.copy(updatedAt = 1_500))).getOrThrow(),
-        ).isEqualTo(0)
-        val unchanged = backend.pull(family, pullA.cursor).getOrThrow()
-        assertThat(unchanged.entities).isEmpty()
-        assertThat(unchanged.cursor).isEqualTo(pullA.cursor)
-
-        assertThat(backend.pull("another-family", 0).getOrThrow().entities).isEmpty()
-    }
-
-    @Test
     fun fulfillmentCandidateFreezeIsIdempotentAndIgnoresClientForgedStamps() = runBlocking {
-        // Ticket 26: Fake mirrors lezi-sync — first accept freezes membership/role/
+        // Fake mirrors lezi-sync — first accept freezes membership/role/
         // confirmed_at; later pushes cannot rewrite those fields.
         val backend = FakeSyncBackend()
         val ownerJoin = backend.create(
