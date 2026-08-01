@@ -120,8 +120,11 @@ UI 事件
        护理计划 bind 或无侧别会话保持内存 `PAUSED`，不得伪造 `"L"`
 进程被杀 / 坏存储读 → 冻结或 **init fail-closed 清空** 并停服（强于 transition 的 keep-session FAILED）；
        仅进程内同 session 见证可保留 RUNNING；不自动重复启动
-     → 完成态 SavedState：Saving+draft 且 session 仍在 → 幂等 resume completeNursing；
-       已发布 post-save 但 TimerState 未清 → 只补 clear；已有 next-feed/exit → 只恢复 UI
+     → 完成态 SavedState：submit 身份（completionClientUuid + baby）与 draft/Saving 同写；
+       Saving+draft 且有 durable uuid → 幂等 resume completeNursing（timer DataStore 空亦可）；
+       Saving 但身份全失 → 可重试 sheet（「会话已失效」），不得伪造成功 pendingExit；
+       已发布 post-save 但 TimerState 未清 → 只补 clear；已有 next-feed/exit → 只恢复 UI；
+       next-feed 结束后再发 pendingExit，与无 offer 成功路径同可消费退出
 CancellationException / Error → 先停服再原样重抛，不得吞成产品错误
 ```
 
@@ -136,10 +139,10 @@ CancellationException / Error → 先停服再原样重抛，不得吞成产品�
 | 完成 UI 态 | 含义 | 配置/进程重建 |
 |------------|------|----------------|
 | sheet + draft | 确认面板打开 | SavedState 恢复 draft；可改可取消 |
-| Saving | 单飞提交中 | 恢复 busy sheet；同 `completionClientUuid` 幂等 resume |
-| saveError | 可重试失败 | 恢复 error + draft |
-| next-feed offer | 事实已落，待安排 | 恢复 suggestedAt + baby 身份；不重复写事实 |
-| pendingExit | 无 offer，待 Host 退出 | 可确认消费一次；再订阅不重复导航 |
+| Saving | 单飞提交中 | 恢复 busy sheet；同 durable `completionClientUuid` 幂等 resume |
+| saveError | 可重试失败 | 恢复 error + draft（含会话失效 fail-closed） |
+| next-feed offer | 事实已落，待安排 | 恢复单 blob（baby+suggestedAt）；不重复写事实 |
+| pendingExit | 无 offer 或 offer 已结束，待 Host 退出 | 可确认消费一次；再订阅不重复导航 |
 
 绑定护理计划的计时完成以事务内 plan media 为准（不是打开计时/Composer 时的 UI 快照）；
 计划照片所有权与顺序不变，Record 行独立 `client_uuid`、可共享 `local_uri`；幂等

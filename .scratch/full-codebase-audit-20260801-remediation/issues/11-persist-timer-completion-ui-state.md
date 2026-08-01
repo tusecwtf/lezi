@@ -9,11 +9,11 @@
 
 ## Design notes (public seams)
 
-1. `TimerCompletionUiState` — single observable completion stage: draft / saving / saveError / pendingNextFeedSuggestedAt / pendingExit. Host reads only this; no Compose `remember` dual master.
-2. Pure reducers — `openTimerCompletionSheet`, `updateTimerCompletionDraft`, `dismissTimerCompletionSheet`, `mayStartTimerCompletionSave`, `beginTimerCompletionSave`, `timerCompletionSaveFailed`, `timerCompletionSucceeded`, `consumeTimerPendingExit`, `consumeTimerPendingNextFeed`, `shouldResumeTimerCompletionSave`, `rehydrateTimerCompletionUi`.
-3. `TimerCompletionSavedState` — SavedStateHandle adapter (Serializable draft blob + saving/error/exit + historical next-feed baby/suggestedAt keys for schedule/reconcile).
-4. `TimerViewModel.completionUi` / `openCompletion` / `confirmCompletion` / `acknowledgeCompletionExit` — results published on state (not composition callbacks); in-flight re-confirm is no-op; process-death resume is idempotent on `completionClientUuid`.
-5. `TimerRoute` — collects `completionUi` only; consumable exit via `LaunchedEffect(pendingExit)`; next-feed from `pendingNextFeedSuggestedAt`.
+1. `TimerCompletionUiState` — single observable completion stage: draft / saving / saveError / pendingNextFeed (blob) / pendingExit / completionClientUuid / sessionBabyId. Host reads only this; no Compose `remember` dual master.
+2. Pure reducers — `canMutateSheet`, `openTimerCompletionSheet`, `updateTimerCompletionDraft`, `dismissTimerCompletionSheet`, `mayStartTimerCompletionSave`, `beginTimerCompletionSave`, `timerCompletionValidationFailed`, `timerCompletionSaveFailed`, `timerCompletionSucceeded`, `consumeTimerPendingExit`, `finishTimerNextFeedToExit`, `shouldResumeTimerCompletionSave`, `decideTimerCompletionResume`, `rehydrateTimerCompletionUi`.
+3. `TimerCompletionSavedState` — SavedStateHandle adapter (Serializable draft blob + saving/error/exit + single `TimerPendingNextFeed` blob + durable submit identity). Legacy multi-key next-feed migrated on restore.
+4. `TimerViewModel.completionUi` / `openCompletion` / `confirmCompletion` / `acknowledgeCompletionExit` — results published on state (not composition callbacks); in-flight re-confirm is no-op; process-death resume is idempotent on durable `completionClientUuid` (completion SavedState preferred over timer DataStore alone). Missing identity mid-save → fail-closed retryable sheet, never false-success exit.
+5. `TimerRoute` — collects `completionUi` only; consumable exit via `LaunchedEffect(pendingExit)` (including after next-feed finish); next-feed from `pendingNextFeed`.
 
 ## Acceptance criteria
 

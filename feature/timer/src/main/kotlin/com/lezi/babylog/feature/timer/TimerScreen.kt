@@ -331,14 +331,9 @@ fun TimerRoute(
             preferredHand = preferredHand,
             onSchedule = vm::scheduleNextFeedPlan,
             onReconcile = vm::reconcileNextFeedPlan,
-            onFinishedScheduled = {
-                vm.dismissNextFeedPlan()
-                onDone()
-            },
-            onFinishedWithoutPlan = {
-                vm.dismissNextFeedPlan()
-                onDone()
-            },
+            // Navigation is owned by LaunchedEffect(pendingExit) after finish publishes exit.
+            onFinishedScheduled = { vm.dismissNextFeedPlan() },
+            onFinishedWithoutPlan = { vm.dismissNextFeedPlan() },
         )
     }
 }

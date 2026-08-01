@@ -215,7 +215,7 @@ Owner。详细页面、错误和删除恢复见
 - 左右圆钮发起计时后，系统真实确认前台服务才显示运行；通知权限开启时还须确认通知已发布，通知权限关闭不伪造失败。系统拒绝时保留累计值和目标侧，明确显示已暂停并提供“重试启动”。
 - 重开 App 不把未确认或已失联的服务伪装成运行中；这类会话显示为可恢复暂停态，由用户显式重试。
 - 设置关闭后：记录页不显示计时入口。
-- **计时完成态恢复（VM/`SavedState` 单主）**：确认面板的 draft、Saving/error 与提交中身份由 `TimerViewModel.completionUi` 驱动并写入 `SavedState`；配置重建后任意新 composition 只订阅该状态恢复 sheet 与 busy，不依赖旧 composition 的 `remember` 或一次性 `onDone`/`onError` 回调。保存进行中再次确认保持同一 Saving，不启动第二个 coroutine/Record。domain 成功后立刻发布可消费的 next-feed offer 或 pendingExit；失败回到可重试 sheet。进程死亡后靠稳定 `completionClientUuid` 幂等恢复，不重复 Record、候选、照片或 next-feed offer。Host 确认消费 exit/offer 后重新订阅不得重复导航。
+- **计时完成态恢复（VM/`SavedState` 单主）**：确认面板的 draft、Saving/error 与提交身份（`completionClientUuid` + baby）由 `TimerViewModel.completionUi` 驱动并写入 `SavedState`（与 timer DataStore 解耦，避免 fail-closed 空会话与 Saving 脱节）；配置重建后任意新 composition 只订阅该状态恢复 sheet 与 busy，不依赖旧 composition 的 `remember` 或一次性 `onDone`/`onError` 回调。保存进行中再次确认保持同一 Saving，不启动第二个 coroutine/Record。domain 成功后立刻发布可消费的 next-feed offer（单 blob）或 pendingExit；next-feed 结束后同样发布 pendingExit 由 Host 消费导航。失败回到可重试 sheet（含会话失效）。进程死亡后靠 durable `completionClientUuid` 幂等恢复，不重复 Record、候选、照片或 next-feed offer。Host 确认消费 exit 后重新订阅不得重复导航。
 
 #### 事实后的下次喂养安排（唯一权威流程）
 
