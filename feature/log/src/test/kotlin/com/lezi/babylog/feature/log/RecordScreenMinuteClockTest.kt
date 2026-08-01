@@ -1,5 +1,4 @@
 package com.lezi.babylog.feature.log
-
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.RecordType
@@ -18,6 +17,11 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.lezi.babylog.feature.log.timeline.*
+import com.lezi.babylog.feature.log.dock.*
+import com.lezi.babylog.feature.log.composer.*
+import com.lezi.babylog.feature.log.layout.*
+import com.lezi.babylog.feature.log.photo.*
 
 class RecordScreenMinuteClockTest {
     @Test

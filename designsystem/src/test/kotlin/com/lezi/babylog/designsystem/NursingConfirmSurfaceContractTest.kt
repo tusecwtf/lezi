@@ -10,7 +10,7 @@ class NursingConfirmSurfaceContractTest {
     fun `record composer uses the shared nursing field surface`() {
         val root = repositoryRoot()
         val composerSource = root.resolve(
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/QuickRecordPurposeFields.kt",
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordPurposeFields.kt",
         ).readText()
 
         assertTrue(composerSource.contains("LeziNursingConfirmFields("))
@@ -32,10 +32,10 @@ class NursingConfirmSurfaceContractTest {
     fun `composer and timer completion retain the shared confirm chrome`() {
         val root = repositoryRoot()
         val composerChrome = root.resolve(
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/ComposerConfirmChrome.kt",
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/ComposerConfirmChrome.kt",
         ).readText()
         val composerSheet = root.resolve(
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/QuickRecordSheet.kt",
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordSheet.kt",
         ).readText()
         val timerSheet = root.resolve(
             "feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/" +

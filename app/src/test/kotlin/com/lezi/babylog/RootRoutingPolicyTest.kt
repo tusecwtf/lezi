@@ -1,7 +1,7 @@
 package com.lezi.babylog
 
 import androidx.compose.ui.unit.dp
-import com.lezi.babylog.feature.log.quickDockSnackbarBottomInset
+import com.lezi.babylog.feature.log.dock.quickDockSnackbarBottomInset
 import com.lezi.babylog.sync.FamilyRole
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

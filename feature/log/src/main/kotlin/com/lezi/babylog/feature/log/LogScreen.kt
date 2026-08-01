@@ -1,5 +1,4 @@
 package com.lezi.babylog.feature.log
-
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -81,6 +80,11 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import kotlinx.coroutines.launch
+import com.lezi.babylog.feature.log.timeline.*
+import com.lezi.babylog.feature.log.dock.*
+import com.lezi.babylog.feature.log.composer.*
+import com.lezi.babylog.feature.log.layout.*
+import com.lezi.babylog.feature.log.photo.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

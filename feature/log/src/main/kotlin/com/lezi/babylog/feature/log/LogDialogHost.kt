@@ -1,5 +1,4 @@
 package com.lezi.babylog.feature.log
-
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -26,6 +25,11 @@ import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.sync.localRecordPublishDetail
+import com.lezi.babylog.feature.log.timeline.*
+import com.lezi.babylog.feature.log.dock.*
+import com.lezi.babylog.feature.log.composer.*
+import com.lezi.babylog.feature.log.layout.*
+import com.lezi.babylog.feature.log.photo.*
 
 internal data class PublishChromeTarget(
     val recordId: Long,

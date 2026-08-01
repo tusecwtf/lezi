@@ -38,7 +38,7 @@ class ContractSupersededSurfacesTest {
             "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/wizard/AccountFamilyWizardHost.kt",
         )
         val composer = source(
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordComposer.kt",
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/RecordComposer.kt",
         )
         val timer = source(
             "feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt",
@@ -131,7 +131,7 @@ class ContractSupersededSurfacesTest {
         }
 
         val refreshHosts = listOf(
-            source("feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogTimelineList.kt"),
+            source("feature/log/src/main/kotlin/com/lezi/babylog/feature/log/timeline/LogTimelineList.kt"),
             source("feature/summary/src/main/kotlin/com/lezi/babylog/feature/summary/SummaryScreen.kt"),
             source("feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt"),
         )

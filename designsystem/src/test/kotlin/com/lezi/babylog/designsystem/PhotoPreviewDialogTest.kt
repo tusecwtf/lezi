@@ -11,7 +11,7 @@ class PhotoPreviewDialogTest {
         val root = repositoryRoot()
         val callerSources = listOf(
             root.resolve(
-                "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/QuickRecordSheet.kt",
+                "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordSheet.kt",
             ),
             root.resolve(
                 "feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/CalendarScreen.kt",
