@@ -32,8 +32,7 @@ mod tests {
     const ROOT_README: &str = include_str!("../../../../README.md");
     const TECH_MD: &str = include_str!("../../../../docs/prd/tech.md");
     const PRD_README: &str = include_str!("../../../../docs/prd/README.md");
-    const RUNBOOK: &str =
-        include_str!("../../deploy/copy-back-tls-cutover-runbook.md");
+    const RUNBOOK: &str = include_str!("../../deploy/copy-back-tls-cutover-runbook.md");
 
     #[test]
     fn adr_0013_states_maintenance_window_exception_not_startup_migration() {
@@ -177,10 +176,7 @@ mod tests {
             ADR_0013.contains("Data bind") || ADR_0013.contains("data bind"),
             "data bind"
         );
-        assert!(
-            ADR_0013.contains("10001"),
-            "container uid on data bind"
-        );
+        assert!(ADR_0013.contains("10001"), "container uid on data bind");
         assert!(
             ADR_0013.contains("回滚") || ADR_0013.contains("rollback"),
             "backup/rollback"
@@ -193,13 +189,9 @@ mod tests {
             ADR_0013.contains("Departed") || ADR_0013.contains("departed"),
             "departed membership"
         );
+        assert!(ADR_0013.contains("hard-delete"), "hard-delete disposition");
         assert!(
-            ADR_0013.contains("hard-delete"),
-            "hard-delete disposition"
-        );
-        assert!(
-            ADR_0013.contains("anonymized_membership_refs")
-                || ADR_0013.contains("匿名事实"),
+            ADR_0013.contains("anonymized_membership_refs") || ADR_0013.contains("匿名事实"),
             "anonymized fact refs"
         );
         assert!(
@@ -249,7 +241,8 @@ mod tests {
         // Frontmatter: exception does not overturn fail-closed startup.
         assert!(
             ADR_0008.contains("does not overturn")
-                || ADR_0008.contains("不") && ADR_0008.contains("推翻")
+                || ADR_0008.contains("不")
+                    && ADR_0008.contains("推翻")
                     && ADR_0008.contains("fail-closed"),
             "status/body must clarify ADR-0013 does not overturn fail-closed startup"
         );
@@ -281,15 +274,17 @@ mod tests {
             "live-cutover-help",
             "help",
         ] {
-            assert!(text.contains(sub), "CLI help missing subcommand {sub}: {text}");
+            assert!(
+                text.contains(sub),
+                "CLI help missing subcommand {sub}: {text}"
+            );
         }
         assert!(
             text.contains("LEZI_MIGRATE_NEW_ROOT_PASSWORD"),
             "password env documented"
         );
         assert!(
-            text.contains(COPY_BACK_RUNBOOK)
-                || text.contains("copy-back-tls-cutover-runbook.md"),
+            text.contains(COPY_BACK_RUNBOOK) || text.contains("copy-back-tls-cutover-runbook.md"),
             "help must point at runbook"
         );
 
@@ -299,7 +294,13 @@ mod tests {
             assert_no_literal_secret_material(corpus);
         }
 
-        for sub in ["migrate", "dry-run", "validate", "copy-out-help", "copy-back-help"] {
+        for sub in [
+            "migrate",
+            "dry-run",
+            "validate",
+            "copy-out-help",
+            "copy-back-help",
+        ] {
             assert!(
                 ADR_0013.contains(sub),
                 "ADR-0013 must list CLI subcommand {sub}"
@@ -389,8 +390,7 @@ mod tests {
         );
         assert!(
             LEZI_SYNC_README.contains("普通 CD")
-                && (LEZI_SYNC_README.contains("不执行")
-                    || LEZI_SYNC_README.contains("不得执行")),
+                && (LEZI_SYNC_README.contains("不执行") || LEZI_SYNC_README.contains("不得执行")),
             "ordinary CD does not run offline-migrate"
         );
         assert!(
@@ -425,8 +425,7 @@ mod tests {
             "root README should point at offline-migrate boundary"
         );
         assert!(
-            ROOT_README.contains("0013")
-                || ROOT_README.contains("copy-back-tls-cutover-runbook"),
+            ROOT_README.contains("0013") || ROOT_README.contains("copy-back-tls-cutover-runbook"),
             "root README must link ADR or runbook"
         );
 
@@ -445,8 +444,7 @@ mod tests {
         );
         assert!(
             PRD_README.contains("fresh-current")
-                && (PRD_README.contains("offline-migrate")
-                    || PRD_README.contains("ADR-0013")),
+                && (PRD_README.contains("offline-migrate") || PRD_README.contains("ADR-0013")),
             "PRD README must keep fresh-current and acknowledge offline cutover boundary"
         );
         assert!(
