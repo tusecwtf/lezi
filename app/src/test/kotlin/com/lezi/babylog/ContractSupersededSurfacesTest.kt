@@ -186,7 +186,7 @@ class ContractSupersededSurfacesTest {
         assertThat(server).doesNotContain(".route(\"/v1/invite\"")
         assertThat(server).doesNotContain(".route(\"/v1/join\"")
         assertThat(server).doesNotContain("\"token\":")
-        assertThat(source("tools/lezi-sync/src/store.rs"))
+        assertThat(source("tools/lezi-sync/src/store/schema.rs"))
             .doesNotContain("CREATE TABLE invites")
     }
 
