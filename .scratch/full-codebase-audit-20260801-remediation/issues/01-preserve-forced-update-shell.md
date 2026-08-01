@@ -4,17 +4,17 @@
 
 **Source:** `AUDIT-20260801-P1-01`  
 **Blocked by:** None — can start immediately  
-**Status:** ready-for-agent  
+**Status:** implemented  
 **Size:** S–M
 
 ## Acceptance criteria
 
-- [ ] 回归先证明 `CUR → PackageUnknown → checkAppUpdate(UpToDate)` 当前会清壳，再修到仍保留 `PackageUnknown`。
-- [ ] `CUR → PackageUnknown → checkAppUpdate(OptionalUpdate)` 不展示 optional banner，且强制壳仍在。
-- [ ] 已有 `WithPackage` 时，暂时失败或非 Forced 元数据保留最后一个已验证可安装包；新的合法 Forced 元数据可替换它。
-- [ ] 没有 CUR/forced 历史的正常手动检查仍可返回 UpToDate/Optional 并清理过期 optional 状态。
-- [ ] 未加入家庭时继续清除 update surface；手动检查失败仍不把 `SyncStatus` 伪装成 NAS 网络错误。
-- [ ] `classifyAndPublishAppUpdate` 不再被可拆壳调用方绕过；测试覆盖同步和手动重试两条入口。
+- [x] 回归先证明 `CUR → PackageUnknown → checkAppUpdate(UpToDate)` 当前会清壳，再修到仍保留 `PackageUnknown`。
+- [x] `CUR → PackageUnknown → checkAppUpdate(OptionalUpdate)` 不展示 optional banner，且强制壳仍在。
+- [x] 已有 `WithPackage` 时，暂时失败或非 Forced 元数据保留最后一个已验证可安装包；新的合法 Forced 元数据可替换它。
+- [x] 没有 CUR/forced 历史的正常手动检查仍可返回 UpToDate/Optional 并清理过期 optional 状态。
+- [x] 未加入家庭时继续清除 update surface；手动检查失败仍不把 `SyncStatus` 伪装成 NAS 网络错误。
+- [x] `classifyAndPublishAppUpdate` 不再被可拆壳调用方绕过；测试覆盖同步和手动重试两条入口。
 
 ## Validation
 

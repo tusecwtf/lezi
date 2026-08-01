@@ -39,7 +39,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 | ID | Source | Ticket | Blocked by | Size | Status |
 |----|--------|--------|------------|------|--------|
-| [01](./issues/01-preserve-forced-update-shell.md) | Audit P1-01 | 保留 CUR 强制更新壳 | — | S–M | ready-for-agent |
+| [01](./issues/01-preserve-forced-update-shell.md) | Audit P1-01 | 保留 CUR 强制更新壳 | — | S–M | implemented |
 | [02](./issues/02-cas-media-commit-receipts.md) | Audit P1-02 | 用条件回写确认媒体 commit | — | M | ready-for-agent |
 | [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | blocked |
 | [04](./issues/04-freeze-fulfillment-candidate-evidence.md) | Audit P1-04 | 冻结履行候选业务证据 | — | M | ready-for-agent |

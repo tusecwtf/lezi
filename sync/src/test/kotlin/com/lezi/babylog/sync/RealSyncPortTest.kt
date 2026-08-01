@@ -251,6 +251,168 @@ class RealSyncPortTest {
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
+    /**
+     * AUDIT-20260801-P1-01: force-shell "retry" shares [SyncPort.checkAppUpdate] with Settings.
+     * After CUR → PackageUnknown, UpToDate-classifying metadata must not tear the shell
+     * (would reintroduce 假正常 while authoritative sync is still gated).
+     */
+    @Test
+    fun checkAppUpdateAfterPackageUnknownKeepsForceShellWhenMetadataIsUpToDate() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        // CUR + metadata failure → PackageUnknown force shell.
+        rig.backend.getAppUpdateMetadataFailure =
+            SyncHttpException(500, """{"detail":"update store unavailable"}""")
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+
+        // Retry path: metadata returns but classifies as UpToDate (local >= versionCode and min).
+        // Divergence from prior CUR — fail closed: keep PackageUnknown, no optional banner.
+        rig.backend.getAppUpdateMetadataFailure = null
+        rig.backend.appUpdateMetadata = sampleAppUpdateMetadata(
+            versionCode = 6,
+            versionName = "0.3.0",
+            minSupportedVersionCode = 1,
+        )
+        rig.port.checkAppUpdate().getOrThrow()
+
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun checkAppUpdateAfterPackageUnknownKeepsForceShellWithoutOptionalBanner() = runTest {
+        val optionalMetadata = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 1,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        rig.backend.getAppUpdateMetadataFailure =
+            SyncHttpException(500, """{"detail":"update store unavailable"}""")
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+
+        // Optional-classifying metadata after CUR must not demote force or show optional banner.
+        rig.backend.getAppUpdateMetadataFailure = null
+        rig.backend.appUpdateMetadata = optionalMetadata
+        rig.port.checkAppUpdate().getOrThrow()
+
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun checkAppUpdatePreservesWithPackageWhenMetadataClassifiesNonForced() = runTest {
+        val forcedPackage = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+        )
+        val nonForcedMetadata = sampleAppUpdateMetadata(
+            versionCode = 10,
+            versionName = "0.4.1",
+            minSupportedVersionCode = 1,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = forcedPackage
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
+
+        // Temporary divergence / non-Forced metadata must keep the last installable package.
+        rig.backend.appUpdateMetadata = nonForcedMetadata
+        rig.port.checkAppUpdate().getOrThrow()
+
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun checkAppUpdateReplacesWithPackageWhenNewForcedMetadataArrives() = runTest {
+        val firstForced = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+        )
+        val newerForced = sampleAppUpdateMetadata(
+            versionCode = 11,
+            versionName = "0.5.0",
+            minSupportedVersionCode = 10,
+            releaseNotes = "更新强制包",
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = firstForced
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(firstForced))
+
+        rig.backend.appUpdateMetadata = newerForced
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.ForcedUpdate(newerForced))
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(newerForced))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun checkAppUpdatePreservesWithPackageOnTemporaryMetadataFailure() = runTest {
+        val forcedPackage = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = forcedPackage
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
+
+        rig.backend.getAppUpdateMetadataFailure =
+            SyncHttpException(500, """{"detail":"update store unavailable"}""")
+        assertThat(rig.port.checkAppUpdate().isFailure).isTrue()
+
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
     @Test
     fun familySyncErrorMapsClientUpdateRequiredOutOfGenericHttpFailure() {
         val mapped = familySyncError(

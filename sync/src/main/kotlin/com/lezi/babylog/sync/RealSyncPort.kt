@@ -617,7 +617,14 @@ class RealSyncPort @Inject constructor(
                 throw ForegroundSyncBlockedException(decision)
             }
             val metadata = backend.getAppUpdateMetadata(session)
-            classifyAndPublishAppUpdate(metadata, respectOptionalDismissal = true)
+            // When a force shell is already up (CUR / PackageUnknown / WithPackage),
+            // only Forced metadata may advance it — bare UpToDate/Optional must not
+            // demote to 假正常 (AUDIT-20260801-P1-01).
+            classifyAndPublishAppUpdate(
+                metadata = metadata,
+                respectOptionalDismissal = true,
+                preserveExistingForceShell = forcedAppUpdateState.value != null,
+            )
         }.recoverCatching { error ->
             // Map wire gate failures out of generic check-update "network" copy.
             val required = when (error) {
@@ -787,10 +794,17 @@ class RealSyncPort @Inject constructor(
      * matching optional/forced flow. Forced always wins over optional.
      * Rejects metadata whose packageName is not this process applicationId so UI
      * never offers install of a different app.
+     *
+     * When [preserveExistingForceShell] is true and classification is not Forced,
+     * an existing force surface is left intact and optional is not published —
+     * callers that already observed CUR must not demote via bare UpToDate/Optional.
+     * Handshake piggyback after a successful sync keeps the default (false) so a
+     * genuine non-gated client can clear a stale shell.
      */
     private fun classifyAndPublishAppUpdate(
         metadata: AppUpdateMetadata,
         respectOptionalDismissal: Boolean,
+        preserveExistingForceShell: Boolean = false,
     ): AppUpdateCheckResult {
         metadataPackageMismatchOrNull(metadata)?.let { mismatch ->
             optionalAppUpdateState.value = null
@@ -801,6 +815,15 @@ class RealSyncPort @Inject constructor(
             optionalAppUpdateState.value = null
             forcedAppUpdateState.value = ForcedAppUpdateState.WithPackage(metadata)
             return AppUpdateCheckResult.ForcedUpdate(metadata)
+        }
+        if (preserveExistingForceShell && forcedAppUpdateState.value != null) {
+            // Fail closed: keep PackageUnknown / last WithPackage; never optional banner.
+            optionalAppUpdateState.value = null
+            return if (local >= metadata.versionCode) {
+                AppUpdateCheckResult.UpToDate
+            } else {
+                AppUpdateCheckResult.OptionalUpdate(metadata)
+            }
         }
         forcedAppUpdateState.value = null
         if (local >= metadata.versionCode) {
@@ -872,9 +895,12 @@ class RealSyncPort @Inject constructor(
                 )
                 if (decision == ForegroundSyncDecision.Allowed) {
                     val metadata = backend.getAppUpdateMetadata(session)
+                    // Never tear shell on non-Forced classification while resolving CUR —
+                    // same policy as checkAppUpdate retry under an active force surface.
                     val classified = classifyAndPublishAppUpdate(
                         metadata = metadata,
                         respectOptionalDismissal = false,
+                        preserveExistingForceShell = true,
                     )
                     if (classified is AppUpdateCheckResult.ForcedUpdate) {
                         accepted = classified
