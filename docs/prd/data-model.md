@@ -369,11 +369,24 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 `status`（pending|missed|completed|skipped）,
 `created_by_membership_id`（服务端盖章）, `fulfilled_record_client_uuid?`,
 `fulfilled_at?`。计划媒体为 bundle 内 `media` 且 `care_plan_client_uuid` 指向根。
-NAS 一旦持久化同时具有非空 `fulfilled_record_client_uuid` 与 `fulfilled_at` 的 completed
-CarePlan，后续版本必须精确保留这两个值；清空、改绑其它 Record 或改变确认时间均返回
-`409`，creator 与 owner 遵循相同规则。其它计划字段仍可按原 ACL/LWW 更新。这个不可变 pair
-是服务端证明 tombstone 自定义定义只产生一次显式履行事实的 current-wire 门闩；设备根据
-FulfillmentCandidate 做的赢家重链仍是本机派生，不把 rebind 重新发布为 CarePlan LWW。
+
+**Completed ↔ fulfillment pair 双向不变量（model/API fail-closed）：**
+
+| status | `fulfilled_record_client_uuid` + `fulfilled_at` |
+|--------|--------------------------------------------------|
+| `completed` | 两字段必须**同时非空**（完整 pair）；任一为空/缺失 → `422` |
+| `pending` / `missed` / `skipped` | 两字段必须**同时为空**；携带 pair 或残缺 pair → `422` |
+
+两字段本身也是「同时为空或同时非空」；禁止残缺绑定。`status=completed` 的首次 atomic
+root 写入必须在同一事务携带完整 pair，不能先 completed 再补绑。若 bound Record 已在同
+家庭存在，须与计划同宝宝（否则引用冲突）；产品发布序仍允许 completed CarePlan → Record
+的前向引用。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
+清空、改绑其它 Record 或改变确认时间：残缺/清空在 model 边界 `422`，合法完整但改绑/改时
+的 rewrite 返回 `409`，creator 与 owner 遵循相同规则。精确 replay（同 pair）幂等；stage
+与 commit 间的并发 rebind 仍由 commit 时冻结检查拦截。其它计划字段仍可按原 ACL/LWW 更新。
+这个不可变 pair 是服务端证明 tombstone 自定义定义只产生一次显式履行事实的 current-wire
+门闩；设备根据 FulfillmentCandidate 做的赢家重链仍是本机派生，不把 rebind 重新发布为
+CarePlan LWW。
 `type` 使用与 Record 相同的当前类型集合；`type=custom` 时
 `custom_item_client_uuid` 新建时必须引用同家庭、未删除的 CustomItemDef；既有计划可继续
 引用同家庭 tombstone 定义并被编辑、删除或显式履行，其它类型必须省略或置空。

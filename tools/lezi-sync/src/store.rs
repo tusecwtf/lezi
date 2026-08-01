@@ -4244,6 +4244,67 @@ fn freeze_care_plan_fulfillment_binding(
     Ok(())
 }
 
+/// Push-path CarePlan fulfillment pair invariant (mirrors model wire rules).
+/// Completed requires both fields; non-completed forbids either; partial pairs
+/// reject. When the bound record already exists in-family, babies must match.
+/// Forward references (CarePlan before Record) remain allowed.
+fn validate_care_plan_fulfillment_pair_on_push(
+    entity: &Entity,
+    effective_records: &HashMap<String, Map<String, Value>>,
+) -> Result<(), StoreError> {
+    let status = entity
+        .payload
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let fulfilled_record = entity
+        .payload
+        .get("fulfilled_record_client_uuid")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let fulfilled_at = entity.payload.get("fulfilled_at").and_then(Value::as_i64);
+    let has_record = fulfilled_record.is_some();
+    let has_at = fulfilled_at.is_some();
+    if has_record != has_at {
+        return Err(StoreError::UnresolvedReference(
+            "fulfilled_record_client_uuid and fulfilled_at must both be set or both null"
+                .to_owned(),
+        ));
+    }
+    if status == "completed" {
+        if !has_record {
+            return Err(StoreError::UnresolvedReference(
+                "completed care plan requires fulfilled_record_client_uuid and fulfilled_at"
+                    .to_owned(),
+            ));
+        }
+    } else if has_record {
+        return Err(StoreError::UnresolvedReference(
+            "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at"
+                .to_owned(),
+        ));
+    }
+    if let Some(record_id) = fulfilled_record {
+        if let Some(record_payload) = effective_records.get(record_id) {
+            let plan_baby = entity
+                .payload
+                .get("baby_client_uuid")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::InvalidStoredPayload)?;
+            let record_baby = record_payload
+                .get("baby_client_uuid")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::InvalidStoredPayload)?;
+            if plan_baby != record_baby {
+                return Err(StoreError::UnresolvedReference(
+                    "care_plan fulfilled record baby does not match care_plan baby".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn discard_media_for_noop_care_plans(
     entities: &mut Vec<Entity>,
     noop_care_plan_ids: &BTreeSet<String>,
@@ -4968,6 +5029,10 @@ fn validate_push(
                 "care_plan baby_client_uuid does not exist".to_owned(),
             ));
         }
+        // Defense in depth: same status↔pair invariant as model wire validation.
+        // Product publish order is completed CarePlan → Record, so the bound
+        // record may be a forward reference; when it already exists, same-baby.
+        validate_care_plan_fulfillment_pair_on_push(entity, &effective_records)?;
         validate_custom_item_reference(
             entity,
             &live_custom_item_ids,
@@ -6245,6 +6310,220 @@ mod tests {
                 .unwrap()
                 .status,
             "staging"
+        );
+    }
+
+    /// Public store seam: completed CarePlan cannot land without a full pair;
+    /// partial pairs and non-completed carriage fail closed; when the bound
+    /// record already exists, same-baby is required. Forward refs still work.
+    #[test]
+    fn completed_care_plan_requires_full_fulfillment_pair_on_push() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let other_baby_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        let record_id = Uuid::new_v4();
+        let other_record_id = Uuid::new_v4();
+        let fulfilled_at = 1_700_000_100_000i64;
+        let plan_payload = |status: &str, record: Option<Uuid>, at: Option<i64>, baby: Uuid| {
+            json!({
+                "baby_client_uuid":baby,"type":"bath",
+                "custom_item_client_uuid":null,
+                "scheduled_at":1_700_000_000_000i64,
+                "scheduled_zone_id":"Asia/Shanghai",
+                "status":status,
+                "payload_json":{},"schema_version":2,"note":null,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":record,"fulfilled_at":at
+            })
+        };
+        let record_payload = |baby: Uuid| {
+            json!({
+                "baby_client_uuid":baby,"type":"bath",
+                "custom_item_client_uuid":null,"timestamp":1_700_000_100_000i64,
+                "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+            })
+        };
+        let baby_payload = json!({
+            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+            "avatar_media_uuid":null,"birth_weight_grams":3200
+        });
+        publish_root(
+            &store,
+            &principal,
+            entity("baby", baby_id, 1, baby_payload.clone()),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity("baby", other_baby_id, 1, baby_payload),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "care_plan",
+                plan_id,
+                1,
+                plan_payload("pending", None, None, baby_id),
+            ),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity("record", record_id, 1, record_payload(baby_id)),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity("record", other_record_id, 1, record_payload(other_baby_id)),
+            10,
+        )
+        .unwrap();
+
+        // completed without full pair — reject (no complete-then-bind window).
+        for (record, at) in [
+            (None, None),
+            (Some(record_id), None),
+            (None, Some(fulfilled_at)),
+        ] {
+            assert!(
+                matches!(
+                    publish_root(
+                        &store,
+                        &principal,
+                        entity(
+                            "care_plan",
+                            plan_id,
+                            2,
+                            plan_payload("completed", record, at, baby_id),
+                        ),
+                        10,
+                    ),
+                    Err(StoreError::UnresolvedReference(_))
+                ),
+                "completed without full pair must reject"
+            );
+        }
+
+        // Partial or full pair on non-completed — fail closed.
+        for status in ["pending", "missed", "skipped"] {
+            assert!(
+                matches!(
+                    publish_root(
+                        &store,
+                        &principal,
+                        entity(
+                            "care_plan",
+                            plan_id,
+                            2,
+                            plan_payload(status, Some(record_id), Some(fulfilled_at), baby_id),
+                        ),
+                        10,
+                    ),
+                    Err(StoreError::UnresolvedReference(_))
+                ),
+                "{status} must not carry fulfillment pair"
+            );
+        }
+
+        // Cross-baby existing record — reject.
+        assert!(matches!(
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "care_plan",
+                    plan_id,
+                    2,
+                    plan_payload(
+                        "completed",
+                        Some(other_record_id),
+                        Some(fulfilled_at),
+                        baby_id,
+                    ),
+                ),
+                10,
+            ),
+            Err(StoreError::UnresolvedReference(message))
+                if message.contains("fulfilled record baby")
+        ));
+
+        // Same-baby existing record — accept and freeze.
+        assert_eq!(
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "care_plan",
+                    plan_id,
+                    2,
+                    plan_payload("completed", Some(record_id), Some(fulfilled_at), baby_id),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+
+        // Forward-ref completed plan (record not yet published) remains valid.
+        let forward_plan = Uuid::new_v4();
+        let forward_record = Uuid::new_v4();
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "care_plan",
+                forward_plan,
+                1,
+                plan_payload("pending", None, None, baby_id),
+            ),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "care_plan",
+                    forward_plan,
+                    2,
+                    plan_payload(
+                        "completed",
+                        Some(forward_record),
+                        Some(fulfilled_at),
+                        baby_id,
+                    ),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+        assert_eq!(
+            publish_root(
+                &store,
+                &principal,
+                entity("record", forward_record, 2, record_payload(baby_id)),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
         );
     }
 

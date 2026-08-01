@@ -884,6 +884,45 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     optional_nullable_uuid(payload, "fulfilled_record_client_uuid")?;
     optional_integer(payload, "fulfilled_at", 0, i64::MAX)?;
+    // Bidirectional invariant: completed ⇔ full pair; both fields both-null or
+    // both-set. Rejects complete-then-bind and non-completed pair carriage.
+    validate_care_plan_fulfillment_pair(payload, status)?;
+    Ok(())
+}
+
+/// CarePlan wire: `fulfilled_record_client_uuid` + `fulfilled_at` must be both
+/// null or both non-null. `status=completed` requires the full pair; any other
+/// status must carry neither field (fail closed).
+fn validate_care_plan_fulfillment_pair(
+    payload: &Map<String, Value>,
+    status: &str,
+) -> Result<(), ApiError> {
+    let fulfilled_record = optional_string_value(payload, "fulfilled_record_client_uuid")?;
+    let fulfilled_at =
+        match payload.get("fulfilled_at") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_i64().ok_or_else(|| {
+                ApiError::unprocessable("fulfilled_at must be an integer or null")
+            })?),
+        };
+    let has_record = fulfilled_record.is_some();
+    let has_at = fulfilled_at.is_some();
+    if has_record != has_at {
+        return Err(ApiError::unprocessable(
+            "fulfilled_record_client_uuid and fulfilled_at must both be set or both null",
+        ));
+    }
+    if status == "completed" {
+        if !has_record {
+            return Err(ApiError::unprocessable(
+                "completed care plan requires fulfilled_record_client_uuid and fulfilled_at",
+            ));
+        }
+    } else if has_record {
+        return Err(ApiError::unprocessable(
+            "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at",
+        ));
+    }
     Ok(())
 }
 
@@ -1645,6 +1684,84 @@ mod tests {
             assert!(care_plan(payload)
                 .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
+        }
+    }
+
+    /// Public model seam: CarePlan wire status ↔ fulfillment pair bidirectional
+    /// invariant. Completed requires both fields; non-completed forbids either;
+    /// partial pairs never validate.
+    #[test]
+    fn care_plan_fulfillment_pair_is_atomic_with_status() {
+        let record_id = Uuid::new_v4();
+        let fulfilled_at = 1_700_000_100_000i64;
+
+        let mut completed = care_plan_payload();
+        completed["status"] = json!("completed");
+        completed["fulfilled_record_client_uuid"] = json!(record_id);
+        completed["fulfilled_at"] = json!(fulfilled_at);
+        care_plan(completed)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .expect("completed with full pair must accept");
+
+        for status in ["pending", "missed", "skipped"] {
+            let mut open = care_plan_payload();
+            open["status"] = json!(status);
+            open["fulfilled_record_client_uuid"] = Value::Null;
+            open["fulfilled_at"] = Value::Null;
+            care_plan(open)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .unwrap_or_else(|_| panic!("{status} with empty pair must accept"));
+        }
+
+        // completed with either field empty/missing is rejected (no complete-then-bind).
+        for (record, at) in [
+            (Value::Null, json!(fulfilled_at)),
+            (json!(record_id), Value::Null),
+            (Value::Null, Value::Null),
+        ] {
+            let mut incomplete = care_plan_payload();
+            incomplete["status"] = json!("completed");
+            incomplete["fulfilled_record_client_uuid"] = record;
+            incomplete["fulfilled_at"] = at;
+            assert!(
+                care_plan(incomplete)
+                    .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                    .is_err(),
+                "completed without full pair must reject"
+            );
+        }
+
+        // Partial pair on non-completed (and completed covered above) — both-or-neither.
+        for status in ["pending", "missed", "skipped", "completed"] {
+            for (record, at) in [
+                (json!(record_id), Value::Null),
+                (Value::Null, json!(fulfilled_at)),
+            ] {
+                let mut partial = care_plan_payload();
+                partial["status"] = json!(status);
+                partial["fulfilled_record_client_uuid"] = record;
+                partial["fulfilled_at"] = at;
+                assert!(
+                    care_plan(partial)
+                        .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                        .is_err(),
+                    "{status} with partial fulfillment pair must reject"
+                );
+            }
+        }
+
+        // Fail closed: non-completed must not carry a full fulfillment pair.
+        for status in ["pending", "missed", "skipped"] {
+            let mut with_pair = care_plan_payload();
+            with_pair["status"] = json!(status);
+            with_pair["fulfilled_record_client_uuid"] = json!(record_id);
+            with_pair["fulfilled_at"] = json!(fulfilled_at);
+            assert!(
+                care_plan(with_pair)
+                    .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                    .is_err(),
+                "{status} must not carry fulfillment pair"
+            );
         }
     }
 

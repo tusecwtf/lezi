@@ -9564,17 +9564,12 @@ async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner
         StatusCode::OK
     );
 
+    // Full-pair rebind/retime: wire-valid, freeze at store → 409.
     let mut rebound = first_completion.clone();
     rebound["fulfilled_record_client_uuid"] = json!(rebound_record_id);
-    let mut cleared = first_completion.clone();
-    cleared["fulfilled_record_client_uuid"] = Value::Null;
     let mut retimed = first_completion.clone();
     retimed["fulfilled_at"] = json!(fulfilled_at + 1);
-    for (token, updated_at, payload) in [
-        (creator_token, 5, rebound),
-        (creator_token, 6, cleared),
-        (owner_token, 7, retimed),
-    ] {
+    for (token, updated_at, payload) in [(creator_token, 5, rebound), (owner_token, 7, retimed)] {
         let (status, body) = publish_root_bundle(
             &rig.app,
             token,
@@ -9583,6 +9578,22 @@ async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert_eq!(body, json!({"detail": immutable_detail}));
+    }
+
+    // Partial rewrite / clear: fail closed at model boundary (422), not freeze (409).
+    let mut partial_clear = first_completion.clone();
+    partial_clear["fulfilled_record_client_uuid"] = Value::Null;
+    let mut completed_without_pair = first_completion.clone();
+    completed_without_pair["fulfilled_record_client_uuid"] = Value::Null;
+    completed_without_pair["fulfilled_at"] = Value::Null;
+    for (updated_at, payload) in [(6i64, partial_clear), (8, completed_without_pair)] {
+        let (status, body) = publish_root_bundle(
+            &rig.app,
+            creator_token,
+            entity_wire("care_plan", &plan_id, updated_at, payload, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     }
 
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;

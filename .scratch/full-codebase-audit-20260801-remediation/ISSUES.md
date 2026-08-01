@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **4**（01、02、03、04）
-- Current frontier (ready-for-agent): **15**
+- Done: **5**（01、02、03、04、05）
+- Current frontier (ready-for-agent): **14**
 - Blocked by dependency: **12**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**05、06、07、08、10、12、13、14、16、17、19、20、22、23、25**
+**06、07、08、10、12、13、14、16、17、19、20、22、23、25**
 
 ## Tickets
 
@@ -44,7 +44,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [02](./issues/02-cas-media-commit-receipts.md) | Audit P1-02 | 用条件回写确认媒体 commit | — | M | done |
 | [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | done |
 | [04](./issues/04-freeze-fulfillment-candidate-evidence.md) | Audit P1-04 | 冻结履行候选业务证据 | — | M | done |
-| [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | ready-for-agent |
+| [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | done |
 | [06](./issues/06-clear-nursing-timer-with-local-data.md) | Audit P1-06 | 本机清空同步停止并清除计时器 | — | M | ready-for-agent |
 | [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | ready-for-agent |
 | [08](./issues/08-carry-plan-photos-through-timer-fulfillment.md) | Audit P1-08 | 计时履行继承护理计划照片 | — | M | ready-for-agent |
