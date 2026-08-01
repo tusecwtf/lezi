@@ -2,11 +2,11 @@ package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.feature.family.components.*
 
-import com.lezi.babylog.domain.FamilyWizardEntry
-import com.lezi.babylog.domain.FamilyWizardJoinRole
-import com.lezi.babylog.domain.FamilyWizardMode
-import com.lezi.babylog.domain.FamilyWizardOutcome
-import com.lezi.babylog.domain.FamilyWizardStep
+import com.lezi.babylog.domain.family.FamilyWizardEntry
+import com.lezi.babylog.domain.family.FamilyWizardJoinRole
+import com.lezi.babylog.domain.family.FamilyWizardMode
+import com.lezi.babylog.domain.family.FamilyWizardOutcome
+import com.lezi.babylog.domain.family.FamilyWizardStep
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
@@ -100,8 +100,8 @@ class AccountFamilyWizardAdapterTest {
             joinRole = FamilyWizardJoinRole.Member,
         )
 
-        val failed = com.lezi.babylog.domain.projectMemberLoginQrDialog(
-            com.lezi.babylog.domain.FamilyWizardState.MemberLoginQrVerificationFailed(
+        val failed = com.lezi.babylog.domain.family.projectMemberLoginQrDialog(
+            com.lezi.babylog.domain.family.FamilyWizardState.MemberLoginQrVerificationFailed(
                 snapshot = snapshot,
                 payload = payload,
                 message = "暂时无法确认二维码中的家庭服务器，请稍后重试",
@@ -111,8 +111,8 @@ class AccountFamilyWizardAdapterTest {
         assertEquals(true, failed.confirmEnabled)
         assertEquals("重新确认", failed.confirmLabel)
 
-        val ready = com.lezi.babylog.domain.projectMemberLoginQrDialog(
-            com.lezi.babylog.domain.FamilyWizardState.MemberLoginQrReady(
+        val ready = com.lezi.babylog.domain.family.projectMemberLoginQrDialog(
+            com.lezi.babylog.domain.family.FamilyWizardState.MemberLoginQrReady(
                 snapshot = snapshot,
                 payload = payload,
                 feedback = "请填写设备称呼",

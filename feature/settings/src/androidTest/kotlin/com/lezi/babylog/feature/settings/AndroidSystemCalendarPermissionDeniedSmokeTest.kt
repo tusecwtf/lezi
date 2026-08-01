@@ -3,9 +3,9 @@ package com.lezi.babylog.feature.settings
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.domain.SystemCalendarOwnedEventLookup
-import com.lezi.babylog.domain.SystemCalendarUpsert
-import com.lezi.babylog.domain.SystemCalendarUpsertOutcome
+import com.lezi.babylog.domain.calendar.SystemCalendarOwnedEventLookup
+import com.lezi.babylog.domain.calendar.SystemCalendarUpsert
+import com.lezi.babylog.domain.calendar.SystemCalendarUpsertOutcome
 import kotlinx.coroutines.runBlocking
 import org.junit.Test
 import org.junit.runner.RunWith

@@ -74,8 +74,8 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.leziRecordColor
-import com.lezi.babylog.domain.DayChartCategories
-import com.lezi.babylog.domain.DayChartCategory
+import com.lezi.babylog.domain.carelog.DayChartCategories
+import com.lezi.babylog.domain.carelog.DayChartCategory
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId

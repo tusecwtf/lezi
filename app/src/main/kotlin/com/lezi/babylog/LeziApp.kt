@@ -5,7 +5,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.LocalDataClearCoordinator
+import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
 import com.lezi.babylog.core.common.LocalDataGate
 import com.lezi.babylog.feature.export.ExportCacheCleanup
 import com.lezi.babylog.feature.widget.CareWidgetAutoRefresh

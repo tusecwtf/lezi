@@ -3,12 +3,12 @@ package com.lezi.babylog.feature.family.wizard
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.FamilyWizardController
-import com.lezi.babylog.domain.FamilyWizardEntry
-import com.lezi.babylog.domain.FamilyWizardOutcome
-import com.lezi.babylog.domain.FamilyWizardSnapshot
-import com.lezi.babylog.domain.FamilyWizardState
-import com.lezi.babylog.domain.SyncFamilyWizardGateway
+import com.lezi.babylog.domain.family.FamilyWizardController
+import com.lezi.babylog.domain.family.FamilyWizardEntry
+import com.lezi.babylog.domain.family.FamilyWizardOutcome
+import com.lezi.babylog.domain.family.FamilyWizardSnapshot
+import com.lezi.babylog.domain.family.FamilyWizardState
+import com.lezi.babylog.domain.family.SyncFamilyWizardGateway
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
 import com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME
@@ -72,12 +72,12 @@ class AccountFamilyWizardHost @Inject constructor(
                 if (pending != null) {
                     familyWizard.restorePendingMemberApproval(
                         FamilyWizardSnapshot.empty(FamilyWizardEntry.Account).copy(
-                            mode = com.lezi.babylog.domain.FamilyWizardMode.Join,
-                            step = com.lezi.babylog.domain.FamilyWizardStep.Identity,
+                            mode = com.lezi.babylog.domain.family.FamilyWizardMode.Join,
+                            step = com.lezi.babylog.domain.family.FamilyWizardStep.Identity,
                             host = session.serverHost,
                             portText = session.serverPort.toString(),
                             scheme = session.serverScheme,
-                            joinRole = com.lezi.babylog.domain.FamilyWizardJoinRole.Member,
+                            joinRole = com.lezi.babylog.domain.family.FamilyWizardJoinRole.Member,
                         ),
                         pending,
                     )

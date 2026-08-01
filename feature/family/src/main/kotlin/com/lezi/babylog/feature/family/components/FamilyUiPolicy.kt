@@ -3,9 +3,9 @@ package com.lezi.babylog.feature.family.components
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
-import com.lezi.babylog.domain.FamilyWizardEntry
-import com.lezi.babylog.domain.FamilyWizardOutcome
-import com.lezi.babylog.domain.FamilyWizardSnapshot
+import com.lezi.babylog.domain.family.FamilyWizardEntry
+import com.lezi.babylog.domain.family.FamilyWizardOutcome
+import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
@@ -22,9 +22,9 @@ import java.util.Locale
 internal const val LOCAL_FAMILY_DISPLAY_NAME = LOCAL_DEVICE_DISPLAY_NAME
 
 /** UI aliases; the authoritative wizard enums live in domain and are shared with onboarding. */
-internal typealias FamilyWizardMode = com.lezi.babylog.domain.FamilyWizardMode
-internal typealias FamilyWizardStep = com.lezi.babylog.domain.FamilyWizardStep
-internal typealias FamilyWizardJoinRole = com.lezi.babylog.domain.FamilyWizardJoinRole
+internal typealias FamilyWizardMode = com.lezi.babylog.domain.family.FamilyWizardMode
+internal typealias FamilyWizardStep = com.lezi.babylog.domain.family.FamilyWizardStep
+internal typealias FamilyWizardJoinRole = com.lezi.babylog.domain.family.FamilyWizardJoinRole
 
 internal fun accountFamilyActions(): List<String> = listOf(FamilyPrimaryCta.CONNECT)
 
@@ -404,7 +404,7 @@ internal fun displayFamilyName(
 
 /** Current trusted create/rename requires a non-empty family name. */
 internal fun validateFamilyNameInput(raw: String): String? {
-    return com.lezi.babylog.domain.familyNameValidationError(raw)
+    return com.lezi.babylog.domain.family.familyNameValidationError(raw)
 }
 
 /** Member-count entry label on the family card (e.g.「3 位家人」). */

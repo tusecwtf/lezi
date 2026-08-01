@@ -1,11 +1,11 @@
 package com.lezi.babylog.feature.onboarding
 
-import com.lezi.babylog.domain.FamilyWizardEntry
-import com.lezi.babylog.domain.FamilyWizardMode
-import com.lezi.babylog.domain.FamilyWizardJoinRole
-import com.lezi.babylog.domain.FamilyWizardOutcome
-import com.lezi.babylog.domain.FamilyWizardState
-import com.lezi.babylog.domain.FamilyWizardStep
+import com.lezi.babylog.domain.family.FamilyWizardEntry
+import com.lezi.babylog.domain.family.FamilyWizardMode
+import com.lezi.babylog.domain.family.FamilyWizardJoinRole
+import com.lezi.babylog.domain.family.FamilyWizardOutcome
+import com.lezi.babylog.domain.family.FamilyWizardState
+import com.lezi.babylog.domain.family.FamilyWizardStep
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
@@ -210,7 +210,7 @@ class OnboardingFamilyWizardAdapterTest {
             joinRole = FamilyWizardJoinRole.Member,
         )
 
-        val failed = com.lezi.babylog.domain.projectMemberLoginQrDialog(
+        val failed = com.lezi.babylog.domain.family.projectMemberLoginQrDialog(
             FamilyWizardState.MemberLoginQrVerificationFailed(
                 snapshot = snapshot,
                 payload = payload,
@@ -221,7 +221,7 @@ class OnboardingFamilyWizardAdapterTest {
         assertEquals(true, failed.confirmEnabled)
         assertEquals("重新确认", failed.confirmLabel)
 
-        val ready = com.lezi.babylog.domain.projectMemberLoginQrDialog(
+        val ready = com.lezi.babylog.domain.family.projectMemberLoginQrDialog(
             FamilyWizardState.MemberLoginQrReady(
                 snapshot = snapshot,
                 payload = payload,
@@ -234,7 +234,7 @@ class OnboardingFamilyWizardAdapterTest {
     }
 
     private fun completed(
-        snapshot: com.lezi.babylog.domain.FamilyWizardSnapshot,
+        snapshot: com.lezi.babylog.domain.family.FamilyWizardSnapshot,
         outcome: FamilyWizardOutcome,
     ) = FamilyWizardState.Completed(snapshot, outcome)
 

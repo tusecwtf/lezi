@@ -31,9 +31,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.domain.SystemCalendarDisclosureLevel
-import com.lezi.babylog.domain.SystemCalendarPort
-import com.lezi.babylog.domain.SystemCalendarTarget
+import com.lezi.babylog.domain.calendar.SystemCalendarDisclosureLevel
+import com.lezi.babylog.domain.calendar.SystemCalendarPort
+import com.lezi.babylog.domain.calendar.SystemCalendarTarget
 import dagger.hilt.android.EntryPointAccessors
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn

@@ -5,7 +5,7 @@ import com.lezi.babylog.feature.family.members.formatFamilyDeviceLastUsed
 import com.lezi.babylog.feature.family.components.*
 
 import com.lezi.babylog.core.model.SyncStatus
-import com.lezi.babylog.domain.FamilyWizardOutcome
+import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery

@@ -1,5 +1,4 @@
 package com.lezi.babylog.domain
-
 import com.lezi.babylog.sync.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.LocalClearRecoveryGate
@@ -10,6 +9,17 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import com.lezi.babylog.domain.calendar.DefaultSystemCalendarConfigurationCoordinator
+import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
+import com.lezi.babylog.domain.export.ExportPort
+import com.lezi.babylog.domain.export.TxtExportPort
+import com.lezi.babylog.domain.localdata.DaoLocalDataClearPersistence
+import com.lezi.babylog.domain.localdata.DefaultLocalDataClearCoordinator
+import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
+import com.lezi.babylog.domain.localdata.LocalDataClearPersistence
+import com.lezi.babylog.domain.localdata.LocalDataClearScope
+import com.lezi.babylog.domain.localdata.LocalDataClearSettings
+import com.lezi.babylog.domain.localdata.StoreLocalDataClearSettings
 
 @Module
 @InstallIn(SingletonComponent::class)

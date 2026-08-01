@@ -1,7 +1,7 @@
 package com.lezi.babylog.feature.settings
 
 import com.lezi.babylog.core.model.CarePlan
-import com.lezi.babylog.domain.ReminderCleanupPort
+import com.lezi.babylog.domain.careplan.ReminderCleanupPort
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn

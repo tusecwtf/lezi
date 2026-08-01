@@ -25,7 +25,7 @@ import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.SectionHeading
-import com.lezi.babylog.domain.babyAgeLabel
+import com.lezi.babylog.domain.carelog.babyAgeLabel
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.feature.family.components.canManageFamilyBabies
 import java.time.LocalDate

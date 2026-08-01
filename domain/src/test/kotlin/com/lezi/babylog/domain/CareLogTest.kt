@@ -1,5 +1,4 @@
 package com.lezi.babylog.domain
-
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
@@ -59,6 +58,36 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.yield
 import org.junit.Test
+import com.lezi.babylog.domain.calendar.SYSTEM_CALENDAR_UNSYNCED_LABEL
+import com.lezi.babylog.domain.calendar.SystemCalendarEventState
+import com.lezi.babylog.domain.calendar.SystemCalendarOwnedEventLookup
+import com.lezi.babylog.domain.calendar.SystemCalendarPort
+import com.lezi.babylog.domain.calendar.SystemCalendarTarget
+import com.lezi.babylog.domain.calendar.SystemCalendarUpsert
+import com.lezi.babylog.domain.calendar.SystemCalendarUpsertOutcome
+import com.lezi.babylog.domain.calendar.SystemCalendarUpsertResult
+import com.lezi.babylog.domain.calendar.encodeSystemCalendarEventMap
+import com.lezi.babylog.domain.calendar.parseSystemCalendarEventMap
+import com.lezi.babylog.domain.carelog.CareAggregation
+import com.lezi.babylog.domain.carelog.weekStartFor
+import com.lezi.babylog.domain.careplan.ReminderCleanupPort
+import com.lezi.babylog.domain.careplan.nextFeedPlanClientUuid
+import com.lezi.babylog.domain.growth.CareLogGrowthMeasurementRecordStore
+import com.lezi.babylog.domain.growth.DefaultGrowthMeasurementLifecycle
+import com.lezi.babylog.domain.growth.GrowthMeasurementSaveResult
+import com.lezi.babylog.domain.growth.GrowthReferenceSource
+import com.lezi.babylog.domain.growth.SaveGrowthMeasurement
+import com.lezi.babylog.domain.localdata.CalendarReminderMutationGuard
+import com.lezi.babylog.domain.localdata.DaoLocalDataClearPersistence
+import com.lezi.babylog.domain.localdata.DefaultLocalDataClearCoordinator
+import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
+import com.lezi.babylog.domain.localdata.LocalDataClearScope
+import com.lezi.babylog.domain.localdata.LocalRecordsClearCommittedException
+import com.lezi.babylog.domain.localdata.NursingTimerCleanupPort
+import com.lezi.babylog.domain.localdata.StoreLocalDataClearSettings
+import com.lezi.babylog.domain.nextSyncUpdatedAt
+import com.lezi.babylog.domain.toModel
+import com.lezi.babylog.domain.carelog.matchesSqlLike
 
 class CareLogTest {
     private val zone = ZoneOffset.UTC

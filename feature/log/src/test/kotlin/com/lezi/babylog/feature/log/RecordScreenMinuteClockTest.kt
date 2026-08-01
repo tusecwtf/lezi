@@ -2,7 +2,7 @@ package com.lezi.babylog.feature.log
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.domain.relativeTimeLabel
+import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId

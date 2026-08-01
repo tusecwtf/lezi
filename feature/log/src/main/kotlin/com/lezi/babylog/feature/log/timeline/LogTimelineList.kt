@@ -49,9 +49,9 @@ import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.SwipeEditDeleteRow
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
-import com.lezi.babylog.domain.DayChartCategory
-import com.lezi.babylog.domain.formatClock
-import com.lezi.babylog.domain.relativeTimeLabel
+import com.lezi.babylog.domain.carelog.DayChartCategory
+import com.lezi.babylog.domain.carelog.formatClock
+import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import com.lezi.babylog.sync.localCarePlanPublishDetail
 import java.time.Instant
 import java.time.LocalDate

@@ -57,7 +57,7 @@ class SystemCalendarSetupStateTest {
     @Test
     fun targetSummaryUsesCalendarNameAndNeverExposesProviderId() {
         val targets = listOf(
-            com.lezi.babylog.domain.SystemCalendarTarget(
+            com.lezi.babylog.domain.calendar.SystemCalendarTarget(
                 calendarId = "37",
                 displayName = "家庭日历",
                 accountName = "care@example.com",

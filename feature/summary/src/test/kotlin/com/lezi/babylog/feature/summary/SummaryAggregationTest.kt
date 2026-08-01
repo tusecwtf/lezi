@@ -3,7 +3,7 @@ package com.lezi.babylog.feature.summary
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.domain.CareAggregation
+import com.lezi.babylog.domain.carelog.CareAggregation
 import java.time.LocalDate
 import java.time.ZoneOffset
 import org.junit.Test

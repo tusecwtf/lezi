@@ -32,8 +32,8 @@ import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
-import com.lezi.babylog.domain.formatClock
-import com.lezi.babylog.domain.relativeTimeLabel
+import com.lezi.babylog.domain.carelog.formatClock
+import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException

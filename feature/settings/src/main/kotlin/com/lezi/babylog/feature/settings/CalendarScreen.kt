@@ -72,7 +72,7 @@ import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.rememberLocalPhoto
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
-import com.lezi.babylog.domain.SYSTEM_CALENDAR_UNSYNCED_LABEL
+import com.lezi.babylog.domain.calendar.SYSTEM_CALENDAR_UNSYNCED_LABEL
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate

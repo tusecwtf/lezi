@@ -1,10 +1,10 @@
 package com.lezi.babylog.feature.family
 
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.domain.FamilyWizardController
-import com.lezi.babylog.domain.FamilyWizardEntry
-import com.lezi.babylog.domain.FamilyWizardGateway
-import com.lezi.babylog.domain.FamilyWizardState
+import com.lezi.babylog.domain.family.FamilyWizardController
+import com.lezi.babylog.domain.family.FamilyWizardEntry
+import com.lezi.babylog.domain.family.FamilyWizardGateway
+import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.family.members.FamilyMembersState
 import com.lezi.babylog.feature.family.members.MembersDevicesActions
 import com.lezi.babylog.sync.CreateFamilyResult

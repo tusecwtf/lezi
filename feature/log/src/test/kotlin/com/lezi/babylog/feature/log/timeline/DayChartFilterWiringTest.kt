@@ -1,8 +1,8 @@
 package com.lezi.babylog.feature.log.timeline
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.designsystem.LeziRecordColorRole
-import com.lezi.babylog.domain.DayChartCategories
-import com.lezi.babylog.domain.DayChartCategory
+import com.lezi.babylog.domain.carelog.DayChartCategories
+import com.lezi.babylog.domain.carelog.DayChartCategory
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -16,7 +16,7 @@ import com.lezi.babylog.feature.log.photo.*
 
 /**
  * Feature-only wiring for day-chart filter state on the log page.
- * Category mapping lives in domain [com.lezi.babylog.domain.DayChartCategories].
+ * Category mapping lives in domain [com.lezi.babylog.domain.carelog.DayChartCategories].
  */
 class DayChartFilterWiringTest {
 

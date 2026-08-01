@@ -3,7 +3,7 @@ import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.TimelineAxis
-import com.lezi.babylog.domain.DayChartCategory
+import com.lezi.babylog.domain.carelog.DayChartCategory
 import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals

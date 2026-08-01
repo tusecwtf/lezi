@@ -3,7 +3,7 @@ package com.lezi.babylog.feature.export
 import android.content.Context
 import android.net.Uri
 import androidx.core.content.FileProvider
-import com.lezi.babylog.domain.ExportDocument
+import com.lezi.babylog.domain.export.ExportDocument
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.time.LocalDate

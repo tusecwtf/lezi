@@ -3,10 +3,10 @@ import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RootPublicationState
-import com.lezi.babylog.domain.TimelineCarePlanRow
-import com.lezi.babylog.domain.TimelineMediaSnapshot
-import com.lezi.babylog.domain.TimelineRecordRow
-import com.lezi.babylog.domain.TimelineRowCapabilities
+import com.lezi.babylog.domain.timeline.TimelineCarePlanRow
+import com.lezi.babylog.domain.timeline.TimelineMediaSnapshot
+import com.lezi.babylog.domain.timeline.TimelineRecordRow
+import com.lezi.babylog.domain.timeline.TimelineRowCapabilities
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import com.lezi.babylog.feature.log.*

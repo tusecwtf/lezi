@@ -1,7 +1,7 @@
 package com.lezi.babylog.feature.timer
 
 import android.content.Context
-import com.lezi.babylog.domain.NursingTimerCleanupPort
+import com.lezi.babylog.domain.localdata.NursingTimerCleanupPort
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn

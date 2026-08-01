@@ -1,5 +1,4 @@
 package com.lezi.babylog.domain
-
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
@@ -41,6 +40,21 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
+import com.lezi.babylog.domain.calendar.NoOpSystemCalendarPort
+import com.lezi.babylog.domain.calendar.SystemCalendarPort
+import com.lezi.babylog.domain.carelog.CareLogQueries
+import com.lezi.babylog.domain.carelog.ConflictAuditQueries
+import com.lezi.babylog.domain.carelog.DailySummary
+import com.lezi.babylog.domain.carelog.PhotoAttachmentReconciler
+import com.lezi.babylog.domain.carelog.RecordMutationCoordinator
+import com.lezi.babylog.domain.carelog.WeekSummary
+import com.lezi.babylog.domain.carelog.WidgetSummaryDto
+import com.lezi.babylog.domain.careplan.CarePlanCoordinator
+import com.lezi.babylog.domain.careplan.CarePlanReminderProjection
+import com.lezi.babylog.domain.careplan.ReminderCleanupPort
+import com.lezi.babylog.domain.catalog.CustomItemCatalog
+import com.lezi.babylog.domain.family.BabyFamilyProfileCoordinator
+import com.lezi.babylog.domain.localdata.CalendarReminderMutationGuard
 
 data class CreateBabyInput(
     val nickname: String,

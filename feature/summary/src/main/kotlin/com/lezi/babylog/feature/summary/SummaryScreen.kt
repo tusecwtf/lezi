@@ -57,8 +57,8 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageHero
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.WeekSummary
-import com.lezi.babylog.domain.weekStartFor
+import com.lezi.babylog.domain.carelog.WeekSummary
+import com.lezi.babylog.domain.carelog.weekStartFor
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger

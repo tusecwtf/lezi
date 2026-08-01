@@ -72,8 +72,8 @@ import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.GrowthMeasurementLifecycle
-import com.lezi.babylog.domain.ObserveGrowthMeasurements
+import com.lezi.babylog.domain.growth.GrowthMeasurementLifecycle
+import com.lezi.babylog.domain.growth.ObserveGrowthMeasurements
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel

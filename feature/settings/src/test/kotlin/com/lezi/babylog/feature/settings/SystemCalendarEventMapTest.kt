@@ -1,7 +1,7 @@
 package com.lezi.babylog.feature.settings
 
-import com.lezi.babylog.domain.encodeSystemCalendarEventMap
-import com.lezi.babylog.domain.parseSystemCalendarEventMap
+import com.lezi.babylog.domain.calendar.encodeSystemCalendarEventMap
+import com.lezi.babylog.domain.calendar.parseSystemCalendarEventMap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

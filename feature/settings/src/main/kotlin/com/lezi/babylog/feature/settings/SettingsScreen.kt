@@ -79,11 +79,11 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
-import com.lezi.babylog.domain.LocalRecordsClearCommittedException
-import com.lezi.babylog.domain.LocalDataClearCoordinator
-import com.lezi.babylog.domain.LocalDataClearScope
-import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
-import com.lezi.babylog.domain.SystemCalendarPort
+import com.lezi.babylog.domain.localdata.LocalRecordsClearCommittedException
+import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
+import com.lezi.babylog.domain.localdata.LocalDataClearScope
+import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
+import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.ClientAppVersion

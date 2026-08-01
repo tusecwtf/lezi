@@ -5,7 +5,7 @@ import com.lezi.babylog.core.model.GrowthReferenceBand
 import com.lezi.babylog.core.model.GrowthReferenceSeries
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
-import com.lezi.babylog.domain.GrowthReferenceSource
+import com.lezi.babylog.domain.growth.GrowthReferenceSource
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn

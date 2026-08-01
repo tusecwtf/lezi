@@ -1,11 +1,11 @@
 package com.lezi.babylog.feature.summary
 
 import com.lezi.babylog.core.model.Record
-import com.lezi.babylog.domain.CareAggregation
-import com.lezi.babylog.domain.CareDay
-import com.lezi.babylog.domain.CareRange
-import com.lezi.babylog.domain.WeekSummary
-import com.lezi.babylog.domain.weekStartFor
+import com.lezi.babylog.domain.carelog.CareAggregation
+import com.lezi.babylog.domain.carelog.CareDay
+import com.lezi.babylog.domain.carelog.CareRange
+import com.lezi.babylog.domain.carelog.WeekSummary
+import com.lezi.babylog.domain.carelog.weekStartFor
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit

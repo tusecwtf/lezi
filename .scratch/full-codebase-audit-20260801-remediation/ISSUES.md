@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **25**
-- Current frontier (ready-for-agent): **5**
+- Done: **26**
+- Current frontier (ready-for-agent): **4**
 - Blocked by dependency: **2**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**27、28、29、30、31**
+**28、29、30、31**
 
 ## Tickets
 
@@ -66,7 +66,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [24](./issues/24-split-family-hosts-and-align-directories.md) | readability 03 + directory C4 | Family 三 host 与目录对齐 | 23 | M–L | done |
 | [25](./issues/25-remove-low-value-tests-and-placeholders.md) | readability 06 | 清理低价值测试与占位 API | — | S–M | done |
 | [26](./issues/26-partition-log-package-by-flow.md) | directory C1 | feature/log 按调用流分包 | 09、12、20、22 | M–L | done |
-| [27](./issues/27-partition-domain-package-by-capability.md) | directory C2 | domain 按能力分包并保留 CareLog façade | 05、06、07、08、13、22 | M–L | ready-for-agent |
+| [27](./issues/27-partition-domain-package-by-capability.md) | directory C2 | domain 按能力分包并保留 CareLog façade | 05、06、07、08、13、22 | M–L | done |
 | [28](./issues/28-partition-sync-package-by-capability.md) | directory C3 | sync 按能力分包并保留 Sync façade | 01、03、06、15、16、19 | M–L | ready-for-agent |
 | [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | ready-for-agent |
 | [30](./issues/30-partition-settings-package.md) | directory C6 | Settings 按 calendar/record 分包 | 06、25 | M | ready-for-agent |

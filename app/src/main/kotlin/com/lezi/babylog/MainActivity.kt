@@ -94,8 +94,8 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
-import com.lezi.babylog.domain.babyAgeLabel
+import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
+import com.lezi.babylog.domain.carelog.babyAgeLabel
 import com.lezi.babylog.feature.export.ExportRoute
 import com.lezi.babylog.feature.family.FamilyRoute
 import com.lezi.babylog.feature.growth.GrowthRoute

@@ -1,8 +1,8 @@
 package com.lezi.babylog.feature.settings
 
-import com.lezi.babylog.domain.SystemCalendarEventState
-import com.lezi.babylog.domain.SystemCalendarOwnedEventLookup
-import com.lezi.babylog.domain.SystemCalendarUpsertOutcome
+import com.lezi.babylog.domain.calendar.SystemCalendarEventState
+import com.lezi.babylog.domain.calendar.SystemCalendarOwnedEventLookup
+import com.lezi.babylog.domain.calendar.SystemCalendarUpsertOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

@@ -44,8 +44,8 @@ import com.journeyapps.barcodescanner.BarcodeEncoder
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import com.lezi.babylog.domain.FamilyWizardSnapshot
-import com.lezi.babylog.domain.FamilyWizardState
+import com.lezi.babylog.domain.family.FamilyWizardSnapshot
+import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
 import com.lezi.babylog.feature.family.components.FamilyScopeRow
 import com.lezi.babylog.feature.family.components.FamilyWizardJoinRole

@@ -41,7 +41,7 @@ import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.ExportPort
+import com.lezi.babylog.domain.export.ExportPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
 import java.time.Instant

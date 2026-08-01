@@ -7,9 +7,9 @@ import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.TimelineLaneSegment
-import com.lezi.babylog.domain.DayChartCategories
-import com.lezi.babylog.domain.DayChartCategory
-import com.lezi.babylog.domain.formatClock
+import com.lezi.babylog.domain.carelog.DayChartCategories
+import com.lezi.babylog.domain.carelog.DayChartCategory
+import com.lezi.babylog.domain.carelog.formatClock
 import java.time.LocalDate
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.dock.*
