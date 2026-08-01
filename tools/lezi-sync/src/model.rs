@@ -11,6 +11,25 @@ use crate::ApiError;
 /// Device-local UI placeholder. Must never be accepted as a real family name.
 pub(crate) const LOCAL_DEVICE_DISPLAY_NAME: &str = "我（本机）";
 
+/// Internal CarePlan `note` prefix for family-shared next-feed intent (v1).
+/// Not a user-facing note format. Production value is hardcoded; the versioned
+/// build/test contract is `config/next-feed-plan-marker.v1.json` (Kotlin + Rust).
+pub(crate) const NEXT_FEED_PLAN_MARKER: &str = "[[lezi:next-feed:v1]]";
+
+/// True when [note] carries the next-feed protocol marker as a prefix.
+pub(crate) fn is_next_feed_plan_note(note: Option<&str>) -> bool {
+    note.is_some_and(|value| value.starts_with(NEXT_FEED_PLAN_MARKER))
+}
+
+/// Visible remainder after stripping the next-feed marker (Kotlin-aligned).
+/// Only meaningful when [is_next_feed_plan_note] is true.
+#[cfg(test)]
+fn visible_next_feed_note(note: &str) -> Option<&str> {
+    note.strip_prefix(NEXT_FEED_PLAN_MARKER)
+        .map(str::trim_start)
+        .filter(|rest| !rest.is_empty())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyCreateRequest {
@@ -864,10 +883,8 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
         ));
     }
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    let allow_intent_only_feed = payload
-        .get("note")
-        .and_then(Value::as_str)
-        .is_some_and(|note| note.starts_with("[[lezi:next-feed:v1]]"));
+    let allow_intent_only_feed =
+        is_next_feed_plan_note(payload.get("note").and_then(Value::as_str));
     validate_current_payload_json(
         &record_type,
         payload.get_mut("payload_json"),
@@ -1527,10 +1544,15 @@ fn validate_length(value: &str, min: usize, max: usize, field: &str) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use serde_json::{json, Value};
     use uuid::Uuid;
 
-    use super::{EntityValidationContext, RawEntity};
+    use super::{
+        is_next_feed_plan_note, visible_next_feed_note, EntityValidationContext, RawEntity,
+        NEXT_FEED_PLAN_MARKER,
+    };
 
     fn entity(entity_type: &str, payload: Value) -> RawEntity {
         RawEntity {
@@ -2180,7 +2202,7 @@ mod tests {
             let mut plan_payload = care_plan_payload();
             plan_payload["type"] = json!(record_type);
             plan_payload["payload_json"] = nested.clone();
-            plan_payload["note"] = json!("[[lezi:next-feed:v1]]");
+            plan_payload["note"] = json!(NEXT_FEED_PLAN_MARKER);
             care_plan(plan_payload)
                 .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .unwrap();
@@ -2200,4 +2222,93 @@ mod tests {
                 .is_err());
         }
     }
+
+    #[test]
+    fn next_feed_plan_marker_matches_cross_language_fixture() {
+        let fixture: Value = serde_json::from_str(NEXT_FEED_MARKER_FIXTURE)
+            .expect("next-feed marker fixture must parse");
+        assert_eq!(
+            fixture["contract"].as_str(),
+            Some("lezi.next-feed-plan-marker")
+        );
+        assert_eq!(fixture["version"].as_i64(), Some(1));
+        assert_eq!(
+            fixture["marker"].as_str(),
+            Some(NEXT_FEED_PLAN_MARKER),
+            "production constant must match versioned fixture marker"
+        );
+
+        let samples = fixture["samples"]
+            .as_array()
+            .expect("fixture samples array");
+        let mut ids = BTreeSet::new();
+        let mut saw_marker_only = false;
+        let mut saw_marker_plus_visible = false;
+        let mut saw_illegal = false;
+        for sample in samples {
+            let id = sample["id"].as_str().expect("sample id");
+            ids.insert(id.to_owned());
+            let note = sample["note"].as_str().expect("sample note");
+            let expected = sample["is_next_feed"]
+                .as_bool()
+                .expect("sample is_next_feed");
+            assert_eq!(
+                is_next_feed_plan_note(Some(note)),
+                expected,
+                "recognition mismatch for sample {id}"
+            );
+            assert_eq!(
+                note.starts_with(NEXT_FEED_PLAN_MARKER),
+                expected,
+                "starts_with must match is_next_feed for sample {id}"
+            );
+            if expected {
+                let expected_visible = sample["visible_note"].as_str();
+                assert_eq!(
+                    visible_next_feed_note(note),
+                    expected_visible,
+                    "strip mismatch for sample {id}"
+                );
+                if expected_visible.is_none() {
+                    saw_marker_only = true;
+                } else {
+                    saw_marker_plus_visible = true;
+                }
+            } else {
+                assert!(
+                    sample["visible_note"].is_null(),
+                    "non-marker sample {id} must not declare strip output"
+                );
+                saw_illegal = true;
+            }
+        }
+        assert!(ids.contains("marker_only"));
+        assert!(ids.contains("marker_plus_visible"));
+        assert!(ids.contains("illegal_v2_prefix"));
+        assert!(ids.contains("illegal_single_bracket"));
+        assert!(ids.contains("illegal_embedded_not_prefix"));
+        assert!(saw_marker_only && saw_marker_plus_visible && saw_illegal);
+
+        // Illegal similar prefixes must not unlock intent-only feed validation.
+        for illegal in [
+            "[[lezi:next-feed:v2]]",
+            "[lezi:next-feed:v1]",
+            "note [[lezi:next-feed:v1]]",
+        ] {
+            let mut plan_payload = care_plan_payload();
+            plan_payload["type"] = json!("formula");
+            plan_payload["payload_json"] = json!({"amount_ml": 0});
+            plan_payload["note"] = json!(illegal);
+            assert!(
+                care_plan(plan_payload)
+                    .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                    .is_err(),
+                "illegal note {illegal:?} must not allow intent-only feed"
+            );
+        }
+    }
+
+    /// Shared with Kotlin: `config/next-feed-plan-marker.v1.json`.
+    const NEXT_FEED_MARKER_FIXTURE: &str =
+        include_str!("../../../config/next-feed-plan-marker.v1.json");
 }

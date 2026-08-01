@@ -14,13 +14,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::{
-    care_plan_fulfillment_pair_issue, normalized_device_name_key, Entity,
+    care_plan_fulfillment_pair_issue, is_next_feed_plan_note, normalized_device_name_key, Entity,
     MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_PER_FAMILY,
 };
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
-const NEXT_FEED_PLAN_MARKER: &str = "[[lezi:next-feed:v1]]";
 /// Current SQLite `PRAGMA user_version` / schema contract version.
 /// Offline migration inventory couples to this constant (must not drift).
 pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 11;
@@ -4337,10 +4336,7 @@ fn discard_media_for_noop_care_plans(
 }
 
 fn is_open_next_feed_payload(payload: &Map<String, Value>) -> bool {
-    payload
-        .get("note")
-        .and_then(Value::as_str)
-        .is_some_and(|note| note.starts_with(NEXT_FEED_PLAN_MARKER))
+    is_next_feed_plan_note(payload.get("note").and_then(Value::as_str))
         && payload
             .get("status")
             .and_then(Value::as_str)

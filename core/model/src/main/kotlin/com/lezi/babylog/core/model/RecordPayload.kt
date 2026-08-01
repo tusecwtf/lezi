@@ -12,6 +12,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
+/**
+ * Internal CarePlan `note` prefix for family-shared next-feed intent (v1).
+ * Not a user-facing note format. Hardcoded at runtime; the versioned build/test
+ * contract is `config/next-feed-plan-marker.v1.json` (Kotlin + Rust).
+ */
 const val NEXT_FEED_PLAN_MARKER = "[[lezi:next-feed:v1]]"
 
 const val CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION = 2
