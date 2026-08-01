@@ -10,10 +10,14 @@ package com.lezi.babylog.domain
  */
 fun interface NursingTimerCleanupPort {
     /**
-     * Idempotently stop the nursing timer FGS when its active session matches
-     * [sessionToken]. No-op when [sessionToken] is null or a different session
-     * is already active. Throws when the captured session still appears active
-     * after a stop attempt so committed cleanup can be retried.
+     * Idempotently stop the nursing timer FGS when its active session **exactly**
+     * matches [sessionToken].
+     *
+     * No-op when [sessionToken] is null/blank, when a different session is
+     * active, or when the process witness is unknown (`null`) — the latter
+     * covers STARTING-before-markActive so a post-commit newer timer is not
+     * ABA-stopped. Throws when the captured session still appears active after
+     * a stop attempt so committed cleanup can be retried.
      */
     fun stopCapturedSession(sessionToken: String?)
 }

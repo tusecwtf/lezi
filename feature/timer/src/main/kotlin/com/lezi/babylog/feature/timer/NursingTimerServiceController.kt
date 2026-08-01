@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.timer
 
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -9,6 +10,7 @@ import android.os.Looper
 import android.os.ResultReceiver
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import com.lezi.babylog.core.model.shouldStopCapturedNursingTimerSession
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -69,16 +71,70 @@ class NursingTimerServiceController @Inject constructor(
         return TimerServiceStartResult.Failed(TimerServiceFailure.TIMEOUT)
     }
 
+    /**
+     * Unconditional stop for ViewModel teardown (user finish / timeout / start fail).
+     * Stop failures must not manufacture running truth.
+     */
     internal fun stop() {
         try {
-            app.stopService(Intent(app, NursingTimerService::class.java))
+            requestNursingTimerServiceStop(app)
         } catch (_: RuntimeException) {
-            // State is already non-running. A stop failure must not manufacture running truth.
+            // State is already non-running.
+        }
+    }
+
+    /**
+     * Session-scoped stop for local-clear finalization.
+     *
+     * Only stops when the process witness matches [sessionToken]. Unknown active
+     * (null, including STARTING-before-markActive) is a no-op so a post-commit
+     * newer session is not ABA-stopped. Rethrows stop failures unless a newer
+     * session is already proven active; clears the durable runtime marker only
+     * after the captured session is no longer claimed.
+     */
+    internal fun stopCapturedSession(sessionToken: String) {
+        if (
+            !shouldStopCapturedNursingTimerSession(
+                activeSession = NursingTimerServiceRuntime.activeSession(),
+                capturedSession = sessionToken,
+            )
+        ) {
+            return
+        }
+        try {
+            requestNursingTimerServiceStop(app)
+        } catch (failure: RuntimeException) {
+            val activeAfter = NursingTimerServiceRuntime.activeSession()
+            if (activeAfter == sessionToken) throw failure
+            // Newer session (or already cleared): do not rethrow.
+            return
+        }
+        NursingTimerServiceRuntime.clear(sessionToken)
+        // Belt-and-suspenders if the service process path left the notification.
+        if (NursingTimerServiceRuntime.activeSession() != sessionToken) {
+            cancelNursingTimerNotification(app)
+        }
+        check(NursingTimerServiceRuntime.activeSession() != sessionToken) {
+            "Nursing timer session $sessionToken is still marked active after stop"
         }
     }
 
     private companion object {
         const val START_CONFIRM_TIMEOUT_MS = 4_500L
+    }
+}
+
+/** Shared Intent glue for FGS stop; used by ViewModel and local-clear cleanup. */
+internal fun requestNursingTimerServiceStop(app: Context) {
+    app.stopService(Intent(app, NursingTimerService::class.java))
+}
+
+internal fun cancelNursingTimerNotification(app: Context) {
+    try {
+        app.getSystemService(NotificationManager::class.java)
+            ?.cancel(NursingTimerService.NOTIF_ID)
+    } catch (_: RuntimeException) {
+        // Notification manager may be unavailable in rare process states.
     }
 }
 

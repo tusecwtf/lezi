@@ -104,6 +104,9 @@ class NursingTimerService : Service() {
     }
 
     override fun onDestroy() {
+        // Drop the ongoing FGS notification on every teardown path (stopService,
+        // failStartup already removes it; cleanup relies on this for local clear).
+        stopForeground(STOP_FOREGROUND_REMOVE)
         NursingTimerServiceRuntime.clear(activeSessionToken)
         activeSessionToken = null
         tickerJob?.cancel()

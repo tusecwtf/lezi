@@ -89,8 +89,10 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanup(
                 scope = LocalDataClearScope.RecordsOnly,
                 carePlanIds = setOf(1L),
-                nursingTimerJson = timerJson,
-                nursingTimerSessionToken = "session-a",
+                nursingTimer = com.lezi.babylog.core.model.NursingTimerClearEpoch(
+                    json = timerJson,
+                    sessionToken = "session-a",
+                ),
                 familyServerRetained = false,
             ),
         )
@@ -99,8 +101,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanup(
                 scope = LocalDataClearScope.RecordsOnly,
                 carePlanIds = setOf(2L),
-                nursingTimerJson = null,
-                nursingTimerSessionToken = null,
+                nursingTimer = com.lezi.babylog.core.model.NursingTimerClearEpoch.EMPTY,
                 familyServerRetained = true,
             ),
         )

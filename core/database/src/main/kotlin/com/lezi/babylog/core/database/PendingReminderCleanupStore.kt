@@ -1,5 +1,6 @@
 package com.lezi.babylog.core.database
 
+import com.lezi.babylog.core.model.NursingTimerClearEpoch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -13,14 +14,15 @@ data class PendingReminderCleanup(
     val systemCalendarProjections: Map<String, String?> = emptyMap(),
     val currentBabyId: Long? = null,
     /**
-     * Exact nursing timer DataStore value captured under exclusion before Room commit.
-     * Finish uses compare-and-remove so a post-commit newer session survives recovery.
+     * Nursing timer clear epoch (JSON + session token) captured under exclusion.
+     * Encoded and merged as one unit so partial pairs cannot drift on recovery.
      */
-    val nursingTimerJson: String? = null,
-    /** Stable session token for scoped FGS stop; null when no session was captured. */
-    val nursingTimerSessionToken: String? = null,
+    val nursingTimer: NursingTimerClearEpoch = NursingTimerClearEpoch.EMPTY,
     val familyServerRetained: Boolean,
-)
+) {
+    val nursingTimerJson: String? get() = nursingTimer.json
+    val nursingTimerSessionToken: String? get() = nursingTimer.sessionToken
+}
 
 interface PendingReminderCleanupStore {
     suspend fun load(scope: LocalDataClearScope): PendingReminderCleanup?
@@ -68,11 +70,12 @@ internal class RoomPendingReminderCleanupStore(
             "Pending nursing timer session token must not be blank when present"
         }
         val existing = load(pending.scope)
-        // Prefer the first captured timer epoch so a later empty snapshot cannot
-        // drop recovery of an older stop+clear that still needs to finish.
-        val nursingTimerJson = existing?.nursingTimerJson ?: pending.nursingTimerJson
-        val nursingTimerSessionToken =
-            existing?.nursingTimerSessionToken ?: pending.nursingTimerSessionToken
+        // Prefer the first non-empty captured timer epoch as one unit so a later
+        // empty snapshot cannot drop recovery, and json/token stay paired.
+        val nursingTimer = when {
+            existing != null && !existing.nursingTimer.isEmpty -> existing.nursingTimer
+            else -> pending.nursingTimer
+        }
         dao.upsert(
             PendingReminderCleanupEntity(
                 operation = pending.scope.reminderOperationKey,
@@ -86,10 +89,7 @@ internal class RoomPendingReminderCleanupStore(
                 ),
                 currentBabyId = pending.currentBabyId,
                 nextFeedAt = null,
-                nextFeedEpoch = encodeNursingTimerEpoch(
-                    nursingTimerJson = nursingTimerJson,
-                    nursingTimerSessionToken = nursingTimerSessionToken,
-                ),
+                nextFeedEpoch = encodeNursingTimerEpoch(nursingTimer),
                 familyServerRetained =
                     existing?.familyServerRetained == true || pending.familyServerRetained,
             ),
@@ -122,8 +122,7 @@ internal class RoomPendingReminderCleanupStore(
                 familyServerRetained = familyServerRetained,
             ),
             currentBabyId = currentBabyId,
-            nursingTimerJson = timerEpoch.json,
-            nursingTimerSessionToken = timerEpoch.sessionToken,
+            nursingTimer = timerEpoch,
             familyServerRetained = familyServerRetained,
         )
     }
@@ -151,28 +150,20 @@ private fun decodeReminderIds(
     }
 }
 
-private data class NursingTimerEpoch(
-    val json: String?,
-    val sessionToken: String?,
-)
-
 /**
  * Persist timer epoch in the legacy `nextFeedEpoch` TEXT column without a Room
  * schema bump. Empty string means no timer was captured (legacy rows stay valid).
  */
-private fun encodeNursingTimerEpoch(
-    nursingTimerJson: String?,
-    nursingTimerSessionToken: String?,
-): String {
-    if (nursingTimerJson == null && nursingTimerSessionToken == null) return ""
+private fun encodeNursingTimerEpoch(epoch: NursingTimerClearEpoch): String {
+    if (epoch.isEmpty) return ""
     return buildJsonObject {
-        if (nursingTimerJson != null) {
-            put("nursingTimerJson", JsonPrimitive(nursingTimerJson))
+        if (epoch.json != null) {
+            put("nursingTimerJson", JsonPrimitive(epoch.json))
         } else {
             put("nursingTimerJson", JsonNull)
         }
-        if (nursingTimerSessionToken != null) {
-            put("nursingTimerSessionToken", JsonPrimitive(nursingTimerSessionToken))
+        if (epoch.sessionToken != null) {
+            put("nursingTimerSessionToken", JsonPrimitive(epoch.sessionToken))
         } else {
             put("nursingTimerSessionToken", JsonNull)
         }
@@ -183,9 +174,9 @@ private fun decodeNursingTimerEpoch(
     encoded: String,
     scope: LocalDataClearScope,
     familyServerRetained: Boolean,
-): NursingTimerEpoch {
+): NursingTimerClearEpoch {
     if (encoded.isEmpty()) {
-        return NursingTimerEpoch(json = null, sessionToken = null)
+        return NursingTimerClearEpoch.EMPTY
     }
     val objectValue = try {
         Json.parseToJsonElement(encoded) as? JsonObject
@@ -221,7 +212,7 @@ private fun decodeNursingTimerEpoch(
             )
         }
     }
-    return NursingTimerEpoch(
+    return NursingTimerClearEpoch(
         json = readOptionalString("nursingTimerJson"),
         sessionToken = readOptionalString("nursingTimerSessionToken"),
     )

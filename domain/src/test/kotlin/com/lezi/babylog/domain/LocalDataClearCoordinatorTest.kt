@@ -5,6 +5,9 @@ import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.model.CarePlan
+import com.lezi.babylog.core.model.NursingTimerClearEpoch
+import com.lezi.babylog.core.model.shouldCasRemoveNursingTimerJson
+import com.lezi.babylog.core.model.shouldStopCapturedNursingTimerSession
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.SyncPort
@@ -518,8 +521,7 @@ private class RecordingLocalDataClearPersistence(
                 carePlanIds = setOf(21L, 22L),
                 systemCalendarProjections = settingsSnapshot.systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
-                nursingTimerJson = settingsSnapshot.nursingTimerJson,
-                nursingTimerSessionToken = settingsSnapshot.nursingTimerSessionToken,
+                nursingTimer = settingsSnapshot.nursingTimer,
                 familyServerRetained = familyServerRetained,
             ),
         )
@@ -535,9 +537,14 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
         "plan-22" to "evt-22",
     )
     private var currentBabyId: Long? = 7L
-    var nursingTimerJson: String? = TIMER_JSON_OLD
-    var nursingTimerSessionToken: String? = "session-old"
+    var nursingTimer: NursingTimerClearEpoch = NursingTimerClearEpoch(
+        json = TIMER_JSON_OLD,
+        sessionToken = "session-old",
+    )
     var failure: Throwable? = null
+
+    val nursingTimerJson: String? get() = nursingTimer.json
+    val nursingTimerSessionToken: String? get() = nursingTimer.sessionToken
 
     fun addSystemCalendarEvent(eventId: String) {
         projections["plan-$eventId"] = eventId
@@ -553,8 +560,7 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
     }
 
     fun replaceNursingTimer(json: String?, sessionToken: String?) {
-        nursingTimerJson = json
-        nursingTimerSessionToken = sessionToken
+        nursingTimer = NursingTimerClearEpoch(json = json, sessionToken = sessionToken)
     }
 
     suspend fun systemCalendarEventIds(): Set<String> = projections.values.toSet()
@@ -564,8 +570,7 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
     override suspend fun capture(): LocalClearSettingsSnapshot = LocalClearSettingsSnapshot(
         currentBabyId = currentBabyId,
         systemCalendarProjections = projections.toMap(),
-        nursingTimerJson = nursingTimerJson,
-        nursingTimerSessionToken = nursingTimerSessionToken,
+        nursingTimer = nursingTimer,
     )
 
     override suspend fun finish(
@@ -583,14 +588,10 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
         ) {
             currentBabyId = null
         }
-        // Compare-and-remove for the captured timer epoch only.
-        if (
-            snapshot.nursingTimerJson != null &&
-            nursingTimerJson == snapshot.nursingTimerJson
-        ) {
+        // CAS-remove by session token (primary) or exact JSON (secondary).
+        if (shouldCasRemoveNursingTimerJson(snapshot.nursingTimer, nursingTimer.json)) {
             finishedTimerSessions += snapshot.nursingTimerSessionToken.orEmpty()
-            nursingTimerJson = null
-            nursingTimerSessionToken = null
+            nursingTimer = NursingTimerClearEpoch.EMPTY
         }
     }
 }
@@ -604,7 +605,15 @@ private class RecordingNursingTimerCleanupPort : NursingTimerCleanupPort {
     override fun stopCapturedSession(sessionToken: String?) {
         if (sessionToken.isNullOrBlank()) return
         if (sessionToken in skipTokens) return
-        if (activeSessionToken != null && activeSessionToken != sessionToken) return
+        // Mirror production: only stop when active exactly matches captured.
+        if (
+            !shouldStopCapturedNursingTimerSession(
+                activeSession = activeSessionToken,
+                capturedSession = sessionToken,
+            )
+        ) {
+            return
+        }
         stoppedSessionTokens += sessionToken
         if (failuresRemaining > 0) {
             failuresRemaining -= 1
@@ -630,14 +639,16 @@ private class RecordingPendingReminderCleanupStore : PendingReminderCleanupStore
 
     override suspend fun upsert(pending: PendingReminderCleanup) {
         val existing = this.pending?.takeIf { it.scope == pending.scope }
+        val nursingTimer = when {
+            existing != null && !existing.nursingTimer.isEmpty -> existing.nursingTimer
+            else -> pending.nursingTimer
+        }
         this.pending = pending.copy(
             carePlanIds = existing?.carePlanIds.orEmpty() + pending.carePlanIds,
             systemCalendarProjections =
                 existing?.systemCalendarProjections.orEmpty() + pending.systemCalendarProjections,
             currentBabyId = pending.currentBabyId,
-            nursingTimerJson = existing?.nursingTimerJson ?: pending.nursingTimerJson,
-            nursingTimerSessionToken =
-                existing?.nursingTimerSessionToken ?: pending.nursingTimerSessionToken,
+            nursingTimer = nursingTimer,
             familyServerRetained =
                 existing?.familyServerRetained == true || pending.familyServerRetained,
         )

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -105,6 +106,42 @@ class SettingsDataSourceLocalClearTest {
         settings.finishLocalClearSettings(captured, clearCurrentBabyId = false)
 
         assertNull(settings.nursingTimerJson.first())
+    }
+
+    @Test
+    fun finalizerClearsSameSessionAfterJsonRewrite() = runBlocking {
+        val settings = newSettings("timer-cas-rewrite.preferences_pb")
+        val capturedJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-old","savedElapsed":1,"leftRunning":true}"""
+        val rewrittenSameSession =
+            """{"schemaVersion":1,"completionClientUuid":"session-old","savedElapsed":999,"leftRunning":false}"""
+        settings.setNursingTimerJson(capturedJson)
+        val captured = settings.captureLocalClearSettings()
+        assertEquals("session-old", captured.nursingTimerSessionToken)
+
+        // TimerState.toJson always stamps savedElapsed; same session rewrite must still clear.
+        settings.setNursingTimerJson(rewrittenSameSession)
+        settings.finishLocalClearSettings(captured, clearCurrentBabyId = false)
+
+        assertNull(settings.nursingTimerJson.first())
+    }
+
+    @Test
+    fun finalizerFailsClosedWhenCapturedTimerJsonHasNoSessionToken() = runBlocking {
+        val settings = newSettings("timer-tokenless.preferences_pb")
+        val tokenLess = """{"schemaVersion":1,"leftRunning":true}"""
+        settings.setNursingTimerJson(tokenLess)
+        val captured = settings.captureLocalClearSettings()
+        assertEquals(tokenLess, captured.nursingTimerJson)
+        assertNull(captured.nursingTimerSessionToken)
+
+        val failure = runCatching {
+            settings.finishLocalClearSettings(captured, clearCurrentBabyId = false)
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        // Preference retained so pending cleanup can retry / surface the failure.
+        assertEquals(tokenLess, settings.nursingTimerJson.first())
     }
 
     private fun newSettings(fileName: String): SettingsDataSource {

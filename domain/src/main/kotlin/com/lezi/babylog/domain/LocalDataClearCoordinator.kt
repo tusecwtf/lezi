@@ -116,8 +116,7 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
                 carePlanIds = carePlanIds,
                 systemCalendarProjections = systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
-                nursingTimerJson = settingsSnapshot.nursingTimerJson,
-                nursingTimerSessionToken = settingsSnapshot.nursingTimerSessionToken,
+                nursingTimer = settingsSnapshot.nursingTimer,
                 familyServerRetained = familyServerRetained,
             ),
         )
@@ -240,8 +239,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
                 systemCalendarProjections = loaded.systemCalendarProjections.mapNotNull {
                     (clientUuid, eventId) -> eventId?.let { clientUuid to it }
                 }.toMap(),
-                nursingTimerJson = loaded.nursingTimerJson,
-                nursingTimerSessionToken = loaded.nursingTimerSessionToken,
+                nursingTimer = loaded.nursingTimer,
             )
             loaded.systemCalendarProjections.forEach { (clientUuid, eventId) ->
                 attempt { deleteSystemCalendarProjection(clientUuid, eventId) }

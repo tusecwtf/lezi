@@ -6811,18 +6811,12 @@ private class FakeSettingsStore : SettingsStore {
     }
 
     override suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot {
-        val timerJson = timer.value
         return LocalClearSettingsSnapshot(
             currentBabyId = babyId.value,
             systemCalendarProjections = parseSystemCalendarEventMap(systemCalMap.value),
-            nursingTimerJson = timerJson,
-            nursingTimerSessionToken = timerJson
-                ?.let { raw ->
-                    Regex(""""completionClientUuid"\s*:\s*"([^"]+)"""")
-                        .find(raw)
-                        ?.groupValues
-                        ?.getOrNull(1)
-                },
+            nursingTimer = com.lezi.babylog.core.model.NursingTimerClearEpoch.captureFromJson(
+                timer.value,
+            ),
         )
     }
 
@@ -6838,7 +6832,12 @@ private class FakeSettingsStore : SettingsStore {
                 snapshot.systemCalendarProjections[clientUuid] != eventId
             }
         systemCalMap.value = encodeSystemCalendarEventMap(retained)
-        if (snapshot.nursingTimerJson != null && timer.value == snapshot.nursingTimerJson) {
+        if (
+            com.lezi.babylog.core.model.shouldCasRemoveNursingTimerJson(
+                snapshot.nursingTimer,
+                timer.value,
+            )
+        ) {
             timer.value = null
         }
         publish()

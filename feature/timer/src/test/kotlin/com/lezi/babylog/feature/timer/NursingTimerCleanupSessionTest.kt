@@ -1,14 +1,15 @@
 package com.lezi.babylog.feature.timer
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.model.shouldStopCapturedNursingTimerSession
 import org.junit.After
 import org.junit.Test
 
 /**
- * Public stop-policy seams for local-clear FGS finalization.
+ * Runtime witness + pure stop-policy seams for local-clear FGS finalization.
  *
- * [NursingTimerServiceRuntime] is the process witness the cleanup adapter consults
- * before deciding whether to stopService for a captured session token.
+ * Stop decision is [shouldStopCapturedNursingTimerSession] (shared with the
+ * controller); these tests exercise that function and Runtime.clear matching.
  */
 class NursingTimerCleanupSessionTest {
     @After
@@ -34,26 +35,36 @@ class NursingTimerCleanupSessionTest {
     }
 
     @Test
-    fun capturedStopPolicyLeavesNewerSessionAlone() {
-        NursingTimerServiceRuntime.markActive("session-new")
-        val active = NursingTimerServiceRuntime.activeSession()
-        val captured = "session-old"
-        val shouldStop = active == null || active == captured
-        assertThat(shouldStop).isFalse()
+    fun stopPolicyLeavesNewerAndUnknownActiveAlone() {
+        assertThat(
+            shouldStopCapturedNursingTimerSession(
+                activeSession = "session-new",
+                capturedSession = "session-old",
+            ),
+        ).isFalse()
+        // STARTING-before-markActive: active is still null — must not ABA-stop.
+        assertThat(
+            shouldStopCapturedNursingTimerSession(
+                activeSession = null,
+                capturedSession = "session-old",
+            ),
+        ).isFalse()
     }
 
     @Test
-    fun capturedStopPolicyStopsWhenActiveMatchesOrIsUnknown() {
+    fun stopPolicyStopsOnlyWhenActiveMatchesCaptured() {
+        assertThat(
+            shouldStopCapturedNursingTimerSession(
+                activeSession = "session-old",
+                capturedSession = "session-old",
+            ),
+        ).isTrue()
         NursingTimerServiceRuntime.markActive("session-old")
         assertThat(
-            NursingTimerServiceRuntime.activeSession() == null ||
-                NursingTimerServiceRuntime.activeSession() == "session-old",
-        ).isTrue()
-
-        NursingTimerServiceRuntime.clear()
-        assertThat(
-            NursingTimerServiceRuntime.activeSession() == null ||
-                NursingTimerServiceRuntime.activeSession() == "session-old",
+            shouldStopCapturedNursingTimerSession(
+                activeSession = NursingTimerServiceRuntime.activeSession(),
+                capturedSession = "session-old",
+            ),
         ).isTrue()
     }
 }

@@ -11,11 +11,13 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.lezi.babylog.core.model.DEVICE_LAYOUT_SNAPSHOT_VERSION
 import com.lezi.babylog.core.model.DEFAULT_QUICK_RECORD_SLOTS
 import com.lezi.babylog.core.model.DeviceLayoutSnapshot
+import com.lezi.babylog.core.model.NursingTimerClearEpoch
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.normalizeDeviceLayoutSnapshot
 import com.lezi.babylog.core.model.normalizeQuickRecordSlots
 import com.lezi.babylog.core.model.requireCurrentDeviceLayoutVersion
+import com.lezi.babylog.core.model.shouldCasRemoveNursingTimerJson
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
@@ -223,12 +225,13 @@ class SettingsDataSource @Inject constructor(
         val systemCalendarProjections = decodeSystemCalendarEventMap(
             prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
         )
-        val nursingTimerJson = prefs[Keys.NURSING_TIMER_JSON]?.takeIf { it.isNotBlank() }
+        val nursingTimer = NursingTimerClearEpoch.captureFromJson(
+            prefs[Keys.NURSING_TIMER_JSON],
+        )
         return LocalClearSettingsSnapshot(
             currentBabyId = prefs[Keys.CURRENT_BABY_ID],
             systemCalendarProjections = systemCalendarProjections,
-            nursingTimerJson = nursingTimerJson,
-            nursingTimerSessionToken = nursingTimerSessionToken(nursingTimerJson),
+            nursingTimer = nursingTimer,
         )
     }
 
@@ -236,6 +239,15 @@ class SettingsDataSource @Inject constructor(
         snapshot: LocalClearSettingsSnapshot,
         clearCurrentBabyId: Boolean,
     ) {
+        // Fail closed: timer JSON without a parseable session token cannot be
+        // safely stopped (session-scoped stop no-ops) or CAS-removed by token.
+        // Retain pending cleanup rather than orphan an FGS/notification.
+        if (snapshot.nursingTimerJson != null && snapshot.nursingTimerSessionToken == null) {
+            error(
+                "Captured nursing timer JSON has no session token; " +
+                    "retain pending cleanup for retry",
+            )
+        }
         dataStore.edit { prefs ->
             if (
                 clearCurrentBabyId &&
@@ -250,11 +262,10 @@ class SettingsDataSource @Inject constructor(
                 snapshot.systemCalendarProjections[clientUuid] != eventId
             }
             prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] = encodeSystemCalendarEventMap(retainedMap)
-            // Compare-and-remove: only the exact captured timer epoch may be deleted.
-            if (
-                snapshot.nursingTimerJson != null &&
-                prefs[Keys.NURSING_TIMER_JSON] == snapshot.nursingTimerJson
-            ) {
+            // CAS-remove when the live preference still belongs to the captured
+            // session epoch (token match), or exact JSON as secondary match.
+            val currentTimerJson = prefs[Keys.NURSING_TIMER_JSON]
+            if (shouldCasRemoveNursingTimerJson(snapshot.nursingTimer, currentTimerJson)) {
                 prefs.remove(Keys.NURSING_TIMER_JSON)
             }
         }
@@ -391,21 +402,6 @@ internal fun decodeDeviceLayoutSnapshot(
             categoryOrderJson = stringValue("categoryOrderJson", legacy.categoryOrderJson),
         ),
     )
-}
-
-/**
- * Best-effort extraction of the stable nursing timer session token from persisted
- * timer JSON. Malformed or token-less snapshots yield null (no session-scoped stop).
- */
-internal fun nursingTimerSessionToken(raw: String?): String? {
-    if (raw.isNullOrBlank()) return null
-    return runCatching {
-        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return null
-        val value = root["completionClientUuid"] ?: return null
-        if (value is kotlinx.serialization.json.JsonNull) return null
-        val primitive = value as? JsonPrimitive ?: return null
-        primitive.content.takeIf { it.isNotBlank() && primitive.isString }
-    }.getOrNull()
 }
 
 internal fun decodeSystemCalendarEventMap(raw: String): Map<String, String> {

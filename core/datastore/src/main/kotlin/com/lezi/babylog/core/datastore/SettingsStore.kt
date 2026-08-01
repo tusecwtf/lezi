@@ -1,6 +1,7 @@
 package com.lezi.babylog.core.datastore
 
 import com.lezi.babylog.core.model.DeviceLayoutSnapshot
+import com.lezi.babylog.core.model.NursingTimerClearEpoch
 import com.lezi.babylog.core.model.SettingsLocal
 import kotlinx.coroutines.flow.Flow
 
@@ -10,16 +11,14 @@ data class LocalClearSettingsSnapshot(
     /** Exact provider identity captured for each plan UUID; IDs alone are ABA-prone. */
     val systemCalendarProjections: Map<String, String> = emptyMap(),
     /**
-     * Exact nursing timer DataStore value at capture time. Finish uses
-     * compare-and-remove so a newer post-commit session is not wiped.
+     * Nursing timer clear epoch (JSON + session token) captured under exclusion.
+     * Finish CAS-removes when the live preference still belongs to this epoch.
      */
-    val nursingTimerJson: String? = null,
-    /**
-     * Stable session token (`completionClientUuid`) extracted from
-     * [nursingTimerJson]; scopes FGS stop to the captured epoch only.
-     */
-    val nursingTimerSessionToken: String? = null,
-)
+    val nursingTimer: NursingTimerClearEpoch = NursingTimerClearEpoch.EMPTY,
+) {
+    val nursingTimerJson: String? get() = nursingTimer.json
+    val nursingTimerSessionToken: String? get() = nursingTimer.sessionToken
+}
 
 /**
  * Preference surface used by domain. [SettingsDataSource] is the production impl;
