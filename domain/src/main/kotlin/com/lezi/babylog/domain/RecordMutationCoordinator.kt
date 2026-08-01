@@ -409,7 +409,9 @@ internal class RecordMutationCoordinator(
         completionClientUuid: String = newClientUuid(),
         /**
          * When set, complete this open nursing CarePlan in the same transaction as
-         * the timer record. Cancel / save-failure leave the plan pending.
+         * the timer record and clone the plan's current active photos (0–3) onto
+         * the new Record as independent MediaAsset rows (shared local_uri).
+         * Cancel / save-failure leave the plan pending and roll back any clone.
          */
         carePlanId: Long? = null,
         nowMillis: Long = System.currentTimeMillis(),

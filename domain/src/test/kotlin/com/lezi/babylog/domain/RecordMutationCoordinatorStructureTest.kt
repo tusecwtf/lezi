@@ -60,18 +60,6 @@ class RecordMutationCoordinatorStructureTest {
             "coordinator must call the existing plan completion seam",
             "completeOpenCarePlanWithRecord: suspend (" in coordinator,
         )
-        assertTrue(
-            "timer fulfillment must read live plan photo paths (not UI snapshot)",
-            "listCarePlanPhotoPaths: suspend (Long) -> List<String>" in coordinator,
-        )
-        val completeNursingBody = coordinator
-            .substringAfter("suspend fun completeNursing(")
-            .substringBefore("suspend fun confirmSleep(")
-        assertTrue(
-            "completeNursing must clone plan photos onto the new record before plan complete",
-            "listCarePlanPhotoPaths(carePlanId)" in completeNursingBody &&
-                "photoAttachmentReconciler.reconcile(" in completeNursingBody,
-        )
         val healBody = coordinator
             .substringAfter("internal suspend fun healDuplicateOpenSleeps(")
             .substringBefore("internal suspend fun cleanupCommittedPhotoTombstones(")

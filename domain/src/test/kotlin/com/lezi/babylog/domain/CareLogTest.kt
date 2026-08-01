@@ -4962,6 +4962,125 @@ class CareLogTest {
     }
 
     @Test
+    fun completeNursingClonedPlanPhotosKeepSharedPathWhileEitherOwnerActive() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 85_000_000L
+        val planPhotos = listOf("plans/share-a.jpg", "plans/share-b.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val planMediaUuids = fakes.media.listActiveForCarePlan(planId).map { it.clientUuid }.toSet()
+
+        val recordId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 5,
+            rightMin = 1,
+            order = "LR",
+            startedAt = now - 7 * 60_000L,
+            endedAt = now,
+            completionClientUuid = "timer-shared-path-refs",
+            carePlanId = planId,
+            nowMillis = now,
+        )
+        val recordMediaUuids = fakes.media.listActiveForRecord(recordId).map { it.clientUuid }.toSet()
+        // Both owners reference each shared path after timer clone.
+        planPhotos.forEach { path ->
+            assertThat(fakes.media.countActiveReferences(path)).isEqualTo(2)
+        }
+
+        // Tombstone plan media only: shared paths stay reclaim-blocked by record rows.
+        assertThat(care.deleteCarePlan(planId, nowMillis = now + 1L)).isTrue()
+        planPhotos.forEach { path ->
+            assertThat(fakes.media.countActiveReferences(path)).isEqualTo(1)
+        }
+        assertThat(fakes.media.listActiveForCarePlan(planId)).isEmpty()
+        assertThat(care.listRecordPhotoPaths(recordId)).containsExactlyElementsIn(planPhotos).inOrder()
+        assertThat(sync.mediaCleanupCandidates).contains(planMediaUuids)
+        // Domain hands tombstone UUIDs to sync cleanup; physical delete must not run
+        // while countActiveReferences > 0 (ReferenceAwareMediaFileCleanup contract).
+        assertThat(planPhotos.any { fakes.media.countActiveReferences(it) > 0 }).isTrue()
+
+        // Tombstone record side: last active refs drop; cleanup is again requested.
+        assertThat(care.deleteRecord(recordId)).isTrue()
+        planPhotos.forEach { path ->
+            assertThat(fakes.media.countActiveReferences(path)).isEqualTo(0)
+        }
+        assertThat(sync.mediaCleanupCandidates).contains(recordMediaUuids)
+    }
+
+    @Test
+    fun completeNursingFailsClosedWhenPlanAlreadyCompletedByOtherRecord() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 86_000_000L
+        val planPhotos = listOf("plans/bound-a.jpg", "plans/bound-b.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val firstUuid = "timer-first-completion"
+        val firstId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 6,
+            rightMin = 2,
+            order = "LR",
+            startedAt = now - 9 * 60_000L,
+            endedAt = now,
+            completionClientUuid = firstUuid,
+            carePlanId = planId,
+            nowMillis = now,
+        )
+        val planAfterFirst = care.getCarePlan(planId)!!
+        assertThat(planAfterFirst.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(planAfterFirst.fulfilledRecordClientUuid).isEqualTo(firstUuid)
+        val mediaAfterFirst = fakes.media.listAllIncludingDeleted()
+        val recordsAfterFirst = fakes.records.listAllIncludingDeleted()
+        val candidatesAfterFirst = fakes.fulfillmentCandidates.listAllIncludingDeleted()
+
+        val error = runCatching {
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 4,
+                rightMin = 0,
+                order = "L",
+                startedAt = now - 5 * 60_000L,
+                endedAt = now + 1L,
+                completionClientUuid = "timer-second-completion",
+                carePlanId = planId,
+                nowMillis = now + 1L,
+            )
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(error).hasMessageThat().contains("该护理计划已由其他记录完成")
+        // Fail closed: no leftover second record/media; plan binding unchanged.
+        assertThat(fakes.records.listAllIncludingDeleted()).containsExactlyElementsIn(recordsAfterFirst)
+        assertThat(fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaAfterFirst)
+        assertThat(fakes.fulfillmentCandidates.listAllIncludingDeleted())
+            .containsExactlyElementsIn(candidatesAfterFirst)
+        assertThat(care.getCarePlan(planId)).isEqualTo(planAfterFirst)
+        assertThat(care.listRecordPhotoPaths(firstId)).containsExactlyElementsIn(planPhotos).inOrder()
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactlyElementsIn(planPhotos).inOrder()
+    }
+
+    @Test
     fun sleepCarePlanIsIntentOnlyOpenAndClosedFulfill() = runTest {
         val fakes = Fakes()
         fakes.wireTransactionalSnapshots()
