@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P2-01`  
 **Blocked by:** 02、07 — receipt/tombstone ownership must be stable first  
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M
 
 ## Acceptance criteria

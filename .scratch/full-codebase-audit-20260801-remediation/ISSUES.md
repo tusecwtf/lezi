@@ -9,9 +9,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **13**（01、02、03、04、05、06、07、08、10、12、13、14、16）
-- Current frontier (ready-for-agent): **8**
-- Blocked by dependency: **10**
+- Done: **13**
+- Current frontier (ready-for-agent): **11**
+- Blocked by dependency: **8**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**11、17、19、20、21、22、23、25**
+**09、11、15、17、19、20、21、22、23、25、31**
 
 ## Tickets
 
@@ -48,13 +48,13 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [06](./issues/06-clear-nursing-timer-with-local-data.md) | Audit P1-06 | 本机清空同步停止并清除计时器 | — | M | done |
 | [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | done |
 | [08](./issues/08-carry-plan-photos-through-timer-fulfillment.md) | Audit P1-08 | 计时履行继承护理计划照片 | — | M | done |
-| [09](./issues/09-transfer-composer-draft-to-timer-safely.md) | Audit P1-09 | Composer→Timer 安全转移草稿 | 08 | M | blocked |
+| [09](./issues/09-transfer-composer-draft-to-timer-safely.md) | Audit P1-09 | Composer→Timer 安全转移草稿 | 08 | M | ready-for-agent |
 | [10](./issues/10-handle-all-timer-transition-failures.md) | Audit P1-10 | Timer transition 覆盖全部非取消异常 | — | S–M | done |
 | [11](./issues/11-persist-timer-completion-ui-state.md) | Audit P1-11 | 计时完成态跨配置重建 | 10 | M | ready-for-agent |
 | [12](./issues/12-restore-composer-next-feed-offer.md) | Audit P1-12 | Composer 保存后恢复下次喂养 offer | — | M | done |
 | [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | done |
 | [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | done |
-| [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | blocked |
+| [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | ready-for-agent |
 | [16](./issues/16-prune-dead-syncport-surface.md) | Audit P2-02 + readability 04 | 修剪 SyncPort 死公开表面 | 01 | S–M | done |
 | [17](./issues/17-align-tech-md-current-architecture.md) | Audit P2-03 + readability 05 + directory B3 | tech.md 对齐 current 架构真相 | — | S | ready-for-agent |
 | [18](./issues/18-split-sync-capability-ports.md) | Audit P2-04 | 全面拆 SyncPort/RealSyncPort | — | — | wontfix |
@@ -70,7 +70,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [28](./issues/28-partition-sync-package-by-capability.md) | directory C3 | sync 按能力分包并保留 Sync façade | 01、03、06、15、16、19 | M–L | blocked |
 | [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | blocked |
 | [30](./issues/30-partition-settings-package.md) | directory C6 | Settings 按 calendar/record 分包 | 06、25 | M | blocked |
-| [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | blocked |
+| [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | ready-for-agent |
 | [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | blocked |
 | [33](./issues/33-codify-implemented-layout-conventions.md) | directory E1 | 固化已落地目录约定并收口 | 17、22、24、26–32 | S | blocked |
 

@@ -5,7 +5,7 @@
 
 **Source:** merged directory D1
 **Blocked by:** 05 — 先闭合会修改 server model/API seam 的 completed pair 合同
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** L
 
 ## Acceptance criteria

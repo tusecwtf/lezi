@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P1-09`  
 **Blocked by:** 08 — timer fulfillment photo ownership must be defined  
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M
 
 ## Acceptance criteria
