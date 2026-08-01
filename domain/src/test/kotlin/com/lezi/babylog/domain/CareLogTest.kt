@@ -4721,6 +4721,250 @@ class CareLogTest {
     }
 
     @Test
+    fun completeNursingWithCarePlanPhotosClonesIndependentActiveMediaInOrder() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 80_000_000L
+        val planPhotos = listOf("plans/n1.jpg", "plans/n2.jpg", "plans/n3.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val planMediaBefore = fakes.media.listActiveForCarePlan(planId)
+        assertThat(planMediaBefore.map { it.localUri }).containsExactlyElementsIn(planPhotos).inOrder()
+        val planClientUuids = planMediaBefore.map { it.clientUuid }.toSet()
+
+        val recordId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 6,
+            rightMin = 3,
+            order = "LR",
+            startedAt = now - 10 * 60_000L,
+            endedAt = now,
+            completionClientUuid = "timer-plan-photos-uuid",
+            carePlanId = planId,
+            nowMillis = now,
+        )
+
+        // Record gets same-order active media with independent client UUIDs.
+        assertThat(care.listRecordPhotoPaths(recordId))
+            .containsExactlyElementsIn(planPhotos)
+            .inOrder()
+        val recordMedia = fakes.media.listActiveForRecord(recordId)
+        assertThat(recordMedia).hasSize(3)
+        assertThat(recordMedia.map { it.clientUuid }.toSet())
+            .containsNoneIn(planClientUuids)
+        assertThat(recordMedia.all { it.carePlanId == null && it.recordId == recordId && it.syncDirty })
+            .isTrue()
+
+        // Plan media ownership, order, and local paths stay active (shared bytes OK).
+        assertThat(care.listCarePlanPhotoPaths(planId))
+            .containsExactlyElementsIn(planPhotos)
+            .inOrder()
+        assertThat(fakes.media.listActiveForCarePlan(planId).map { it.clientUuid }.toSet())
+            .isEqualTo(planClientUuids)
+        assertThat(fakes.media.listActiveForCarePlan(planId).all { it.recordId == null }).isTrue()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+    }
+
+    @Test
+    fun completeNursingWithCarePlanPhotosReplayDoesNotRecloneMedia() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 81_000_000L
+        val planPhotos = listOf("plans/a.jpg", "plans/b.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val completionUuid = "timer-plan-photos-replay"
+        val first = care.completeNursing(
+            babyId = babyId,
+            leftMin = 5,
+            rightMin = 2,
+            order = "L",
+            startedAt = now - 8 * 60_000L,
+            endedAt = now,
+            completionClientUuid = completionUuid,
+            carePlanId = planId,
+            nowMillis = now,
+        )
+        val mediaAfterFirst = fakes.media.listActiveForRecord(first).map { it.clientUuid }
+        assertThat(mediaAfterFirst).hasSize(2)
+
+        val replay = care.completeNursing(
+            babyId = babyId,
+            leftMin = 5,
+            rightMin = 2,
+            order = "L",
+            startedAt = now - 8 * 60_000L,
+            endedAt = now,
+            completionClientUuid = completionUuid,
+            carePlanId = planId,
+            nowMillis = now + 1L,
+        )
+        assertThat(replay).isEqualTo(first)
+        assertThat(fakes.media.listActiveForRecord(first).map { it.clientUuid })
+            .containsExactlyElementsIn(mediaAfterFirst)
+            .inOrder()
+        // Plan still holds its original two rows; no extra clones anywhere.
+        assertThat(care.listCarePlanPhotoPaths(planId))
+            .containsExactlyElementsIn(planPhotos)
+            .inOrder()
+        assertThat(
+            fakes.media.listAllIncludingDeleted().count {
+                it.kind == "log" && it.deletedAt == null
+            },
+        ).isEqualTo(4) // 2 plan + 2 record
+    }
+
+    @Test
+    fun completeNursingPlanPhotoCloneFailureRollsBackRecordAndPlan() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 82_000_000L
+        val planPhotos = listOf("plans/x.jpg", "plans/y.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val mediaBefore = fakes.media.listAllIncludingDeleted()
+        val planBefore = fakes.carePlans.get(planId)!!
+
+        fakes.media.failUpserts = true
+        val error = runCatching {
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 4,
+                rightMin = 1,
+                order = "RL",
+                startedAt = now - 5 * 60_000L,
+                endedAt = now,
+                completionClientUuid = "timer-plan-photos-fail",
+                carePlanId = planId,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalStateException::class.java)
+        assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.fulfillmentCandidates.listAllIncludingDeleted()).isEmpty()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(fakes.carePlans.get(planId)).isEqualTo(planBefore)
+        assertThat(care.listCarePlanPhotoPaths(planId))
+            .containsExactlyElementsIn(planPhotos)
+            .inOrder()
+        assertThat(fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaBefore)
+    }
+
+    @Test
+    fun completeNursingWithoutPlanPhotosOrCarePlanIdLeavesRecordMediaEmpty() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 83_000_000L
+        // No-photo plan still completes without inventing media.
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            nowMillis = now,
+        )
+        val withPlan = care.completeNursing(
+            babyId = babyId,
+            leftMin = 3,
+            rightMin = 0,
+            order = "L",
+            startedAt = now - 4 * 60_000L,
+            endedAt = now,
+            completionClientUuid = "timer-no-plan-photos",
+            carePlanId = planId,
+            nowMillis = now,
+        )
+        assertThat(care.listRecordPhotoPaths(withPlan)).isEmpty()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+
+        // Non-plan timer completion is unchanged (no media).
+        val freeTimer = care.completeNursing(
+            babyId = babyId,
+            leftMin = 2,
+            rightMin = 2,
+            order = "LR",
+            startedAt = now - 3 * 60_000L,
+            endedAt = now + 1L,
+            completionClientUuid = "timer-no-plan-at-all",
+            carePlanId = null,
+            nowMillis = now + 1L,
+        )
+        assertThat(care.listRecordPhotoPaths(freeTimer)).isEmpty()
+        assertThat(fakes.media.listActiveForRecord(freeTimer)).isEmpty()
+    }
+
+    @Test
+    fun completeNursingUsesLivePlanMediaNotStaleSnapshot() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 84_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = listOf("plans/old-a.jpg", "plans/old-b.jpg"),
+            nowMillis = now,
+        )
+        // Simulate plan photos changing after timer started (no UI photo args on complete).
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 60_000L,
+            photoLocalPaths = listOf("plans/live-only.jpg"),
+            nowMillis = now + 1L,
+        )
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/live-only.jpg")
+
+        val recordId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 7,
+            rightMin = 0,
+            order = "R",
+            startedAt = now - 6 * 60_000L,
+            endedAt = now + 2L,
+            completionClientUuid = "timer-live-plan-media",
+            carePlanId = planId,
+            nowMillis = now + 2L,
+        )
+        assertThat(care.listRecordPhotoPaths(recordId)).containsExactly("plans/live-only.jpg")
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/live-only.jpg")
+    }
+
+    @Test
     fun sleepCarePlanIsIntentOnlyOpenAndClosedFulfill() = runTest {
         val fakes = Fakes()
         fakes.wireTransactionalSnapshots()

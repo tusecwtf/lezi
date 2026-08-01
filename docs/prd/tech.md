@@ -102,9 +102,14 @@ UI 事件
 开始 → 先持久化暂停的 STARTING 快照 → 请求前台服务与通知
      → 系统真实标记前台服务，且通知权限开启时通知已发布，才回执 RUNNING 并在 UI 走秒
      → 受限启动 / 权限 / 通知 / 运行时失败则持久化 FAILED，保留侧别与累计值供重试
-完成 → 写入 nursing Record → 停服务
+完成 → domain completeNursing：写 nursing Record；若绑定 carePlanId，同事务读取计划当前
+       active 照片并 clone 为 Record 独立 MediaAsset 行，再 complete 计划 + 候选 → 停服务
 进程被杀 → 启动时冻结旧运行快照并标记 RECOVERABLE，不假定服务仍存活、不自动重复启动
 ```
+
+绑定护理计划的计时完成以事务内 plan media 为准（不是打开计时/Composer 时的 UI 快照）；
+计划照片所有权与顺序不变，Record 行独立 `client_uuid`、可共享 `local_uri`；幂等
+`completionClientUuid` replay 不重复 clone。
 
 只解析当前 TimerState；非 current 计时状态不属于支持输入。当前状态的进程重启恢复、幂等完成与异常安全结束仍是
 必须门禁，fresh-current 不能被解释为丢弃当前会话恢复。`startForeground()` 正常返回本身不是

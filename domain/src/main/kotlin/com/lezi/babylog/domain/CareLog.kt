@@ -211,6 +211,12 @@ class CareLog @Inject constructor(
                 actualTimestamp = actualTimestamp,
             )
         },
+        // Read plan media at transaction time (not Composer/Timer UI snapshot).
+        listCarePlanPhotoPaths = { carePlanId ->
+            mediaAssetDao.listActiveForCarePlan(carePlanId)
+                .map(MediaAssetEntity::localUri)
+                .filter { it.isNotBlank() }
+        },
         requestLocalSync = ::requestLocalSync,
     )
     private val babyProfiles: BabyFamilyProfileCoordinator = BabyFamilyProfileCoordinator(

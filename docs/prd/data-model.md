@@ -273,6 +273,14 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 履行事务成功后，原 CarePlan 的媒体集合保持不变，事实 Record 只建立确认时仍在草稿内的
 计划照片和新导入照片媒体行；已被事实引用的新导入文件不进入物理清理候选。
 
+**计时履行（`completeNursing(carePlanId=…)`）** 不依赖 Composer 草稿或 UI 照片快照：
+在与 Record 写入、计划 complete、履行候选同一事务内，读取该护理计划**当前** active
+计划照片（按媒体行 id 序，最多三张），为新 Record 创建独立 `client_uuid` 的 MediaAsset
+行并共享同一 `local_uri`。原 CarePlan 的媒体行、顺序与物理文件保持 active；删除任一方
+媒体行不得在另一路径仍 active 时回收文件。`completionClientUuid` 幂等 replay 返回同一
+Record 且不重复 clone；无照片计划与未绑定计划的计时完成不产生媒体行。生成的 Record +
+0–3 媒体行继续走完整 atomic bundle 出站。
+
 MediaAsset 行所有权与物理文件所有权是两层契约：每条 `log` 行仍只归属一个 Record 或
 CarePlan，但多个 active 行可以用相同 `local_uri` 共享同一份本机字节。编辑、整实体删除、
 Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和同步 tombstone 只把精确

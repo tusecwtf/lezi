@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **7**（01、02、03、04、05、06、07）
-- Current frontier (ready-for-agent): **12**
+- Done: **8**（01、02、03、04、05、06、07、08）
+- Current frontier (ready-for-agent): **11**
 - Blocked by dependency: **12**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**08、10、12、13、14、16、17、19、20、22、23、25**
+**10、12、13、14、16、17、19、20、22、23、25**
 
 ## Tickets
 
@@ -47,7 +47,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | done |
 | [06](./issues/06-clear-nursing-timer-with-local-data.md) | Audit P1-06 | 本机清空同步停止并清除计时器 | — | M | done |
 | [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | done |
-| [08](./issues/08-carry-plan-photos-through-timer-fulfillment.md) | Audit P1-08 | 计时履行继承护理计划照片 | — | M | ready-for-agent |
+| [08](./issues/08-carry-plan-photos-through-timer-fulfillment.md) | Audit P1-08 | 计时履行继承护理计划照片 | — | M | done |
 | [09](./issues/09-transfer-composer-draft-to-timer-safely.md) | Audit P1-09 | Composer→Timer 安全转移草稿 | 08 | M | blocked |
 | [10](./issues/10-handle-all-timer-transition-failures.md) | Audit P1-10 | Timer transition 覆盖全部非取消异常 | — | S–M | ready-for-agent |
 | [11](./issues/11-persist-timer-completion-ui-state.md) | Audit P1-11 | 计时完成态跨配置重建 | 10 | M | blocked |

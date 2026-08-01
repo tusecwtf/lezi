@@ -49,6 +49,11 @@ internal class RecordMutationCoordinator(
         now: Long,
         actualTimestamp: Long,
     ) -> Unit,
+    /**
+     * Authoritative active plan photo paths (ordered). Timer fulfillment clones these
+     * into the new Record inside the same transaction; does not use UI snapshots.
+     */
+    private val listCarePlanPhotoPaths: suspend (Long) -> List<String>,
     private val requestLocalSync: () -> Unit,
 ) {
     suspend fun addRecord(
@@ -481,6 +486,14 @@ internal class RecordMutationCoordinator(
                 ),
             )
             if (carePlanId != null) {
+                // Clone current plan media into independent record rows (shared local path).
+                // Plan ownership/order stay unchanged; replay path above skips this clone.
+                val planPhotos = listCarePlanPhotoPaths(carePlanId)
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.Record(inserted),
+                    planPhotos,
+                    now,
+                )
                 completeOpenCarePlanWithRecord(
                     carePlanId,
                     babyId,
