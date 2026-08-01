@@ -43,11 +43,15 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lezi.babylog.core.model.NextFeedPlanOrigin
+import com.lezi.babylog.core.model.TimerHandoffBuildResult
+import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 internal const val RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED = true
 
@@ -132,7 +136,17 @@ fun RecordComposerHost(
     /** Consumes the restorable root request as soon as a database write succeeds. */
     onPersisted: () -> Unit,
     onSaved: (String) -> Unit,
-    onStartNursingTimer: (note: String, amountMl: String, carePlanId: Long?, babyId: Long?) -> Unit,
+    /**
+     * Explicit Composer→Timer ownership handoff. Host keeps Composer open until
+     * Timer accepts the seed. Shell navigates with the seed and later invokes the
+     * release callback registered via [onRegisterTimerHandoffRelease].
+     */
+    onStartNursingTimer: (TimerHandoffSeed) -> Unit,
+    /**
+     * Host registers a one-shot release function: after Timer accepts, shell must
+     * call it so Composer closes without reclaiming transferred owned photos.
+     */
+    onRegisterTimerHandoffRelease: ((TimerHandoffSeed) -> Unit) -> Unit = {},
     /** Optional: open device-local system calendar setup (ticket 21). Cancel still saves plan. */
     onConfigureSystemCalendar: (() -> Unit)? = null,
     vm: RecordComposerViewModel = hiltViewModel(),
@@ -143,7 +157,13 @@ fun RecordComposerHost(
     /** Explicit convert confirm; cancel keeps the draft and original record untouched. */
     var confirmConvert by remember(request) { mutableStateOf(false) }
     var confirmDiscard by rememberRecordComposerDiscardPrompt(request)
+    /** Untransferable dirty fields require explicit confirm before handoff. */
+    var confirmTimerHandoff by remember(request) { mutableStateOf(false) }
+    var timerHandoffConfirmMessage by remember(request) { mutableStateOf<String?>(null) }
+    var timerHandoffOverflowMessage by remember(request) { mutableStateOf<String?>(null) }
+    var pendingTimerHandoffSeed by remember(request) { mutableStateOf<TimerHandoffSeed?>(null) }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     // Post-save offer + finish copy live in ViewModel/SavedState (single source of truth).
     // Any new composition after rotation observes state — never dual-mastered rememberSaveable
     // locals mutated by a late save callback from a disposed composition.
@@ -316,17 +336,100 @@ fun RecordComposerHost(
                         }
                     },
                     onStartNursingTimer = {
-                        onStartNursingTimer(
-                            draft.note,
-                            draft.nursingAmountMl,
-                            draft.carePlanId?.takeUnless { draft.editCarePlan },
-                            state.babyId,
-                        )
+                        scope.launch {
+                            when (val prepared = vm.buildTimerHandoffFromOpenDraft()) {
+                                null -> Unit
+                                is TimerHandoffBuildResult.PhotoOverflow -> {
+                                    timerHandoffOverflowMessage =
+                                        timerHandoffPhotoOverflowMessage(
+                                            distinctCount = prepared.distinctCount,
+                                            maxAllowed = prepared.maxAllowed,
+                                        )
+                                }
+                                is TimerHandoffBuildResult.Ready -> {
+                                    val untransferable = vm.untransferableFieldsForOpenDraft()
+                                    if (untransferable.isEmpty()) {
+                                        onStartNursingTimer(prepared.seed)
+                                    } else {
+                                        pendingTimerHandoffSeed = prepared.seed
+                                        timerHandoffConfirmMessage =
+                                            timerHandoffUntransferableConfirmMessage(
+                                                untransferable,
+                                            )
+                                        confirmTimerHandoff = true
+                                    }
+                                }
+                            }
+                        }
                     },
                     onImportPhotos = vm::importPhotos,
                     onRemovePhoto = vm::removePhoto,
                 )
             }
+        }
+    }
+
+    if (confirmTimerHandoff) {
+        AlertDialog(
+            onDismissRequest = {
+                confirmTimerHandoff = false
+                pendingTimerHandoffSeed = null
+                timerHandoffConfirmMessage = null
+            },
+            title = { Text("开始喂奶计时？") },
+            text = {
+                Text(
+                    timerHandoffConfirmMessage
+                        ?: "开始计时后，无法带入计时器的草稿字段将被丢弃。确定开始计时吗？",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val seed = pendingTimerHandoffSeed
+                        confirmTimerHandoff = false
+                        pendingTimerHandoffSeed = null
+                        timerHandoffConfirmMessage = null
+                        if (seed != null) {
+                            onStartNursingTimer(seed)
+                        }
+                    },
+                ) {
+                    Text("开始计时")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        confirmTimerHandoff = false
+                        pendingTimerHandoffSeed = null
+                        timerHandoffConfirmMessage = null
+                    },
+                ) {
+                    Text("继续编辑")
+                }
+            },
+        )
+    }
+
+    timerHandoffOverflowMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { timerHandoffOverflowMessage = null },
+            title = { Text("照片过多") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { timerHandoffOverflowMessage = null }) {
+                    Text("知道了")
+                }
+            },
+        )
+    }
+
+    val latestOnDismiss by rememberUpdatedState(onDismiss)
+    LaunchedEffect(vm) {
+        onRegisterTimerHandoffRelease { seed ->
+            vm.closeAfterTimerHandoff(seed)
+            latestOnDismiss()
         }
     }
 

@@ -11,14 +11,21 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
+import com.lezi.babylog.core.model.TimerHandoffAcceptResult
+import com.lezi.babylog.core.model.TimerHandoffSeed
+import com.lezi.babylog.core.model.decideTimerHandoffAccept
+import com.lezi.babylog.core.model.mergeTimerCompletionPhotos
 import com.lezi.babylog.core.model.nextFeedSuggestedAt
 import com.lezi.babylog.core.model.runNextFeedPlanReconciliation
 import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
+import com.lezi.babylog.core.model.timerDiscardReclaimPaths
 import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +35,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 @HiltViewModel
 class TimerViewModel @Inject constructor(
@@ -219,13 +227,16 @@ class TimerViewModel @Inject constructor(
     internal fun freezeCompletion(
         initialNote: String = "",
         initialAmountMl: String = "",
-    ): NursingCompletionDraft = freezeNursingCompletion(
-        state = _state.value,
-        nowElapsed = SystemClock.elapsedRealtime(),
-        clickedAt = System.currentTimeMillis(),
-        initialNote = initialNote,
-        initialAmountMl = initialAmountMl,
-    )
+    ): NursingCompletionDraft {
+        val seed = _state.value.handoffSeed
+        return freezeNursingCompletion(
+            state = _state.value,
+            nowElapsed = SystemClock.elapsedRealtime(),
+            clickedAt = System.currentTimeMillis(),
+            initialNote = seed?.note?.takeIf { it.isNotBlank() } ?: initialNote,
+            initialAmountMl = seed?.amountMl?.takeIf { it.isNotBlank() } ?: initialAmountMl,
+        )
+    }
 
     internal fun complete(
         draft: NursingCompletionDraft,
@@ -253,6 +264,16 @@ class TimerViewModel @Inject constructor(
                     val command = draft.toCommand()
                     val currentSettings = settings.settings.first()
                     val recordMode = currentSettings.recordAtStartOrEnd
+                    val seed = stableState.handoffSeed
+                    val livePlanPhotos = if (stableState.carePlanId != null) {
+                        careLog.listCarePlanPhotoPaths(stableState.carePlanId)
+                    } else {
+                        emptyList()
+                    }
+                    val completionPhotos = mergeTimerCompletionPhotos(
+                        seedPhotoPaths = seed?.orderedPaths.orEmpty(),
+                        livePlanPhotoPaths = livePlanPhotos,
+                    )
                     careLog.completeNursing(
                         babyId = babyId,
                         leftMin = command.leftMin,
@@ -265,6 +286,7 @@ class TimerViewModel @Inject constructor(
                         recordMode = recordMode,
                         completionClientUuid = completionClientUuid,
                         carePlanId = stableState.carePlanId,
+                        photoLocalPaths = completionPhotos.takeIf { it.isNotEmpty() },
                     )
                     val offerNextFeedPlan = shouldOfferNextFeedPlanForFact(
                         type = RecordType.NURSING,
@@ -341,10 +363,46 @@ class TimerViewModel @Inject constructor(
 
     fun clear(onCleared: () -> Unit = {}) {
         viewModelScope.launch {
-            toggleMutex.withLock { applyTransition(TimerState()) }
+            val reclaim = toggleMutex.withLock {
+                val seed = _state.value.handoffSeed
+                applyTransition(TimerState())
+                timerDiscardReclaimPaths(seed)
+            }
+            reclaimComposerOwnedHandoffFiles(reclaim)
             onCleared()
         }
     }
+
+    /**
+     * Accept a Composer→Timer ownership handoff. Idempotent for the same
+     * [TimerHandoffSeed.handoffId]; rejects when another session already owns the timer.
+     */
+    suspend fun acceptHandoffSeed(seed: TimerHandoffSeed): TimerHandoffAcceptResult =
+        toggleMutex.withLock {
+            val cur = _state.value
+            val decision = decideTimerHandoffAccept(
+                seed = seed,
+                existingHandoffId = cur.handoffSeed?.handoffId,
+                boundCarePlanId = cur.carePlanId,
+                boundBabyId = cur.babyId,
+                hasSessionData = cur.hasRunningOrAccumulatedData(),
+            )
+            when (decision) {
+                TimerHandoffAcceptResult.AlreadyAccepted -> decision
+                TimerHandoffAcceptResult.RejectedConflict -> decision
+                is TimerHandoffAcceptResult.Accepted -> {
+                    applyTransition(
+                        cur.copy(
+                            babyId = decision.stateBabyId,
+                            carePlanId = decision.stateCarePlanId,
+                            handoffSeed = seed,
+                            completionClientUuid = cur.completionClientUuid ?: newClientUuid(),
+                        ),
+                    )
+                    decision
+                }
+            }
+        }
 
     /**
      * Bind an open nursing care plan to the next/current timer session.
@@ -363,7 +421,7 @@ class TimerViewModel @Inject constructor(
                             applyTransition(cur.copy(babyId = babyId))
                         }
                     }
-                    cur.hasTimerData() || cur.carePlanId != null -> {
+                    cur.hasTimerData() || cur.carePlanId != null || cur.handoffSeed != null -> {
                         // Active unrelated session — leave it alone (fail closed).
                     }
                     else -> {
@@ -374,6 +432,21 @@ class TimerViewModel @Inject constructor(
                                 completionClientUuid = cur.completionClientUuid ?: newClientUuid(),
                             ),
                         )
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun reclaimComposerOwnedHandoffFiles(paths: Collection<String>) {
+        if (paths.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            val allowedRoot = File(app.filesDir, "record-media").canonicalFile
+            paths.forEach { path ->
+                runCatching {
+                    val file = File(path).canonicalFile
+                    if (file.parentFile == allowedRoot) {
+                        file.delete()
                     }
                 }
             }

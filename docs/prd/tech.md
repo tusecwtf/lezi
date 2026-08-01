@@ -107,6 +107,10 @@ UI 事件
      → FAILED 再持久化失败时仍先更新内存态，UI 不得长期停在 STARTING/RUNNING 假象
 完成 → domain completeNursing：写 nursing Record；若绑定 carePlanId，同事务读取计划当前
        active 照片并 clone 为 Record 独立 MediaAsset 行，再 complete 计划 + 候选 → 停服务
+     → Composer→Timer handoff（Ticket 09）：显式 TimerHandoffSeed（baby/carePlan/note/amount/
+       有序照片+borrowed|composer_owned）写入 TimerState 并随 DataStore 恢复；Timer accept 后
+       Composer 才 close 且不删除已转移 owned 文件；完成时 merge seed 路径与 Ticket 08 直播
+       plan media（去重 0–3）经 photoLocalPaths 写入 Record；丢弃只回收 composer_owned
      → 完成 / 暂停 / 清空：先持久化非运行快照再停服；持久化失败同样停服；
        仅当存在真实可重试侧别（lastSide / 曾运行侧）时内存 `FAILED`；
        护理计划 bind 或无侧别会话保持内存 `PAUSED`，不得伪造 `"L"`

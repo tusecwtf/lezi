@@ -53,6 +53,19 @@ internal class RecordComposerPhotoLifecycle(
         deleteFiles(discardedOwned)
     }
 
+    /**
+     * Composer→Timer ownership transfer: reclaim only owned imports that are
+     * **not** listed in the handoff seed. Seed-owned paths stay on disk for Timer;
+     * borrowed CarePlan paths are never physical-deleted here.
+     */
+    suspend fun releaseForTimerHandoff(
+        draft: QuickRecordDraft,
+        transferredOwnedPaths: Collection<String>,
+    ) {
+        val keep = transferredOwnedPaths.map(String::trim).filter(String::isNotEmpty).toSet()
+        deleteFiles(ownedCleanupCandidates(draft).filter { it !in keep })
+    }
+
     private fun ownedCleanupCandidates(draft: QuickRecordDraft): List<String> {
         val protected = draft.sourcePhotos.toSet() + draft.borrowedPhotos.toSet()
         return draft.ownedDraftPhotos.distinct().filterNot(protected::contains)

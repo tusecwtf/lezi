@@ -281,6 +281,16 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 Record 且不重复 clone；无照片计划与未绑定计划的计时完成不产生媒体行。生成的 Record +
 0–3 媒体行继续走完整 atomic bundle 出站。
 
+**Composer→Timer 草稿 handoff（所有权转移，非隐式放弃）**：从 Composer 开始计时时，
+可转移字段与照片经显式 `TimerHandoffSeed`（baby、carePlan、note、amount、有序照片及
+每张 borrowed/Composer-owned 所有权）交给 Timer，并随 TimerState 持久化/恢复；Timer
+确认接管后 Composer 才关闭，且不得 cleanup 已转移的 Composer-owned 导入。导航失败或
+接管冲突时原草稿与照片保持可编辑。完成时把 seed 照片路径与上述 Ticket 08 直播 plan
+media 去重合并（seed 序优先，最多 3 张）经 `photoLocalPaths` 写入 Record；Timer 显式
+丢弃只回收 Composer-owned 文件，borrowed 计划路径永不由草稿/Timer 丢弃路径物理删除。
+已输入但无法映射到计时器的 manual 时长/顺序/时间须在离开 Composer 前明确确认；
+seed+plan 合并超 3 张时在离开前可操作提示删减。
+
 MediaAsset 行所有权与物理文件所有权是两层契约：每条 `log` 行仍只归属一个 Record 或
 CarePlan，但多个 active 行可以用相同 `local_uri` 共享同一份本机字节。编辑、整实体删除、
 Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和同步 tombstone 只把精确

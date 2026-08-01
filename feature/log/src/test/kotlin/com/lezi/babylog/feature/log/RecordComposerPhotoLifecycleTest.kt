@@ -137,6 +137,32 @@ class RecordComposerPhotoLifecycleTest {
     }
 
     @Test
+    fun releaseForTimerHandoffNeverDeletesBorrowedPlanBytes() = runBlocking {
+        val planBytes = byteArrayOf(9, 9, 9)
+        val ownedKeepBytes = byteArrayOf(1, 1, 1)
+        val ownedDropBytes = byteArrayOf(2, 2, 2)
+        val plan = photo("plan-handoff.jpg", planBytes)
+        val keep = photo("owned-keep-handoff.jpg", ownedKeepBytes)
+        val drop = photo("owned-drop-handoff.jpg", ownedDropBytes)
+        val draft = lifecycle.imported(
+            lifecycle.fulfillmentDraft(
+                base = QuickRecordDraft.create(RecordType.NURSING, 1_000L).copy(carePlanId = 3L),
+                planPhotos = listOf(plan.absolutePath),
+            ),
+            listOf(keep.absolutePath, drop.absolutePath),
+        )
+
+        lifecycle.releaseForTimerHandoff(
+            draft = draft,
+            transferredOwnedPaths = listOf(keep.absolutePath),
+        )
+
+        assertArrayEquals(planBytes, plan.readBytes())
+        assertArrayEquals(ownedKeepBytes, keep.readBytes())
+        assertFalse(drop.exists())
+    }
+
+    @Test
     fun failedSaveThenRecreationRetainsOwnershipUntilExplicitAbandon() = runBlocking {
         val planBytes = byteArrayOf(11, 12)
         val ownedBytes = byteArrayOf(21, 22)

@@ -465,6 +465,11 @@ class CareLog @Inject constructor(
         recordMode: String = "end",
         completionClientUuid: String = newClientUuid(),
         carePlanId: Long? = null,
+        /**
+         * Optional merged seed + live plan photo paths (Ticket 09). When null and
+         * [carePlanId] is set, clones current plan media (Ticket 08).
+         */
+        photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
     ): Long = recordMutations.completeNursing(
         babyId,
@@ -478,6 +483,7 @@ class CareLog @Inject constructor(
         recordMode,
         completionClientUuid,
         carePlanId,
+        photoLocalPaths,
         nowMillis,
     )
 

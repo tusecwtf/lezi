@@ -51,6 +51,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
 import com.lezi.babylog.core.model.NextFeedPlanOrigin
+import com.lezi.babylog.core.model.TimerHandoffAcceptResult
+import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
 import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
@@ -83,11 +85,30 @@ fun TimerRoute(
     /** When set, bind this open nursing care plan to the timer session (ticket 16). */
     carePlanId: Long? = null,
     babyId: Long? = null,
+    /**
+     * Explicit Composer→Timer ownership handoff (Ticket 09). Accepted before
+     * Composer releases draft ownership; rejected keeps Composer draft editable.
+     */
+    handoffSeed: TimerHandoffSeed? = null,
+    onHandoffAccepted: (TimerHandoffSeed) -> Unit = {},
+    onHandoffRejected: (TimerHandoffSeed) -> Unit = {},
     vm: TimerViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
-    LaunchedEffect(carePlanId, babyId) {
-        vm.bindCarePlanIfIdle(carePlanId = carePlanId, babyId = babyId)
+    LaunchedEffect(handoffSeed?.handoffId) {
+        val seed = handoffSeed ?: return@LaunchedEffect
+        when (vm.acceptHandoffSeed(seed)) {
+            is TimerHandoffAcceptResult.Accepted,
+            TimerHandoffAcceptResult.AlreadyAccepted,
+            -> onHandoffAccepted(seed)
+            TimerHandoffAcceptResult.RejectedConflict -> onHandoffRejected(seed)
+        }
+    }
+    LaunchedEffect(carePlanId, babyId, handoffSeed?.handoffId) {
+        // Seed accept already binds baby/plan; keep legacy bind for non-seed entry.
+        if (handoffSeed == null) {
+            vm.bindCarePlanIfIdle(carePlanId = carePlanId, babyId = babyId)
+        }
     }
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()

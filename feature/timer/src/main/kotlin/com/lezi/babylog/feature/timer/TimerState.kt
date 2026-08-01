@@ -3,9 +3,11 @@ package com.lezi.babylog.feature.timer
 import android.content.Context
 import android.os.SystemClock
 import android.provider.Settings
+import com.lezi.babylog.core.model.TimerHandoffSeed
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -42,6 +44,12 @@ data class TimerState(
      * pending until [com.lezi.babylog.domain.CareLog.completeNursing] succeeds.
      */
     val carePlanId: Long? = null,
+    /**
+     * Optional Composer→Timer ownership handoff. Survives config/process restore
+     * with the session; cleared on complete or explicit discard. Same
+     * [TimerHandoffSeed.handoffId] accept is idempotent.
+     */
+    val handoffSeed: TimerHandoffSeed? = null,
     val leftRunning: Boolean = false,
     val rightRunning: Boolean = false,
     val leftAccumMs: Long = 0L,
@@ -76,6 +84,12 @@ data class TimerState(
             put("completionClientUuid", completionClientUuid)
         }
         putNullableLong("carePlanId", carePlanId)
+        if (handoffSeed == null) {
+            put("handoffSeed", JsonNull)
+        } else {
+            // Embed parsed object so restore does not re-stringify escaping.
+            put("handoffSeed", Json.parseToJsonElement(handoffSeed.toJson()))
+        }
         put("leftRunning", leftRunning)
         put("rightRunning", rightRunning)
         put("leftAccumMs", leftAccumMs)
@@ -162,10 +176,12 @@ data class TimerState(
                         TimerServiceState.RECOVERABLE
                     else -> serializedServiceState
                 }
+                val handoffSeed = o.optionalHandoffSeed("handoffSeed")
                 TimerState(
                     babyId = o.requiredNullableLong("babyId")?.also { require(it > 0L) },
                     completionClientUuid = completionClientUuid,
                     carePlanId = o.requiredNullableLong("carePlanId")?.also { require(it > 0L) },
+                    handoffSeed = handoffSeed,
                     leftRunning = leftRunning && confirmedServiceIsAlive,
                     rightRunning = rightRunning && confirmedServiceIsAlive,
                     leftAccumMs = leftAccum,
@@ -202,6 +218,9 @@ internal fun TimerState.hasTimerData(): Boolean =
         leftAccumMs > 0L ||
         rightAccumMs > 0L ||
         sessionStartedAt != null
+
+/** Session has user-visible timer progress (not mere handoff/plan bind). */
+internal fun TimerState.hasRunningOrAccumulatedData(): Boolean = hasTimerData()
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.putNullableLong(
     key: String,
@@ -255,6 +274,22 @@ private inline fun <reified T : Enum<T>> JsonObject.optionalEnum(key: String): T
     val value = optionalNullableString(key) ?: return null
     return enumValues<T>().firstOrNull { it.name == value }
         ?: throw IllegalArgumentException("Invalid $key")
+}
+
+/**
+ * Optional handoff seed (Ticket 09). Absent key is treated as null so older
+ * schemaVersion=1 snapshots without the field still restore.
+ */
+private fun JsonObject.optionalHandoffSeed(key: String): TimerHandoffSeed? {
+    val value = get(key) ?: return null
+    if (value === JsonNull) return null
+    return when (value) {
+        is JsonPrimitive -> TimerHandoffSeed.fromJson(value.contentOrNull)
+            ?: throw IllegalArgumentException("Invalid $key")
+        is JsonObject -> runCatching { TimerHandoffSeed.fromJsonObject(value) }
+            .getOrElse { throw IllegalArgumentException("Invalid $key") }
+        else -> throw IllegalArgumentException("Invalid $key")
+    }
 }
 
 /**

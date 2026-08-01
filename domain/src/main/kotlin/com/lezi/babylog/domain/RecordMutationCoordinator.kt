@@ -414,6 +414,13 @@ internal class RecordMutationCoordinator(
          * Cancel / save-failure leave the plan pending and roll back any clone.
          */
         carePlanId: Long? = null,
+        /**
+         * Optional explicit record photo paths (Ticket 09 seed merge with Ticket 08
+         * live plan media, already deduped and capped 0–3). When non-null, these
+         * paths are reconciled onto the Record instead of cloning plan media alone.
+         * When null and [carePlanId] is set, falls back to live plan media clone.
+         */
+        photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
     ): Long {
         require(order in NURSING_ORDER_ALLOWLIST) {
@@ -487,15 +494,21 @@ internal class RecordMutationCoordinator(
                     updatedAt = now,
                 ),
             )
-            if (carePlanId != null) {
-                // Clone current plan media into independent record rows (shared local path).
-                // Plan ownership/order stay unchanged; replay path above skips this clone.
-                val planPhotos = listCarePlanPhotoPaths(carePlanId)
+            val recordPhotos = when {
+                photoLocalPaths != null -> photoLocalPaths
+                carePlanId != null -> listCarePlanPhotoPaths(carePlanId)
+                else -> emptyList()
+            }
+            if (recordPhotos.isNotEmpty()) {
+                // Independent record MediaAsset rows (shared local path with plan when
+                // overlapping). Plan ownership/order stay unchanged; replay skips clone.
                 photoAttachmentReconciler.reconcile(
                     PhotoAttachmentOwner.Record(inserted),
-                    planPhotos,
+                    recordPhotos,
                     now,
                 )
+            }
+            if (carePlanId != null) {
                 completeOpenCarePlanWithRecord(
                     carePlanId,
                     babyId,

@@ -205,6 +205,8 @@ Owner。详细页面、错误和删除恢复见
 
 ### 5.3 喂奶计时（全屏）
 
+- **Composer→Timer 草稿所有权转移（非隐式放弃）**：从 Composer「开始计时」进入喂奶计时是显式 seed/ownership handoff，不是先关闭草稿再丢四个标量。可转移字段（宝宝、护理计划、备注、奶量、照片顺序与每张 borrowed/Composer-owned 所有权）在 Timer **确认接管** seed 之前不得被 Composer cleanup；导航失败或接管冲突时原草稿与照片保持可编辑。Timer 完成后 Composer-owned 导入归 Record；Timer 显式丢弃时回收 Composer-owned 文件；CarePlan borrowed 照片永不因草稿/Timer 丢弃路径物理删除。已填写但无法映射到计时的时长/顺序/时间须先明确确认。seed 照片与计划当前照片在完成时去重并限制 0–3 张；超限在离开 Composer 前提示删减。
+
 - 左 / 右两大圆：开始、停止；累计分钟。  
 - 中央：上次停在哪一侧。  
 - 底部“完成并记录”只冻结点击时的左右时长与结束时刻，再打开确认面板；面板可调整时长、仅左（`L`）/仅右（`R`）/先左后右（`LR`）/先右后左（`RL`）顺序、可选奶量、备注和圆盘时间，确认后才写入。

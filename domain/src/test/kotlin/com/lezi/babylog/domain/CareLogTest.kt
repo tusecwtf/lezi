@@ -4922,6 +4922,65 @@ class CareLogTest {
     }
 
     @Test
+    fun completeNursingWithSeedPhotoPathsMergesOntoRecordAndKeepsPlanMedia() = runTest {
+        // Ticket 09: explicit seed photo list (seed + live plan, pre-merged) attaches to Record.
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 84_500_000L
+        val planPhotos = listOf("plans/live-a.jpg", "plans/live-b.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val planClientUuids = fakes.media.listActiveForCarePlan(planId).map { it.clientUuid }.toSet()
+        // Seed order: owned import first, then one plan path; live plan also has live-b.
+        val merged = listOf("imports/owned.jpg", "plans/live-a.jpg", "plans/live-b.jpg")
+        val recordId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 4,
+            rightMin = 1,
+            order = "LR",
+            startedAt = now - 5 * 60_000L,
+            endedAt = now,
+            completionClientUuid = "timer-seed-photos-uuid",
+            carePlanId = planId,
+            photoLocalPaths = merged,
+            nowMillis = now,
+        )
+        assertThat(care.listRecordPhotoPaths(recordId))
+            .containsExactlyElementsIn(merged)
+            .inOrder()
+        assertThat(fakes.media.listActiveForRecord(recordId).map { it.clientUuid }.toSet())
+            .containsNoneIn(planClientUuids)
+        assertThat(care.listCarePlanPhotoPaths(planId))
+            .containsExactlyElementsIn(planPhotos)
+            .inOrder()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+
+        // Free-timer path with seed-only photos (no care plan).
+        val freeId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 2,
+            rightMin = 0,
+            order = "L",
+            startedAt = now - 3 * 60_000L,
+            endedAt = now + 1L,
+            completionClientUuid = "timer-seed-only-uuid",
+            carePlanId = null,
+            photoLocalPaths = listOf("imports/solo.jpg"),
+            nowMillis = now + 1L,
+        )
+        assertThat(care.listRecordPhotoPaths(freeId)).containsExactly("imports/solo.jpg")
+    }
+
+    @Test
     fun completeNursingUsesLivePlanMediaNotStaleSnapshot() = runTest {
         val fakes = Fakes()
         fakes.wireTransactionalSnapshots()

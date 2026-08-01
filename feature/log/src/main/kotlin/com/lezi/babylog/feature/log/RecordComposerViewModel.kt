@@ -4,11 +4,15 @@ import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.TimerHandoffBuildResult
+import com.lezi.babylog.core.model.TimerHandoffSeed
+import com.lezi.babylog.core.model.UntransferableTimerField
 import com.lezi.babylog.core.model.nextFeedSuggestedAt
 import com.lezi.babylog.core.model.runNextFeedPlanReconciliation
 import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
@@ -311,6 +315,18 @@ class RecordComposerViewModel @Inject constructor(
     }
 
     internal fun close() {
+        closeInternal(transferredOwnedPaths = emptySet())
+    }
+
+    /**
+     * Close after Timer has accepted [seed]. Transferred Composer-owned photo
+     * bytes are retained for Timer; only non-transferred owned orphans are reclaimed.
+     */
+    internal fun closeAfterTimerHandoff(seed: TimerHandoffSeed) {
+        closeInternal(transferredOwnedPaths = transferredOwnedPaths(seed).toSet())
+    }
+
+    private fun closeInternal(transferredOwnedPaths: Set<String>) {
         val draftForCleanup = _state.value.draft ?: savedState.draftForCleanup()
         val (preemptedOrphans, previousImport) = beginImportPreemption()
         importJob = null
@@ -338,9 +354,46 @@ class RecordComposerViewModel @Inject constructor(
             )
             importSave.reset()
             if (draftForCleanup != null) {
-                photoLifecycle.cleanupAbandoned(draftForCleanup)
+                if (transferredOwnedPaths.isEmpty()) {
+                    photoLifecycle.cleanupAbandoned(draftForCleanup)
+                } else {
+                    photoLifecycle.releaseForTimerHandoff(
+                        draft = draftForCleanup,
+                        transferredOwnedPaths = transferredOwnedPaths,
+                    )
+                }
             }
         }
+    }
+
+    /**
+     * Build a Timer handoff seed from the live draft. Queries current plan media
+     * when fulfilling so overflow is detected against Ticket 08 live plan photos.
+     */
+    internal suspend fun buildTimerHandoffFromOpenDraft(): TimerHandoffBuildResult? {
+        val cur = _state.value
+        val draft = cur.draft ?: return null
+        val babyId = cur.babyId ?: return null
+        if (babyId <= 0L) return null
+        val carePlanId = draft.carePlanId?.takeUnless { draft.editCarePlan }
+        val livePlanPhotos = if (carePlanId != null) {
+            runCatching { careLog.listCarePlanPhotoPaths(carePlanId) }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+        return prepareTimerHandoffSeed(
+            handoffId = newClientUuid(),
+            babyId = babyId,
+            draft = draft,
+            livePlanPhotoPaths = livePlanPhotos,
+        )
+    }
+
+    internal fun untransferableFieldsForOpenDraft(): Set<UntransferableTimerField> {
+        val cur = _state.value
+        val draft = cur.draft ?: return emptySet()
+        val baseline = cur.initialDraft ?: return emptySet()
+        return untransferableFieldsForTimerHandoff(draft, baseline)
     }
 
     internal fun updateDraft(draft: QuickRecordDraft) {
