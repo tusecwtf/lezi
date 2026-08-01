@@ -9,6 +9,16 @@ data class LocalClearSettingsSnapshot(
     val currentBabyId: Long?,
     /** Exact provider identity captured for each plan UUID; IDs alone are ABA-prone. */
     val systemCalendarProjections: Map<String, String> = emptyMap(),
+    /**
+     * Exact nursing timer DataStore value at capture time. Finish uses
+     * compare-and-remove so a newer post-commit session is not wiped.
+     */
+    val nursingTimerJson: String? = null,
+    /**
+     * Stable session token (`completionClientUuid`) extracted from
+     * [nursingTimerJson]; scopes FGS stop to the captured epoch only.
+     */
+    val nursingTimerSessionToken: String? = null,
 )
 
 /**

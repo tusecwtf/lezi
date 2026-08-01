@@ -53,7 +53,10 @@ dependencies {
     implementation(libs.androidx.lifecycle.service)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
+    testImplementation(libs.truth)
     androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.truth)
 
     implementation(project(":core:datastore"))
 

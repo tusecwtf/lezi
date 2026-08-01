@@ -80,6 +80,39 @@ class PendingReminderCleanupStoreTest {
     }
 
     @Test
+    fun nursingTimerEpochRoundTripsAndMergesPreferExisting() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val timerJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-a","leftRunning":true}"""
+        store.upsert(
+            PendingReminderCleanup(
+                scope = LocalDataClearScope.RecordsOnly,
+                carePlanIds = setOf(1L),
+                nursingTimerJson = timerJson,
+                nursingTimerSessionToken = "session-a",
+                familyServerRetained = false,
+            ),
+        )
+
+        store.upsert(
+            PendingReminderCleanup(
+                scope = LocalDataClearScope.RecordsOnly,
+                carePlanIds = setOf(2L),
+                nursingTimerJson = null,
+                nursingTimerSessionToken = null,
+                familyServerRetained = true,
+            ),
+        )
+
+        val loaded = store.load(LocalDataClearScope.RecordsOnly)
+        assertThat(loaded?.carePlanIds).containsExactly(1L, 2L)
+        assertThat(loaded?.nursingTimerJson).isEqualTo(timerJson)
+        assertThat(loaded?.nursingTimerSessionToken).isEqualTo("session-a")
+        assertThat(loaded?.familyServerRetained).isTrue()
+    }
+
+    @Test
     fun allLocalCleanupUsesIndependentOperationKey() = runBlocking {
         val dao = FakePendingReminderCleanupDao()
         val store = RoomPendingReminderCleanupStore(dao)

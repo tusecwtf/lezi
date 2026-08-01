@@ -179,18 +179,24 @@ pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语�
 同步，不发送降级 payload。
 
 当前 Room schema 的 `pending_reminder_cleanup` 持久化 `carePlanIds`、
-`systemCalendarProjectionsJson`、可空的 `currentBabyId`，以及 `familyServerRetained`。
-`nextFeedAt` / `nextFeedEpoch` 只作为冻结的旧 schema 列保留，生产代码始终写空且不读取；
-下次喂养已统一为普通 CarePlan，不再有独立提醒状态。
+`systemCalendarProjectionsJson`、可空的 `currentBabyId`、哺乳计时 epoch，以及
+`familyServerRetained`。`nextFeedAt` 仍是冻结的旧 schema 列（生产始终写空）；
+`nextFeedEpoch` 复用为可恢复的 nursing timer epoch JSON（空串表示未捕获计时），
+避免抬高 Room v24。下次喂养已统一为普通 CarePlan，不再有独立提醒状态。
 `systemCalendarProjectionsJson` 是稳定护理计划 UUID 到 provider event ID（可空，表示只可按
-UID 查找）的精确映射。清除记录或全部本地数据时，领域事务按 scope 分别写入 pending 行，
-持久保存护理计划提醒 ID、系统日历投影身份、当前宝宝设置快照与家庭服务器保留
-标记。提交后必须依次确认系统日历副本已删除、scope 对应设置已清理、应用内提醒已取消，
-才可删除 pending 行并向界面返回成功；权限撤销或 provider 失败时保留该行，进程重启或用户
-重试后继续，不得遗失已删除护理计划的任一提醒身份。
+UID 查找）的精确映射。清除记录（RecordsOnly）或全部本地数据（AllLocalData）时，领域事务
+按 scope 分别写入 pending 行，持久保存护理计划提醒 ID、系统日历投影身份、当前宝宝设置
+快照、捕获的 timer JSON 与稳定 session token，以及家庭服务器保留标记。提交后必须依次确认
+系统日历副本已删除、**捕获 session 的 FGS 已停止且 ongoing 通知已消失**、scope 对应设置
+（含 timer JSON 的 compare-and-remove）已清理、应用内提醒已取消，才可删除 pending 行并向
+界面返回成功；权限撤销、provider 失败或 timer stop/DataStore 失败时保留该行，进程重启或
+用户重试后继续，不得遗失已删除护理计划的任一提醒身份，也不得遗留可运行的旧计时会话。
 
-当前清除只删除仍与捕获 UUID + event ID 精确相等的系统日历映射，以及已捕获 CarePlan
-对应的应用内提醒；清除提交后新写入的设置、映射及护理计划提醒必须保留。
+当前清除只删除仍与捕获 UUID + event ID 精确相等的系统日历映射、已捕获 CarePlan
+对应的应用内提醒，以及仍等于捕获 epoch 的 timer JSON；只对捕获的 session token 停止 FGS。
+清除提交后新写入的设置、映射、护理计划提醒与**新 session 计时器**必须保留（session epoch
+防 ABA）。设备撤销、成员删除、家庭删除与设置页本机清空复用同一 `LocalDataClearCoordinator`，
+不得旁路清 Room 后留下计时器。
 
 atomic commit 在 `record_authors` 回执中返回本次请求涉及的
 canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
@@ -611,7 +617,9 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 |------|------|
 | 删一条记录 | `deleted_at` 软删并进入 Outbox |
 | 成员退出 | membership 标记离开并吊销其全部 credentials；**NAS 业务数据保留** |
-| 清除本机全部 | 多重确认后清空本地库；**默认仅本地** |
+| 清除本机记录（RecordsOnly） | 清 Record/CarePlan/履行候选/日志媒体与对应提醒、系统日历投影；**停止并清除捕获的本机 nursing timer session/JSON**（session epoch 保护）；保留宝宝档案、自定义项目与家庭会话 |
+| 清除本机全部 / 设备撤销（AllLocalData） | 多重确认或撤设备路径清空本地库与会话投影；**同一 coordinator 停止并清除捕获的 nursing timer**；**默认仅本地** |
+| 成员删除 / 家庭删除（本机侧） | 身份或家庭终止后走同一本机清空协调器收口，不得留下可运行计时器或旧家庭 timer JSON |
 | 管理员删除家庭数据 | 多重确认后清空 NAS entities + `DATA_DIR/media/`（见 [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md)） |
 
 ---

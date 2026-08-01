@@ -65,6 +65,48 @@ class SettingsDataSourceLocalClearTest {
         )
     }
 
+    @Test
+    fun captureIncludesNursingTimerJsonAndSessionToken() = runBlocking {
+        val settings = newSettings("timer-capture.preferences_pb")
+        val timerJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-old","leftRunning":false}"""
+        settings.setNursingTimerJson(timerJson)
+
+        val captured = settings.captureLocalClearSettings()
+
+        assertEquals(timerJson, captured.nursingTimerJson)
+        assertEquals("session-old", captured.nursingTimerSessionToken)
+    }
+
+    @Test
+    fun finalizerRemovesCapturedTimerAndPreservesNewerSession() = runBlocking {
+        val settings = newSettings("timer-cas.preferences_pb")
+        val oldJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-old","leftRunning":true}"""
+        val newJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-new","leftRunning":true}"""
+        settings.setNursingTimerJson(oldJson)
+        val captured = settings.captureLocalClearSettings()
+
+        settings.setNursingTimerJson(newJson)
+        settings.finishLocalClearSettings(captured, clearCurrentBabyId = false)
+
+        assertEquals(newJson, settings.nursingTimerJson.first())
+    }
+
+    @Test
+    fun finalizerClearsUnchangedCapturedTimer() = runBlocking {
+        val settings = newSettings("timer-clear.preferences_pb")
+        val timerJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-old","leftRunning":false}"""
+        settings.setNursingTimerJson(timerJson)
+        val captured = settings.captureLocalClearSettings()
+
+        settings.finishLocalClearSettings(captured, clearCurrentBabyId = false)
+
+        assertNull(settings.nursingTimerJson.first())
+    }
+
     private fun newSettings(fileName: String): SettingsDataSource {
         val file = File(temporaryFolder.root, fileName)
         return SettingsDataSource(

@@ -223,9 +223,12 @@ class SettingsDataSource @Inject constructor(
         val systemCalendarProjections = decodeSystemCalendarEventMap(
             prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
         )
+        val nursingTimerJson = prefs[Keys.NURSING_TIMER_JSON]?.takeIf { it.isNotBlank() }
         return LocalClearSettingsSnapshot(
             currentBabyId = prefs[Keys.CURRENT_BABY_ID],
             systemCalendarProjections = systemCalendarProjections,
+            nursingTimerJson = nursingTimerJson,
+            nursingTimerSessionToken = nursingTimerSessionToken(nursingTimerJson),
         )
     }
 
@@ -247,6 +250,13 @@ class SettingsDataSource @Inject constructor(
                 snapshot.systemCalendarProjections[clientUuid] != eventId
             }
             prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] = encodeSystemCalendarEventMap(retainedMap)
+            // Compare-and-remove: only the exact captured timer epoch may be deleted.
+            if (
+                snapshot.nursingTimerJson != null &&
+                prefs[Keys.NURSING_TIMER_JSON] == snapshot.nursingTimerJson
+            ) {
+                prefs.remove(Keys.NURSING_TIMER_JSON)
+            }
         }
     }
 
@@ -381,6 +391,21 @@ internal fun decodeDeviceLayoutSnapshot(
             categoryOrderJson = stringValue("categoryOrderJson", legacy.categoryOrderJson),
         ),
     )
+}
+
+/**
+ * Best-effort extraction of the stable nursing timer session token from persisted
+ * timer JSON. Malformed or token-less snapshots yield null (no session-scoped stop).
+ */
+internal fun nursingTimerSessionToken(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    return runCatching {
+        val root = Json.parseToJsonElement(raw) as? JsonObject ?: return null
+        val value = root["completionClientUuid"] ?: return null
+        if (value is kotlinx.serialization.json.JsonNull) return null
+        val primitive = value as? JsonPrimitive ?: return null
+        primitive.content.takeIf { it.isNotBlank() && primitive.isString }
+    }.getOrNull()
 }
 
 internal fun decodeSystemCalendarEventMap(raw: String): Map<String, String> {

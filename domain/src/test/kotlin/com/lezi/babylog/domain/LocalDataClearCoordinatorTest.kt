@@ -24,6 +24,10 @@ class LocalDataClearCoordinatorTest {
         val rig = ClearCoordinatorRig()
 
         rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
+        // A later AllLocalData clear may capture a newer timer epoch that still
+        // must be stopped; re-seed after RecordsOnly removed the previous JSON.
+        rig.settings.replaceNursingTimer(TIMER_JSON_OLD, "session-old")
+        rig.timer.activeSessionToken = "session-old"
         rig.coordinator.clear(LocalDataClearScope.AllLocalData)
 
         assertThat(rig.sync.recordsClearCount).isEqualTo(1)
@@ -38,6 +42,9 @@ class LocalDataClearCoordinatorTest {
             .containsExactly(21L, 22L, 21L, 22L)
             .inOrder()
         assertThat(rig.systemCalendar.deleted).containsExactly("evt-21", "evt-22").inOrder()
+        assertThat(rig.timer.stoppedSessionTokens)
+            .containsExactly("session-old", "session-old")
+            .inOrder()
         assertThat(rig.pending.pending).isNull()
     }
 
@@ -54,7 +61,75 @@ class LocalDataClearCoordinatorTest {
         assertThat(actual).isSameInstanceAs(failure)
         assertThat(rig.settings.scopes).isEmpty()
         assertThat(rig.reminders.cancelledCarePlanIds).isEmpty()
+        assertThat(rig.timer.stoppedSessionTokens).isEmpty()
         assertThat(rig.pending.pending).isNull()
+    }
+
+    @Test
+    fun activeTimerStopAndClearSurvivesProcessRecreation() = runTest {
+        val rig = ClearCoordinatorRig(familyServerRetained = true)
+        rig.timer.failuresRemaining = 1
+
+        val failure = runCatching {
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat(rig.pending.pending?.nursingTimerSessionToken).isEqualTo("session-old")
+        assertThat(rig.pending.pending?.nursingTimerJson).isEqualTo(TIMER_JSON_OLD)
+        assertThat(rig.timer.stoppedSessionTokens).containsExactly("session-old")
+        // Settings CAS still runs after a stop failure; marker stays until stop also succeeds.
+        assertThat(rig.settings.finishedTimerSessions).containsExactly("session-old")
+        assertThat(rig.settings.nursingTimerJson).isNull()
+
+        rig.timer.failuresRemaining = 0
+        rig.newCoordinator().recoverPendingReminderCleanup()
+
+        assertThat(rig.pending.pending).isNull()
+        assertThat(rig.timer.stoppedSessionTokens)
+            .containsExactly("session-old", "session-old")
+            .inOrder()
+        assertThat(rig.settings.finishedTimerSessions).containsExactly("session-old")
+    }
+
+    @Test
+    fun recoveryDoesNotStopOrClearNewerTimerSession() = runTest {
+        val rig = ClearCoordinatorRig()
+        rig.timer.failuresRemaining = 1
+
+        val failure = runCatching {
+            rig.coordinator.clear(LocalDataClearScope.AllLocalData)
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+
+        // Post-commit newer epoch: settings and runtime now hold session-new.
+        rig.settings.replaceNursingTimer(TIMER_JSON_NEW, "session-new")
+        rig.timer.activeSessionToken = "session-new"
+        rig.timer.failuresRemaining = 0
+        // Adapter no-ops when active != captured; simulate by not recording stop for mismatch.
+        rig.timer.skipTokens += "session-old"
+
+        rig.newCoordinator().recoverPendingReminderCleanup()
+
+        assertThat(rig.pending.pending).isNull()
+        assertThat(rig.settings.nursingTimerSessionToken).isEqualTo("session-new")
+        assertThat(rig.settings.nursingTimerJson).isEqualTo(TIMER_JSON_NEW)
+        // stop was attempted for old token but skipped (ABA); never stops session-new
+        assertThat(rig.timer.stoppedSessionTokens).doesNotContain("session-new")
+    }
+
+    @Test
+    fun pausedAndFailedTimerSnapshotsAreStillClearedAfterCommit() = runTest {
+        listOf(TIMER_JSON_PAUSED, TIMER_JSON_FAILED).forEach { timerJson ->
+            val rig = ClearCoordinatorRig()
+            rig.settings.replaceNursingTimer(timerJson, "session-old")
+
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
+
+            assertThat(rig.timer.stoppedSessionTokens).containsExactly("session-old")
+            assertThat(rig.settings.nursingTimerJson).isNull()
+            assertThat(rig.pending.pending).isNull()
+        }
     }
 
     @Test
@@ -390,6 +465,15 @@ class LocalDataClearCoordinatorTest {
     }
 }
 
+private const val TIMER_JSON_OLD =
+    """{"schemaVersion":1,"completionClientUuid":"session-old","leftRunning":true,"serviceState":"RUNNING"}"""
+private const val TIMER_JSON_NEW =
+    """{"schemaVersion":1,"completionClientUuid":"session-new","leftRunning":true,"serviceState":"RUNNING"}"""
+private const val TIMER_JSON_PAUSED =
+    """{"schemaVersion":1,"completionClientUuid":"session-old","leftRunning":false,"serviceState":"PAUSED"}"""
+private const val TIMER_JSON_FAILED =
+    """{"schemaVersion":1,"completionClientUuid":"session-old","leftRunning":false,"serviceState":"FAILED","requestedSide":"L","serviceFailure":"RESTRICTED"}"""
+
 private class ClearCoordinatorRig(
     familyServerRetained: Boolean = false,
 ) {
@@ -397,6 +481,7 @@ private class ClearCoordinatorRig(
     val persistence = RecordingLocalDataClearPersistence(pending)
     val settings = RecordingLocalDataClearSettings()
     val reminders = RecordingClearReminderPort()
+    val timer = RecordingNursingTimerCleanupPort()
     val systemCalendar = RecordingSystemCalendarPort()
     val sync = RecordingClearSyncPort(familyServerRetained)
     val coordinator: LocalDataClearCoordinator = newCoordinator()
@@ -407,6 +492,7 @@ private class ClearCoordinatorRig(
             settings = settings,
             syncPort = sync,
             reminderCleanup = reminders,
+            nursingTimerCleanup = timer,
             systemCalendar = systemCalendar,
             pendingReminderCleanupStore = pending,
             mutationGuard = CalendarReminderMutationGuard(),
@@ -432,6 +518,8 @@ private class RecordingLocalDataClearPersistence(
                 carePlanIds = setOf(21L, 22L),
                 systemCalendarProjections = settingsSnapshot.systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
+                nursingTimerJson = settingsSnapshot.nursingTimerJson,
+                nursingTimerSessionToken = settingsSnapshot.nursingTimerSessionToken,
                 familyServerRetained = familyServerRetained,
             ),
         )
@@ -441,11 +529,14 @@ private class RecordingLocalDataClearPersistence(
 
 private class RecordingLocalDataClearSettings : LocalDataClearSettings {
     val scopes = mutableListOf<LocalDataClearScope>()
+    val finishedTimerSessions = mutableListOf<String>()
     private val projections = linkedMapOf(
         "plan-21" to "evt-21",
         "plan-22" to "evt-22",
     )
     private var currentBabyId: Long? = 7L
+    var nursingTimerJson: String? = TIMER_JSON_OLD
+    var nursingTimerSessionToken: String? = "session-old"
     var failure: Throwable? = null
 
     fun addSystemCalendarEvent(eventId: String) {
@@ -461,6 +552,11 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
         projections.putAll(values)
     }
 
+    fun replaceNursingTimer(json: String?, sessionToken: String?) {
+        nursingTimerJson = json
+        nursingTimerSessionToken = sessionToken
+    }
+
     suspend fun systemCalendarEventIds(): Set<String> = projections.values.toSet()
 
     suspend fun systemCalendarProjections(): Map<String, String> = projections.toMap()
@@ -468,6 +564,8 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
     override suspend fun capture(): LocalClearSettingsSnapshot = LocalClearSettingsSnapshot(
         currentBabyId = currentBabyId,
         systemCalendarProjections = projections.toMap(),
+        nursingTimerJson = nursingTimerJson,
+        nursingTimerSessionToken = nursingTimerSessionToken,
     )
 
     override suspend fun finish(
@@ -484,6 +582,36 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
             currentBabyId == snapshot.currentBabyId
         ) {
             currentBabyId = null
+        }
+        // Compare-and-remove for the captured timer epoch only.
+        if (
+            snapshot.nursingTimerJson != null &&
+            nursingTimerJson == snapshot.nursingTimerJson
+        ) {
+            finishedTimerSessions += snapshot.nursingTimerSessionToken.orEmpty()
+            nursingTimerJson = null
+            nursingTimerSessionToken = null
+        }
+    }
+}
+
+private class RecordingNursingTimerCleanupPort : NursingTimerCleanupPort {
+    val stoppedSessionTokens = mutableListOf<String>()
+    val skipTokens = mutableSetOf<String>()
+    var activeSessionToken: String? = "session-old"
+    var failuresRemaining = 0
+
+    override fun stopCapturedSession(sessionToken: String?) {
+        if (sessionToken.isNullOrBlank()) return
+        if (sessionToken in skipTokens) return
+        if (activeSessionToken != null && activeSessionToken != sessionToken) return
+        stoppedSessionTokens += sessionToken
+        if (failuresRemaining > 0) {
+            failuresRemaining -= 1
+            throw IllegalStateException("nursing timer stop failed")
+        }
+        if (activeSessionToken == sessionToken) {
+            activeSessionToken = null
         }
     }
 }
@@ -507,6 +635,9 @@ private class RecordingPendingReminderCleanupStore : PendingReminderCleanupStore
             systemCalendarProjections =
                 existing?.systemCalendarProjections.orEmpty() + pending.systemCalendarProjections,
             currentBabyId = pending.currentBabyId,
+            nursingTimerJson = existing?.nursingTimerJson ?: pending.nursingTimerJson,
+            nursingTimerSessionToken =
+                existing?.nursingTimerSessionToken ?: pending.nursingTimerSessionToken,
             familyServerRetained =
                 existing?.familyServerRetained == true || pending.familyServerRetained,
         )

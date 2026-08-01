@@ -116,6 +116,8 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
                 carePlanIds = carePlanIds,
                 systemCalendarProjections = systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
+                nursingTimerJson = settingsSnapshot.nursingTimerJson,
+                nursingTimerSessionToken = settingsSnapshot.nursingTimerSessionToken,
                 familyServerRetained = familyServerRetained,
             ),
         )
@@ -154,6 +156,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
     private val settings: LocalDataClearSettings,
     private val syncPort: SyncPort,
     private val reminderCleanup: ReminderCleanupPort,
+    private val nursingTimerCleanup: NursingTimerCleanupPort,
     private val systemCalendar: SystemCalendarPort,
     private val pendingReminderCleanupStore: PendingReminderCleanupStore,
     private val mutationGuard: CalendarReminderMutationGuard,
@@ -237,9 +240,17 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
                 systemCalendarProjections = loaded.systemCalendarProjections.mapNotNull {
                     (clientUuid, eventId) -> eventId?.let { clientUuid to it }
                 }.toMap(),
+                nursingTimerJson = loaded.nursingTimerJson,
+                nursingTimerSessionToken = loaded.nursingTimerSessionToken,
             )
             loaded.systemCalendarProjections.forEach { (clientUuid, eventId) ->
                 attempt { deleteSystemCalendarProjection(clientUuid, eventId) }
+            }
+            // Stop FGS for the captured session before DataStore CAS remove so a
+            // still-running old service cannot keep an ongoing notification after
+            // the durable clear epoch is finalized.
+            attempt {
+                nursingTimerCleanup.stopCapturedSession(loaded.nursingTimerSessionToken)
             }
             attempt {
                 settings.finish(

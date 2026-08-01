@@ -8,10 +8,11 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 
 /**
- * Durable hand-off from the Room clear transaction to Android alarm cleanup.
+ * Durable hand-off from the Room clear transaction to Android side-effect cleanup.
  *
- * One row per local-clear scope survives process death until settings, app
- * care-plan alarms and captured Android system-calendar events have all been cleaned.
+ * One row per local-clear scope survives process death until settings (including
+ * nursing timer epoch), app care-plan alarms, nursing timer FGS, and captured
+ * Android system-calendar events have all been cleaned.
  * This storage entity is private to [RoomPendingReminderCleanupStore]; callers
  * use typed snapshots.
  */
@@ -24,9 +25,16 @@ data class PendingReminderCleanupEntity(
     val systemCalendarProjectionsJson: String = "{}",
     @androidx.room.ColumnInfo(defaultValue = "NULL")
     val currentBabyId: Long? = null,
-    /** Frozen columns from the retired independent next-feed alarm; always empty and unconsumed. */
+    /**
+     * Unused residual column from the retired independent next-feed alarm.
+     * Always written null; kept only to preserve Room schema v24.
+     */
     @androidx.room.ColumnInfo(defaultValue = "NULL")
     val nextFeedAt: Long? = null,
+    /**
+     * Nursing timer clear epoch (JSON). Empty string means no timer was captured.
+     * Reuses the retired next-feed epoch column so Room schema v24 stays fixed.
+     */
     @androidx.room.ColumnInfo(defaultValue = "''")
     val nextFeedEpoch: String = "",
     val familyServerRetained: Boolean,

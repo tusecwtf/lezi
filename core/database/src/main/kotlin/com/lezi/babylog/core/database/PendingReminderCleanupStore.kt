@@ -12,6 +12,13 @@ data class PendingReminderCleanup(
     /** Exact stable plan UUID -> provider event ID; null means recover through UID lookup only. */
     val systemCalendarProjections: Map<String, String?> = emptyMap(),
     val currentBabyId: Long? = null,
+    /**
+     * Exact nursing timer DataStore value captured under exclusion before Room commit.
+     * Finish uses compare-and-remove so a post-commit newer session survives recovery.
+     */
+    val nursingTimerJson: String? = null,
+    /** Stable session token for scoped FGS stop; null when no session was captured. */
+    val nursingTimerSessionToken: String? = null,
     val familyServerRetained: Boolean,
 )
 
@@ -57,7 +64,15 @@ internal class RoomPendingReminderCleanupStore(
         ) {
             "Pending reminder cleanup projection identities must not be blank"
         }
+        require(pending.nursingTimerSessionToken?.isBlank() != true) {
+            "Pending nursing timer session token must not be blank when present"
+        }
         val existing = load(pending.scope)
+        // Prefer the first captured timer epoch so a later empty snapshot cannot
+        // drop recovery of an older stop+clear that still needs to finish.
+        val nursingTimerJson = existing?.nursingTimerJson ?: pending.nursingTimerJson
+        val nursingTimerSessionToken =
+            existing?.nursingTimerSessionToken ?: pending.nursingTimerSessionToken
         dao.upsert(
             PendingReminderCleanupEntity(
                 operation = pending.scope.reminderOperationKey,
@@ -70,9 +85,11 @@ internal class RoomPendingReminderCleanupStore(
                         pending.systemCalendarProjections,
                 ),
                 currentBabyId = pending.currentBabyId,
-                // Frozen Room columns retained only to keep the current schema stable.
                 nextFeedAt = null,
-                nextFeedEpoch = "",
+                nextFeedEpoch = encodeNursingTimerEpoch(
+                    nursingTimerJson = nursingTimerJson,
+                    nursingTimerSessionToken = nursingTimerSessionToken,
+                ),
                 familyServerRetained =
                     existing?.familyServerRetained == true || pending.familyServerRetained,
             ),
@@ -85,8 +102,13 @@ internal class RoomPendingReminderCleanupStore(
 
     private fun PendingReminderCleanupEntity.toSnapshot(
         typedScope: LocalDataClearScope,
-    ): PendingReminderCleanup =
-        PendingReminderCleanup(
+    ): PendingReminderCleanup {
+        val timerEpoch = decodeNursingTimerEpoch(
+            encoded = nextFeedEpoch,
+            scope = typedScope,
+            familyServerRetained = familyServerRetained,
+        )
+        return PendingReminderCleanup(
             scope = typedScope,
             carePlanIds = decodeReminderIds(
                 encoded = carePlanIds,
@@ -100,8 +122,11 @@ internal class RoomPendingReminderCleanupStore(
                 familyServerRetained = familyServerRetained,
             ),
             currentBabyId = currentBabyId,
+            nursingTimerJson = timerEpoch.json,
+            nursingTimerSessionToken = timerEpoch.sessionToken,
             familyServerRetained = familyServerRetained,
         )
+    }
 }
 
 private fun decodeReminderIds(
@@ -124,6 +149,82 @@ private fun decodeReminderIds(
         }
         id
     }
+}
+
+private data class NursingTimerEpoch(
+    val json: String?,
+    val sessionToken: String?,
+)
+
+/**
+ * Persist timer epoch in the legacy `nextFeedEpoch` TEXT column without a Room
+ * schema bump. Empty string means no timer was captured (legacy rows stay valid).
+ */
+private fun encodeNursingTimerEpoch(
+    nursingTimerJson: String?,
+    nursingTimerSessionToken: String?,
+): String {
+    if (nursingTimerJson == null && nursingTimerSessionToken == null) return ""
+    return buildJsonObject {
+        if (nursingTimerJson != null) {
+            put("nursingTimerJson", JsonPrimitive(nursingTimerJson))
+        } else {
+            put("nursingTimerJson", JsonNull)
+        }
+        if (nursingTimerSessionToken != null) {
+            put("nursingTimerSessionToken", JsonPrimitive(nursingTimerSessionToken))
+        } else {
+            put("nursingTimerSessionToken", JsonNull)
+        }
+    }.toString()
+}
+
+private fun decodeNursingTimerEpoch(
+    encoded: String,
+    scope: LocalDataClearScope,
+    familyServerRetained: Boolean,
+): NursingTimerEpoch {
+    if (encoded.isEmpty()) {
+        return NursingTimerEpoch(json = null, sessionToken = null)
+    }
+    val objectValue = try {
+        Json.parseToJsonElement(encoded) as? JsonObject
+            ?: throw IllegalArgumentException("not an object")
+    } catch (_: Exception) {
+        throw CorruptPendingReminderCleanupException(
+            scope = scope,
+            familyServerRetained = familyServerRetained,
+            reminderKind = "nursing timer epoch",
+            invalidToken = encoded,
+        )
+    }
+    fun readOptionalString(key: String): String? {
+        val element = objectValue[key] ?: return null
+        return when (element) {
+            JsonNull -> null
+            is JsonPrimitive -> {
+                if (!element.isString || element.content.isBlank()) {
+                    throw CorruptPendingReminderCleanupException(
+                        scope = scope,
+                        familyServerRetained = familyServerRetained,
+                        reminderKind = "nursing timer epoch",
+                        invalidToken = "$key=$element",
+                    )
+                }
+                element.content
+            }
+            else -> throw CorruptPendingReminderCleanupException(
+                scope = scope,
+                familyServerRetained = familyServerRetained,
+                reminderKind = "nursing timer epoch",
+                invalidToken = "$key=$element",
+            )
+        }
+    }
+    return NursingTimerEpoch(
+        json = readOptionalString("nursingTimerJson"),
+        sessionToken = readOptionalString("nursingTimerSessionToken"),
+    )
 }
 
 private fun encodeSystemCalendarProjections(values: Map<String, String?>): String =

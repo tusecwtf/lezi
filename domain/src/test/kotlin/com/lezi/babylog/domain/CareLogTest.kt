@@ -5879,6 +5879,7 @@ private class Fakes(
         settings = StoreLocalDataClearSettings(settings),
         syncPort = sync,
         reminderCleanup = reminders,
+        nursingTimerCleanup = NursingTimerCleanupPort { },
         systemCalendar = systemCalendar,
         pendingReminderCleanupStore = pendingReminderCleanup,
         mutationGuard = calendarReminderMutationGuard,
@@ -6809,11 +6810,21 @@ private class FakeSettingsStore : SettingsStore {
         publish()
     }
 
-    override suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot =
-        LocalClearSettingsSnapshot(
+    override suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot {
+        val timerJson = timer.value
+        return LocalClearSettingsSnapshot(
             currentBabyId = babyId.value,
             systemCalendarProjections = parseSystemCalendarEventMap(systemCalMap.value),
+            nursingTimerJson = timerJson,
+            nursingTimerSessionToken = timerJson
+                ?.let { raw ->
+                    Regex(""""completionClientUuid"\s*:\s*"([^"]+)"""")
+                        .find(raw)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                },
         )
+    }
 
     override suspend fun finishLocalClearSettings(
         snapshot: LocalClearSettingsSnapshot,
@@ -6827,6 +6838,9 @@ private class FakeSettingsStore : SettingsStore {
                 snapshot.systemCalendarProjections[clientUuid] != eventId
             }
         systemCalMap.value = encodeSystemCalendarEventMap(retained)
+        if (snapshot.nursingTimerJson != null && timer.value == snapshot.nursingTimerJson) {
+            timer.value = null
+        }
         publish()
     }
 
