@@ -3044,7 +3044,7 @@ impl Store {
         discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
         canonicalize_record_authors(role, membership_id, &mut package, &existing)?;
-        stamp_fulfillment_candidates(
+        stamp_and_authorize_fulfillment_candidates(
             role,
             membership_id,
             confirmed_at_millis(now),
@@ -3406,7 +3406,13 @@ impl Store {
             .and_then(|entity| entity.payload.get("confirmed_at"))
             .and_then(Value::as_i64)
             .unwrap_or_else(|| confirmed_at_millis(now));
-        stamp_fulfillment_candidates(role, membership_id, confirmed_at, &mut package, &existing)?;
+        stamp_and_authorize_fulfillment_candidates(
+            role,
+            membership_id,
+            confirmed_at,
+            &mut package,
+            &existing,
+        )?;
         let canonical_root = package
             .iter()
             .find(|entity| entity.entity_type != "media")
@@ -3442,7 +3448,13 @@ impl Store {
         let noop_care_plan_ids =
             stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
         discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
-        stamp_fulfillment_candidates(role, membership_id, confirmed_at, &mut effective, &existing)?;
+        stamp_and_authorize_fulfillment_candidates(
+            role,
+            membership_id,
+            confirmed_at,
+            &mut effective,
+            &existing,
+        )?;
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
@@ -4264,7 +4276,7 @@ fn is_open_next_feed_payload(payload: &Map<String, Value>) -> bool {
 /// freezes the full evidence tuple after first accept: plan/record/actual time
 /// plus submitter membership, role, and confirmed_at. Clients cannot forge or
 /// splice-rewrite evidence. Exact replay is a no-op (no revision advance).
-fn stamp_fulfillment_candidates(
+fn stamp_and_authorize_fulfillment_candidates(
     role: &str,
     membership_id: &str,
     confirmed_at: i64,
@@ -4291,7 +4303,8 @@ fn stamp_fulfillment_candidates(
             if submitter.is_none() && role != "owner" {
                 return Err(StoreError::ForbiddenAnonymousFact);
             }
-            freeze_fulfillment_candidate_evidence(current, entity)?;
+            // Validate-only freeze; single payload clone below is the canonizer.
+            freeze_fulfillment_candidate_evidence(current, &entity.payload)?;
             // Exact evidence + same tombstone state → force LWW no-op so
             // exact replay does not advance revision or rewrite content.
             if entity.deleted_at == current.deleted_at {
@@ -4318,12 +4331,13 @@ fn stamp_fulfillment_candidates(
     Ok(())
 }
 
-/// Business pair + actual time are immutable after first accept. Submitter
-/// stamps are restored from the published row (clients cannot forge). Owner
-/// and peers cannot splice a rewritten pair under the original stamps.
+/// Business pair + actual time are immutable after first accept (validate-only).
+/// Submitter stamps and the full payload are restored by
+/// [`stamp_and_authorize_fulfillment_candidates`] via a single published-row
+/// clone, matching [`freeze_care_plan_fulfillment_binding`].
 fn freeze_fulfillment_candidate_evidence(
     current: &ExistingEntity,
-    entity: &mut Entity,
+    incoming: &Map<String, Value>,
 ) -> Result<(), StoreError> {
     for field in [
         "care_plan_client_uuid",
@@ -4331,36 +4345,11 @@ fn freeze_fulfillment_candidate_evidence(
         "actual_timestamp",
     ] {
         let current_value = current.payload.get(field).unwrap_or(&Value::Null);
-        let incoming_value = entity.payload.get(field).unwrap_or(&Value::Null);
+        let incoming_value = incoming.get(field).unwrap_or(&Value::Null);
         if current_value != incoming_value {
             return Err(StoreError::ImmutableFulfillmentCandidateEvidence);
         }
     }
-
-    let submitter = current
-        .payload
-        .get("submitter_membership_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let submitter_role = current
-        .payload
-        .get("submitter_role")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let frozen_at = current.payload.get("confirmed_at").and_then(Value::as_i64);
-
-    entity.payload.insert(
-        "submitter_membership_id".to_owned(),
-        submitter.map_or(Value::Null, Value::String),
-    );
-    entity.payload.insert(
-        "submitter_role".to_owned(),
-        submitter_role.map_or(Value::Null, Value::String),
-    );
-    entity.payload.insert(
-        "confirmed_at".to_owned(),
-        frozen_at.map_or(Value::Null, |value| Value::Number(value.into())),
-    );
     Ok(())
 }
 
@@ -6259,54 +6248,116 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fulfillment_candidate_business_evidence_is_frozen_after_first_accept() {
-        let directory = TempDir::new().unwrap();
-        let store = Store::open(directory.path().join("lezi.db")).unwrap();
-        let family_id = family(&store);
-        let owner = owner_principal(&family_id);
-        let member = Principal {
-            family_id: family_id.clone(),
-            role: "member".to_owned(),
-            membership_id: "m-member".to_owned(),
-            device_id: "d-member".to_owned(),
-        };
-        let peer = Principal {
-            family_id: family_id.clone(),
-            role: "member".to_owned(),
-            membership_id: "m-peer".to_owned(),
-            device_id: "d-peer".to_owned(),
-        };
-        let baby_id = Uuid::new_v4();
-        let plan_id = Uuid::new_v4();
-        let other_plan_id = Uuid::new_v4();
-        let record_id = Uuid::new_v4();
-        let other_record_id = Uuid::new_v4();
-        let candidate_id = Uuid::new_v4();
-        let actual_timestamp = 1_700_000_000_100i64;
-        let baby_payload = json!({
-            "nickname":"年年","sex":"female","birthday":"2025-01-02",
-            "avatar_media_uuid":null,"birth_weight_grams":3200
-        });
-        let plan_payload = |plan_note: &str| {
-            json!({
-                "baby_client_uuid":baby_id,"type":"bath",
-                "custom_item_client_uuid":null,
-                "scheduled_at":1_700_000_000_000i64,
-                "scheduled_zone_id":"Asia/Shanghai",
-                "status":"pending","payload_json":{},"schema_version":2,
-                "note":plan_note,"created_by_membership_id":"m-owner",
-                "fulfilled_record_client_uuid":null,"fulfilled_at":null
-            })
-        };
-        let record_payload = || {
-            json!({
-                "baby_client_uuid":baby_id,"type":"bath",
-                "custom_item_client_uuid":null,"timestamp":actual_timestamp,
-                "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
-            })
-        };
-        let candidate_payload = |plan: Uuid, record: Uuid, actual: Option<i64>| {
+    struct FulfillmentCandidateFixture {
+        store: Store,
+        _directory: TempDir,
+        family_id: String,
+        owner: Principal,
+        member: Principal,
+        peer: Principal,
+        plan_id: Uuid,
+        other_plan_id: Uuid,
+        record_id: Uuid,
+        other_record_id: Uuid,
+        candidate_id: Uuid,
+        actual_timestamp: i64,
+    }
+
+    impl FulfillmentCandidateFixture {
+        fn seed() -> Self {
+            let directory = TempDir::new().unwrap();
+            let store = Store::open(directory.path().join("lezi.db")).unwrap();
+            let family_id = family(&store);
+            let owner = owner_principal(&family_id);
+            let member = Principal {
+                family_id: family_id.clone(),
+                role: "member".to_owned(),
+                membership_id: "m-member".to_owned(),
+                device_id: "d-member".to_owned(),
+            };
+            let peer = Principal {
+                family_id: family_id.clone(),
+                role: "member".to_owned(),
+                membership_id: "m-peer".to_owned(),
+                device_id: "d-peer".to_owned(),
+            };
+            let baby_id = Uuid::new_v4();
+            let plan_id = Uuid::new_v4();
+            let other_plan_id = Uuid::new_v4();
+            let record_id = Uuid::new_v4();
+            let other_record_id = Uuid::new_v4();
+            let candidate_id = Uuid::new_v4();
+            let actual_timestamp = 1_700_000_000_100i64;
+            let baby_payload = json!({
+                "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                "avatar_media_uuid":null,"birth_weight_grams":3200
+            });
+            let plan_payload = |plan_note: &str| {
+                json!({
+                    "baby_client_uuid":baby_id,"type":"bath",
+                    "custom_item_client_uuid":null,
+                    "scheduled_at":1_700_000_000_000i64,
+                    "scheduled_zone_id":"Asia/Shanghai",
+                    "status":"pending","payload_json":{},"schema_version":2,
+                    "note":plan_note,"created_by_membership_id":"m-owner",
+                    "fulfilled_record_client_uuid":null,"fulfilled_at":null
+                })
+            };
+            let record_payload = || {
+                json!({
+                    "baby_client_uuid":baby_id,"type":"bath",
+                    "custom_item_client_uuid":null,"timestamp":actual_timestamp,
+                    "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+                })
+            };
+
+            publish_root(&store, &owner, entity("baby", baby_id, 1, baby_payload), 10).unwrap();
+            publish_root(
+                &store,
+                &owner,
+                entity("care_plan", plan_id, 1, plan_payload("primary")),
+                10,
+            )
+            .unwrap();
+            publish_root(
+                &store,
+                &owner,
+                entity("care_plan", other_plan_id, 1, plan_payload("other")),
+                10,
+            )
+            .unwrap();
+            publish_root(
+                &store,
+                &member,
+                entity("record", record_id, 2, record_payload()),
+                10,
+            )
+            .unwrap();
+            publish_root(
+                &store,
+                &member,
+                entity("record", other_record_id, 2, record_payload()),
+                10,
+            )
+            .unwrap();
+
+            Self {
+                store,
+                _directory: directory,
+                family_id,
+                owner,
+                member,
+                peer,
+                plan_id,
+                other_plan_id,
+                record_id,
+                other_record_id,
+                candidate_id,
+                actual_timestamp,
+            }
+        }
+
+        fn candidate_payload(&self, plan: Uuid, record: Uuid, actual: Option<i64>) -> Value {
             json!({
                 "care_plan_client_uuid": plan,
                 "record_client_uuid": record,
@@ -6315,85 +6366,85 @@ mod tests {
                 "submitter_role": "owner",
                 "confirmed_at": 1,
             })
-        };
+        }
 
-        publish_root(&store, &owner, entity("baby", baby_id, 1, baby_payload), 10).unwrap();
-        publish_root(
-            &store,
-            &owner,
-            entity("care_plan", plan_id, 1, plan_payload("primary")),
-            10,
-        )
-        .unwrap();
-        publish_root(
-            &store,
-            &owner,
-            entity("care_plan", other_plan_id, 1, plan_payload("other")),
-            10,
-        )
-        .unwrap();
-        publish_root(
-            &store,
-            &member,
-            entity("record", record_id, 2, record_payload()),
-            10,
-        )
-        .unwrap();
-        publish_root(
-            &store,
-            &member,
-            entity("record", other_record_id, 2, record_payload()),
-            10,
-        )
-        .unwrap();
+        fn exact_candidate_payload(&self) -> Value {
+            self.candidate_payload(self.plan_id, self.record_id, Some(self.actual_timestamp))
+        }
 
-        assert_eq!(
-            publish_root(
-                &store,
-                &member,
-                entity(
-                    "fulfillment_candidate",
-                    candidate_id,
-                    3,
-                    candidate_payload(plan_id, record_id, Some(actual_timestamp)),
-                ),
-                10,
-            )
-            .unwrap()
-            .applied,
-            1
-        );
-        let after_first = store.pull(&family_id, 0).unwrap();
-        let frozen = after_first
-            .entities
-            .iter()
-            .find(|entity| {
-                entity.entity_type == "fulfillment_candidate"
-                    && entity.client_uuid == candidate_id.to_string()
-            })
-            .expect("candidate published");
-        assert_eq!(frozen.payload["submitter_membership_id"], "m-member");
-        assert_eq!(frozen.payload["submitter_role"], "member");
-        assert_ne!(frozen.payload["confirmed_at"], 1);
-        assert_eq!(frozen.payload["care_plan_client_uuid"], json!(plan_id));
-        assert_eq!(frozen.payload["record_client_uuid"], json!(record_id));
-        assert_eq!(frozen.payload["actual_timestamp"], actual_timestamp);
-        let frozen_confirmed_at = frozen.payload["confirmed_at"].clone();
-        let frozen_rev = frozen.rev;
-        let baseline_cursor = after_first.cursor;
-
-        // Exact replay (higher updated_at, forged stamps) by original submitter,
-        // peer member, and owner: idempotent success, no content/revision change.
-        for (principal, updated_at) in [(&member, 30i64), (&peer, 40), (&owner, 50)] {
+        fn publish_first_accept(&self) -> (i64, i64, Value) {
             assert_eq!(
                 publish_root(
-                    &store,
+                    &self.store,
+                    &self.member,
+                    entity(
+                        "fulfillment_candidate",
+                        self.candidate_id,
+                        3,
+                        self.exact_candidate_payload(),
+                    ),
+                    10,
+                )
+                .unwrap()
+                .applied,
+                1
+            );
+            let after_first = self.store.pull(&self.family_id, 0).unwrap();
+            let frozen = after_first
+                .entities
+                .iter()
+                .find(|entity| {
+                    entity.entity_type == "fulfillment_candidate"
+                        && entity.client_uuid == self.candidate_id.to_string()
+                })
+                .expect("candidate published");
+            (
+                after_first.cursor,
+                frozen.rev,
+                frozen.payload["confirmed_at"].clone(),
+            )
+        }
+
+        fn pull_candidate(&self) -> PulledEntity {
+            self.store
+                .pull(&self.family_id, 0)
+                .unwrap()
+                .entities
+                .into_iter()
+                .find(|entity| entity.client_uuid == self.candidate_id.to_string())
+                .expect("candidate present")
+        }
+    }
+
+    #[test]
+    fn fulfillment_candidate_first_accept_stamps_submitter_evidence() {
+        let fx = FulfillmentCandidateFixture::seed();
+        let (_cursor, _rev, confirmed_at) = fx.publish_first_accept();
+        let frozen = fx.pull_candidate();
+        assert_eq!(frozen.payload["submitter_membership_id"], "m-member");
+        assert_eq!(frozen.payload["submitter_role"], "member");
+        assert_ne!(confirmed_at, json!(1));
+        assert_eq!(frozen.payload["care_plan_client_uuid"], json!(fx.plan_id));
+        assert_eq!(frozen.payload["record_client_uuid"], json!(fx.record_id));
+        assert_eq!(frozen.payload["actual_timestamp"], fx.actual_timestamp);
+        assert_eq!(frozen.payload["confirmed_at"], confirmed_at);
+    }
+
+    #[test]
+    fn fulfillment_candidate_exact_replay_is_idempotent_for_submitter_peer_and_owner() {
+        let fx = FulfillmentCandidateFixture::seed();
+        let (baseline_cursor, frozen_rev, frozen_confirmed_at) = fx.publish_first_accept();
+
+        for (principal, updated_at) in [(&fx.member, 30i64), (&fx.peer, 40), (&fx.owner, 50)] {
+            assert_eq!(
+                publish_root(
+                    &fx.store,
                     principal,
                     entity(
                         "fulfillment_candidate",
-                        candidate_id,
+                        fx.candidate_id,
                         updated_at,
-                        candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                        fx.exact_candidate_payload(),
                     ),
                     100,
                 )
@@ -6401,52 +6452,69 @@ mod tests {
                 .applied,
                 0
             );
-            let pulled = store.pull(&family_id, 0).unwrap();
+            let pulled = fx.store.pull(&fx.family_id, 0).unwrap();
             assert_eq!(pulled.cursor, baseline_cursor);
             let candidate = pulled
                 .entities
                 .iter()
-                .find(|entity| entity.client_uuid == candidate_id.to_string())
+                .find(|entity| entity.client_uuid == fx.candidate_id.to_string())
                 .unwrap();
             assert_eq!(candidate.rev, frozen_rev);
             assert_eq!(candidate.payload["submitter_membership_id"], "m-member");
             assert_eq!(candidate.payload["submitter_role"], "member");
             assert_eq!(candidate.payload["confirmed_at"], frozen_confirmed_at);
-            assert_eq!(candidate.payload["care_plan_client_uuid"], json!(plan_id));
-            assert_eq!(candidate.payload["record_client_uuid"], json!(record_id));
-            assert_eq!(candidate.payload["actual_timestamp"], actual_timestamp);
+            assert_eq!(
+                candidate.payload["care_plan_client_uuid"],
+                json!(fx.plan_id)
+            );
+            assert_eq!(candidate.payload["record_client_uuid"], json!(fx.record_id));
+            assert_eq!(candidate.payload["actual_timestamp"], fx.actual_timestamp);
         }
+    }
 
-        // Owner cannot rewrite plan, record, or actual time under original stamps.
+    #[test]
+    fn fulfillment_candidate_owner_cannot_rewrite_frozen_business_fields() {
+        let fx = FulfillmentCandidateFixture::seed();
+        let (baseline_cursor, _, _) = fx.publish_first_accept();
+
         for payload in [
-            candidate_payload(other_plan_id, record_id, Some(actual_timestamp)),
-            candidate_payload(plan_id, other_record_id, Some(actual_timestamp)),
-            candidate_payload(plan_id, record_id, Some(actual_timestamp + 1)),
-            candidate_payload(plan_id, record_id, None),
+            fx.candidate_payload(fx.other_plan_id, fx.record_id, Some(fx.actual_timestamp)),
+            fx.candidate_payload(fx.plan_id, fx.other_record_id, Some(fx.actual_timestamp)),
+            fx.candidate_payload(fx.plan_id, fx.record_id, Some(fx.actual_timestamp + 1)),
+            fx.candidate_payload(fx.plan_id, fx.record_id, None),
         ] {
             assert!(matches!(
                 publish_root(
-                    &store,
-                    &owner,
-                    entity("fulfillment_candidate", candidate_id, 60, payload),
+                    &fx.store,
+                    &fx.owner,
+                    entity("fulfillment_candidate", fx.candidate_id, 60, payload),
                     100,
                 ),
                 Err(StoreError::ImmutableFulfillmentCandidateEvidence)
             ));
-            assert_eq!(store.pull(&family_id, 0).unwrap().cursor, baseline_cursor);
+            assert_eq!(
+                fx.store.pull(&fx.family_id, 0).unwrap().cursor,
+                baseline_cursor
+            );
         }
+    }
+
+    #[test]
+    fn fulfillment_candidate_stage_and_commit_re_run_freeze() {
+        let fx = FulfillmentCandidateFixture::seed();
+        let (baseline_cursor, _, _) = fx.publish_first_accept();
 
         // Stage re-runs freeze: rewrite package is rejected before commit.
         let staged_rewrite_bundle = Uuid::new_v4().to_string();
         assert!(matches!(
-            store.stage_bundle(
-                &owner,
+            fx.store.stage_bundle(
+                &fx.owner,
                 &staged_rewrite_bundle,
                 entity(
                     "fulfillment_candidate",
-                    candidate_id,
+                    fx.candidate_id,
                     65,
-                    candidate_payload(other_plan_id, record_id, Some(actual_timestamp)),
+                    fx.candidate_payload(fx.other_plan_id, fx.record_id, Some(fx.actual_timestamp)),
                 ),
                 vec![],
                 1_700_000_000,
@@ -6457,15 +6525,15 @@ mod tests {
         // Exact staged replay commits as no-op (applied=0, cursor unchanged).
         let staged_exact_bundle = Uuid::new_v4().to_string();
         assert_eq!(
-            store
+            fx.store
                 .stage_bundle(
-                    &owner,
+                    &fx.owner,
                     &staged_exact_bundle,
                     entity(
                         "fulfillment_candidate",
-                        candidate_id,
+                        fx.candidate_id,
                         66,
-                        candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                        fx.exact_candidate_payload(),
                     ),
                     vec![],
                     1_700_000_000,
@@ -6474,9 +6542,10 @@ mod tests {
                 .status,
             "staging"
         );
-        let exact_commit = store
+        let exact_commit = fx
+            .store
             .commit_bundle(
-                &owner,
+                &fx.owner,
                 &staged_exact_bundle,
                 &BTreeMap::new(),
                 100,
@@ -6485,25 +6554,28 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(exact_commit.applied, 0);
-        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, baseline_cursor);
+        assert_eq!(
+            fx.store.pull(&fx.family_id, 0).unwrap().cursor,
+            baseline_cursor
+        );
 
         // Commit re-runs freeze: a package staged before first accept cannot
         // overwrite the winning evidence when it finally commits.
         let raced_candidate_id = Uuid::new_v4();
         let raced_bundle = Uuid::new_v4().to_string();
         assert_eq!(
-            store
+            fx.store
                 .stage_bundle(
-                    &peer,
+                    &fx.peer,
                     &raced_bundle,
                     entity(
                         "fulfillment_candidate",
                         raced_candidate_id,
                         10,
-                        candidate_payload(
-                            other_plan_id,
-                            other_record_id,
-                            Some(actual_timestamp + 5)
+                        fx.candidate_payload(
+                            fx.other_plan_id,
+                            fx.other_record_id,
+                            Some(fx.actual_timestamp + 5)
                         ),
                     ),
                     vec![],
@@ -6515,13 +6587,13 @@ mod tests {
         );
         assert_eq!(
             publish_root(
-                &store,
-                &member,
+                &fx.store,
+                &fx.member,
                 entity(
                     "fulfillment_candidate",
                     raced_candidate_id,
                     5,
-                    candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+                    fx.exact_candidate_payload(),
                 ),
                 100,
             )
@@ -6529,14 +6601,24 @@ mod tests {
             .applied,
             1
         );
-        let raced_baseline = store.pull(&family_id, 0).unwrap().cursor;
+        let raced_baseline = fx.store.pull(&fx.family_id, 0).unwrap().cursor;
         assert!(matches!(
-            store.commit_bundle(&peer, &raced_bundle, &BTreeMap::new(), 100, 1_700_000_002,),
+            fx.store.commit_bundle(
+                &fx.peer,
+                &raced_bundle,
+                &BTreeMap::new(),
+                100,
+                1_700_000_002,
+            ),
             Err(StoreError::ImmutableFulfillmentCandidateEvidence)
         ));
-        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, raced_baseline);
-        let raced_frozen = store
-            .pull(&family_id, 0)
+        assert_eq!(
+            fx.store.pull(&fx.family_id, 0).unwrap().cursor,
+            raced_baseline
+        );
+        let raced_frozen = fx
+            .store
+            .pull(&fx.family_id, 0)
             .unwrap()
             .entities
             .into_iter()
@@ -6545,64 +6627,183 @@ mod tests {
         assert_eq!(raced_frozen.payload["submitter_membership_id"], "m-member");
         assert_eq!(
             raced_frozen.payload["care_plan_client_uuid"],
-            json!(plan_id)
+            json!(fx.plan_id)
         );
-        assert_eq!(raced_frozen.payload["record_client_uuid"], json!(record_id));
-        assert_eq!(raced_frozen.payload["actual_timestamp"], actual_timestamp);
+        assert_eq!(
+            raced_frozen.payload["record_client_uuid"],
+            json!(fx.record_id)
+        );
+        assert_eq!(
+            raced_frozen.payload["actual_timestamp"],
+            fx.actual_timestamp
+        );
+    }
 
-        // Tombstone keeps frozen evidence; resurrection is rejected; rewrite via
-        // tombstone cannot change business fields.
+    #[test]
+    fn fulfillment_candidate_tombstone_keeps_evidence_and_blocks_resurrection() {
+        let fx = FulfillmentCandidateFixture::seed();
+        fx.publish_first_accept();
+
         let mut tombstone = entity(
             "fulfillment_candidate",
-            candidate_id,
+            fx.candidate_id,
             70,
-            candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+            fx.exact_candidate_payload(),
         );
         tombstone.deleted_at = Some(70);
         assert_eq!(
-            publish_root(&store, &owner, tombstone, 100)
+            publish_root(&fx.store, &fx.owner, tombstone, 100)
                 .unwrap()
                 .applied,
             1
         );
-        let after_tombstone = store.pull(&family_id, 0).unwrap();
+        let after_tombstone = fx.store.pull(&fx.family_id, 0).unwrap();
         let tombstoned = after_tombstone
             .entities
             .iter()
-            .find(|entity| entity.client_uuid == candidate_id.to_string())
+            .find(|entity| entity.client_uuid == fx.candidate_id.to_string())
             .unwrap();
         assert_eq!(tombstoned.deleted_at, Some(70));
         assert_eq!(tombstoned.payload["submitter_membership_id"], "m-member");
-        assert_eq!(tombstoned.payload["care_plan_client_uuid"], json!(plan_id));
-        assert_eq!(tombstoned.payload["record_client_uuid"], json!(record_id));
-        assert_eq!(tombstoned.payload["actual_timestamp"], actual_timestamp);
+        assert_eq!(
+            tombstoned.payload["care_plan_client_uuid"],
+            json!(fx.plan_id)
+        );
+        assert_eq!(
+            tombstoned.payload["record_client_uuid"],
+            json!(fx.record_id)
+        );
+        assert_eq!(tombstoned.payload["actual_timestamp"], fx.actual_timestamp);
         let tombstone_cursor = after_tombstone.cursor;
 
         let mut resurrect = entity(
             "fulfillment_candidate",
-            candidate_id,
+            fx.candidate_id,
             80,
-            candidate_payload(plan_id, record_id, Some(actual_timestamp)),
+            fx.exact_candidate_payload(),
         );
         resurrect.deleted_at = None;
         assert!(matches!(
-            publish_root(&store, &owner, resurrect, 100),
+            publish_root(&fx.store, &fx.owner, resurrect, 100),
             Err(StoreError::FulfillmentCandidateTombstoneResurrection)
         ));
-        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, tombstone_cursor);
+        assert_eq!(
+            fx.store.pull(&fx.family_id, 0).unwrap().cursor,
+            tombstone_cursor
+        );
 
         let mut rewrite_via_tombstone = entity(
             "fulfillment_candidate",
-            candidate_id,
+            fx.candidate_id,
             90,
-            candidate_payload(other_plan_id, other_record_id, Some(actual_timestamp + 9)),
+            fx.candidate_payload(
+                fx.other_plan_id,
+                fx.other_record_id,
+                Some(fx.actual_timestamp + 9),
+            ),
         );
         rewrite_via_tombstone.deleted_at = Some(90);
         assert!(matches!(
-            publish_root(&store, &owner, rewrite_via_tombstone, 100),
+            publish_root(&fx.store, &fx.owner, rewrite_via_tombstone, 100),
             Err(StoreError::ImmutableFulfillmentCandidateEvidence)
         ));
-        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, tombstone_cursor);
+        assert_eq!(
+            fx.store.pull(&fx.family_id, 0).unwrap().cursor,
+            tombstone_cursor
+        );
+    }
+
+    #[test]
+    fn fulfillment_candidate_rejects_cross_baby_plan_record_pair() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let owner = owner_principal(&family_id);
+        let baby_a = Uuid::new_v4();
+        let baby_b = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        let record_id = Uuid::new_v4();
+        let candidate_id = Uuid::new_v4();
+        let baby_payload = |nickname: &str| {
+            json!({
+                "nickname":nickname,"sex":"female","birthday":"2025-01-02",
+                "avatar_media_uuid":null,"birth_weight_grams":3200
+            })
+        };
+        publish_root(
+            &store,
+            &owner,
+            entity("baby", baby_a, 1, baby_payload("年年")),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &owner,
+            entity("baby", baby_b, 1, baby_payload("豆豆")),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &owner,
+            entity(
+                "care_plan",
+                plan_id,
+                1,
+                json!({
+                    "baby_client_uuid":baby_a,"type":"bath",
+                    "custom_item_client_uuid":null,
+                    "scheduled_at":1_700_000_000_000i64,
+                    "scheduled_zone_id":"Asia/Shanghai",
+                    "status":"pending","payload_json":{},"schema_version":2,
+                    "note":null,"created_by_membership_id":"m-owner",
+                    "fulfilled_record_client_uuid":null,"fulfilled_at":null
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &owner,
+            entity(
+                "record",
+                record_id,
+                2,
+                json!({
+                    "baby_client_uuid":baby_b,"type":"bath",
+                    "custom_item_client_uuid":null,"timestamp":1_700_000_000_100i64,
+                    "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+        let before = store.pull(&family_id, 0).unwrap().cursor;
+        assert!(matches!(
+            publish_root(
+                &store,
+                &owner,
+                entity(
+                    "fulfillment_candidate",
+                    candidate_id,
+                    3,
+                    json!({
+                        "care_plan_client_uuid": plan_id,
+                        "record_client_uuid": record_id,
+                        "actual_timestamp": 1_700_000_000_100i64,
+                        "submitter_membership_id": "forged",
+                        "submitter_role": "owner",
+                        "confirmed_at": 1,
+                    }),
+                ),
+                10,
+            ),
+            Err(StoreError::UnresolvedReference(message))
+                if message == "fulfillment_candidate record baby does not match care_plan baby"
+        ));
+        assert_eq!(store.pull(&family_id, 0).unwrap().cursor, before);
     }
 
     #[test]

@@ -1501,79 +1501,9 @@ async fn stage_bundle(
         state.now(),
     ) {
         Ok(value) => value,
-        Err(StoreError::ForbiddenBaby) => {
-            return Err(ApiError::forbidden("Only owner may manage baby profiles"))
+        Err(error) => {
+            return Err(map_stage_bundle_store_error(error));
         }
-        Err(StoreError::ForbiddenAvatar) => {
-            return Err(ApiError::forbidden("Only owner may change avatar"))
-        }
-        Err(StoreError::ForbiddenCustomItem) => {
-            return Err(ApiError::forbidden(
-                "Only the creator or family owner may change this custom item",
-            ))
-        }
-        Err(StoreError::ForbiddenCarePlan) => {
-            return Err(ApiError::forbidden(
-                "Only the creator or family owner may change this care plan",
-            ))
-        }
-        Err(StoreError::ForbiddenAnonymousFact) => {
-            return Err(ApiError::forbidden(
-                "Only the family owner may change an anonymous shared fact",
-            ))
-        }
-        Err(StoreError::CarePlanTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted care plan cannot be resurrected",
-            ))
-        }
-        Err(StoreError::ImmutableCarePlanFulfillmentBinding) => {
-            return Err(ApiError::conflict(
-                "Completed care plan fulfillment binding is immutable",
-            ))
-        }
-        Err(StoreError::ImmutableFulfillmentCandidateEvidence) => {
-            return Err(ApiError::conflict(
-                "Fulfillment candidate evidence is immutable",
-            ))
-        }
-        Err(StoreError::FulfillmentCandidateTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted fulfillment candidate cannot be resurrected",
-            ))
-        }
-        Err(StoreError::CustomItemTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted custom item cannot be resurrected",
-            ))
-        }
-        Err(StoreError::ImmutableMediaAssociation) => {
-            return Err(ApiError::conflict(
-                "Media kind and association are immutable",
-            ))
-        }
-        Err(StoreError::BundleContentConflict) => {
-            return Err(ApiError::conflict(
-                "bundle_id already committed with different content",
-            ))
-        }
-        Err(StoreError::BundleMembershipMismatch) => {
-            return Err(ApiError::conflict(
-                "bundle belongs to another family membership",
-            ))
-        }
-        Err(StoreError::BundleStagingLimit) => {
-            return Err(ApiError::unprocessable(
-                "too many open staging bundles; commit or wait for cleanup",
-            ))
-        }
-        Err(StoreError::UnresolvedReference(message)) => return Err(ApiError::conflict(message)),
-        Err(StoreError::PullEntityTooLarge) => {
-            return Err(ApiError::unprocessable(
-                "entity payload is too large for bounded sync pull",
-            ))
-        }
-        Err(error) => return Err(error.into()),
     };
     Ok(Json(status))
 }
@@ -1836,83 +1766,9 @@ async fn commit_bundle(
         state.now(),
     ) {
         Ok(value) => value,
-        Err(StoreError::BundleMediaIncomplete) => {
-            return Err(ApiError::unprocessable("bundle media bytes are incomplete"))
+        Err(error) => {
+            return Err(map_commit_bundle_store_error(error));
         }
-        Err(StoreError::BundleRootNotNewer) => {
-            return Err(ApiError::conflict(
-                "bundle root is not newer than the published version",
-            ))
-        }
-        Err(StoreError::BundleMembershipMismatch) => {
-            return Err(ApiError::conflict(
-                "bundle belongs to another family membership",
-            ))
-        }
-        Err(StoreError::ForbiddenBaby) => {
-            return Err(ApiError::forbidden("Only owner may manage baby profiles"))
-        }
-        Err(StoreError::ForbiddenAvatar) => {
-            return Err(ApiError::forbidden("Only owner may change avatar"))
-        }
-        Err(StoreError::ForbiddenCustomItem) => {
-            return Err(ApiError::forbidden(
-                "Only the creator or family owner may change this custom item",
-            ))
-        }
-        Err(StoreError::ForbiddenCarePlan) => {
-            return Err(ApiError::forbidden(
-                "Only the creator or family owner may change this care plan",
-            ))
-        }
-        Err(StoreError::ForbiddenAnonymousFact) => {
-            return Err(ApiError::forbidden(
-                "Only the family owner may change an anonymous shared fact",
-            ))
-        }
-        Err(StoreError::CarePlanTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted care plan cannot be resurrected",
-            ))
-        }
-        Err(StoreError::ImmutableCarePlanFulfillmentBinding) => {
-            return Err(ApiError::conflict(
-                "Completed care plan fulfillment binding is immutable",
-            ))
-        }
-        Err(StoreError::ImmutableFulfillmentCandidateEvidence) => {
-            return Err(ApiError::conflict(
-                "Fulfillment candidate evidence is immutable",
-            ))
-        }
-        Err(StoreError::FulfillmentCandidateTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted fulfillment candidate cannot be resurrected",
-            ))
-        }
-        Err(StoreError::CustomItemTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted custom item cannot be resurrected",
-            ))
-        }
-        Err(StoreError::ImmutableMediaAssociation) => {
-            return Err(ApiError::conflict(
-                "Media kind and association are immutable",
-            ))
-        }
-        Err(StoreError::TimestampOutOfRange) => {
-            return Err(ApiError::unprocessable(
-                "updated_at is outside the accepted server time window",
-            ))
-        }
-        Err(StoreError::PullEntityTooLarge) => {
-            return Err(ApiError::unprocessable(
-                "entity payload is too large for bounded sync pull",
-            ))
-        }
-        Err(StoreError::UnresolvedReference(message)) => return Err(ApiError::conflict(message)),
-        Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
-        Err(error) => return Err(error.into()),
     };
     cleanup_committed_pending_bundle_media_for_bundle(
         &state.store,
@@ -2858,6 +2714,85 @@ impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         tracing::error!(%error, "sync store failure");
         Self::internal("Internal server error")
+    }
+}
+
+/// Shared StoreError → ApiError mapping for immutable/tombstone/ACL policy
+/// failures so stage and commit cannot drift on detail text or status.
+fn map_bundle_policy_store_error(error: StoreError) -> Result<StoreError, ApiError> {
+    match error {
+        StoreError::ForbiddenBaby => {
+            Err(ApiError::forbidden("Only owner may manage baby profiles"))
+        }
+        StoreError::ForbiddenAvatar => Err(ApiError::forbidden("Only owner may change avatar")),
+        StoreError::ForbiddenCustomItem => Err(ApiError::forbidden(
+            "Only the creator or family owner may change this custom item",
+        )),
+        StoreError::ForbiddenCarePlan => Err(ApiError::forbidden(
+            "Only the creator or family owner may change this care plan",
+        )),
+        StoreError::ForbiddenAnonymousFact => Err(ApiError::forbidden(
+            "Only the family owner may change an anonymous shared fact",
+        )),
+        StoreError::CarePlanTombstoneResurrection => Err(ApiError::conflict(
+            "Deleted care plan cannot be resurrected",
+        )),
+        StoreError::ImmutableCarePlanFulfillmentBinding => Err(ApiError::conflict(
+            "Completed care plan fulfillment binding is immutable",
+        )),
+        StoreError::ImmutableFulfillmentCandidateEvidence => Err(ApiError::conflict(
+            "Fulfillment candidate evidence is immutable",
+        )),
+        StoreError::FulfillmentCandidateTombstoneResurrection => Err(ApiError::conflict(
+            "Deleted fulfillment candidate cannot be resurrected",
+        )),
+        StoreError::CustomItemTombstoneResurrection => Err(ApiError::conflict(
+            "Deleted custom item cannot be resurrected",
+        )),
+        StoreError::ImmutableMediaAssociation => Err(ApiError::conflict(
+            "Media kind and association are immutable",
+        )),
+        StoreError::UnresolvedReference(message) => Err(ApiError::conflict(message)),
+        StoreError::PullEntityTooLarge => Err(ApiError::unprocessable(
+            "entity payload is too large for bounded sync pull",
+        )),
+        other => Ok(other),
+    }
+}
+
+fn map_stage_bundle_store_error(error: StoreError) -> ApiError {
+    match map_bundle_policy_store_error(error) {
+        Err(api) => api,
+        Ok(StoreError::BundleContentConflict) => {
+            ApiError::conflict("bundle_id already committed with different content")
+        }
+        Ok(StoreError::BundleMembershipMismatch) => {
+            ApiError::conflict("bundle belongs to another family membership")
+        }
+        Ok(StoreError::BundleStagingLimit) => {
+            ApiError::unprocessable("too many open staging bundles; commit or wait for cleanup")
+        }
+        Ok(other) => other.into(),
+    }
+}
+
+fn map_commit_bundle_store_error(error: StoreError) -> ApiError {
+    match map_bundle_policy_store_error(error) {
+        Err(api) => api,
+        Ok(StoreError::BundleMediaIncomplete) => {
+            ApiError::unprocessable("bundle media bytes are incomplete")
+        }
+        Ok(StoreError::BundleRootNotNewer) => {
+            ApiError::conflict("bundle root is not newer than the published version")
+        }
+        Ok(StoreError::BundleMembershipMismatch) => {
+            ApiError::conflict("bundle belongs to another family membership")
+        }
+        Ok(StoreError::TimestampOutOfRange) => {
+            ApiError::unprocessable("updated_at is outside the accepted server time window")
+        }
+        Ok(StoreError::BundleNotFound) => ApiError::not_found("Bundle not found"),
+        Ok(other) => other.into(),
     }
 }
 

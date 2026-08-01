@@ -10172,6 +10172,8 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
     let owner_token = owner["access_token"].as_str().unwrap();
     let member = approve_new_member(&rig.app, owner_token, "fulfill-freeze-member").await;
     let member_token = member["access_token"].as_str().unwrap();
+    let peer = approve_new_member(&rig.app, owner_token, "fulfill-freeze-peer").await;
+    let peer_token = peer["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
@@ -10301,94 +10303,66 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
     assert_ne!(o1["payload"]["confirmed_at"], 2);
     let frozen_member_at = m1["payload"]["confirmed_at"].clone();
     let frozen_owner_at = o1["payload"]["confirmed_at"].clone();
+    let member_rev = m1["rev"].as_i64().unwrap();
+    let cursor_after_first = pull1["cursor"].as_i64().unwrap();
 
-    // Idempotent replay with higher updated_at and forged stamps must not rewrite.
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            member_token,
-            entity_wire(
-                "fulfillment_candidate",
-                &member_cand,
-                99,
-                json!({
-                    "care_plan_client_uuid": plan_id,
-                    "record_client_uuid": member_record,
-                    "submitter_membership_id": "replay-forged",
-                    "submitter_role": "owner",
-                    "confirmed_at": 999_999,
-                }),
-                None
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let (_, pull2) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let m2 = pull2["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == member_cand)
-        .expect("member candidate after replay");
-    assert_eq!(
-        m2["payload"]["submitter_membership_id"],
-        member["membership_id"]
-    );
-    assert_eq!(m2["payload"]["submitter_role"], "member");
-    assert_eq!(m2["payload"]["confirmed_at"], frozen_member_at);
-    assert_eq!(
-        pull2["entities"]
+    // Exact evidence replay by original submitter, peer Member, and Owner — all
+    // idempotent with unchanged rev/cursor/stamps/business fields.
+    for (token, updated_at, forged_submitter) in [
+        (member_token, 99i64, "replay-forged"),
+        (peer_token, 110, "peer-forged"),
+        (owner_token, 120, "owner-forged"),
+    ] {
+        assert_eq!(
+            publish_root_bundle(
+                &rig.app,
+                token,
+                entity_wire(
+                    "fulfillment_candidate",
+                    &member_cand,
+                    updated_at,
+                    json!({
+                        "care_plan_client_uuid": plan_id,
+                        "record_client_uuid": member_record,
+                        "submitter_membership_id": forged_submitter,
+                        "submitter_role": "owner",
+                        "confirmed_at": 999_999,
+                    }),
+                    None
+                ),
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+        assert_eq!(pulled["cursor"].as_i64().unwrap(), cursor_after_first);
+        let candidate = pulled["entities"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|e| e["client_uuid"] == owner_cand)
-            .unwrap()["payload"]["confirmed_at"],
-        frozen_owner_at
-    );
-    // Exact replay must not advance the family cursor / candidate revision.
-    let member_rev = m2["rev"].as_i64().unwrap();
-    let cursor_after_first_replays = pull2["cursor"].as_i64().unwrap();
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            owner_token,
-            entity_wire(
-                "fulfillment_candidate",
-                &member_cand,
-                120,
-                json!({
-                    "care_plan_client_uuid": plan_id,
-                    "record_client_uuid": member_record,
-                    "submitter_membership_id": "owner-forged",
-                    "submitter_role": "owner",
-                    "confirmed_at": 42,
-                }),
-                None
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let (_, pull_exact) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    assert_eq!(
-        pull_exact["cursor"].as_i64().unwrap(),
-        cursor_after_first_replays
-    );
-    let m_exact = pull_exact["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == member_cand)
-        .unwrap();
-    assert_eq!(m_exact["rev"].as_i64().unwrap(), member_rev);
-    assert_eq!(
-        m_exact["payload"]["submitter_membership_id"],
-        member["membership_id"]
-    );
-    assert_eq!(m_exact["payload"]["record_client_uuid"], member_record);
+            .find(|e| e["client_uuid"] == member_cand)
+            .expect("member candidate after exact replay");
+        assert_eq!(candidate["rev"].as_i64().unwrap(), member_rev);
+        assert_eq!(
+            candidate["payload"]["submitter_membership_id"],
+            member["membership_id"]
+        );
+        assert_eq!(candidate["payload"]["submitter_role"], "member");
+        assert_eq!(candidate["payload"]["confirmed_at"], frozen_member_at);
+        assert_eq!(candidate["payload"]["record_client_uuid"], member_record);
+        assert_eq!(candidate["payload"]["care_plan_client_uuid"], plan_id);
+        assert_eq!(
+            pulled["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["client_uuid"] == owner_cand)
+                .unwrap()["payload"]["confirmed_at"],
+            frozen_owner_at
+        );
+    }
+    let cursor_after_first_replays = cursor_after_first;
 
     // Attack: cannot leave original submitter stamps + rewritten business fields.
     let immutable_detail = "Fulfillment candidate evidence is immutable";
@@ -10503,6 +10477,47 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
     assert_eq!(
         bad_ref_body["detail"],
         "fulfillment_candidate care_plan_client_uuid does not exist"
+    );
+
+    // Same-family cross-baby plan/record pair is CONFLICT; cursor unchanged.
+    let baby_b = seed_baby(&rig.app, owner_token).await;
+    let plan_on_a = plan_id;
+    let record_on_b = Uuid::new_v4().to_string();
+    seed_record_with_id(
+        &rig.app,
+        owner_token,
+        &record_on_b,
+        50,
+        record_payload(&baby_b),
+    )
+    .await;
+    let (_, pull_before_cross) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let cursor_before_cross = pull_before_cross["cursor"].as_i64().unwrap();
+    let cross_cand = Uuid::new_v4().to_string();
+    let (cross_status, cross_body) = publish_root_bundle(
+        &rig.app,
+        member_token,
+        entity_wire(
+            "fulfillment_candidate",
+            &cross_cand,
+            60,
+            json!({
+                "care_plan_client_uuid": plan_on_a,
+                "record_client_uuid": record_on_b,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(cross_status, StatusCode::CONFLICT, "{cross_body}");
+    assert_eq!(
+        cross_body["detail"],
+        "fulfillment_candidate record baby does not match care_plan baby"
+    );
+    let (_, pull_after_cross) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert_eq!(
+        pull_after_cross["cursor"].as_i64().unwrap(),
+        cursor_before_cross
     );
 }
 
