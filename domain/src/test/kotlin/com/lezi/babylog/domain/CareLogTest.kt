@@ -6316,6 +6316,16 @@ class CareLogTest {
         assertThat(care.getRecord(peeRecordId)!!.timestamp).isEqualTo(now + fiveMin)
         assertThat(care.getCarePlan(peePlan)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
 
+        // Write is allowed under fulfill skew, but aggregation waits for the clock.
+        val written = care.getRecord(peeRecordId)!!
+        val day = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+        assertThat(
+            CareAggregation.day(listOf(written), day, zone, now).bucket.pee,
+        ).isEqualTo(0)
+        assertThat(
+            CareAggregation.day(listOf(written), day, zone, now + fiveMin).bucket.pee,
+        ).isEqualTo(1)
+
         val sleepPlan = care.createCarePlan(
             babyId = babyId,
             type = RecordType.SLEEP,

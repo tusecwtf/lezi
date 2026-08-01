@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **9**（01、02、03、04、05、06、07、08、10）
-- Current frontier (ready-for-agent): **11**
+- Done: **11**（01、02、03、04、05、06、07、08、10、12、13）
+- Current frontier (ready-for-agent): **9**
 - Blocked by dependency: **11**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**11、12、13、14、16、17、19、20、22、23、25**
+**11、14、16、17、19、20、22、23、25**
 
 ## Tickets
 
@@ -52,7 +52,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [10](./issues/10-handle-all-timer-transition-failures.md) | Audit P1-10 | Timer transition 覆盖全部非取消异常 | — | S–M | done |
 | [11](./issues/11-persist-timer-completion-ui-state.md) | Audit P1-11 | 计时完成态跨配置重建 | 10 | M | ready-for-agent |
 | [12](./issues/12-restore-composer-next-feed-offer.md) | Audit P1-12 | Composer 保存后恢复下次喂养 offer | — | M | done |
-| [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | ready-for-agent |
+| [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | done |
 | [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | ready-for-agent |
 | [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | blocked |
 | [16](./issues/16-prune-dead-syncport-surface.md) | Audit P2-02 + readability 04 | 修剪 SyncPort 死公开表面 | 01 | S–M | ready-for-agent |

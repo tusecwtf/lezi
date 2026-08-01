@@ -231,6 +231,9 @@
 - 可选：上周对比、周起始日、平均睡眠。
 - Log、Summary、24 小时时间条和 Widget 必须复用同一 `CareAggregation`，
   对跨午夜与进行中睡眠给出一致结果。
+- 聚合时钟：点事实仅 `timestamp ≤ now` 计入累计；睡眠按
+  `[start, min(end, now)]` 裁剪。履行允许的「已确认但时刻未到」记录可在时间轴
+  展示，但暂不进汇总，到点后自然计入（见 [data-model.md](./data-model.md) §5.1）。
 
 ### 4.6 成长
 

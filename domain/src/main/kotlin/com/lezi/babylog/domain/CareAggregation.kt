@@ -25,6 +25,17 @@ import kotlinx.coroutines.ensureActive
  * Callers provide one already baby-scoped record set and receive day buckets,
  * range totals, and widget facts from the same interface. Compose geometry and
  * storage queries deliberately stay outside this module.
+ *
+ * ## Aggregation clock
+ *
+ * All entry points share one [now] clock:
+ * - **Point facts** (formula, pumped, nursing, diaper, temperature, …): counted
+ *   only when `timestamp <= now`. A fulfilled plan may store `now + 5m` skew;
+ *   that row is visible on the timeline immediately but stays out of counts,
+ *   amounts, temperatures, and feed-time buckets until the clock reaches it.
+ * - **Sleep intervals**: clip to `[start, min(end, now)]` (open end uses [now]).
+ *   A sleep that starts after [now] contributes neither minutes nor segments.
+ * - Boundary is inclusive at equality: `timestamp == now` counts.
  */
 object CareAggregation {
     fun day(
@@ -86,7 +97,7 @@ object CareAggregation {
             val payload = record.payload.payload
             if (payload is UnknownPayload) return@forEach
             if (record.type == RecordType.SLEEP) {
-                val intervalEnd = record.endTimestamp ?: now
+                val intervalEnd = sleepIntervalEnd(record, now)
                 if (intervalEnd <= dayStarts.first() || record.timestamp >= dayStarts.last()) {
                     return@forEach
                 }
@@ -101,6 +112,8 @@ object CareAggregation {
                 }
                 return@forEach
             }
+            // Point facts: not yet occurred under the aggregation clock.
+            if (record.timestamp > now) return@forEach
 
             val date = Instant.ofEpochMilli(record.timestamp).atZone(zone).toLocalDate()
             val index = ChronoUnit.DAYS.between(startDate, date).toInt()
@@ -133,7 +146,7 @@ object CareAggregation {
     ): WidgetSummaryDto {
         val day = day(records, date, zone, now)
         val latest = records.asSequence()
-            .filter { it.deletedAt == null && it.timestamp < now }
+            .filter { it.deletedAt == null && it.timestamp <= now }
             .maxByOrNull(Record::timestamp)
         return WidgetSummaryDto(
             babyName = babyName,
@@ -176,7 +189,7 @@ object CareAggregation {
             val payload = record.payload.payload
             if (payload is UnknownPayload) return@forEach
             if (record.type == RecordType.SLEEP) {
-                val intervalEnd = record.endTimestamp ?: now
+                val intervalEnd = sleepIntervalEnd(record, now)
                 val clippedStart = maxOf(record.timestamp, dayStart)
                 val clippedEnd = minOf(intervalEnd, dayEnd)
                 if (clippedEnd > clippedStart) {
@@ -189,6 +202,8 @@ object CareAggregation {
                 }
                 return@forEach
             }
+            // Point facts: not yet occurred under the aggregation clock.
+            if (record.timestamp > now) return@forEach
             if (record.timestamp < dayStart || record.timestamp >= dayEnd) return@forEach
 
             when (record.type) {
@@ -421,6 +436,10 @@ fun weekStartFor(day: LocalDate, weekStartSetting: Int): LocalDate {
 }
 
 private const val MINUTE_MILLIS = 60_000L
+
+/** Closed or open sleep end, never past the aggregation clock. */
+private fun sleepIntervalEnd(record: Record, now: Long): Long =
+    minOf(record.endTimestamp ?: now, now)
 
 private fun MutableList<Float>.incrementFor(timestamp: Long, zone: ZoneId) {
     val hour = Instant.ofEpochMilli(timestamp).atZone(zone).hour
