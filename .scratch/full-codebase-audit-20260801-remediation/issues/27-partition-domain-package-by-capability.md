@@ -5,7 +5,7 @@
 
 **Source:** merged directory C2
 **Blocked by:** 05、06、07、08、13、22 — 先闭合同一 domain seam 的行为票
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M–L
 
 ## Acceptance criteria

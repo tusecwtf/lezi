@@ -5,7 +5,7 @@
 
 **Source:** merged directory C3
 **Blocked by:** 01、03、06、15、16、19 — 先闭合同一 sync seam 的行为/协议票
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M–L
 
 ## Acceptance criteria

@@ -5,7 +5,7 @@
 
 **Source:** merged directory C1
 **Blocked by:** 09、12、20、22 — 先闭合 Composer/layout 行为和结构测试删除
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M–L
 
 ## Acceptance criteria

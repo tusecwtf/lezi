@@ -5,7 +5,7 @@
 
 **Source:** merged directory C6
 **Blocked by:** 06、25 — 先闭合清理路径与低价值 settings 测试
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M
 
 ## Acceptance criteria
