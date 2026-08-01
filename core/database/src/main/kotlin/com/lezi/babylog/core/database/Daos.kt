@@ -81,6 +81,50 @@ interface BabyDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    /**
+     * After an avatar (or baby+avatar) atomic package publishes elevated
+     * [publishedUpdatedAt] for content epoch [expectedLocalUpdatedAt], CAS-align
+     * local `updatedAt` so the next baby edit exceeds NAS LWW.
+     *
+     * Concurrent profile edits (local revision != expected) are never overwritten;
+     * dirty stays set so capture rebuilds outbox for the newer root.
+     *
+     * Returns true when local content matched the published epoch and was
+     * advanced (or already equal) with dirty cleared — the baby equivalent of a
+     * family root receipt watermark.
+     */
+    @Transaction
+    suspend fun acknowledgeSyntheticRootPublication(
+        clientUuid: String,
+        expectedLocalUpdatedAt: Long,
+        publishedUpdatedAt: Long,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        if (publishedUpdatedAt <= 0L || expectedLocalUpdatedAt <= 0L) return false
+        if (publishedUpdatedAt < expectedLocalUpdatedAt) return false
+        when {
+            current.updatedAt == expectedLocalUpdatedAt -> {
+                if (current.updatedAt != publishedUpdatedAt || current.syncDirty) {
+                    update(
+                        current.copy(
+                            updatedAt = publishedUpdatedAt,
+                            syncDirty = false,
+                        ),
+                    )
+                }
+                return true
+            }
+            // Already aligned to the published revision (retry after partial ack).
+            current.updatedAt == publishedUpdatedAt -> {
+                if (current.syncDirty) {
+                    update(current.copy(syncDirty = false))
+                }
+                return true
+            }
+            else -> return false
+        }
+    }
+
     @Query("UPDATE babies SET syncDirty = 1")
     suspend fun markAllPendingSync()
 
@@ -294,6 +338,67 @@ interface RecordDao {
             )
         }
         return confirmsCurrent
+    }
+
+    /**
+     * After a standalone-media atomic package elevated the root to
+     * [publishedUpdatedAt] for content epoch [expectedLocalUpdatedAt], align local
+     * revision + [RecordEntity.familyPublishedUpdatedAt] without clobbering a
+     * concurrent content edit.
+     *
+     * - Content still at [expectedLocalUpdatedAt]: advance `updatedAt` to
+     *   [publishedUpdatedAt], set receipt to that value, clear dirty.
+     * - Concurrent newer content: never overwrite body fields; advance receipt
+     *   only when [publishedUpdatedAt] ≤ current `updatedAt` (monotonic);
+     *   keep dirty so capture rebuilds outbox for the newer root.
+     * - Already advanced to [publishedUpdatedAt] (retry): ensure receipt + clean dirty.
+     *
+     * Returns true when local content was confirmed at the published revision.
+     */
+    @Transaction
+    suspend fun acknowledgeSyntheticRootPublication(
+        clientUuid: String,
+        expectedLocalUpdatedAt: Long,
+        publishedUpdatedAt: Long,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        if (publishedUpdatedAt <= 0L || expectedLocalUpdatedAt <= 0L) return false
+        if (publishedUpdatedAt < expectedLocalUpdatedAt) return false
+        when {
+            current.updatedAt == expectedLocalUpdatedAt ||
+                current.updatedAt == publishedUpdatedAt -> {
+                val validExisting = current.familyPublishedUpdatedAt
+                    ?.takeIf { it > 0L && it <= publishedUpdatedAt }
+                val mergedReceipt = maxOf(validExisting ?: 0L, publishedUpdatedAt)
+                if (
+                    current.updatedAt != publishedUpdatedAt ||
+                    current.familyPublishedUpdatedAt != mergedReceipt ||
+                    current.syncDirty
+                ) {
+                    update(
+                        current.copy(
+                            updatedAt = publishedUpdatedAt,
+                            familyPublishedUpdatedAt = mergedReceipt,
+                            syncDirty = false,
+                        ),
+                    )
+                }
+                return true
+            }
+            current.updatedAt > expectedLocalUpdatedAt -> {
+                if (publishedUpdatedAt > current.updatedAt) return false
+                val validExisting = current.familyPublishedUpdatedAt
+                    ?.takeIf { it > 0L && it <= current.updatedAt }
+                val mergedReceipt = maxOf(validExisting ?: 0L, publishedUpdatedAt)
+                if (validExisting != mergedReceipt) {
+                    update(
+                        current.copy(familyPublishedUpdatedAt = mergedReceipt),
+                    )
+                }
+                return false
+            }
+            else -> return false
+        }
     }
 
     /** Merge server-owned metadata without changing content, revision, dirty state, or outbox. */
@@ -581,6 +686,57 @@ interface CarePlanDao {
             )
         }
         return confirmsCurrent
+    }
+
+    /**
+     * CarePlan twin of [RecordDao.acknowledgeSyntheticRootPublication]: after a
+     * standalone plan-photo package elevates the root, CAS-align local revision +
+     * [CarePlanEntity.familyPublishedUpdatedAt] without clobbering concurrent edits.
+     */
+    @Transaction
+    suspend fun acknowledgeSyntheticRootPublication(
+        clientUuid: String,
+        expectedLocalUpdatedAt: Long,
+        publishedUpdatedAt: Long,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        if (publishedUpdatedAt <= 0L || expectedLocalUpdatedAt <= 0L) return false
+        if (publishedUpdatedAt < expectedLocalUpdatedAt) return false
+        when {
+            current.updatedAt == expectedLocalUpdatedAt ||
+                current.updatedAt == publishedUpdatedAt -> {
+                val validExisting = current.familyPublishedUpdatedAt
+                    ?.takeIf { it > 0L && it <= publishedUpdatedAt }
+                val mergedReceipt = maxOf(validExisting ?: 0L, publishedUpdatedAt)
+                if (
+                    current.updatedAt != publishedUpdatedAt ||
+                    current.familyPublishedUpdatedAt != mergedReceipt ||
+                    current.syncDirty
+                ) {
+                    update(
+                        current.copy(
+                            updatedAt = publishedUpdatedAt,
+                            familyPublishedUpdatedAt = mergedReceipt,
+                            syncDirty = false,
+                        ),
+                    )
+                }
+                return true
+            }
+            current.updatedAt > expectedLocalUpdatedAt -> {
+                if (publishedUpdatedAt > current.updatedAt) return false
+                val validExisting = current.familyPublishedUpdatedAt
+                    ?.takeIf { it > 0L && it <= current.updatedAt }
+                val mergedReceipt = maxOf(validExisting ?: 0L, publishedUpdatedAt)
+                if (validExisting != mergedReceipt) {
+                    update(
+                        current.copy(familyPublishedUpdatedAt = mergedReceipt),
+                    )
+                }
+                return false
+            }
+            else -> return false
+        }
     }
 
     @Query("UPDATE care_plans SET syncDirty = 1")

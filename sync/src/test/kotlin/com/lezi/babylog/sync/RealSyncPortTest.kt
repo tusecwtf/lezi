@@ -3683,8 +3683,12 @@ class RealSyncPortTest {
         val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
         assertThat(baby.nickname).isEqualTo("并发改名")
         assertThat(baby.updatedAt).isEqualTo(101)
+        // Materialize skipped the avatar after the concurrent profile edit; wire
+        // still published the re-read concurrent baby root (no avatar pointer).
         assertThat(baby.avatarMediaUuid).isNull()
-        assertThat(baby.syncDirty).isTrue()
+        // Synthetic root ack uses the content epoch at push time (101), so the
+        // concurrent rename is confirmed clean rather than left spuriously dirty.
+        assertThat(baby.syncDirty).isFalse()
     }
 
     @Test
@@ -5362,6 +5366,281 @@ class RealSyncPortTest {
         val current = requireNotNull(rig.carePlans.getByClientUuid("plan-root-receipt"))
         assertThat(current.familyPublishedUpdatedAt).isEqualTo(1_001)
         assertThat(current.syncDirty).isFalse()
+    }
+
+    @Test
+    fun standaloneLogMediaRecordsExactElevatedRootReceiptAndAdvancesLocalRevision() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-standalone-log",
+                updatedAt = 500,
+                familyPublishedUpdatedAt = 500,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-standalone-log")
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/standalone-log.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val published = requireNotNull(rig.records.getByClientUuid("record-standalone-log"))
+        // max(nextPackageVersion(500), media 200) = 501
+        assertThat(published.updatedAt).isEqualTo(501)
+        assertThat(published.familyPublishedUpdatedAt).isEqualTo(501)
+        assertThat(published.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        val draft = rig.backend.stagedBundles.single { it.root.clientUuid == "record-standalone-log" }
+        assertThat(draft.root.updatedAt).isEqualTo(501)
+        assertThat(draft.bundleId)
+            .isEqualTo(AtomicBundleId.forRecord("record-standalone-log", 501))
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
+    @Test
+    fun standaloneCarePlanPhotoRecordsExactElevatedRootReceipt() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val planId = rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-standalone-log",
+                updatedAt = 800,
+                familyPublishedUpdatedAt = 800,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-plan-standalone")
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/plan-standalone.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 150,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val published = requireNotNull(rig.carePlans.getByClientUuid("plan-standalone-log"))
+        assertThat(published.updatedAt).isEqualTo(801)
+        assertThat(published.familyPublishedUpdatedAt).isEqualTo(801)
+        assertThat(published.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+    }
+
+    @Test
+    fun avatarOnlyBabyAdvancesLocalRevisionToPublishedRootUpdatedAt() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val avatarUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-avatar-only",
+                updatedAt = 300,
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "avatars/only.jpg",
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                babyId = babyId,
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                localUri = "avatars/only.jpg",
+                mime = "image/jpeg",
+                byteSize = 2,
+                createdAt = 100,
+                updatedAt = 250,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val baby = requireNotNull(rig.babies.getByClientUuid("baby-avatar-only"))
+        // max(nextPackageVersion(300), avatar 250) = 301
+        assertThat(baby.updatedAt).isEqualTo(301)
+        assertThat(baby.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
+        val draft = rig.backend.stagedBundles.single { it.root.clientUuid == "baby-avatar-only" }
+        assertThat(draft.root.updatedAt).isEqualTo(301)
+        assertThat(draft.bundleId)
+            .isEqualTo(AtomicBundleId.forBaby("baby-avatar-only", 301))
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
+    @Test
+    fun standaloneLogConcurrentRootEditKeepsContentDirtyAndMonotonicReceipt() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-standalone-concurrent",
+                updatedAt = 400,
+                familyPublishedUpdatedAt = 400,
+                note = "original",
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-standalone-concurrent")
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/concurrent.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.afterCommit = {
+            // One-shot concurrent content edit during the synthetic package commit.
+            rig.backend.afterCommit = null
+            val current = requireNotNull(
+                rig.records.getByClientUuid("record-standalone-concurrent"),
+            )
+            rig.records.update(
+                current.copy(
+                    updatedAt = 900,
+                    note = "edited-during-upload",
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val concurrent = requireNotNull(
+            rig.records.getByClientUuid("record-standalone-concurrent"),
+        )
+        assertThat(concurrent.updatedAt).isEqualTo(900)
+        assertThat(concurrent.note).isEqualTo("edited-during-upload")
+        assertThat(concurrent.syncDirty).isTrue()
+        // Synthetic package used rootUpdatedAt = 401; receipt advances without clearing dirty.
+        assertThat(concurrent.familyPublishedUpdatedAt).isEqualTo(401)
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        // Outbox for the newer root is rebuilt on the next capture (dirty retained).
+        assertThat(rig.records.listPendingSync().map { it.clientUuid })
+            .contains("record-standalone-concurrent")
+    }
+
+    @Test
+    fun standaloneLogCrashAfterRemoteCommitRetriesSameBundleIdAndConverges() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-standalone-crash",
+                updatedAt = 600,
+                familyPublishedUpdatedAt = 600,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-standalone-crash")
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/crash.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 120,
+                syncDirty = true,
+            ),
+        )
+        val expectedBundleId = AtomicBundleId.forRecord("record-standalone-crash", 601)
+        rig.backend.afterCommit = {
+            throw IllegalStateException("crash after remote commit before local ack")
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        assertThat(rig.backend.committedBundles).containsExactly(expectedBundleId)
+        assertThat(rig.records.getByClientUuid("record-standalone-crash")?.updatedAt)
+            .isEqualTo(600)
+        assertThat(rig.records.getByClientUuid("record-standalone-crash")?.familyPublishedUpdatedAt)
+            .isEqualTo(600)
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isTrue()
+
+        rig.backend.afterCommit = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.committedBundles.count { it == expectedBundleId }).isEqualTo(2)
+        val published = requireNotNull(rig.records.getByClientUuid("record-standalone-crash"))
+        assertThat(published.updatedAt).isEqualTo(601)
+        assertThat(published.familyPublishedUpdatedAt).isEqualTo(601)
+        assertThat(published.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
+    @Test
+    fun syntheticRootReceiptIsMonotonicAcrossMultipleStandaloneMediaGroups() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-mono-receipt",
+                updatedAt = 1_000,
+                familyPublishedUpdatedAt = 1_000,
+                syncDirty = false,
+            ),
+        )
+
+        // Newer receipt first, then a stale older synthetic ack must not regress.
+        assertThat(
+            rig.records.acknowledgeSyntheticRootPublication(
+                clientUuid = "record-mono-receipt",
+                expectedLocalUpdatedAt = 1_000,
+                publishedUpdatedAt = 1_002,
+            ),
+        ).isTrue()
+        assertThat(rig.records.getByClientUuid("record-mono-receipt")?.familyPublishedUpdatedAt)
+            .isEqualTo(1_002)
+        assertThat(rig.records.getByClientUuid("record-mono-receipt")?.updatedAt)
+            .isEqualTo(1_002)
+
+        // Concurrent-path older receipt (expected epoch already left behind).
+        assertThat(
+            rig.records.acknowledgeSyntheticRootPublication(
+                clientUuid = "record-mono-receipt",
+                expectedLocalUpdatedAt = 1_000,
+                publishedUpdatedAt = 1_001,
+            ),
+        ).isFalse()
+        assertThat(rig.records.getByClientUuid("record-mono-receipt")?.familyPublishedUpdatedAt)
+            .isEqualTo(1_002)
+        assertThat(rig.records.getByClientUuid("record-mono-receipt")?.updatedAt)
+            .isEqualTo(1_002)
     }
 
     @Test

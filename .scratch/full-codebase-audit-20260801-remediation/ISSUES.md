@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **3**（01、02、04）
-- Current frontier (ready-for-agent): **16**
+- Done: **4**（01、02、03、04）
+- Current frontier (ready-for-agent): **15**
 - Blocked by dependency: **12**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**03、05、06、07、08、10、12、13、14、16、17、19、20、22、23、25**
+**05、06、07、08、10、12、13、14、16、17、19、20、22、23、25**
 
 ## Tickets
 
@@ -42,7 +42,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 |----|--------|--------|------------|------|--------|
 | [01](./issues/01-preserve-forced-update-shell.md) | Audit P1-01 | 保留 CUR 强制更新壳 | — | S–M | done |
 | [02](./issues/02-cas-media-commit-receipts.md) | Audit P1-02 | 用条件回写确认媒体 commit | — | M | done |
-| [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | ready-for-agent |
+| [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | done |
 | [04](./issues/04-freeze-fulfillment-candidate-evidence.md) | Audit P1-04 | 冻结履行候选业务证据 | — | M | done |
 | [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | ready-for-agent |
 | [06](./issues/06-clear-nursing-timer-with-local-data.md) | Audit P1-06 | 本机清空同步停止并清除计时器 | — | M | ready-for-agent |

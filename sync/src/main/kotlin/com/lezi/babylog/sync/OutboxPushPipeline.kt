@@ -210,6 +210,8 @@ internal class OutboxPushPipeline(
         babyRow: OutboxEntity?,
         avatarRows: List<OutboxEntity>,
     ) {
+        // Content epoch packaged on the wire; synthetic packages may elevate above this.
+        val expectedLocalUpdatedAt = baby.updatedAt
         val rootUpdatedAt = maxOf(
             babyRow?.updatedAt ?: nextPackageVersion(baby.updatedAt),
             avatarRows.maxOfOrNull(OutboxEntity::updatedAt) ?: baby.updatedAt,
@@ -227,9 +229,15 @@ internal class OutboxPushPipeline(
             root = root,
             mediaRows = avatarRows,
         )
-        babyRow?.let {
-            babyDao.markSynced(it.clientUuid, it.updatedAt)
-            outboxDao.deleteIds(listOf(it.id))
+        // Align local baby revision to the exact rootUpdatedAt published to NAS so
+        // the next local edit is strictly newer (avatar-only has no baby outbox row).
+        val confirmed = babyDao.acknowledgeSyntheticRootPublication(
+            clientUuid = baby.clientUuid,
+            expectedLocalUpdatedAt = expectedLocalUpdatedAt,
+            publishedUpdatedAt = rootUpdatedAt,
+        )
+        if (babyRow != null && confirmed) {
+            outboxDao.deleteIds(listOf(babyRow.id))
         }
         acknowledgeMediaRows(avatarRows)
     }
@@ -286,6 +294,7 @@ internal class OutboxPushPipeline(
                 ?: error("日志媒体对应的本地记录不存在")
             val baby = babyDao.getIncludingDeleted(record.babyId)
                 ?: error("本地宝宝档案不存在")
+            val expectedLocalUpdatedAt = record.updatedAt
             val rootUpdatedAt = maxOf(
                 nextPackageVersion(record.updatedAt),
                 mediaRows.maxOf(OutboxEntity::updatedAt),
@@ -301,6 +310,13 @@ internal class OutboxPushPipeline(
                 root,
                 mediaRows,
             )
+            // Standalone media elevates root updatedAt on NAS; local root receipt and
+            // revision must match that rootUpdatedAt so LWW / next edit stay aligned.
+            recordDao.acknowledgeSyntheticRootPublication(
+                clientUuid = record.clientUuid,
+                expectedLocalUpdatedAt = expectedLocalUpdatedAt,
+                publishedUpdatedAt = rootUpdatedAt,
+            )
             acknowledgeMediaRows(mediaRows)
         }
         for ((planId, mediaRows) in planGroups) {
@@ -308,6 +324,7 @@ internal class OutboxPushPipeline(
                 ?: error("日志媒体对应的本地护理计划不存在")
             val baby = babyDao.getIncludingDeleted(plan.babyId)
                 ?: error("本地宝宝档案不存在")
+            val expectedLocalUpdatedAt = plan.updatedAt
             val rootUpdatedAt = maxOf(
                 nextPackageVersion(plan.updatedAt),
                 mediaRows.maxOf(OutboxEntity::updatedAt),
@@ -322,6 +339,11 @@ internal class OutboxPushPipeline(
                 AtomicBundleId.forCarePlan(plan.clientUuid, rootUpdatedAt),
                 root,
                 mediaRows,
+            )
+            carePlanDao.acknowledgeSyntheticRootPublication(
+                clientUuid = plan.clientUuid,
+                expectedLocalUpdatedAt = expectedLocalUpdatedAt,
+                publishedUpdatedAt = rootUpdatedAt,
             )
             acknowledgeMediaRows(mediaRows)
         }

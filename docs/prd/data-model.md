@@ -143,7 +143,7 @@ self。新登录设备读取完整家庭历史。不做保育只读角色、不�
 | `sort_order` | 本机展示顺序；不同步 |
 | `family_authority` | 仅本机派生标记：该行来自家庭服务器权威集合；不进 wire，不由普通成员编辑 |
 | `client_uuid` | |
-| `updated_at` / `deleted_at` | 软删 |
+| `updated_at` / `deleted_at` | 软删；Baby 无独立 `family_published_updated_at` 列。avatar-only 等合成根包在 NAS 抬高 root 修订后，本机以 CAS 前进 `updated_at` 到同一 `rootUpdatedAt` 并清除 dirty 作为等价水印，使下一次档案编辑严格大于已发布根 |
 
 家庭会话中只有 owner 可创建、修改、删除或上传 Baby；member 只 pull/apply 家庭权威宝宝，仍可切换当前宝宝并修改本机 `theme_color` / `sort_order`。member 加入前的本机孤宝宝不上传：若 pull 完整轮次后恰有一个家庭权威宝宝，自动把孤宝宝的 Record、CarePlan 与相关媒体再绑定过去；若有多个权威宝宝，只允许用户显式选择「孤宝宝 → 权威宝宝」，不得按昵称猜测；若没有权威宝宝则保留本机数据并展示等待管理员的空态。再绑定完成前，孤宝宝下的事实、计划与媒体保持本机 dirty，不携带无效宝宝引用上行；合并后再捕获新版。
 
@@ -159,7 +159,7 @@ self。新登录设备读取完整家庭历史。不做保育只读角色、不�
 | `end_timestamp` | 睡眠等区间 |
 | `note` | |
 | `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；尚未加入家庭的本机记录可空 |
-| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire |
+| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire。独立 log 媒体包会抬高 NAS 根 `updated_at`，成功后须把本机回执与（内容 epoch 未变时的）本地 `updated_at` 对齐到同一 `rootUpdatedAt`，不能只 ack 媒体 |
 | `payload_json` | 类型扩展 |
 | `schema_version` | 当前固定为 v2 |
 | `updated_at` / `deleted_at` | 软删 / LWW |
@@ -355,7 +355,8 @@ tombstone 不可复活。删除目录项不级联删除或改写已存在的 `cu
 `created_by_membership_id`, `fulfilled_record_client_uuid?`, `fulfilled_at?`,
 `source_record_client_uuid?`, `updated_at`, `deleted_at`, `sync_dirty`,
 `family_published_updated_at?`。根回执只在 atomic commit 成功或 pull 到已提交根后写入，
-不进入家庭 wire，也不由媒体 `remote_uri` 推断。此外保留
+不进入家庭 wire，也不由媒体 `remote_uri` 推断。独立计划照片包抬高 NAS 根修订时，
+回执与（内容 epoch 未变时的）本地 `updated_at` 必须对齐到同一 `rootUpdatedAt`。此外保留
 `system_calendar_projection_enabled`, `system_calendar_event_id?`,
 `system_calendar_reminder_ready` 与 `system_calendar_projection_pending` 等当前设备
 副作用状态；这些字段不进入家庭 wire。
@@ -572,7 +573,10 @@ interface SyncPort {
 Record/CarePlan 的 `family_published_updated_at` 是独立的设备本机根回执。仅当它与根
 `updated_at` 相等时才表示当前版本已发布；较小正值表示家庭仍看到上一完整版本，缺失、
 零值或未来值均按从未发布 fail closed。媒体 `remote_uri` 只说明某个媒体上传步骤已有
-回执，不能证明根已 commit。跨家庭或失效重建同步凭据时须清空根回执。
+回执，不能证明根已 commit。跨家庭或失效重建同步凭据时须清空根回执。独立 log 媒体包与
+avatar-only Baby 包仍发布完整 atomic root 并可能抬高 root 修订：成功后 Record/CarePlan
+须 CAS 写入精确 `rootUpdatedAt` 回执并在内容未并发编辑时对齐本地 `updated_at`；Baby
+以 CAS 前进的 `updated_at` 作为等价水印。较旧回执不得倒退较新水印。
 
 记录页通过一个不可变的 timeline window snapshot 消费这些状态。每次 Room invalidation
 固定执行 1 次根记录读取、1 次计划读取和 1 次活跃日志媒体读取；根与媒体读取位于同一
