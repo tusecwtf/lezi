@@ -35,6 +35,18 @@ internal fun shouldReleaseComposerAfterHandoff(result: TimerHandoffAcceptResult)
         TimerHandoffAcceptResult.RejectedConflict -> false
     }
 
+/**
+ * Durable accept token may arrive after process death when shell [TimerHandoffSession]
+ * is gone. Release only when Composer still holds a matching pending seed.
+ */
+internal fun shouldReleasePendingTimerHandoff(
+    pendingSeed: TimerHandoffSeed?,
+    acceptedSeed: TimerHandoffSeed,
+): Boolean {
+    val pending = pendingSeed ?: return false
+    return pending.handoffId == acceptedSeed.handoffId
+}
+
 internal fun untransferableFieldsForTimerHandoff(
     draft: QuickRecordDraft,
     baseline: QuickRecordDraft,

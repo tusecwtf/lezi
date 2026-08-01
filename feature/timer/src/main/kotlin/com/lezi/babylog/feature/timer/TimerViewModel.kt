@@ -131,12 +131,14 @@ class TimerViewModel @Inject constructor(
                 }
                 is TimerCompletionResumeDecision.ReplayInFlightSave -> {
                     // Mid-save: replay is idempotent on durable completionClientUuid
-                    // (from completion SavedState and/or timer session).
+                    // (from completion SavedState and/or timer session). Prefer durable
+                    // completion photo paths when handoffSeed was wiped fail-closed.
                     launchCompletionSave(
                         draft = resume.draft,
                         markBegin = false,
                         resumeCompletionClientUuid = resume.completionClientUuid,
                         resumeSessionBabyId = resume.sessionBabyId,
+                        resumeCompletionPhotoPaths = resume.completionPhotoPaths,
                     )
                 }
                 is TimerCompletionResumeDecision.FailClosedRetryable -> {
@@ -306,12 +308,16 @@ class TimerViewModel @Inject constructor(
             initialAmountMl = initialAmountMl,
         )
         val session = _state.value
+        // Freeze seed photo paths with the sheet so mid-Saving process death still
+        // attaches handoff imports after fail-closed empty timer restore.
+        val frozenPhotoPaths = session.handoffSeed?.orderedPaths
         publishCompletion(
             openTimerCompletionSheet(
                 current = _completionUi.value,
                 draft = draft,
                 completionClientUuid = session.completionClientUuid,
                 sessionBabyId = session.babyId,
+                completionPhotoPaths = frozenPhotoPaths,
             ),
         )
     }
@@ -339,7 +345,13 @@ class TimerViewModel @Inject constructor(
             )
             return
         }
-        publishCompletion(beginTimerCompletionSave(_completionUi.value, draft))
+        publishCompletion(
+            beginTimerCompletionSave(
+                current = _completionUi.value,
+                draft = draft,
+                completionPhotoPaths = _state.value.handoffSeed?.orderedPaths,
+            ),
+        )
         launchCompletionSave(draft, markBegin = true)
     }
 
@@ -354,6 +366,7 @@ class TimerViewModel @Inject constructor(
         markBegin: Boolean,
         resumeCompletionClientUuid: String? = null,
         resumeSessionBabyId: Long? = null,
+        resumeCompletionPhotoPaths: List<String>? = null,
     ) {
         if (!markBegin && !completionInFlight.compareAndSet(false, true)) {
             return
@@ -390,13 +403,17 @@ class TimerViewModel @Inject constructor(
                     val currentSettings = settings.settings.first()
                     val recordMode = currentSettings.recordAtStartOrEnd
                     val seed = stableState.handoffSeed
+                    // Prefer durable frozen paths (survive fail-closed seed wipe) over live seed.
+                    val seedPhotoPaths = completionUiSnapshot.completionPhotoPaths
+                        ?: resumeCompletionPhotoPaths
+                        ?: seed?.orderedPaths.orEmpty()
                     val livePlanPhotos = if (carePlanId != null) {
                         careLog.listCarePlanPhotoPaths(carePlanId)
                     } else {
                         emptyList()
                     }
                     val completionPhotos = mergeTimerCompletionPhotos(
-                        seedPhotoPaths = seed?.orderedPaths.orEmpty(),
+                        seedPhotoPaths = seedPhotoPaths,
                         livePlanPhotoPaths = livePlanPhotos,
                     )
                     careLog.completeNursing(

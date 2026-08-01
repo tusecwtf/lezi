@@ -138,10 +138,21 @@ fun RecordComposerHost(
     onSaved: (String) -> Unit,
     /**
      * Explicit Composer→Timer ownership handoff. Shell navigates with the seed
-     * JSON and must invoke [TimerHandoffSession.onAccepted] / [TimerHandoffSession.onRejected]
-     * from the Timer accept result — no recomposition-time registration.
+     * JSON; accept/reject settle via durable [acceptedTimerHandoffSeedJson] /
+     * [timerHandoffRejectEpoch] so process death cannot drop release.
      */
     onStartNursingTimer: (TimerHandoffSession) -> Unit,
+    /**
+     * Durable shell signal: Timer accepted (or AlreadyAccepted after restore).
+     * Host releases transferred owned paths without requiring process-local session.
+     */
+    acceptedTimerHandoffSeedJson: String? = null,
+    onAcceptedTimerHandoffConsumed: () -> Unit = {},
+    /**
+     * Monotonic shell signal: Timer rejected or user left timer before accept.
+     * Clears in-flight lock only; draft + owned files stay editable.
+     */
+    timerHandoffRejectEpoch: Int = 0,
     /** Optional: open device-local system calendar setup (ticket 21). Cancel still saves plan. */
     onConfigureSystemCalendar: (() -> Unit)? = null,
     vm: RecordComposerViewModel = hiltViewModel(),
@@ -160,11 +171,13 @@ fun RecordComposerHost(
     /**
      * After seed is launched to Timer, block dismiss/import/remove until accept
      * or reject so cleanupAbandoned cannot race transferred owned paths.
+     * Source of truth is VM/SavedState — not Compose remember (process-death safe).
      */
-    var timerHandoffInFlight by remember(request) { mutableStateOf(false) }
+    val timerHandoffInFlight = state.timerHandoffInFlight
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val latestOnDismiss by rememberUpdatedState(onDismiss)
+    val latestOnAcceptedConsumed by rememberUpdatedState(onAcceptedTimerHandoffConsumed)
     // Post-save offer + finish copy live in ViewModel/SavedState (single source of truth).
     // Any new composition after rotation observes state — never dual-mastered rememberSaveable
     // locals mutated by a late save callback from a disposed composition.
@@ -181,21 +194,40 @@ fun RecordComposerHost(
     }
 
     fun launchTimerHandoff(seed: TimerHandoffSeed) {
-        timerHandoffInFlight = true
+        // Durable lock first — shell session is process-local and may die mid-handoff.
+        vm.beginTimerHandoff(seed)
         onStartNursingTimer(
             TimerHandoffSession(
                 seed = seed,
-                onAccepted = { accepted ->
-                    timerHandoffInFlight = false
-                    vm.closeAfterTimerHandoff(accepted)
-                    latestOnDismiss()
-                },
-                onRejected = {
-                    // Keep draft + owned files editable; clear in-flight lock only.
-                    timerHandoffInFlight = false
-                },
+                // Accept/reject settle via shell durable tokens observed below.
+                onAccepted = { },
+                onRejected = { },
             ),
         )
+    }
+
+    // Process-death safe release: shell remember session is gone, but accepted seed
+    // JSON + Composer pending handoff survive SavedState and re-drive close.
+    LaunchedEffect(acceptedTimerHandoffSeedJson) {
+        val json = acceptedTimerHandoffSeedJson ?: return@LaunchedEffect
+        val accepted = TimerHandoffSeed.fromJson(json)
+        if (accepted != null &&
+            shouldReleasePendingTimerHandoff(vm.pendingTimerHandoffSeed(), accepted)
+        ) {
+            vm.closeAfterTimerHandoff(accepted)
+            latestOnDismiss()
+        }
+        latestOnAcceptedConsumed()
+    }
+
+    // Reject / leave-timer-before-accept: unlock without reclaiming transferred paths.
+    var lastRejectEpoch by remember { mutableStateOf(0) }
+    LaunchedEffect(timerHandoffRejectEpoch) {
+        if (timerHandoffRejectEpoch > lastRejectEpoch) {
+            lastRejectEpoch = timerHandoffRejectEpoch
+            // Idempotent: clears durable in-flight only; no file reclaim.
+            vm.cancelTimerHandoff()
+        }
     }
 
     fun requestDismiss(source: ComposerDismissSource) {

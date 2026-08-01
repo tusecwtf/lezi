@@ -44,6 +44,12 @@ internal data class TimerCompletionUiState(
     val completionClientUuid: String? = null,
     /** Session baby for replay when timer DataStore is empty; cleared with submit identity. */
     val sessionBabyId: Long? = null,
+    /**
+     * Frozen ordered handoff/completion photo paths for mid-Saving process-death replay.
+     * Null means not frozen yet (prefer live [TimerState.handoffSeed]); empty list means
+     * frozen with no seed photos. Survives fail-closed empty timer restore.
+     */
+    val completionPhotoPaths: List<String>? = null,
 ) {
     val sheetVisible: Boolean
         get() = draft != null
@@ -68,12 +74,14 @@ internal fun openTimerCompletionSheet(
     draft: NursingCompletionDraft,
     completionClientUuid: String? = null,
     sessionBabyId: Long? = null,
+    completionPhotoPaths: List<String>? = null,
 ): TimerCompletionUiState {
     if (!canMutateSheet(current)) return current
     return TimerCompletionUiState(
         draft = draft,
         completionClientUuid = completionClientUuid,
         sessionBabyId = sessionBabyId,
+        completionPhotoPaths = completionPhotoPaths,
     )
 }
 
@@ -105,9 +113,16 @@ internal fun mayStartTimerCompletionSave(state: TimerCompletionUiState): Boolean
 internal fun beginTimerCompletionSave(
     current: TimerCompletionUiState,
     draft: NursingCompletionDraft,
+    completionPhotoPaths: List<String>? = null,
 ): TimerCompletionUiState {
     if (current.saving || !current.sheetVisible || current.hasPostSaveStage) return current
-    return current.copy(draft = draft, saving = true, saveError = null)
+    return current.copy(
+        draft = draft,
+        saving = true,
+        saveError = null,
+        // Freeze seed photos at save start when open did not (or seed arrived late).
+        completionPhotoPaths = current.completionPhotoPaths ?: completionPhotoPaths,
+    )
 }
 
 /**
@@ -193,6 +208,7 @@ internal sealed class TimerCompletionResumeDecision {
         val draft: NursingCompletionDraft,
         val completionClientUuid: String,
         val sessionBabyId: Long?,
+        val completionPhotoPaths: List<String>? = null,
     ) : TimerCompletionResumeDecision()
     /** Saving without session identity — keep draft, surface retryable error. */
     data class FailClosedRetryable(
@@ -227,6 +243,7 @@ internal fun decideTimerCompletionResume(
             draft = draft,
             completionClientUuid = uuid,
             sessionBabyId = stage.sessionBabyId,
+            completionPhotoPaths = stage.completionPhotoPaths,
         )
     } else {
         TimerCompletionResumeDecision.FailClosedRetryable(
@@ -278,6 +295,7 @@ internal class TimerCompletionSavedState(
         handle[PENDING_EXIT_KEY] = state.pendingExit
         persistPendingNextFeed(state)
         persistCompletionIdentity(state)
+        persistCompletionPhotoPaths(state)
     }
 
     /**
@@ -314,6 +332,25 @@ internal class TimerCompletionSavedState(
         }
     }
 
+    /**
+     * Seed photo paths lifetime mirrors submit identity: present with sheet/Saving so
+     * ReplayInFlightSave can attach handoff imports when timer DataStore seed is gone.
+     */
+    private fun persistCompletionPhotoPaths(state: TimerCompletionUiState) {
+        when {
+            state.hasPostSaveStage -> clearCompletionPhotoPaths()
+            state.draft != null || state.saving -> {
+                if (state.completionPhotoPaths != null) {
+                    handle[COMPLETION_PHOTO_PATHS_KEY] =
+                        ArrayList(state.completionPhotoPaths)
+                } else {
+                    handle.remove<ArrayList<String>>(COMPLETION_PHOTO_PATHS_KEY)
+                }
+            }
+            else -> clearCompletionPhotoPaths()
+        }
+    }
+
     fun restore(): TimerCompletionUiState {
         val draft = handle.get<NursingCompletionDraft>(DRAFT_KEY)
         val saving = handle.get<Boolean>(SAVING_KEY) ?: false
@@ -322,6 +359,8 @@ internal class TimerCompletionSavedState(
         val pendingNextFeed = pendingNextFeed()
         val completionClientUuid = handle.get<String>(COMPLETION_CLIENT_UUID_KEY)
         val sessionBabyId = handle.get<Long>(SESSION_BABY_ID_KEY)
+        val completionPhotoPaths = handle.get<ArrayList<String>>(COMPLETION_PHOTO_PATHS_KEY)
+            ?.toList()
         return when {
             pendingExit && draft == null -> TimerCompletionUiState(pendingExit = true)
             draft != null -> TimerCompletionUiState(
@@ -330,6 +369,7 @@ internal class TimerCompletionSavedState(
                 saveError = saveError,
                 completionClientUuid = completionClientUuid,
                 sessionBabyId = sessionBabyId,
+                completionPhotoPaths = completionPhotoPaths,
             )
             pendingNextFeed != null -> TimerCompletionUiState(pendingNextFeed = pendingNextFeed)
             else -> TimerCompletionUiState()
@@ -364,6 +404,10 @@ internal class TimerCompletionSavedState(
         handle.remove<Long>(SESSION_BABY_ID_KEY)
     }
 
+    private fun clearCompletionPhotoPaths() {
+        handle.remove<ArrayList<String>>(COMPLETION_PHOTO_PATHS_KEY)
+    }
+
     private fun readLegacyPendingNextFeed(): TimerPendingNextFeed? {
         val babyId = handle.get<Long>(LEGACY_PENDING_NEXT_FEED_BABY_KEY) ?: return null
         val suggestedAt = handle.get<Long>(LEGACY_PENDING_NEXT_FEED_SUGGESTED_AT_KEY) ?: return null
@@ -383,6 +427,7 @@ internal class TimerCompletionSavedState(
         const val PENDING_NEXT_FEED_KEY = "timer_pending_next_feed"
         const val COMPLETION_CLIENT_UUID_KEY = "timer_completion_client_uuid"
         const val SESSION_BABY_ID_KEY = "timer_completion_session_baby"
+        const val COMPLETION_PHOTO_PATHS_KEY = "timer_completion_photo_paths"
         /** Historical multi-key shape; migrated to [PENDING_NEXT_FEED_KEY] on restore. */
         const val LEGACY_PENDING_NEXT_FEED_BABY_KEY = "timer_pending_next_feed_baby"
         const val LEGACY_PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "timer_pending_next_feed_suggested_at"

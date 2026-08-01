@@ -272,6 +272,72 @@ class TimerCompletionUiTest {
     }
 
     @Test
+    fun openSheetFreezesCompletionPhotoPathsForProcessDeathReplay() {
+        val paths = listOf("handoff-owned.jpg", "plan.jpg")
+        val open = openTimerCompletionSheet(
+            current = TimerCompletionUiState(),
+            draft = sampleDraft(),
+            completionClientUuid = "session-uuid",
+            sessionBabyId = 11L,
+            completionPhotoPaths = paths,
+        )
+        assertEquals(paths, open.completionPhotoPaths)
+
+        val saving = beginTimerCompletionSave(open, open.draft!!)
+        assertEquals(paths, saving.completionPhotoPaths)
+
+        val handle = SavedStateHandle()
+        TimerCompletionSavedState(handle).persist(saving)
+        val restored = TimerCompletionSavedState(handle).restore()
+        assertTrue(restored.saving)
+        assertEquals(paths, restored.completionPhotoPaths)
+
+        val decision = decideTimerCompletionResume(
+            stage = restored,
+            hasTimerData = false, // fail-closed empty timer
+            timerSessionUuid = null,
+        )
+        val replay = decision as TimerCompletionResumeDecision.ReplayInFlightSave
+        assertEquals(paths, replay.completionPhotoPaths)
+    }
+
+    @Test
+    fun beginSaveFreezesPhotoPathsWhenOpenHadNone() {
+        val open = openWithIdentity()
+        assertNull(open.completionPhotoPaths)
+        val saving = beginTimerCompletionSave(
+            current = open,
+            draft = open.draft!!,
+            completionPhotoPaths = listOf("late-seed.jpg"),
+        )
+        assertEquals(listOf("late-seed.jpg"), saving.completionPhotoPaths)
+        // Already frozen wins over a second begin attempt (no-op while saving).
+        val ignored = beginTimerCompletionSave(
+            current = saving,
+            draft = open.draft!!,
+            completionPhotoPaths = listOf("other.jpg"),
+        )
+        assertEquals(saving, ignored)
+    }
+
+    @Test
+    fun postSaveClearsCompletionPhotoPathsFromSavedState() {
+        val open = openTimerCompletionSheet(
+            current = TimerCompletionUiState(),
+            draft = sampleDraft(),
+            completionClientUuid = "u",
+            sessionBabyId = 1L,
+            completionPhotoPaths = listOf("a.jpg"),
+        )
+        val saving = beginTimerCompletionSave(open, open.draft!!)
+        val success = timerCompletionSucceeded(saving, pendingNextFeed = null)
+        assertNull(success.completionPhotoPaths)
+        val handle = SavedStateHandle()
+        TimerCompletionSavedState(handle).persist(success)
+        assertNull(handle.get<ArrayList<String>>("timer_completion_photo_paths"))
+    }
+
+    @Test
     fun midSavePersistKeepsIdentityAndClearsStaleNextFeedKeys() {
         val handle = SavedStateHandle()
         // Stale offer from a previous session still on the handle.

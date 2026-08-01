@@ -168,6 +168,72 @@ class ComposerTimerHandoffTest {
     }
 
     @Test
+    fun pendingHandoffReleaseMatchesAcceptedHandoffIdOnly() {
+        val seed = TimerHandoffSeed(
+            handoffId = "h-match",
+            babyId = 1L,
+            photos = listOf(
+                com.lezi.babylog.core.model.TimerHandoffPhoto(
+                    "owned.jpg",
+                    com.lezi.babylog.core.model.TimerHandoffPhotoOwnership.ComposerOwned,
+                ),
+            ),
+        )
+        assertTrue(shouldReleasePendingTimerHandoff(seed, seed))
+        assertTrue(
+            shouldReleasePendingTimerHandoff(
+                seed,
+                seed.copy(note = "AlreadyAccepted re-delivery"),
+            ),
+        )
+        assertFalse(
+            shouldReleasePendingTimerHandoff(
+                seed,
+                seed.copy(handoffId = "other"),
+            ),
+        )
+        assertFalse(shouldReleasePendingTimerHandoff(null, seed))
+    }
+
+    @Test
+    fun savedStateRestoresPendingHandoffInFlightAcrossRecreation() {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val seed = TimerHandoffSeed(
+            handoffId = "h-durable",
+            babyId = 3L,
+            note = "交接",
+            photos = listOf(
+                com.lezi.babylog.core.model.TimerHandoffPhoto(
+                    "keep.jpg",
+                    com.lezi.babylog.core.model.TimerHandoffPhotoOwnership.ComposerOwned,
+                ),
+            ),
+        )
+        val saved = RecordComposerSavedState(handle)
+        saved.savePendingTimerHandoff(seed)
+
+        val restored = RecordComposerSavedState(handle)
+        assertTrue(restored.timerHandoffInFlight())
+        assertEquals(seed, restored.pendingTimerHandoffSeed())
+
+        restored.clearPendingTimerHandoff()
+        assertFalse(RecordComposerSavedState(handle).timerHandoffInFlight())
+        assertEquals(null, RecordComposerSavedState(handle).pendingTimerHandoffSeed())
+    }
+
+    @Test
+    fun clearComposerSavedStateDropsPendingHandoff() {
+        val handle = androidx.lifecycle.SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        saved.savePendingTimerHandoff(
+            TimerHandoffSeed(handoffId = "h-clear", babyId = 1L),
+        )
+        saved.clear()
+        assertFalse(saved.timerHandoffInFlight())
+        assertEquals(null, saved.pendingTimerHandoffSeed())
+    }
+
+    @Test
     fun untransferableDirtyDurationTriggersConfirmMessage() {
         val baseline = QuickRecordDraft.create(RecordType.NURSING, 1_000L)
         val dirty = baseline.copy(leftMin = "12", rightMin = "5")

@@ -93,6 +93,9 @@ class RecordComposerViewModel @Inject constructor(
         _state.value = RecordComposerUiState(
             activeRequest = request,
             loading = true,
+            // Keep mid-handoff lock during load so process-death restore cannot
+            // unlock dismiss before draft + pending seed rehydrate.
+            timerHandoffInFlight = savedState.timerHandoffInFlight(),
         )
         loadJob = viewModelScope.launch {
             // Mirror save: join cancelled import before reset so late produce is reclaimed.
@@ -295,6 +298,8 @@ class RecordComposerViewModel @Inject constructor(
                         timerEnabled = settings.timerEnabled,
                     ),
                     systemCalendarConfigured = systemCalConfigured,
+                    // Restore mid-handoff lock across process death (Ticket 09).
+                    timerHandoffInFlight = savedState.timerHandoffInFlight(),
                 )
                 savedState.initialize(request, initialDraft, activeDraft)
                 // Keep projection chrome in sync if user completes setup mid-sheet.
@@ -319,10 +324,38 @@ class RecordComposerViewModel @Inject constructor(
     }
 
     /**
+     * Mark Composer→Timer handoff in flight before shell navigates. Durable in
+     * SavedState so process death cannot unlock dismiss/cleanup while Timer still
+     * owns (or is accepting) the seed.
+     */
+    internal fun beginTimerHandoff(seed: TimerHandoffSeed) {
+        savedState.savePendingTimerHandoff(seed)
+        _state.update { cur -> cur.copy(timerHandoffInFlight = true) }
+    }
+
+    /** Pending seed restored after process death; null when no handoff is open. */
+    internal fun pendingTimerHandoffSeed(): TimerHandoffSeed? = savedState.pendingTimerHandoffSeed()
+
+    /**
+     * Timer rejected or user left timer before accept. Keep draft + owned files
+     * editable; clear only the durable in-flight lock.
+     */
+    internal fun cancelTimerHandoff() {
+        savedState.clearPendingTimerHandoff()
+        _state.update { cur -> cur.copy(timerHandoffInFlight = false) }
+    }
+
+    /**
      * Close after Timer has accepted [seed]. Transferred Composer-owned photo
      * bytes are retained for Timer; only non-transferred owned orphans are reclaimed.
+     * Idempotent when draft/pending already cleared (durable re-delivery safe).
      */
     internal fun closeAfterTimerHandoff(seed: TimerHandoffSeed) {
+        val draftForCleanup = _state.value.draft ?: savedState.draftForCleanup()
+        val pending = savedState.pendingTimerHandoffSeed()
+        if (draftForCleanup == null && pending == null && !_state.value.timerHandoffInFlight) {
+            return
+        }
         closeInternal(transferredOwnedPaths = seed.composerOwnedPaths.toSet())
     }
 

@@ -4,6 +4,7 @@ import androidx.lifecycle.SavedStateHandle
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.domain.CustomRecordItem
 
 sealed interface RecordComposerRequest : java.io.Serializable {
@@ -116,10 +117,31 @@ internal class RecordComposerSavedState(
         handle.remove<String>(PENDING_FINISH_MESSAGE_KEY)
     }
 
+    /**
+     * Persist Composer→Timer handoff lock + seed so process death mid-handoff cannot
+     * unlock dismiss/cleanup before Timer accept/reject settles (Ticket 09).
+     */
+    fun savePendingTimerHandoff(seed: TimerHandoffSeed) {
+        handle[TIMER_HANDOFF_PENDING_SEED_JSON_KEY] = seed.toJson()
+        handle[TIMER_HANDOFF_IN_FLIGHT_KEY] = true
+    }
+
+    fun pendingTimerHandoffSeed(): TimerHandoffSeed? =
+        TimerHandoffSeed.fromJson(handle.get<String>(TIMER_HANDOFF_PENDING_SEED_JSON_KEY))
+
+    fun timerHandoffInFlight(): Boolean =
+        handle.get<Boolean>(TIMER_HANDOFF_IN_FLIGHT_KEY) == true
+
+    fun clearPendingTimerHandoff() {
+        handle.remove<String>(TIMER_HANDOFF_PENDING_SEED_JSON_KEY)
+        handle.remove<Boolean>(TIMER_HANDOFF_IN_FLIGHT_KEY)
+    }
+
     fun clear() {
         handle.remove<RecordComposerRequest>(REQUEST_KEY)
         handle.remove<QuickRecordDraft>(DRAFT_KEY)
         handle.remove<QuickRecordDraft>(INITIAL_DRAFT_KEY)
+        clearPendingTimerHandoff()
     }
 
     private fun readLegacyPendingNextFeed(): PendingNextFeed? {
@@ -145,6 +167,8 @@ internal class RecordComposerSavedState(
         const val INITIAL_DRAFT_KEY = "record_composer_saved_initial_draft"
         const val PENDING_NEXT_FEED_KEY = "pending_next_feed"
         const val PENDING_FINISH_MESSAGE_KEY = "pending_finish_message"
+        const val TIMER_HANDOFF_PENDING_SEED_JSON_KEY = "timer_handoff_pending_seed_json"
+        const val TIMER_HANDOFF_IN_FLIGHT_KEY = "timer_handoff_in_flight"
         const val LEGACY_PENDING_NEXT_FEED_BABY_KEY = "pending_next_feed_baby"
         const val LEGACY_PENDING_NEXT_FEED_TYPE_KEY = "pending_next_feed_type"
         const val LEGACY_PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "pending_next_feed_suggested_at"
@@ -210,6 +234,11 @@ internal data class RecordComposerUiState(
      * SavedState until Host acknowledges; re-subscribe must not re-fire after acknowledge.
      */
     val pendingFinishMessage: String? = null,
+    /**
+     * Composer→Timer handoff launched; dismiss/import blocked until accept/reject settles.
+     * Durable in [RecordComposerSavedState] across process death (not Compose remember).
+     */
+    val timerHandoffInFlight: Boolean = false,
 ) {
     val hasUserChanges: Boolean
         get() = initialDraft?.let { baseline ->

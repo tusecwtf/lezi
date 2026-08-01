@@ -56,9 +56,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -766,11 +768,18 @@ private fun LeziMainScaffold(
     var logLayoutEditActive by remember { mutableStateOf(false) }
     /**
      * Composer→Timer handoff session captured at navigate time (Ticket 09).
-     * Accept/reject callbacks are stable for this launch — not recomposition-registered.
+     * Process-local only; durable accept/reject settle via saveable tokens below so
+     * process death cannot drop Composer release while Timer already holds the seed.
      */
     var timerHandoffSession by remember {
         mutableStateOf<TimerHandoffSession?>(null)
     }
+    /** Durable accept token re-delivered to Composer Host after process death. */
+    var acceptedTimerHandoffSeedJson by rememberSaveable {
+        mutableStateOf<String?>(null)
+    }
+    /** Monotonic reject / leave-before-accept signal for Host cancelTimerHandoff. */
+    var timerHandoffRejectEpoch by rememberSaveable { mutableIntStateOf(0) }
 
     LaunchedEffect(widgetComposerTarget) {
         val target = widgetComposerTarget ?: return@LaunchedEffect
@@ -1061,18 +1070,16 @@ private fun LeziMainScaffold(
                     babyId = handoffSeed?.babyId,
                     handoffSeed = handoffSeed,
                     onHandoffAccepted = { seed ->
-                        // Timer owns the seed; release Composer without reclaiming
-                        // transferred owned photos.
-                        val session = timerHandoffSession
+                        // Timer owns the seed. Durable token drives Host release even when
+                        // process-local session is null after death (AlreadyAccepted path).
                         timerHandoffSession = null
-                        session?.onAccepted?.invoke(seed)
+                        acceptedTimerHandoffSeedJson = seed.toJson()
                         source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
                     },
                     onHandoffRejected = {
                         // Keep Composer draft + photos editable; leave timer route.
-                        val session = timerHandoffSession
                         timerHandoffSession = null
-                        session?.onRejected?.invoke()
+                        timerHandoffRejectEpoch += 1
                         source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
                         scope.launch {
                             snackbar.showSnackbar("当前已有进行中的计时，草稿仍可编辑")
@@ -1081,14 +1088,20 @@ private fun LeziMainScaffold(
                     },
                     onDone = {
                         // Pop / discard before accept: unlock Composer without releasing files.
-                        val pending = timerHandoffSession
                         timerHandoffSession = null
-                        pending?.onRejected?.invoke()
+                        timerHandoffRejectEpoch += 1
                         source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
                         nav.popBackStack()
                     },
                 )
             }
+        }
+    }
+
+    // Drop orphan accept token if Composer root is already gone (e.g. double-deliver).
+    LaunchedEffect(composerRequest, acceptedTimerHandoffSeedJson) {
+        if (composerRequest == null && acceptedTimerHandoffSeedJson != null) {
+            acceptedTimerHandoffSeedJson = null
         }
     }
 
@@ -1101,7 +1114,7 @@ private fun LeziMainScaffold(
         },
         onStartNursingTimer = { session ->
             // Ownership transfer: do NOT close Composer until Timer accepts seed.
-            // Session callbacks are bound here — sole navigate payload is seed JSON.
+            // Sole navigate payload is seed JSON; accept/reject settle via saveable tokens.
             timerHandoffSession = session
             nav.currentBackStackEntry?.savedStateHandle?.set(
                 TIMER_HANDOFF_SEED_JSON_KEY,
@@ -1109,6 +1122,9 @@ private fun LeziMainScaffold(
             )
             nav.navigate("timer")
         },
+        acceptedTimerHandoffSeedJson = acceptedTimerHandoffSeedJson,
+        onAcceptedTimerHandoffConsumed = { acceptedTimerHandoffSeedJson = null },
+        timerHandoffRejectEpoch = timerHandoffRejectEpoch,
         // Ticket 21: unconfigured plan switch → explicit setup; dismiss still allows save.
         onConfigureSystemCalendar = { showSystemCalendarSetup = true },
     )
