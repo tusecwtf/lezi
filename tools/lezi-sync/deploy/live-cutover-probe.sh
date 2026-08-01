@@ -15,7 +15,7 @@
 #   LEZI_CONTAINER_NAME           default lezi-sync
 #   LEZI_TLS_CACERT               optional path to data-bind tls/server.crt
 #   LEZI_EVIDENCE_DIR             default <repo>/.scratch/nas-v3-offline-migrate/evidence/07
-#   LEZI_EXPECTED_VERSION         default 0.3.0 — required in /health JSON
+#   LEZI_EXPECTED_VERSION         default 0.3.1 — required in /health JSON
 #   LEZI_PROBE_OWNER_LOGIN=1      optional: POST /v1/owner/login + pull
 #   LEZI_BOOTSTRAP_SECRET         migration password for optional owner login only
 #   LEZI_CLIENT_VERSION_CODE      default 6 (x-lezi-client-version-code for pull)
@@ -33,7 +33,7 @@ LEZI_CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 LEZI_EVIDENCE_DIR="${LEZI_EVIDENCE_DIR:-${ROOT}/.scratch/nas-v3-offline-migrate/evidence/07}"
 LEZI_PROBE_WRITE_EVIDENCE="${LEZI_PROBE_WRITE_EVIDENCE:-1}"
 LEZI_PROBE_OWNER_LOGIN="${LEZI_PROBE_OWNER_LOGIN:-0}"
-LEZI_EXPECTED_VERSION="${LEZI_EXPECTED_VERSION:-0.3.0}"
+LEZI_EXPECTED_VERSION="${LEZI_EXPECTED_VERSION:-0.3.1}"
 LEZI_CLIENT_VERSION_CODE="${LEZI_CLIENT_VERSION_CODE:-6}"
 
 LAN_HTTPS_HEALTH="https://${LEZI_LAN_HOST}:8765/health"

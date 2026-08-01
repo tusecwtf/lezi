@@ -10,7 +10,7 @@
 |----|------|------|
 | 语言 / UI | Kotlin + Jetpack Compose | 夜喂热区、Canvas 时间条、前台服务计时 |
 | 架构 | 多模块 + ViewModel + StateFlow | |
-| DB | Room | 唯一真相源；fresh install 创建当前 schema，同一 schema 重启持久化 |
+| DB | Room | 唯一真相源；本地数据契约 v1 起以相邻迁移链保护 APK 原地替换 |
 | 偏好 | DataStore | SettingsLocal |
 | 异步 | Coroutines + Flow | **同步不做** WorkManager 后台轮询（规格：仅前台） |
 | DI | Hilt | |
@@ -32,8 +32,9 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.0` |
-| versionCode | `6`（Play/安装分发要求单调；不是跨 Room schema 支持信号） |
+| versionName | `0.3.1` |
+| versionCode | `8`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
+| 本地数据契约 | `v1`（最低可迁移 `v1`；永久基线为 0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
 ---
@@ -130,7 +131,7 @@ UI 事件
 | 麦克风 / 后台定位 / 附近设备 | **不申请** | |
 
 拒绝通知：仍可记账，无提醒。
-护理计划本地提醒允许系统在省电策略下批量/延后触发，**不保证**准时到秒；产品不承诺「精确闹钟」体验。下次喂养只复用家庭护理计划及其单一提醒来源，不写入独立时间或安排第二个闹钟；依照 ADR-0008，不承诺旧 Room schema 升级。
+护理计划本地提醒允许系统在省电策略下批量/延后触发，**不保证**准时到秒；产品不承诺「精确闹钟」体验。下次喂养只复用家庭护理计划及其单一提醒来源，不写入独立时间或安排第二个闹钟；依照 ADR-0012，只承诺从 0.3.0 本地数据契约 v1 起的连续升级。
 
 系统日历副本提供三级本机披露：仅“乐记 · 护理计划”、标题显示“宝宝昵称 · 记录类型”，或再把文字备注写入描述。标准 `CalendarContract.Events` 无通用照片附件字段；最高级别仅写“照片 N 张，打开乐记查看”并配置应用 URI，照片字节不交给系统日历账户。
 
@@ -178,7 +179,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 7,
+  "version_code": 8,
   "version_name": "0.3.1",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of APK>",
@@ -238,11 +239,13 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 - `client_uuid` 幂等合并
 - NoOpSync 不抛未捕获异常
 - fresh Room 创建当前 schema；force-stop/重启后当前数据、Outbox、TimerState 与提醒清理状态保持
-- Room 只注册 fresh-current 建库路径；非当前 payload/计时状态不得进入正常业务路径
+- APK 原地替换先经过本地数据升级门禁；相邻迁移先按受影响域创建校验快照，失败不得自动清库
+- 基线之前、未来版、空间不足或不一致数据稳定进入恢复界面；业务、提醒、Widget 不得提前打开持久化
 - 应用内更新：SyncPort 检查结果（NotJoined / UpToDate / Optional / Forced）、校验失败不安装、
   同步被 `client_update_required` 映射为强制态；lezi-sync HTTP 鉴权元数据/APK 与门槛
   （pull / media GET 在低或缺 `X-Lezi-Client-Version-Code` 时 `client_update_required`；
-  客户端权威 pull 携带 version 头；`package-nas` check-only 缺 APK / sha 错 fail-closed 烟测
+  客户端权威 pull 携带 version 头；目标 APK 本地数据契约必须覆盖当前契约；`package-nas`
+  用 `apkanalyzer` 对照追加式契约账本，check-only 缺 APK / sha 错 / 契约错均 fail-closed 烟测
   `tools/lezi-sync/deploy/test-package-nas-app-update.sh`，CI 随 lezi-sync workflow 跑）
 
 **冒烟（当前 APK）**

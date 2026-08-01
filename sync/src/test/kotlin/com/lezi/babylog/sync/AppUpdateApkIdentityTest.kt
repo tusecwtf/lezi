@@ -42,6 +42,26 @@ class AppUpdateApkIdentityTest {
     }
 
     @Test
+    fun rejectsTargetApkThatCannotMigrateInstalledLocalDataContract() {
+        val archive = StagedApkIdentity(
+            packageName = local.packageName,
+            versionCode = 7,
+            signingCertSha256 = setOf(certA),
+            localDataContractVersion = 2,
+            minimumMigratableLocalDataContractVersion = 2,
+        )
+
+        assertThat(
+            verifyStagedApkIdentity(
+                archive = archive,
+                installedCerts = setOf(certA),
+                local = local,
+                metadata = metadata,
+            ),
+        ).isEqualTo(APP_UPDATE_PACKAGE_INVALID_MESSAGE)
+    }
+
+    @Test
     fun rejectsNullArchive() {
         assertThat(
             verifyStagedApkIdentity(

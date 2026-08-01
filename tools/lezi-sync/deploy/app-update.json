@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 7,
+  "version_code": 8,
   "version_name": "0.3.1",
-  "min_supported_version_code": 1,
-  "sha256": "f387f7dab97b265ab98c39d1e2bcb5689cace42859a894211dcbd252f6423ed6",
-  "release_notes": "0.3.1 trusted-sync release"
+  "min_supported_version_code": 6,
+  "sha256": "5b8488f64010573bab6c46fbff14c48bdd873922cb35950747e6acfc04d867d6",
+  "release_notes": "0.3.1 local-data-safe in-place upgrade"
 }

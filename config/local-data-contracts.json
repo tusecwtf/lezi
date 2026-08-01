@@ -1,0 +1,16 @@
+{
+  "current_contract": 1,
+  "permanent_baseline_contract": 1,
+  "minimum_migratable_contract": 1,
+  "contracts": [
+    {
+      "contract_version": 1,
+      "introduced_in_version_code": 6,
+      "room_schema": 24,
+      "settings_revision": 1,
+      "credentials_revision": 1,
+      "media_revision": 1
+    }
+  ],
+  "migrations": []
+}

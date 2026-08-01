@@ -28,6 +28,8 @@ import androidx.glance.layout.width
 import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
+import com.lezi.babylog.core.common.LocalDataGate
+import dagger.Lazy
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -40,10 +42,12 @@ class CareWidget : GlanceAppWidget() {
     override val sizeMode: SizeMode = SizeMode.Exact
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
+        val entryPoint = widgetEntryPoint(context)
+        val localDataReady = entryPoint.localDataGate().ensureReady()
         val widgetId = runCatching {
             GlanceAppWidgetManager(context).getAppWidgetId(id)
         }.getOrDefault(0)
-        val model = if (widgetId > 0) {
+        val model = if (localDataReady && widgetId > 0) {
             val store = SharedPreferencesWidgetStateStore(context.applicationContext)
             WidgetRefreshEngine(
                 store = store,
@@ -154,11 +158,14 @@ class CareWidgetReceiver : GlanceAppWidgetReceiver() {
         appWidgetIds: IntArray,
     ) {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
-        val controller = controller(context)
+        val entryPoint = widgetEntryPoint(context)
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                appWidgetIds.forEach { widgetId -> controller.refreshWidget(widgetId) }
+                if (entryPoint.localDataGate().ensureReady()) {
+                    val controller = entryPoint.controller().get()
+                    appWidgetIds.forEach { widgetId -> controller.refreshWidget(widgetId) }
+                }
             } finally {
                 pending.finish()
             }
@@ -167,26 +174,31 @@ class CareWidgetReceiver : GlanceAppWidgetReceiver() {
 
     override fun onDeleted(context: Context, appWidgetIds: IntArray) {
         super.onDeleted(context, appWidgetIds)
-        val controller = controller(context)
+        val entryPoint = widgetEntryPoint(context)
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                appWidgetIds.forEach { widgetId -> controller.remove(widgetId) }
+                if (entryPoint.localDataGate().ensureReady()) {
+                    val controller = entryPoint.controller().get()
+                    appWidgetIds.forEach { widgetId -> controller.remove(widgetId) }
+                }
             } finally {
                 pending.finish()
             }
         }
     }
 
-    private fun controller(context: Context): CareWidgetRefreshController =
-        EntryPointAccessors.fromApplication(
-            context.applicationContext,
-            WidgetReceiverEntryPoint::class.java,
-        ).controller()
 }
+
+private fun widgetEntryPoint(context: Context): WidgetReceiverEntryPoint =
+    EntryPointAccessors.fromApplication(
+        context.applicationContext,
+        WidgetReceiverEntryPoint::class.java,
+    )
 
 @EntryPoint
 @InstallIn(SingletonComponent::class)
 internal interface WidgetReceiverEntryPoint {
-    fun controller(): CareWidgetRefreshController
+    fun localDataGate(): LocalDataGate
+    fun controller(): Lazy<CareWidgetRefreshController>
 }

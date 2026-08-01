@@ -3,7 +3,7 @@
 本目录是 **active** 规格与票单的工作区（约定见
 [`docs/agents/issue-tracker.md`](../docs/agents/issue-tracker.md)）。
 
-**当前：无 open tracker / 无 frontier 票。**
+**当前：`local-data-upgrade-protection` 已完成实现与本机验收。**
 
 产品权威仍在 [`docs/prd/`](../docs/prd/)、[`docs/adr/`](../docs/adr/)、
 [`CONTEXT.md`](../CONTEXT.md)。已关闭票的实现与证据在 git 历史中，不在本目录长期堆放。
@@ -44,11 +44,14 @@
 
 | 面 | 状态 |
 |----|------|
-| App | `versionName=0.3.1` · `versionCode=7` |
+| App | `versionName=0.3.1` · `versionCode=8` |
 | Server | `lezi-sync` crate/image `0.3.1` |
 | 同步合同 | 可信 HTTPS + 每设备会话；旧 SSID/明文/长期 family token 已退役 |
 | 本地交付物（gitignored） | `dist/lezi-sync-0.3.1-nas/` · `dist/release-0.3.1/` |
 | 收口提交 | `aa7d3df` release bump + tracker close；细节以该 commit 与前后历史为准 |
+
+已完成：[`local-data-upgrade-protection`](./local-data-upgrade-protection/) 将 Android
+0.3.0 / 本地数据契约 v1 固化为永久兼容基线，并为后续 APK 原地替换增加无破坏升级门禁。
 
 **未自动做的运维：** 家庭 NAS 上的 `push-and-deploy.sh` 容器替换仍须按根目录
 `AGENTS.md` 维护窗确认后再跑。

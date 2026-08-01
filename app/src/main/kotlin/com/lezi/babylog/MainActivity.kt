@@ -82,6 +82,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.core.common.LocalDataGate
+import com.lezi.babylog.core.common.LocalDataUpgradeState
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.UiTags
@@ -148,6 +150,7 @@ import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject lateinit var localDataGate: LocalDataGate
     private val pendingWidgetComposer = mutableStateOf<WidgetComposerTarget?>(null)
     private val pendingFulfillPlan = mutableStateOf<PendingFulfillPlan?>(null)
 
@@ -166,43 +169,64 @@ class MainActivity : ComponentActivity() {
         pendingFulfillPlan.value = parseFulfillPlanIntent(intent)
         enableEdgeToEdge()
         setContent {
-            val vm: RootViewModel = hiltViewModel()
-            val ui by vm.ui.collectAsStateWithLifecycle()
-            val systemDark = isSystemInDarkTheme()
-            val dark = when (ui.darkMode) {
-                "dark" -> true
-                "light" -> false
-                else -> systemDark
-            }
-            LeziTheme(
-                darkTheme = dark,
-                babyThemeArgb = ui.baby?.themeColorArgb,
-                visualStyle = ui.visualStyle,
-            ) {
-                val transparent = Color.Transparent.toArgb()
-                val navigationScrim = MaterialTheme.colorScheme.surface.toArgb()
-                SideEffect {
-                    this@MainActivity.enableEdgeToEdge(
-                        statusBarStyle = if (dark) {
-                            SystemBarStyle.dark(transparent)
-                        } else {
-                            SystemBarStyle.light(transparent, transparent)
+            val localDataState by localDataGate.state.collectAsStateWithLifecycle()
+            val gateScope = rememberCoroutineScope()
+            LaunchedEffect(Unit) { localDataGate.ensureReady() }
+            if (localDataState is LocalDataUpgradeState.Ready) {
+                val vm: RootViewModel = hiltViewModel()
+                val ui by vm.ui.collectAsStateWithLifecycle()
+                val systemDark = isSystemInDarkTheme()
+                val dark = when (ui.darkMode) {
+                    "dark" -> true
+                    "light" -> false
+                    else -> systemDark
+                }
+                LeziTheme(
+                    darkTheme = dark,
+                    babyThemeArgb = ui.baby?.themeColorArgb,
+                    visualStyle = ui.visualStyle,
+                ) {
+                    val transparent = Color.Transparent.toArgb()
+                    val navigationScrim = MaterialTheme.colorScheme.surface.toArgb()
+                    SideEffect {
+                        this@MainActivity.enableEdgeToEdge(
+                            statusBarStyle = if (dark) {
+                                SystemBarStyle.dark(transparent)
+                            } else {
+                                SystemBarStyle.light(transparent, transparent)
+                            },
+                            navigationBarStyle = if (dark) {
+                                SystemBarStyle.dark(navigationScrim)
+                            } else {
+                                SystemBarStyle.light(navigationScrim, navigationScrim)
+                            },
+                        )
+                    }
+                    LeziRoot(
+                        vm = vm,
+                        dark = dark,
+                        widgetComposerTarget = pendingWidgetComposer.value,
+                        onWidgetComposerConsumed = { pendingWidgetComposer.value = null },
+                        fulfillPlanTarget = pendingFulfillPlan.value,
+                        onFulfillPlanConsumed = { pendingFulfillPlan.value = null },
+                    )
+                }
+            } else {
+                LeziTheme {
+                    LocalDataUpgradeScreen(
+                        state = localDataState,
+                        onRetry = { gateScope.launch { localDataGate.retry() } },
+                        onShareDiagnostics = {
+                            shareLocalDataDiagnostics(
+                                this@MainActivity,
+                                localDataGate.diagnosticReport(),
+                            )
                         },
-                        navigationBarStyle = if (dark) {
-                            SystemBarStyle.dark(navigationScrim)
-                        } else {
-                            SystemBarStyle.light(navigationScrim, navigationScrim)
+                        onClearApplicationData = {
+                            clearLeziApplicationData(this@MainActivity)
                         },
                     )
                 }
-                LeziRoot(
-                    vm = vm,
-                    dark = dark,
-                    widgetComposerTarget = pendingWidgetComposer.value,
-                    onWidgetComposerConsumed = { pendingWidgetComposer.value = null },
-                    fulfillPlanTarget = pendingFulfillPlan.value,
-                    onFulfillPlanConsumed = { pendingFulfillPlan.value = null },
-                )
             }
         }
     }

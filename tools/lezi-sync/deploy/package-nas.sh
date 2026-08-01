@@ -33,6 +33,16 @@ build_image="${LEZI_PACKAGE_BUILD_IMAGE:-0}"
 # Override with LEZI_RELEASE_APK / LEZI_APP_UPDATE_JSON when packaging a different build.
 release_apk="${LEZI_RELEASE_APK:-${REPO_ROOT}/app/build/outputs/apk/release/app-release.apk}"
 app_update_json="${LEZI_APP_UPDATE_JSON:-${SCRIPT_DIR}/app-update.json}"
+local_data_contract_json="${REPO_ROOT}/config/local-data-contracts.json"
+apk_analyzer="${LEZI_APK_ANALYZER:-}"
+if [[ -z "${apk_analyzer}" ]]; then
+  sdk_dir="$(sed -n 's/^sdk.dir=//p' "${REPO_ROOT}/local.properties" 2>/dev/null | head -1)"
+  if [[ -n "${sdk_dir}" && -x "${sdk_dir}/cmdline-tools/latest/bin/apkanalyzer" ]]; then
+    apk_analyzer="${sdk_dir}/cmdline-tools/latest/bin/apkanalyzer"
+  else
+    apk_analyzer="$(command -v apkanalyzer || true)"
+  fi
+fi
 
 echo "==> package lezi-sync ${version}"
 echo "    image:   ${image}"
@@ -60,11 +70,88 @@ require_app_update_inputs() {
     echo "    min_supported_version_code, sha256 (64 lowercase hex; must match APK)" >&2
     exit 1
   fi
+  if [[ ! -f "${local_data_contract_json}" ]]; then
+    echo "error: local-data contract ledger missing: ${local_data_contract_json}" >&2
+    exit 1
+  fi
+  if [[ -z "${apk_analyzer}" || ! -x "${apk_analyzer}" ]]; then
+    echo "error: apkanalyzer is required to verify APK local-data contract metadata" >&2
+    exit 1
+  fi
 }
 
 validate_and_stage_app_update() {
   local dest_dir="$1"
   mkdir -p "${dest_dir}"
+  local manifest_file contract_values
+  manifest_file="$(mktemp "${TMPDIR:-/tmp}/lezi-apk-manifest.XXXXXX")"
+  if ! "${apk_analyzer}" manifest print "${release_apk}" >"${manifest_file}"; then
+    rm -f -- "${manifest_file}"
+    echo "error: unable to read release APK manifest" >&2
+    exit 1
+  fi
+  if ! contract_values="$(
+    python3 - "${local_data_contract_json}" "${manifest_file}" <<'PY'
+import json, re, sys
+
+ledger_path, manifest_path = sys.argv[1:]
+with open(ledger_path, encoding="utf-8") as f:
+    ledger = json.load(f)
+with open(manifest_path, encoding="utf-8") as f:
+    manifest = f.read()
+
+current = ledger.get("current_contract")
+baseline = ledger.get("permanent_baseline_contract")
+minimum = ledger.get("minimum_migratable_contract")
+contracts = ledger.get("contracts")
+migrations = ledger.get("migrations")
+if not isinstance(current, int) or not isinstance(baseline, int) or not isinstance(minimum, int):
+    raise SystemExit("local-data contract ledger current/baseline/minimum must be integers")
+if baseline != 1 or minimum != baseline:
+    raise SystemExit("permanent local-data compatibility baseline must remain contract 1")
+if not isinstance(contracts, list) or not isinstance(migrations, list):
+    raise SystemExit("local-data contract ledger lists are missing")
+versions = [entry.get("contract_version") for entry in contracts]
+if versions != list(range(1, current + 1)):
+    raise SystemExit("local-data contract ledger must be append-only and contiguous")
+if not contracts or contracts[0].get("introduced_in_version_code") != 6:
+    raise SystemExit("local-data contract 1 must remain anchored to Android versionCode 6")
+required_pairs = [[version, version + 1] for version in range(minimum, current)]
+actual_pairs = [
+    [entry.get("from_contract"), entry.get("to_contract")]
+    for entry in migrations
+]
+if actual_pairs != required_pairs:
+    raise SystemExit("local-data contract ledger migration chain is incomplete")
+
+def manifest_int(name):
+    tag_pattern = re.compile(r"<meta-data\b[^>]*>")
+    name_pattern = re.compile(r'android:name=["\']' + re.escape(name) + r'["\']')
+    value_pattern = re.compile(r'android:value=["\'](\d+)["\']')
+    for tag in tag_pattern.findall(manifest):
+        if name_pattern.search(tag):
+            value = value_pattern.search(tag)
+            if value:
+                return int(value.group(1))
+    raise SystemExit(f"APK local-data contract metadata missing: {name}")
+
+apk_current = manifest_int("com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION")
+apk_minimum = manifest_int(
+    "com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION"
+)
+if [apk_current, apk_minimum] != [current, minimum]:
+    raise SystemExit(
+        "APK local-data contract does not match ledger "
+        f"(apk={apk_minimum}..{apk_current}, ledger={minimum}..{current})"
+    )
+print(apk_current)
+print(apk_minimum)
+PY
+  )"; then
+    rm -f -- "${manifest_file}"
+    exit 1
+  fi
+  rm -f -- "${manifest_file}"
   local apk_sha
   apk_sha="$(sha256sum "${release_apk}" | awk '{print $1}')"
   local meta_sha package_name version_code version_name min_supported
@@ -135,6 +222,7 @@ PY
   cp -a "${app_update_json}" "${dest_dir}/app-update.json"
   echo "==> staged app-update ${package_name} v${version_name} (${version_code})"
   echo "    min_supported=${min_supported} sha256=${apk_sha}"
+  echo "    local_data_contract=$(printf '%s' "${contract_values}" | tr '\n' '.')"
 }
 
 require_app_update_inputs

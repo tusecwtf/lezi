@@ -14,6 +14,19 @@ apk_path="${test_root}/app-release.apk"
 printf 'lezi-fake-release-apk-bytes-for-gate-test\n' >"${apk_path}"
 apk_sha="$(sha256sum "${apk_path}" | awk '{print $1}')"
 wrong_sha="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+apk_analyzer="${test_root}/apkanalyzer"
+cat >"${apk_analyzer}" <<'EOF'
+#!/usr/bin/env bash
+cat <<MANIFEST
+<manifest package="com.lezi.babylog">
+  <application>
+    <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_LOCAL_DATA_CONTRACT:-1}" />
+    <meta-data android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_MINIMUM_LOCAL_DATA_CONTRACT:-1}" />
+  </application>
+</manifest>
+MANIFEST
+EOF
+chmod +x "${apk_analyzer}"
 
 write_meta() {
   local dest="$1"
@@ -22,7 +35,7 @@ write_meta() {
   cat >"${dest}" <<EOF
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 7,
+  "version_code": 8,
   "version_name": "0.3.1",
   "min_supported_version_code": 6,
   "sha256": "${sha}",
@@ -38,10 +51,25 @@ write_meta "${bad_sha_json}" "${wrong_sha}" "wrong hash"
 
 run_check() {
   LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
+    LEZI_APK_ANALYZER="${apk_analyzer}" \
     LEZI_RELEASE_APK="$1" \
     LEZI_APP_UPDATE_JSON="$2" \
     "${SCRIPT_DIR}/package-nas.sh"
 }
+
+# Manifest contract outside the tracked ledger → fail closed before staging.
+bad_contract_log="${test_root}/bad-contract.log"
+if LEZI_FAKE_LOCAL_DATA_CONTRACT=2 run_check "${apk_path}" "${good_json}" \
+    >"${bad_contract_log}" 2>&1; then
+  echo "error: APK with untracked local-data contract was accepted" >&2
+  cat "${bad_contract_log}" >&2
+  exit 1
+fi
+if ! grep -q 'local-data contract' "${bad_contract_log}"; then
+  echo "error: bad-contract failure did not explain the local-data contract" >&2
+  cat "${bad_contract_log}" >&2
+  exit 1
+fi
 
 # Missing APK → fail closed before staging; diagnostics must mention the missing path.
 missing_log="${test_root}/missing-apk.log"

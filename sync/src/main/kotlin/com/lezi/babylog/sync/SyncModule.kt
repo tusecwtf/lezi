@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync
 
 import android.content.Context
+import android.content.pm.PackageManager
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -47,13 +48,17 @@ abstract class SyncModule {
         fun clientAppVersion(@ApplicationContext context: Context): ClientAppVersion {
             val packageInfo = context.packageManager.getPackageInfoCompat(
                 context.packageName,
-                flags = 0,
+                flags = PackageManager.GET_META_DATA,
             )
             return ClientAppVersion(
                 versionCode = packageInfo.versionCodeCompat().coerceAtLeast(1),
                 versionName = packageInfo.versionName?.takeIf { it.isNotBlank() }
                     ?: ClientAppVersion.FALLBACK.versionName,
                 packageName = context.packageName,
+                localDataContractVersion = packageInfo.applicationInfo?.metaData?.getInt(
+                    LOCAL_DATA_CONTRACT_VERSION_METADATA,
+                    ClientAppVersion.FALLBACK.localDataContractVersion,
+                ) ?: ClientAppVersion.FALLBACK.localDataContractVersion,
             )
         }
     }

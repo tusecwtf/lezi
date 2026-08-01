@@ -42,6 +42,12 @@
         android:theme="@style/Theme.Lezi"
         android:networkSecurityConfig="@xml/network_security_config"
         android:usesCleartextTraffic="false">
+        <meta-data
+            android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION"
+            android:value="${localDataContractVersion}" />
+        <meta-data
+            android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION"
+            android:value="${minimumMigratableLocalDataContractVersion}" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -1,4 +1,5 @@
 import java.util.Properties
+import groovy.json.JsonSlurper
 
 plugins {
     alias(libs.plugins.android.application)
@@ -29,6 +30,21 @@ val releaseSigningReady = keystorePropertiesFile.isFile &&
     missingSigningKeys.isEmpty() &&
     releaseStoreFile?.isFile == true
 
+val localDataContractFile = rootProject.file("config/local-data-contracts.json")
+val localDataContractLedger = JsonSlurper().parse(localDataContractFile) as Map<*, *>
+val currentLocalDataContract =
+    (localDataContractLedger["current_contract"] as Number).toInt()
+val permanentBaselineLocalDataContract =
+    (localDataContractLedger["permanent_baseline_contract"] as Number).toInt()
+val minimumMigratableLocalDataContract =
+    (localDataContractLedger["minimum_migratable_contract"] as Number).toInt()
+val localDataContractEntries = (localDataContractLedger["contracts"] as List<*>)
+    .map { it as Map<*, *> }
+val localDataRoomSchemas = localDataContractEntries.joinToString(",") { entry ->
+    "${(entry["contract_version"] as Number).toInt()}:" +
+        (entry["room_schema"] as Number).toInt()
+}
+
 android {
     namespace = "com.lezi.babylog"
     compileSdk = 35
@@ -37,10 +53,24 @@ android {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
+        versionCode = 8
         versionName = "0.3.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
+        manifestPlaceholders["localDataContractVersion"] = currentLocalDataContract
+        manifestPlaceholders["minimumMigratableLocalDataContractVersion"] =
+            minimumMigratableLocalDataContract
+        buildConfigField("int", "LOCAL_DATA_CONTRACT_VERSION", "$currentLocalDataContract")
+        buildConfigField(
+            "int",
+            "MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION",
+            "$minimumMigratableLocalDataContract",
+        )
+        buildConfigField(
+            "String",
+            "LOCAL_DATA_CONTRACT_ROOM_SCHEMAS",
+            "\"$localDataRoomSchemas\"",
+        )
     }
 
     signingConfigs {
@@ -169,6 +199,69 @@ tasks.matching { it.name == "assembleRelease" }.configureEach {
     doLast { verifyReleaseApkSignatures() }
 }
 
+val validateLocalDataContractLedger = tasks.register("validateLocalDataContractLedger") {
+    group = "verification"
+    description = "Validates the append-only local-data compatibility ledger."
+    inputs.file(localDataContractFile)
+    doLast {
+        val contractMaps = localDataContractEntries
+        val versions = contractMaps.map {
+            (it["contract_version"] as Number).toInt()
+        }
+        check(versions == (1..currentLocalDataContract).toList()) {
+            "Local-data contracts must be append-only and contiguous from 1"
+        }
+        check(minimumMigratableLocalDataContract in versions) {
+            "minimum_migratable_contract must reference a declared contract"
+        }
+        check(permanentBaselineLocalDataContract == 1 &&
+            minimumMigratableLocalDataContract == permanentBaselineLocalDataContract
+        ) {
+            "The permanent local-data compatibility baseline is contract 1 and cannot be raised"
+        }
+        val introducedVersionCodes = contractMaps.map {
+            (it["introduced_in_version_code"] as Number).toInt()
+        }
+        check(introducedVersionCodes.firstOrNull() == 6) {
+            "Local-data contract 1 must remain anchored to Android versionCode 6"
+        }
+        check(introducedVersionCodes.zipWithNext().all { (left, right) -> left < right }) {
+            "introduced_in_version_code must increase for every contract"
+        }
+        listOf(
+            "room_schema",
+            "settings_revision",
+            "credentials_revision",
+            "media_revision",
+        ).forEach { key ->
+            val revisions = contractMaps.map { (it[key] as? Number)?.toInt() ?: 0 }
+            check(revisions.all { it > 0 } &&
+                revisions.zipWithNext().all { (left, right) -> left <= right }
+            ) {
+                "$key must be positive and append-only"
+            }
+        }
+        val migrations = localDataContractLedger["migrations"] as List<*>
+        val migrationPairs = migrations.map { entry ->
+            val migration = entry as Map<*, *>
+            (migration["from_contract"] as Number).toInt() to
+                (migration["to_contract"] as Number).toInt()
+        }
+        check(migrationPairs.all { (from, to) -> to == from + 1 }) {
+            "Every local-data migration must be adjacent"
+        }
+        val requiredPairs = (minimumMigratableLocalDataContract until currentLocalDataContract)
+            .map { it to it + 1 }
+        check(migrationPairs == requiredPairs) {
+            "Every permanently supported contract must have one adjacent migration"
+        }
+    }
+}
+
+tasks.matching { it.name in setOf("preDebugBuild", "preReleaseBuild") }.configureEach {
+    dependsOn(validateLocalDataContractLedger)
+}
+
 dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:common"))
@@ -196,6 +289,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.process)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
@@ -216,6 +310,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.truth)
     testImplementation(libs.junit)
     testImplementation(libs.truth)
 }

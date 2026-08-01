@@ -33,18 +33,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.lezi.babylog.core.common.LocalDataGate
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.designsystem.LeziTheme
+import dagger.Lazy
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class WidgetConfigurationActivity : ComponentActivity() {
-    @Inject lateinit var careLog: CareLog
-    @Inject lateinit var controller: CareWidgetRefreshController
+    @Inject lateinit var localDataGate: LocalDataGate
+    @Inject lateinit var careLog: Lazy<CareLog>
+    @Inject lateinit var controller: Lazy<CareWidgetRefreshController>
 
     private var screenState by mutableStateOf<WidgetConfigurationScreenState?>(null)
 
@@ -87,16 +90,23 @@ class WidgetConfigurationActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch {
-            val babies = careLog.listBabies()
+            if (!localDataGate.ensureReady()) {
+                packageManager.getLaunchIntentForPackage(packageName)?.let(::startActivity)
+                finish()
+                return@launch
+            }
+            val readyCareLog = careLog.get()
+            val readyController = controller.get()
+            val babies = readyCareLog.listBabies()
                 .map { WidgetBabyOption(it.id, it.nickname) }
             if (babies.isEmpty()) {
                 finish()
                 return@launch
             }
-            val existing = controller.configuration(widgetId)
+            val existing = readyController.configuration(widgetId)
             val selectedBabyId = existing?.babyId
                 ?.takeIf { selected -> babies.any { it.id == selected } }
-                ?: careLog.getCurrentBaby()?.id
+                ?: readyCareLog.getCurrentBaby()?.id
                 ?: babies.first().id
             screenState = WidgetConfigurationScreenState(
                 widgetId = widgetId,
@@ -110,7 +120,8 @@ class WidgetConfigurationActivity : ComponentActivity() {
     private fun save(state: WidgetConfigurationScreenState) {
         if (!state.canSave) return
         lifecycleScope.launch {
-            controller.configure(
+            if (!localDataGate.ensureReady()) return@launch
+            controller.get().configure(
                 WidgetConfiguration(
                     widgetId = state.widgetId,
                     babyId = state.selectedBabyId,

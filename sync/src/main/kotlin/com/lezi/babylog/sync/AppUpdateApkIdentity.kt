@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync
 
 import android.content.Context
+import android.content.pm.PackageManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -18,10 +19,16 @@ data class StagedApkIdentity(
      * Empty only when the platform could not surface certificates (fail-closed).
      */
     val signingCertSha256: Set<String>,
+    val localDataContractVersion: Int = 1,
+    val minimumMigratableLocalDataContractVersion: Int = 1,
 ) {
     init {
         require(packageName.isNotBlank()) { "packageName must not be blank" }
         require(versionCode > 0) { "versionCode must be positive" }
+        require(localDataContractVersion > 0) { "localDataContractVersion must be positive" }
+        require(minimumMigratableLocalDataContractVersion in 1..localDataContractVersion) {
+            "minimumMigratableLocalDataContractVersion must be within the target contract range"
+        }
     }
 }
 
@@ -52,6 +59,7 @@ const val APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE = "更新包与本应用�
  * - archive packageName == metadata packageName
  * - archive versionCode == metadata versionCode
  * - archive versionCode > local versionCode
+ * - archive declares a local-data range that contains the installed contract
  * - installed and archive signing cert digests both non-empty and intersect
  *
  * @return null when ok; Chinese product message when rejected.
@@ -67,6 +75,11 @@ fun verifyStagedApkIdentity(
     if (archive.packageName != metadata.packageName) return APP_UPDATE_PACKAGE_INVALID_MESSAGE
     if (archive.versionCode != metadata.versionCode) return APP_UPDATE_PACKAGE_INVALID_MESSAGE
     if (archive.versionCode <= local.versionCode) return APP_UPDATE_PACKAGE_INVALID_MESSAGE
+    if (local.localDataContractVersion !in
+        archive.minimumMigratableLocalDataContractVersion..archive.localDataContractVersion
+    ) {
+        return APP_UPDATE_PACKAGE_INVALID_MESSAGE
+    }
     // Host package must always present signing digests; empty = unreadable → reject.
     if (installedCerts.isEmpty()) return APP_UPDATE_PACKAGE_INVALID_MESSAGE
     if (archive.signingCertSha256.isEmpty()) return APP_UPDATE_PACKAGE_INVALID_MESSAGE
@@ -85,7 +98,7 @@ class AndroidAppUpdateApkIdentityReader @Inject constructor(
         val path = apkFile.absolutePath
         val packageInfo = context.packageManager.getPackageArchiveInfoCompat(
             path,
-            packageSigningInfoFlags(),
+            packageSigningInfoFlags() or PackageManager.GET_META_DATA,
         ) ?: return null
         // Some platform builds need sourceDir set for subsequent field reads.
         packageInfo.applicationInfo?.let { appInfo ->
@@ -95,10 +108,27 @@ class AndroidAppUpdateApkIdentityReader @Inject constructor(
         val packageName = packageInfo.packageName?.takeIf { it.isNotBlank() } ?: return null
         val versionCode = packageInfo.versionCodeCompat()
         if (versionCode <= 0) return null
+        val appMetadata = packageInfo.applicationInfo?.metaData ?: return null
+        val localDataContractVersion = appMetadata.getInt(
+            LOCAL_DATA_CONTRACT_VERSION_METADATA,
+            0,
+        )
+        val minimumMigratableLocalDataContractVersion = appMetadata.getInt(
+            MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION_METADATA,
+            0,
+        )
+        if (localDataContractVersion <= 0 ||
+            minimumMigratableLocalDataContractVersion !in 1..localDataContractVersion
+        ) {
+            return null
+        }
         return StagedApkIdentity(
             packageName = packageName,
             versionCode = versionCode,
             signingCertSha256 = packageInfo.signingCertSha256Digests(),
+            localDataContractVersion = localDataContractVersion,
+            minimumMigratableLocalDataContractVersion =
+                minimumMigratableLocalDataContractVersion,
         )
     }
 
@@ -112,6 +142,11 @@ class AndroidAppUpdateApkIdentityReader @Inject constructor(
         }.getOrDefault(emptySet())
     }
 }
+
+const val LOCAL_DATA_CONTRACT_VERSION_METADATA =
+    "com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION"
+const val MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION_METADATA =
+    "com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION"
 
 /** Fail-closed default for non-DI construction; production binds the Android reader. */
 internal object UnreadableAppUpdateApkIdentityReader : AppUpdateApkIdentityReader {

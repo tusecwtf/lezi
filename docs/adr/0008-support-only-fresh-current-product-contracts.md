@@ -1,8 +1,11 @@
 ---
-status: accepted
+status: partially superseded by ADR-0012
 ---
 
 # 全产品只支持 fresh-current 契约
+
+> Android 本地持久化部分自 0.3.0 基线起由 [ADR-0012](./0012-preserve-android-local-data-across-in-place-upgrades.md)
+> 取代；NAS schema 与家庭同步 wire 仍按本文 fresh-current、fail-closed。
 
 Android、家庭同步协议与 NAS 服务只支持当前版本创建的数据和当前版本之间的交互，
 不再维护从旧 Room schema、旧 payload、旧计时/提醒状态、旧 NAS schema 或旧 wire
@@ -14,8 +17,9 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
 
 ## 当前合同
 
-- Android 只从当前 Room schema 新建数据库，并只读写当前 payload。当前 schema 的数据库
-  可在同版本进程重启后继续使用；旧 Room schema、旧 payload 与旧计时/提醒状态不是受支持输入。
+- Android 在 0.3.0 之前只从当前 Room schema 新建数据库；0.3.0 起使用独立本地数据契约和
+  相邻迁移链承诺原地升级保留。基线之前的旧 Room schema 仍不是受支持输入，但必须在业务
+  数据打开前稳定阻断且不得自动删除。
 - 当前记录目录不含 `memo`、`other` 或无具体项目身份的裸 `custom`；具体自定义项目仍以
   `custom_item_id` 创建 current `custom` Record。照片只使用当前 Record/MediaAsset 关联。
 - 护理记录表示已发生事实，护理计划表示未来意图。乐记日历只展示 `CarePlan`，系统日历
@@ -46,5 +50,5 @@ fresh-current 不取消已声明的平台兼容：Android 继续支持 `minSdk` 
 
 同样保留当前格式内的故障恢复：事务回滚、WAL/文件持久化、原子媒体发布、幂等重试、
 当前提醒与计时状态的进程重启恢复、游标/generation 全量校准、权限撤销与 provider 失败
-恢复。Release 证据必须来自 fresh install、同一 current schema 重启持久化、current wire
-端到端和这些故障路径；旧版本升级或旧入口 smoke 不再是门禁，也不能冒充当前验收。
+恢复。NAS/wire Release 证据仍来自 fresh-current 端到端；Android Release 另须证明从已承诺
+本地数据契约原地替换后数据保持、失败无破坏，以及目标 APK 的契约兼容门禁。

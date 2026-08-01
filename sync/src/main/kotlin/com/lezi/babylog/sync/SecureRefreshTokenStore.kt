@@ -22,6 +22,7 @@ interface SecureRefreshTokenStore {
     fun getPendingMemberSecret(): String = ""
     fun setPendingMemberSecret(secret: String) = Unit
     fun clearPendingMemberSecret() = Unit
+    fun verifyReadable() = Unit
 }
 
 /** Process-local token store for JVM unit tests. */
@@ -54,7 +55,10 @@ class InMemorySecureRefreshTokenStore : SecureRefreshTokenStore {
 class EncryptedSecureRefreshTokenStore @Inject constructor(
     @ApplicationContext context: Context,
 ) : SecureRefreshTokenStore {
-    private val prefs: SharedPreferences = createPrefs(context)
+    private val applicationContext = context.applicationContext
+    private val prefs: SharedPreferences by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        createPrefs(applicationContext)
+    }
 
     override fun getToken(): String = prefs.getString(KEY_REFRESH_TOKEN, "").orEmpty()
 
@@ -91,6 +95,10 @@ class EncryptedSecureRefreshTokenStore @Inject constructor(
         check(prefs.edit().remove(KEY_PENDING_MEMBER_SECRET).commit()) {
             "Unable to clear encrypted pending member secret"
         }
+    }
+
+    override fun verifyReadable() {
+        prefs.all
     }
 
     private companion object {

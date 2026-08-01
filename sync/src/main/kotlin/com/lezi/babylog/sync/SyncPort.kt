@@ -141,16 +141,20 @@ data class ClientAppVersion(
     val versionCode: Int,
     val versionName: String,
     val packageName: String = "com.lezi.babylog",
+    val localDataContractVersion: Int = 1,
 ) {
     init {
         require(versionCode > 0) { "versionCode must be positive" }
         require(versionName.isNotBlank()) { "versionName must not be blank" }
         require(packageName.isNotBlank()) { "packageName must not be blank" }
+        require(localDataContractVersion > 0) {
+            "localDataContractVersion must be positive"
+        }
     }
 
     companion object {
         /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
-        val FALLBACK = ClientAppVersion(versionCode = 6, versionName = "0.3.0")
+        val FALLBACK = ClientAppVersion(versionCode = 8, versionName = "0.3.1")
     }
 }
 

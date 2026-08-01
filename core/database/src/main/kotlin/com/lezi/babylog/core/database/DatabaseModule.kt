@@ -12,11 +12,11 @@ import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
 /**
- * Builds the current Room schema for a fresh installation.
+ * Builds the Room schema after the process-wide local-data gate has verified it.
  *
- * Deliberately registers neither historical migrations nor a destructive
- * fallback. A database from any older schema therefore fails to open instead
- * of being silently upgraded or erased.
+ * Contract v1 has no predecessor migration. Future adjacent migrations are
+ * coordinated by LocalDataGate before this provider is requested. Destructive
+ * fallback remains forbidden as a final storage-boundary safeguard.
  */
 internal fun buildLeziDatabase(
     context: Context,

@@ -1,7 +1,9 @@
 # 乐记 — 数据模型与同步契约
 
 > 当前 Android 以 **Room** 为本地真相源，并经 **`SyncPort`** 接家庭局域网 `lezi-sync`。
-> 只支持当前 Room schema、当前 payload 与当前 NAS wire；见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)。
+> Android 自 0.3.0 的本地数据契约 v1 起永久支持原地升级保留；当前 NAS wire 仍为 fresh-current。
+> 见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md) 与
+> [ADR-0012](../adr/0012-preserve-android-local-data-across-in-place-upgrades.md)。
 > 主 PRD：[`README.md`](./README.md)
 >
 > **当前身份与网络合同（0.3.1）：** 历史的一设备一 membership、`left_at`、长期
@@ -575,7 +577,8 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 ## 8. 当前数据层
 
-当前 Android fresh Room schema 为 v24，包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
+Android 本地数据契约 v1（0.3.0 / versionCode 6 起）的 Room schema 为 v24，包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
 SettingsLocal、ShareInvite、Outbox、CustomItemDef、CarePlan 与 FulfillmentCandidate，
-并使用真实 `SyncPort` 和 Record/计划媒体原子包。非 current Room schema 不属于支持输入；
-当前数据库在进程重启后必须完整保留业务数据、Outbox、计时与提醒恢复状态。
+并使用真实 `SyncPort` 和 Record/计划媒体原子包。后续本地数据契约必须通过相邻迁移链保留
+Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前无破坏阻断。
+当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、Outbox、计时与提醒恢复状态。

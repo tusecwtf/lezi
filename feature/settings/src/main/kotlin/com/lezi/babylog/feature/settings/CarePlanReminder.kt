@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.lezi.babylog.core.common.LocalDataGate
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
@@ -24,6 +25,7 @@ import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.Lazy
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -145,7 +147,8 @@ class CarePlanReminderScheduler @Inject constructor(
 
 @AndroidEntryPoint
 class CarePlanReminderReceiver : BroadcastReceiver() {
-    @Inject lateinit var careLog: CareLog
+    @Inject lateinit var localDataGate: LocalDataGate
+    @Inject lateinit var careLog: Lazy<CareLog>
 
     override fun onReceive(context: Context, intent: Intent?) {
         val title = intent?.getStringExtra(CarePlanReminderAlarm.EXTRA_TITLE)
@@ -167,8 +170,9 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
                     Log.e(TAG, "Care-plan reminder delivery failed", failure)
                 },
             ) {
+                if (!localDataGate.ensureReady()) return@runBroadcastWork
                 if (
-                    careLog.shouldDeliverCarePlanReminder(
+                    careLog.get().shouldDeliverCarePlanReminder(
                         carePlanId = planId,
                         clientUuid = planUuid,
                         expectedScheduledAt = expectedScheduledAt,
@@ -234,7 +238,8 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
 
 @AndroidEntryPoint
 class BootReceiver : BroadcastReceiver() {
-    @Inject lateinit var carePlanScheduler: CarePlanReminderScheduler
+    @Inject lateinit var localDataGate: LocalDataGate
+    @Inject lateinit var carePlanScheduler: Lazy<CarePlanReminderScheduler>
 
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
@@ -245,8 +250,9 @@ class BootReceiver : BroadcastReceiver() {
                 reportFailure = { failure ->
                     Log.e(TAG, "Care-plan reminder reschedule after boot failed", failure)
                 },
-                work = carePlanScheduler::rescheduleAll,
-            )
+            ) {
+                if (localDataGate.ensureReady()) carePlanScheduler.get().rescheduleAll()
+            }
         }
     }
 
