@@ -81,33 +81,39 @@ internal class RecordComposerSavedState(
 
     fun draftForCleanup(): QuickRecordDraft? = handle[DRAFT_KEY]
 
-    fun savePendingNextFeed(
-        babyId: Long,
-        type: RecordType,
-        suggestedAtMillis: Long,
-        factMessage: String,
-    ) {
-        handle[PENDING_NEXT_FEED_BABY_KEY] = babyId
-        handle[PENDING_NEXT_FEED_TYPE_KEY] = type.key
-        handle[PENDING_NEXT_FEED_SUGGESTED_AT_KEY] = suggestedAtMillis
-        handle[PENDING_NEXT_FEED_MESSAGE_KEY] = factMessage
+    /** Persist the whole offer as one Serializable blob (all-or-nothing restore). */
+    fun savePendingNextFeed(pending: PendingNextFeed) {
+        handle[PENDING_NEXT_FEED_KEY] = pending
+        // Drop legacy multi-key shape if present from earlier builds.
+        clearLegacyPendingNextFeedKeys()
     }
 
     fun pendingNextFeed(): PendingNextFeed? {
-        val babyId = handle.get<Long>(PENDING_NEXT_FEED_BABY_KEY) ?: return null
-        val type = handle.get<String>(PENDING_NEXT_FEED_TYPE_KEY)
-            ?.let(RecordType::fromKey) ?: return null
-        val suggestedAtMillis = handle.get<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY) ?: return null
-        // Message is required for a presentable offer; fall back for partial pre-upgrade rows.
-        val factMessage = handle.get<String>(PENDING_NEXT_FEED_MESSAGE_KEY) ?: "记录已保存"
-        return PendingNextFeed(babyId, type, suggestedAtMillis, factMessage)
+        handle.get<PendingNextFeed>(PENDING_NEXT_FEED_KEY)?.let { return it }
+        // One-shot migration from pre-blob multi-key rows; rewrite as single blob.
+        val legacy = readLegacyPendingNextFeed() ?: return null
+        handle[PENDING_NEXT_FEED_KEY] = legacy
+        clearLegacyPendingNextFeedKeys()
+        return legacy
     }
 
     fun clearPendingNextFeed() {
-        handle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
-        handle.remove<String>(PENDING_NEXT_FEED_TYPE_KEY)
-        handle.remove<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
-        handle.remove<String>(PENDING_NEXT_FEED_MESSAGE_KEY)
+        handle.remove<PendingNextFeed>(PENDING_NEXT_FEED_KEY)
+        clearLegacyPendingNextFeedKeys()
+    }
+
+    /**
+     * Durable one-shot finish copy for non-feed success (or after next-feed complete/skip).
+     * Cleared when Host acknowledges presentation.
+     */
+    fun savePendingFinishMessage(message: String) {
+        handle[PENDING_FINISH_MESSAGE_KEY] = message
+    }
+
+    fun pendingFinishMessage(): String? = handle[PENDING_FINISH_MESSAGE_KEY]
+
+    fun clearPendingFinishMessage() {
+        handle.remove<String>(PENDING_FINISH_MESSAGE_KEY)
     }
 
     fun clear() {
@@ -116,28 +122,61 @@ internal class RecordComposerSavedState(
         handle.remove<QuickRecordDraft>(INITIAL_DRAFT_KEY)
     }
 
+    private fun readLegacyPendingNextFeed(): PendingNextFeed? {
+        val babyId = handle.get<Long>(LEGACY_PENDING_NEXT_FEED_BABY_KEY) ?: return null
+        val type = handle.get<String>(LEGACY_PENDING_NEXT_FEED_TYPE_KEY)
+            ?.let(RecordType::fromKey) ?: return null
+        val suggestedAtMillis = handle.get<Long>(LEGACY_PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
+            ?: return null
+        val factMessage = handle.get<String>(LEGACY_PENDING_NEXT_FEED_MESSAGE_KEY) ?: return null
+        return PendingNextFeed(babyId, type, suggestedAtMillis, factMessage)
+    }
+
+    private fun clearLegacyPendingNextFeedKeys() {
+        handle.remove<Long>(LEGACY_PENDING_NEXT_FEED_BABY_KEY)
+        handle.remove<String>(LEGACY_PENDING_NEXT_FEED_TYPE_KEY)
+        handle.remove<Long>(LEGACY_PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
+        handle.remove<String>(LEGACY_PENDING_NEXT_FEED_MESSAGE_KEY)
+    }
+
     private companion object {
         const val REQUEST_KEY = "record_composer_saved_request"
         const val DRAFT_KEY = "record_composer_saved_draft"
         const val INITIAL_DRAFT_KEY = "record_composer_saved_initial_draft"
-        const val PENDING_NEXT_FEED_BABY_KEY = "pending_next_feed_baby"
-        const val PENDING_NEXT_FEED_TYPE_KEY = "pending_next_feed_type"
-        const val PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "pending_next_feed_suggested_at"
-        const val PENDING_NEXT_FEED_MESSAGE_KEY = "pending_next_feed_message"
+        const val PENDING_NEXT_FEED_KEY = "pending_next_feed"
+        const val PENDING_FINISH_MESSAGE_KEY = "pending_finish_message"
+        const val LEGACY_PENDING_NEXT_FEED_BABY_KEY = "pending_next_feed_baby"
+        const val LEGACY_PENDING_NEXT_FEED_TYPE_KEY = "pending_next_feed_type"
+        const val LEGACY_PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "pending_next_feed_suggested_at"
+        const val LEGACY_PENDING_NEXT_FEED_MESSAGE_KEY = "pending_next_feed_message"
     }
 }
 
 /**
  * Durable post-fact next-feed offer: identity for schedule/reconcile, suggested time, and the
  * fact-success copy shown while the user chooses whether to plan. Survives request clear and
- * process recreation independently of the restorable Composer draft.
+ * process recreation independently of the restorable Composer draft. Single Serializable blob in
+ * SavedState — restore is all-or-nothing (no multi-key partial fallbacks).
  */
 internal data class PendingNextFeed(
     val babyId: Long,
     val type: RecordType,
     val suggestedAtMillis: Long,
     val factMessage: String,
-)
+) : java.io.Serializable {
+    companion object {
+        private const val serialVersionUID: Long = 1L
+    }
+}
+
+/** In-memory + SavedState snapshot of any still-open post-write stage. */
+internal data class ComposerPostSaveStage(
+    val pendingNextFeedOffer: PendingNextFeed? = null,
+    val pendingFinishMessage: String? = null,
+) {
+    val isActive: Boolean
+        get() = pendingNextFeedOffer != null || pendingFinishMessage != null
+}
 
 internal data class RecordComposerUiState(
     val activeRequest: RecordComposerRequest? = null,
@@ -167,8 +206,8 @@ internal data class RecordComposerUiState(
      */
     val pendingNextFeedOffer: PendingNextFeed? = null,
     /**
-     * One-shot finish copy (non-feed success, or next-feed completed/skipped). Host presents once
-     * then acknowledges; re-subscribe must not re-fire after acknowledge.
+     * One-shot finish copy (non-feed success, or next-feed completed/skipped). Durable in
+     * SavedState until Host acknowledges; re-subscribe must not re-fire after acknowledge.
      */
     val pendingFinishMessage: String? = null,
 ) {
@@ -176,6 +215,9 @@ internal data class RecordComposerUiState(
         get() = initialDraft?.let { baseline ->
             draft?.let { current -> hasRecordComposerUserChanges(baseline, current) }
         } ?: false
+
+    val hasPostSaveStage: Boolean
+        get() = pendingNextFeedOffer != null || pendingFinishMessage != null
 }
 
 /** One immutable write decision for a confirm attempt; never resample wall-clock mode mid-save. */

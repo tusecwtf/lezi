@@ -41,8 +41,18 @@ class RecordComposerViewModel @Inject constructor(
     private val photoLifecycle = RecordComposerPhotoLifecycle(photoStore::delete)
     private val importSave = RecordComposerImportSaveSerialization()
     private val _state = MutableStateFlow(
-        // Process recreation: restore durable next-feed offer before any composition subscribes.
-        RecordComposerUiState(pendingNextFeedOffer = savedState.pendingNextFeed()),
+        // Process recreation: restore durable post-save stage before any composition subscribes.
+        run {
+            val restored = rehydrateComposerPostSaveStage(
+                pendingNextFeedOffer = null,
+                pendingFinishMessage = null,
+                savedState = savedState,
+            )
+            RecordComposerUiState(
+                pendingNextFeedOffer = restored.pendingNextFeedOffer,
+                pendingFinishMessage = restored.pendingFinishMessage,
+            )
+        },
     )
     internal val state = _state.asStateFlow()
     private var loadJob: Job? = null
@@ -52,6 +62,21 @@ class RecordComposerViewModel @Inject constructor(
 
     internal fun open(request: RecordComposerRequest) {
         val current = _state.value
+        // Refuse re-arming restorable write identity while a durable post-save stage is live.
+        // Process death after fact commit may still present Activity root New; open must not
+        // re-initialize a draft under a pending next-feed offer (AC: 不能重复写事实).
+        val livePostSave = rehydrateComposerPostSaveStage(
+            pendingNextFeedOffer = current.pendingNextFeedOffer,
+            pendingFinishMessage = current.pendingFinishMessage,
+            savedState = savedState,
+        )
+        if (livePostSave.isActive) {
+            _state.value = recordComposerClosedUiState(
+                pendingNextFeedOffer = livePostSave.pendingNextFeedOffer,
+                pendingFinishMessage = livePostSave.pendingFinishMessage,
+            )
+            return
+        }
         if (current.activeRequest == request && (current.loading || current.draft != null)) return
         val restoredDraft = savedState.restore(request)
         val restoredInitialDraft = savedState.restoreInitial(request)
@@ -61,12 +86,9 @@ class RecordComposerViewModel @Inject constructor(
         loadJob?.cancel()
         actionJob?.cancel()
         settingsObserveJob?.cancel()
-        // Keep any durable post-save offer visible under a new sheet session.
         _state.value = RecordComposerUiState(
             activeRequest = request,
             loading = true,
-            pendingNextFeedOffer = current.pendingNextFeedOffer ?: savedState.pendingNextFeed(),
-            pendingFinishMessage = current.pendingFinishMessage,
         )
         loadJob = viewModelScope.launch {
             // Mirror save: join cancelled import before reset so late produce is reclaimed.
@@ -87,11 +109,12 @@ class RecordComposerViewModel @Inject constructor(
             } catch (error: Throwable) {
                 currentCoroutineContext().ensureActive()
                 sessionGate.deliver(session) {
+                    val stage = currentPostSaveStage()
                     _state.value = RecordComposerUiState(
                         activeRequest = request,
                         error = productUiError(error, "记录设置加载失败"),
-                        pendingNextFeedOffer = _state.value.pendingNextFeedOffer,
-                        pendingFinishMessage = _state.value.pendingFinishMessage,
+                        pendingNextFeedOffer = stage.pendingNextFeedOffer,
+                        pendingFinishMessage = stage.pendingFinishMessage,
                     )
                 }
                 return@launch
@@ -218,6 +241,7 @@ class RecordComposerViewModel @Inject constructor(
             } catch (error: Throwable) {
                 currentCoroutineContext().ensureActive()
                 sessionGate.deliver(session) {
+                    val stage = currentPostSaveStage()
                     _state.value = RecordComposerUiState(
                         activeRequest = request,
                         amountStepMl = settings.amountStepMl,
@@ -226,8 +250,8 @@ class RecordComposerViewModel @Inject constructor(
                         preferredHand = settings.preferredHand,
                         infantFeverAdviceEnabled = settings.infantFeverAdviceEnabled,
                         error = productUiError(error, "记录加载失败"),
-                        pendingNextFeedOffer = _state.value.pendingNextFeedOffer,
-                        pendingFinishMessage = _state.value.pendingFinishMessage,
+                        pendingNextFeedOffer = stage.pendingNextFeedOffer,
+                        pendingFinishMessage = stage.pendingFinishMessage,
                     )
                 }
                 return@launch
@@ -239,9 +263,15 @@ class RecordComposerViewModel @Inject constructor(
                 val activeDraft = restoredDraft ?: draft
                 val systemCalConfigured = settings.systemCalendarEnabled &&
                     !settings.systemCalendarId.isNullOrBlank()
-                val postSaveOffer = _state.value.pendingNextFeedOffer
-                    ?: savedState.pendingNextFeed()
-                val postSaveFinish = _state.value.pendingFinishMessage
+                // Refuse initialize if a post-save stage appeared mid-load (e.g. concurrent path).
+                val stage = currentPostSaveStage()
+                if (stage.isActive) {
+                    _state.value = recordComposerClosedUiState(
+                        pendingNextFeedOffer = stage.pendingNextFeedOffer,
+                        pendingFinishMessage = stage.pendingFinishMessage,
+                    )
+                    return@deliver
+                }
                 _state.value = RecordComposerUiState(
                     activeRequest = request,
                     draft = activeDraft,
@@ -261,8 +291,6 @@ class RecordComposerViewModel @Inject constructor(
                         timerEnabled = settings.timerEnabled,
                     ),
                     systemCalendarConfigured = systemCalConfigured,
-                    pendingNextFeedOffer = postSaveOffer,
-                    pendingFinishMessage = postSaveFinish,
                 )
                 savedState.initialize(request, initialDraft, activeDraft)
                 // Keep projection chrome in sync if user completes setup mid-sheet.
@@ -287,8 +315,7 @@ class RecordComposerViewModel @Inject constructor(
         val (preemptedOrphans, previousImport) = beginImportPreemption()
         importJob = null
         // Preserve durable next-feed offer / finish copy across sheet close and config change.
-        val pendingOffer = _state.value.pendingNextFeedOffer ?: savedState.pendingNextFeed()
-        val pendingFinish = _state.value.pendingFinishMessage
+        val stage = currentPostSaveStage()
         savedState.clear()
         sessionGate.close()
         loadJob?.cancel()
@@ -298,8 +325,8 @@ class RecordComposerViewModel @Inject constructor(
         actionJob = null
         settingsObserveJob = null
         _state.value = recordComposerClosedUiState(
-            pendingNextFeedOffer = pendingOffer,
-            pendingFinishMessage = pendingFinish,
+            pendingNextFeedOffer = stage.pendingNextFeedOffer,
+            pendingFinishMessage = stage.pendingFinishMessage,
         )
         // Join import before reset/drain so cancel-after-write paths are not dropped.
         viewModelScope.launch(NonCancellable) {
@@ -438,8 +465,8 @@ class RecordComposerViewModel @Inject constructor(
                 return@launch
             }
             val writeDecision = draft.writeDecision(RecordTime.currentTimeMillis())
-            val outcome = try {
-                val command = draft.toSaveCommand()
+            val command = draft.toSaveCommand()
+            try {
                 when (writeDecision) {
                     ComposerWriteDecision.UpdateCarePlan -> careLog.updateCarePlan(
                         carePlanId = requireNotNull(draft.carePlanId),
@@ -512,84 +539,6 @@ class RecordComposerViewModel @Inject constructor(
                         photoLocalPaths = draft.photos,
                     )
                 }
-                // Only discarded draft-owned imports are cleaned here. Persisted source paths
-                // are reclaimed by reference-aware domain cleanup after the Room commit.
-                photoLifecycle.cleanupAfterCommit(draft)
-                val message = when (writeDecision) {
-                    ComposerWriteDecision.UpdateCarePlan -> "已保存护理计划"
-                    ComposerWriteDecision.FulfillCarePlan -> "已完成护理计划"
-                    ComposerWriteDecision.ConvertRecordToCarePlan -> {
-                        val label = if (command.type == RecordType.CUSTOM) {
-                            draft.customTitle.trim().ifBlank {
-                                command.type.presentation.label
-                            }
-                        } else {
-                            command.type.presentation.label
-                        }
-                        "已转为护理计划 · $label"
-                    }
-                    ComposerWriteDecision.CreateCarePlan -> {
-                        val label = if (command.type == RecordType.CUSTOM) {
-                            draft.customTitle.trim().ifBlank {
-                                command.type.presentation.label
-                            }
-                        } else {
-                            command.type.presentation.label
-                        }
-                        "已安排$label"
-                    }
-                    ComposerWriteDecision.ConfirmSleep -> when {
-                        draft.sleepAction == SleepDraftAction.SleepDown &&
-                            draft.endTimestamp == null -> "已开始睡眠"
-                        draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
-                        else -> "已记录醒来"
-                    }
-                    ComposerWriteDecision.UpdateRecord -> "已保存修改"
-                    ComposerWriteDecision.AddRecord -> {
-                        val label = if (command.type == RecordType.CUSTOM) {
-                            draft.customTitle.trim().ifBlank {
-                                command.type.presentation.label
-                            }
-                        } else {
-                            command.type.presentation.label
-                        }
-                        "已记录$label"
-                    }
-                }
-                val suggestedNextFeedAt = if (
-                    shouldOfferNextFeedPlanForFact(
-                        type = command.type,
-                        createdNewFact = writeDecision == ComposerWriteDecision.AddRecord,
-                        sourceCarePlanId = draft.carePlanId,
-                    )
-                ) {
-                    val intervalMinutes = try {
-                        settingsStore.settings.first().nursingIntervalMin
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Throwable) {
-                        180
-                    }
-                    nextFeedSuggestedAt(RecordTime.currentTimeMillis(), intervalMinutes)
-                } else {
-                    null
-                }
-                // Durable post-fact stage + consume restorable request immediately after write
-                // success (before deliver), so process death cannot re-open the New draft.
-                val postSave = composerPostSaveOutcome(
-                    message = message,
-                    suggestedNextFeedAt = suggestedNextFeedAt,
-                    babyId = babyId,
-                    type = command.type,
-                )
-                withContext(NonCancellable) {
-                    applyComposerPostSaveOutcome(
-                        current = _state.value,
-                        savedState = savedState,
-                        outcome = postSave,
-                        committedPhotos = draft.photos,
-                    )
-                }
             } catch (cancelled: CancellationException) {
                 importSave.endCommit()
                 throw cancelled
@@ -606,32 +555,68 @@ class RecordComposerViewModel @Inject constructor(
                 }
                 return@launch
             }
-            // Publish observable post-save stage while this session is still active.
-            // Pending offer already lives in SavedState when deliver is skipped; close() and
-            // process recreation rehydrate from SavedState for any new composition.
-            if (!sessionGate.deliver(session) { _state.value = outcome }) {
-                // Session already advanced — still surface durable offer if present.
-                val durable = outcome.pendingNextFeedOffer ?: savedState.pendingNextFeed()
-                if (durable != null) {
-                    _state.update {
-                        it.copy(
-                            saving = false,
-                            pendingNextFeedOffer = durable,
-                            pendingFinishMessage = outcome.pendingFinishMessage,
-                        )
+            // Domain write succeeded. Post-commit cancel must publish durable stage rather than
+            // surface save failure / leave restorable request intact (AC3 / dual-master fix).
+            withContext(NonCancellable) {
+                // Only discarded draft-owned imports are cleaned here. Persisted source paths
+                // are reclaimed by reference-aware domain cleanup after the Room commit.
+                runCatching { photoLifecycle.cleanupAfterCommit(draft) }
+                val message = composerSaveSuccessMessage(
+                    writeDecision = writeDecision,
+                    draft = draft,
+                    commandType = command.type,
+                )
+                val suggestedNextFeedAt = if (
+                    shouldOfferNextFeedPlanForFact(
+                        type = command.type,
+                        createdNewFact = writeDecision == ComposerWriteDecision.AddRecord,
+                        sourceCarePlanId = draft.carePlanId,
+                    )
+                ) {
+                    // Non-cancelling default: CancellationException must not drop the offer.
+                    val intervalMinutes = try {
+                        settingsStore.settings.first().nursingIntervalMin
+                    } catch (_: Throwable) {
+                        180
                     }
-                } else if (outcome.pendingFinishMessage != null) {
+                    nextFeedSuggestedAt(RecordTime.currentTimeMillis(), intervalMinutes)
+                } else {
+                    null
+                }
+                val postSaveOutcome = composerPostSaveOutcome(
+                    message = message,
+                    suggestedNextFeedAt = suggestedNextFeedAt,
+                    babyId = babyId,
+                    type = command.type,
+                )
+                // Persist durable stage + clear restorable request, then publish observable state.
+                val appliedState = applyComposerPostSaveOutcome(
+                    current = _state.value,
+                    savedState = savedState,
+                    outcome = postSaveOutcome,
+                    committedPhotos = draft.photos,
+                )
+                // Publish while this session is still active. Pending already lives in SavedState
+                // when deliver is skipped; close() / process recreation rehydrate for any composition.
+                if (!sessionGate.deliver(session) { _state.value = appliedState }) {
+                    val durable = rehydrateComposerPostSaveStage(
+                        pendingNextFeedOffer = appliedState.pendingNextFeedOffer,
+                        pendingFinishMessage = appliedState.pendingFinishMessage,
+                        savedState = savedState,
+                    )
                     _state.update {
                         it.copy(
                             saving = false,
-                            pendingFinishMessage = outcome.pendingFinishMessage,
+                            activeRequest = null,
+                            pendingNextFeedOffer = durable.pendingNextFeedOffer,
+                            pendingFinishMessage = durable.pendingFinishMessage,
                         )
                     }
                 }
+                // Always clear commit lock — sheet close also resets, but a missed deliver
+                // must not leave import blocked.
+                importSave.endCommit()
             }
-            // Always clear commit lock — sheet close also resets, but a missed deliver
-            // must not leave import blocked.
-            importSave.endCommit()
         }
     }
 
@@ -671,17 +656,13 @@ class RecordComposerViewModel @Inject constructor(
         }
     }
 
-    internal fun dismissNextFeedPlan() {
-        savedState.clearPendingNextFeed()
-        _state.update { it.copy(pendingNextFeedOffer = null) }
-    }
-
     /**
      * User completed or skipped the next-feed flow. Clears durable pending identity and publishes
-     * a one-shot finish message for the current composition to present (Snackbar / exit).
+     * a durable one-shot finish message for the current composition to present (Snackbar / exit).
      */
     internal fun completeNextFeedOffer(finishMessage: String) {
         savedState.clearPendingNextFeed()
+        savedState.savePendingFinishMessage(finishMessage)
         _state.update {
             it.copy(
                 pendingNextFeedOffer = null,
@@ -692,6 +673,7 @@ class RecordComposerViewModel @Inject constructor(
 
     /** Host presented [RecordComposerUiState.pendingFinishMessage] once; clear to avoid re-fire. */
     internal fun acknowledgeFinishMessage() {
+        savedState.clearPendingFinishMessage()
         _state.update { it.copy(pendingFinishMessage = null) }
     }
 
@@ -772,4 +754,51 @@ class RecordComposerViewModel @Inject constructor(
         savedState.update(request, draft)
     }
 
+    private fun currentPostSaveStage(): ComposerPostSaveStage =
+        rehydrateComposerPostSaveStage(
+            pendingNextFeedOffer = _state.value.pendingNextFeedOffer,
+            pendingFinishMessage = _state.value.pendingFinishMessage,
+            savedState = savedState,
+        )
+}
+
+/** Pure success copy for a completed Composer write (no suspend / settings I/O). */
+internal fun composerSaveSuccessMessage(
+    writeDecision: ComposerWriteDecision,
+    draft: QuickRecordDraft,
+    commandType: RecordType,
+): String = when (writeDecision) {
+    ComposerWriteDecision.UpdateCarePlan -> "已保存护理计划"
+    ComposerWriteDecision.FulfillCarePlan -> "已完成护理计划"
+    ComposerWriteDecision.ConvertRecordToCarePlan -> {
+        val label = if (commandType == RecordType.CUSTOM) {
+            draft.customTitle.trim().ifBlank { commandType.presentation.label }
+        } else {
+            commandType.presentation.label
+        }
+        "已转为护理计划 · $label"
+    }
+    ComposerWriteDecision.CreateCarePlan -> {
+        val label = if (commandType == RecordType.CUSTOM) {
+            draft.customTitle.trim().ifBlank { commandType.presentation.label }
+        } else {
+            commandType.presentation.label
+        }
+        "已安排$label"
+    }
+    ComposerWriteDecision.ConfirmSleep -> when {
+        draft.sleepAction == SleepDraftAction.SleepDown &&
+            draft.endTimestamp == null -> "已开始睡眠"
+        draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
+        else -> "已记录醒来"
+    }
+    ComposerWriteDecision.UpdateRecord -> "已保存修改"
+    ComposerWriteDecision.AddRecord -> {
+        val label = if (commandType == RecordType.CUSTOM) {
+            draft.customTitle.trim().ifBlank { commandType.presentation.label }
+        } else {
+            commandType.presentation.label
+        }
+        "已记录$label"
+    }
 }

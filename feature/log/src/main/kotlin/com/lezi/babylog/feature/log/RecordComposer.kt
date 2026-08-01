@@ -149,6 +149,7 @@ fun RecordComposerHost(
     // locals mutated by a late save callback from a disposed composition.
     val pendingNextFeedOffer = state.pendingNextFeedOffer
     val pendingFinishMessage = state.pendingFinishMessage
+    val postSaveActive = hasComposerPostSaveStage(pendingNextFeedOffer, pendingFinishMessage)
 
     fun finishDismiss() {
         confirmDiscard = false
@@ -198,16 +199,22 @@ fun RecordComposerHost(
         confirmValueChange = sheetConfirmValueChange,
     )
 
-    LaunchedEffect(request) {
-        if (request == null) {
-            vm.close()
-        } else {
-            vm.open(request)
+    // Key on post-save too: after complete/skip, a still-set root must open; while post-save is
+    // live, open() refuses re-arming restorable write identity under the durable offer.
+    LaunchedEffect(request, postSaveActive) {
+        when {
+            request == null -> vm.close()
+            postSaveActive -> {
+                // Keep durable stage; do not re-initialize New under an open offer/finish.
+                // Root is consumed by the post-save presentation effect below.
+            }
+            else -> vm.open(request)
         }
     }
 
     // Consume restorable root as soon as a post-save stage is observable; present finish once.
-    LaunchedEffect(pendingNextFeedOffer, pendingFinishMessage) {
+    // Include [request] so a conflicting re-open while offer is live re-runs consumption.
+    LaunchedEffect(request, pendingNextFeedOffer, pendingFinishMessage) {
         consumeComposerPostSavePresentation(
             pendingNextFeedOffer = pendingNextFeedOffer,
             pendingFinishMessage = pendingFinishMessage,
@@ -230,7 +237,10 @@ fun RecordComposerHost(
         )
     }
 
-    if (request != null) {
+    // Write sheet only when root request is live and no post-save stage owns the composition
+    // (avoids sheet + next-feed flow stacking after process death with root still set).
+    if (request != null && !postSaveActive) {
+        val openRequest = request
         RecordComposerModalSheet(
             onDismissRequest = { requestDismiss(ComposerDismissSource.SheetDismiss) },
             sheetState = sheetState,
@@ -253,7 +263,7 @@ fun RecordComposerHost(
                 }
             },
         ) {
-            val ready = state.activeRequest == request
+            val ready = state.activeRequest == openRequest
             val draft = state.draft.takeIf { ready }
             when {
                 !ready || state.loading -> ComposerState(
@@ -273,7 +283,7 @@ fun RecordComposerHost(
                 )
                 else -> QuickRecordSheet(
                     draft = draft,
-                    interactionKey = request,
+                    interactionKey = openRequest,
                     amountStepMl = state.amountStepMl,
                     timeStepMin = state.timeStepMin,
                     timePickerStyle = state.timePickerStyle,

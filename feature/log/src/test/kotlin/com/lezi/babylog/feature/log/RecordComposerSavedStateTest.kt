@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.log
 import androidx.lifecycle.SavedStateHandle
 import com.lezi.babylog.core.model.RecordType
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -114,10 +115,12 @@ class RecordComposerSavedStateTest {
         )
         saved.initialize(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
         saved.savePendingNextFeed(
-            babyId = 7L,
-            type = RecordType.FORMULA,
-            suggestedAtMillis = 9_000L,
-            factMessage = "已记录配方奶",
+            PendingNextFeed(
+                babyId = 7L,
+                type = RecordType.FORMULA,
+                suggestedAtMillis = 9_000L,
+                factMessage = "已记录配方奶",
+            ),
         )
 
         saved.clear()
@@ -140,10 +143,12 @@ class RecordComposerSavedStateTest {
     fun recreatedHandleRestoresUnifiedNextFeedOfferIncludingFactMessage() {
         val handle = SavedStateHandle()
         RecordComposerSavedState(handle).savePendingNextFeed(
-            babyId = 3L,
-            type = RecordType.NURSING,
-            suggestedAtMillis = 12_000L,
-            factMessage = "已记录母乳",
+            PendingNextFeed(
+                babyId = 3L,
+                type = RecordType.NURSING,
+                suggestedAtMillis = 12_000L,
+                factMessage = "已记录母乳",
+            ),
         )
 
         val restored = RecordComposerSavedState(handle).pendingNextFeed()
@@ -157,6 +162,52 @@ class RecordComposerSavedStateTest {
             ),
             restored,
         )
+    }
+
+    @Test
+    fun partialLegacyMultiKeyOfferIsNotRestoredWithoutMessage() {
+        val handle = SavedStateHandle()
+        // Legacy partial row without message must not invent a presentable offer.
+        handle["pending_next_feed_baby"] = 7L
+        handle["pending_next_feed_type"] = RecordType.FORMULA.key
+        handle["pending_next_feed_suggested_at"] = 9_000L
+
+        assertNull(RecordComposerSavedState(handle).pendingNextFeed())
+    }
+
+    @Test
+    fun completeLegacyMultiKeyOfferMigratesToSingleBlob() {
+        val handle = SavedStateHandle()
+        handle["pending_next_feed_baby"] = 7L
+        handle["pending_next_feed_type"] = RecordType.FORMULA.key
+        handle["pending_next_feed_suggested_at"] = 9_000L
+        handle["pending_next_feed_message"] = "已记录配方奶"
+
+        val restored = RecordComposerSavedState(handle).pendingNextFeed()
+        assertEquals(
+            PendingNextFeed(
+                babyId = 7L,
+                type = RecordType.FORMULA,
+                suggestedAtMillis = 9_000L,
+                factMessage = "已记录配方奶",
+            ),
+            restored,
+        )
+        // Legacy keys dropped after migration.
+        assertNull(handle.get<Long>("pending_next_feed_baby"))
+        // Blob survives a second read.
+        assertEquals(restored, RecordComposerSavedState(handle).pendingNextFeed())
+    }
+
+    @Test
+    fun pendingFinishMessageSurvivesRecreationUntilAcknowledged() {
+        val handle = SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        saved.savePendingFinishMessage("已记录笔记")
+
+        assertEquals("已记录笔记", RecordComposerSavedState(handle).pendingFinishMessage())
+        saved.clearPendingFinishMessage()
+        assertNull(RecordComposerSavedState(handle).pendingFinishMessage())
     }
 
     @Test
@@ -265,12 +316,13 @@ class RecordComposerSavedStateTest {
             applied.pendingNextFeedOffer,
         )
         assertNull(applied.pendingFinishMessage)
+        assertNull(applied.activeRequest)
         assertTrue(!applied.saving)
         assertEquals(listOf("/cache/kept.jpg"), applied.draft?.sourcePhotos)
     }
 
     @Test
-    fun applyPostSaveOutcomePublishesFinishMessageWithoutNextFeedOffer() {
+    fun applyPostSaveOutcomePublishesDurableFinishMessageWithoutNextFeedOffer() {
         val handle = SavedStateHandle()
         val saved = RecordComposerSavedState(handle)
         saved.initialize(
@@ -291,61 +343,53 @@ class RecordComposerSavedStateTest {
         )
 
         assertNull(saved.pendingNextFeed())
+        assertEquals("已记录笔记", saved.pendingFinishMessage())
         assertNull(applied.pendingNextFeedOffer)
         assertEquals("已记录笔记", applied.pendingFinishMessage)
+        assertNull(applied.activeRequest)
         assertTrue(!applied.saving)
     }
 
     @Test
-    fun savedFeedConsumesRestorableRequestBeforeReminderChoice() {
-        val events = mutableListOf<String>()
-        var restorableRequest: RecordComposerRequest? = RecordComposerRequest.New(
+    fun persistAndMapPostSaveAreSeparableCommandAndQuery() {
+        val handle = SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        val request = RecordComposerRequest.New(
             babyId = 7L,
             type = RecordType.FORMULA,
             timestamp = 1_000L,
             historical = false,
         )
-        var pendingReminderMessage: String? = null
-
-        dispatchRecordSaveCompletion(
-            message = "已记录配方奶",
-            suggestedNextFeedAt = 9_000L,
-            onOfferReminder = { message, suggestedAt ->
-                events += "reminder-ready"
-                pendingReminderMessage = "$message@$suggestedAt"
-            },
-            onPersisted = {
-                events += "root-consumed"
-                restorableRequest = null
-            },
-            onFinished = { events += "finished" },
+        saved.initialize(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
+        val openState = RecordComposerUiState(
+            activeRequest = request,
+            draft = QuickRecordDraft.create(RecordType.FORMULA, 1_000L),
+            saving = true,
+        )
+        val outcome = ComposerPostSaveOutcome.NextFeedOffer(
+            PendingNextFeed(
+                babyId = 7L,
+                type = RecordType.FORMULA,
+                suggestedAtMillis = 9_000L,
+                factMessage = "已记录配方奶",
+            ),
         )
 
-        assertNull(restorableRequest)
-        assertEquals("已记录配方奶@9000", pendingReminderMessage)
-        assertEquals(listOf("reminder-ready", "root-consumed"), events)
-        assertTrue("finished" !in events)
+        // Pure map does not touch SavedState.
+        val mappedOnly = mapComposerPostSaveUiState(openState, outcome, emptyList())
+        assertTrue(saved.restore(request) != null)
+        assertNull(saved.pendingNextFeed())
+        assertNull(mappedOnly.activeRequest)
+        assertEquals(outcome.pending, mappedOnly.pendingNextFeedOffer)
+
+        persistComposerPostSave(saved, outcome)
+        assertNull(saved.restore(request))
+        assertEquals(outcome.pending, saved.pendingNextFeed())
     }
 
     @Test
-    fun savedNonFeedConsumesRestorableRequestThenFinishes() {
-        val events = mutableListOf<String>()
-
-        dispatchRecordSaveCompletion(
-            message = "已记录笔记",
-            suggestedNextFeedAt = null,
-            onOfferReminder = { _, _ -> events += "unexpected-reminder" },
-            onPersisted = { events += "root-consumed" },
-            onFinished = { events += "finished:$it" },
-        )
-
-        assertEquals(listOf("root-consumed", "finished:已记录笔记"), events)
-    }
-
-    @Test
-    fun hostConsumesObservablePostSaveWithoutDuplicateFinish() {
-        val events = mutableListOf<String>()
-        var restorableRequest: RecordComposerRequest? = RecordComposerRequest.New(
+    fun writeSessionOpenIsRefusedWhilePostSaveStageIsLive() {
+        val request = RecordComposerRequest.New(
             babyId = 7L,
             type = RecordType.FORMULA,
             timestamp = 1_000L,
@@ -357,44 +401,208 @@ class RecordComposerSavedStateTest {
             suggestedAtMillis = 9_000L,
             factMessage = "已记录配方奶",
         )
+        assertFalse(
+            shouldOpenComposerWriteSession(
+                request = request,
+                pendingNextFeedOffer = offer,
+                pendingFinishMessage = null,
+            ),
+        )
+        assertFalse(
+            shouldOpenComposerWriteSession(
+                request = request,
+                pendingNextFeedOffer = null,
+                pendingFinishMessage = "已记录笔记",
+            ),
+        )
+        assertTrue(
+            shouldOpenComposerWriteSession(
+                request = request,
+                pendingNextFeedOffer = null,
+                pendingFinishMessage = null,
+            ),
+        )
+        assertFalse(
+            shouldOpenComposerWriteSession(
+                request = null,
+                pendingNextFeedOffer = null,
+                pendingFinishMessage = null,
+            ),
+        )
+    }
 
-        // New composition observes VM state after rotation mid-save deliver.
+    @Test
+    fun processRecreateWithRootStillSetCannotRearmDraftUnderPendingOffer() {
+        // Simulate: apply cleared VM request/draft SavedState; Activity root still New;
+        // process death restores pending offer + root. open refuse + Host gate block rewrite.
+        val handle = SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.FORMULA,
+            timestamp = 1_000L,
+            historical = false,
+        )
+        saved.initialize(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
+        val applied = applyComposerPostSaveOutcome(
+            current = RecordComposerUiState(
+                activeRequest = request,
+                draft = QuickRecordDraft.create(RecordType.FORMULA, 1_000L),
+                babyId = 7L,
+                saving = true,
+            ),
+            savedState = saved,
+            outcome = ComposerPostSaveOutcome.NextFeedOffer(
+                PendingNextFeed(
+                    babyId = 7L,
+                    type = RecordType.FORMULA,
+                    suggestedAtMillis = 9_000L,
+                    factMessage = "已记录配方奶",
+                ),
+            ),
+            committedPhotos = emptyList(),
+        )
+        // Root still set at Activity (not modeled here); VM SavedState has no draft.
+        assertNull(saved.restore(request))
+        val recreated = RecordComposerSavedState(handle)
+        val restoredOffer = recreated.pendingNextFeed()
+        assertEquals(applied.pendingNextFeedOffer, restoredOffer)
+        assertFalse(
+            shouldOpenComposerWriteSession(
+                request = request, // Activity still holds New
+                pendingNextFeedOffer = restoredOffer,
+                pendingFinishMessage = null,
+            ),
+        )
+        // Re-open path must not re-initialize restorable identity under live offer.
+        assertNull(recreated.restore(request))
+    }
+
+    @Test
+    fun deliverMissStillPublishesDurableOfferFromSavedState() {
+        val handle = SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        val applied = applyComposerPostSaveOutcome(
+            current = RecordComposerUiState(
+                activeRequest = RecordComposerRequest.New(
+                    babyId = 7L,
+                    type = RecordType.FORMULA,
+                    timestamp = 1_000L,
+                    historical = false,
+                ),
+                saving = true,
+            ),
+            savedState = saved,
+            outcome = ComposerPostSaveOutcome.NextFeedOffer(
+                PendingNextFeed(
+                    babyId = 7L,
+                    type = RecordType.FORMULA,
+                    suggestedAtMillis = 9_000L,
+                    factMessage = "已记录配方奶",
+                ),
+            ),
+            committedPhotos = emptyList(),
+        )
+        // Session gate deliver missed — rehydrate from SavedState like VM miss branch.
+        val durable = rehydrateComposerPostSaveStage(
+            pendingNextFeedOffer = null,
+            pendingFinishMessage = null,
+            savedState = saved,
+        )
+        assertEquals(applied.pendingNextFeedOffer, durable.pendingNextFeedOffer)
+        assertTrue(durable.isActive)
+    }
+
+    @Test
+    fun hostConsumesObservablePostSaveWithIdempotentRootCallback() {
+        val events = mutableListOf<String>()
+        var restorableRequest: RecordComposerRequest? = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.FORMULA,
+            timestamp = 1_000L,
+            historical = false,
+        )
+        var rootWasOpen = true
+        val offer = PendingNextFeed(
+            babyId = 7L,
+            type = RecordType.FORMULA,
+            suggestedAtMillis = 9_000L,
+            factMessage = "已记录配方奶",
+        )
+        val idempotentConsumeRoot = {
+            // Mirrors MainViewModel.closeComposerAfterPersist: side effects only when open.
+            if (rootWasOpen) {
+                events += "root-consumed"
+                restorableRequest = null
+                rootWasOpen = false
+            } else {
+                events += "root-noop"
+            }
+        }
+
         consumeComposerPostSavePresentation(
             pendingNextFeedOffer = offer,
             pendingFinishMessage = null,
-            onConsumeRootRequest = {
-                events += "root-consumed"
-                restorableRequest = null
-            },
+            onConsumeRootRequest = idempotentConsumeRoot,
             onPresentFinish = { events += "finish:$it" },
         )
         assertNull(restorableRequest)
         assertEquals(listOf("root-consumed"), events)
 
-        // Re-subscribe must not re-fire finish while offer is open.
+        // Re-subscribe / rotation: callback may fire again but must be side-effect free.
         consumeComposerPostSavePresentation(
             pendingNextFeedOffer = offer,
             pendingFinishMessage = null,
-            onConsumeRootRequest = { events += "root-consumed-again" },
+            onConsumeRootRequest = idempotentConsumeRoot,
             onPresentFinish = { events += "finish:$it" },
         )
-        assertEquals(listOf("root-consumed", "root-consumed-again"), events)
+        assertEquals(listOf("root-consumed", "root-noop"), events)
 
         // Explicit complete/skip publishes finish once.
         consumeComposerPostSavePresentation(
             pendingNextFeedOffer = null,
             pendingFinishMessage = "已记录配方奶；未安排下次喂养",
-            onConsumeRootRequest = { events += "root-noop" },
+            onConsumeRootRequest = idempotentConsumeRoot,
             onPresentFinish = { events += "finish:$it" },
         )
         assertEquals(
             listOf(
                 "root-consumed",
-                "root-consumed-again",
+                "root-noop",
                 "root-noop",
                 "finish:已记录配方奶；未安排下次喂养",
             ),
             events,
+        )
+    }
+
+    @Test
+    fun nonFeedFinishIsDurableUntilAcknowledged() {
+        val handle = SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        applyComposerPostSaveOutcome(
+            current = RecordComposerUiState(
+                activeRequest = RecordComposerRequest.New(
+                    babyId = 1L,
+                    type = RecordType.DIARY,
+                    timestamp = 1L,
+                    historical = false,
+                ),
+                saving = true,
+            ),
+            savedState = saved,
+            outcome = ComposerPostSaveOutcome.Finished("已记录笔记"),
+            committedPhotos = emptyList(),
+        )
+        assertEquals("已记录笔记", saved.pendingFinishMessage())
+        // Host acknowledges after one-shot present.
+        saved.clearPendingFinishMessage()
+        assertNull(saved.pendingFinishMessage())
+        assertFalse(
+            hasComposerPostSaveStage(
+                pendingNextFeedOffer = saved.pendingNextFeed(),
+                pendingFinishMessage = saved.pendingFinishMessage(),
+            ),
         )
     }
 
@@ -436,6 +644,27 @@ class RecordComposerSavedStateTest {
                 baseMessage = "已记录配方奶",
                 notificationPermissionGranted = false,
                 isCarePlanWrite = false,
+            ),
+        )
+    }
+
+    @Test
+    fun composerSaveSuccessMessageCoversFeedAndNonFeed() {
+        val formula = QuickRecordDraft.create(RecordType.FORMULA, 1_000L)
+        assertEquals(
+            "已记录配方奶",
+            composerSaveSuccessMessage(
+                writeDecision = ComposerWriteDecision.AddRecord,
+                draft = formula,
+                commandType = RecordType.FORMULA,
+            ),
+        )
+        assertEquals(
+            "已记录日记",
+            composerSaveSuccessMessage(
+                writeDecision = ComposerWriteDecision.AddRecord,
+                draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L),
+                commandType = RecordType.DIARY,
             ),
         )
     }

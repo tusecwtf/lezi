@@ -3,27 +3,6 @@ package com.lezi.babylog.feature.log
 import com.lezi.babylog.core.model.RecordType
 
 /**
- * Enforces the post-write ordering: prepare any reminder UI, then consume the restorable root
- * request before reporting final completion. This prevents process recreation from replaying a
- * successfully persisted New request.
- *
- * Prefer [applyComposerPostSaveOutcome] + [consumeComposerPostSavePresentation] for production
- * Host/ViewModel wiring so outcomes live in observable VM/SavedState rather than composition-local
- * dual masters.
- */
-internal fun dispatchRecordSaveCompletion(
-    message: String,
-    suggestedNextFeedAt: Long?,
-    onOfferReminder: (String, Long) -> Unit,
-    onPersisted: () -> Unit,
-    onFinished: (String) -> Unit,
-) {
-    if (suggestedNextFeedAt != null) onOfferReminder(message, suggestedNextFeedAt)
-    onPersisted()
-    if (suggestedNextFeedAt == null) onFinished(message)
-}
-
-/**
  * Successful domain write outcome for Composer. Fact is already durable; this only decides whether
  * to present the optional next-feed plan flow or finish with a single result message.
  */
@@ -51,30 +30,12 @@ internal fun composerPostSaveOutcome(
         ComposerPostSaveOutcome.Finished(message)
     }
 
-/**
- * Immediately consume the restorable request/draft and publish a single observable post-save stage.
- * Call only after the domain fact/plan write has succeeded.
- */
-internal fun applyComposerPostSaveOutcome(
+/** Pure mapping: outcome + current UI → post-save UiState fields (no SavedState I/O). */
+internal fun mapComposerPostSaveUiState(
     current: RecordComposerUiState,
-    savedState: RecordComposerSavedState,
     outcome: ComposerPostSaveOutcome,
     committedPhotos: List<String>,
 ): RecordComposerUiState {
-    when (outcome) {
-        is ComposerPostSaveOutcome.NextFeedOffer -> {
-            val pending = outcome.pending
-            savedState.savePendingNextFeed(
-                babyId = pending.babyId,
-                type = pending.type,
-                suggestedAtMillis = pending.suggestedAtMillis,
-                factMessage = pending.factMessage,
-            )
-        }
-        is ComposerPostSaveOutcome.Finished -> savedState.clearPendingNextFeed()
-    }
-    // Fact is durable — drop restorable New/Edit request so process death cannot rewrite it.
-    savedState.clear()
     val draftAfterCommit = current.draft?.copy(
         sourcePhotos = committedPhotos,
         borrowedPhotos = emptyList(),
@@ -85,6 +46,10 @@ internal fun applyComposerPostSaveOutcome(
             saving = false,
             error = null,
             draft = draftAfterCommit,
+            // Drop write-session identity from observable state; restorable keys cleared by persist.
+            activeRequest = null,
+            loading = false,
+            initialDraft = null,
             pendingNextFeedOffer = outcome.pending,
             pendingFinishMessage = null,
         )
@@ -92,11 +57,77 @@ internal fun applyComposerPostSaveOutcome(
             saving = false,
             error = null,
             draft = draftAfterCommit,
+            activeRequest = null,
+            loading = false,
+            initialDraft = null,
             pendingNextFeedOffer = null,
             pendingFinishMessage = outcome.message,
         )
     }
 }
+
+/**
+ * Persist durable post-save stage and drop restorable New/Edit request/draft so process death
+ * cannot rewrite the fact. Call only after the domain fact/plan write has succeeded.
+ */
+internal fun persistComposerPostSave(
+    savedState: RecordComposerSavedState,
+    outcome: ComposerPostSaveOutcome,
+) {
+    when (outcome) {
+        is ComposerPostSaveOutcome.NextFeedOffer -> {
+            savedState.savePendingNextFeed(outcome.pending)
+            savedState.clearPendingFinishMessage()
+        }
+        is ComposerPostSaveOutcome.Finished -> {
+            savedState.clearPendingNextFeed()
+            savedState.savePendingFinishMessage(outcome.message)
+        }
+    }
+    // Fact is durable — drop restorable New/Edit request so process death cannot rewrite it.
+    savedState.clear()
+}
+
+/**
+ * Command + query entry for post-write stage: mutates SavedState then returns mapped UiState.
+ * Prefer calling from a single VM path that also publishes `_state` (see [RecordComposerViewModel]).
+ */
+internal fun applyComposerPostSaveOutcome(
+    current: RecordComposerUiState,
+    savedState: RecordComposerSavedState,
+    outcome: ComposerPostSaveOutcome,
+    committedPhotos: List<String>,
+): RecordComposerUiState {
+    persistComposerPostSave(savedState, outcome)
+    return mapComposerPostSaveUiState(current, outcome, committedPhotos)
+}
+
+/** Rehydrate durable post-save fields from live state with SavedState fallback. */
+internal fun rehydrateComposerPostSaveStage(
+    pendingNextFeedOffer: PendingNextFeed?,
+    pendingFinishMessage: String?,
+    savedState: RecordComposerSavedState,
+): ComposerPostSaveStage = ComposerPostSaveStage(
+    pendingNextFeedOffer = pendingNextFeedOffer ?: savedState.pendingNextFeed(),
+    pendingFinishMessage = pendingFinishMessage ?: savedState.pendingFinishMessage(),
+)
+
+/** True while a next-feed offer or one-shot finish copy still owns the composition. */
+internal fun hasComposerPostSaveStage(
+    pendingNextFeedOffer: PendingNextFeed?,
+    pendingFinishMessage: String?,
+): Boolean = pendingNextFeedOffer != null || pendingFinishMessage != null
+
+/**
+ * Write-session open is refused while a post-save stage is live so process recreation cannot
+ * re-arm a restorable New draft under an open next-feed offer (AC: 进程重建不能重复写事实).
+ */
+internal fun shouldOpenComposerWriteSession(
+    request: RecordComposerRequest?,
+    pendingNextFeedOffer: PendingNextFeed?,
+    pendingFinishMessage: String?,
+): Boolean = request != null &&
+    !hasComposerPostSaveStage(pendingNextFeedOffer, pendingFinishMessage)
 
 /** UiState after the sheet session closes while a post-save stage may still be open. */
 internal fun recordComposerClosedUiState(
@@ -108,9 +139,12 @@ internal fun recordComposerClosedUiState(
 )
 
 /**
- * Host presentation of VM post-save state. Always consumes the restorable root when a post-save
- * stage is present; presents finish only when no offer remains. Safe to re-call on resubscribe —
- * callers must acknowledge finish so [pendingFinishMessage] does not re-fire.
+ * Host presentation of VM post-save state.
+ *
+ * Always invokes [onConsumeRootRequest] when a post-save stage is present so the Activity root
+ * restorable request is nulled (must be idempotent beyond nulling — e.g. refresh widgets only when
+ * a root was actually open). Presents finish only when no offer remains; callers must acknowledge
+ * finish so [pendingFinishMessage] does not re-fire.
  */
 internal fun consumeComposerPostSavePresentation(
     pendingNextFeedOffer: PendingNextFeed?,
@@ -118,7 +152,7 @@ internal fun consumeComposerPostSavePresentation(
     onConsumeRootRequest: () -> Unit,
     onPresentFinish: (String) -> Unit,
 ) {
-    if (pendingNextFeedOffer != null || pendingFinishMessage != null) {
+    if (hasComposerPostSaveStage(pendingNextFeedOffer, pendingFinishMessage)) {
         onConsumeRootRequest()
     }
     if (pendingNextFeedOffer == null && pendingFinishMessage != null) {

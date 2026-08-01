@@ -568,6 +568,19 @@ class RootViewModel @Inject constructor(
         savedStateHandle[COMPOSER_REQUEST_KEY] = null
     }
 
+    /**
+     * Consume the restorable root request after a durable Composer fact/plan write.
+     * Idempotent: widgets refresh only when a root request was actually open, so Host
+     * re-subscribe / rotation while a post-save stage remains cannot spam refresh.
+     */
+    fun closeComposerAfterPersist() {
+        val hadRequest = savedStateHandle.get<RecordComposerRequest>(COMPOSER_REQUEST_KEY) != null
+        savedStateHandle[COMPOSER_REQUEST_KEY] = null
+        if (hadRequest) {
+            refreshWidgets()
+        }
+    }
+
     /** Resolve a stable plan UUID from a notification deep link; null if missing/terminal. */
     suspend fun resolveCarePlanId(clientUuid: String): Long? {
         val plan = careLog.getCarePlanByClientUuid(clientUuid) ?: return null
@@ -1043,10 +1056,7 @@ private fun LeziMainScaffold(
     RecordComposerHost(
         request = composerRequest,
         onDismiss = vm::closeComposer,
-        onPersisted = {
-            vm.closeComposer()
-            vm.refreshWidgets()
-        },
+        onPersisted = vm::closeComposerAfterPersist,
         onSaved = { message ->
             scope.launch { snackbar.showSnackbar(message) }
         },
