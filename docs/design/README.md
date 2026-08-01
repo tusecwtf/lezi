@@ -18,7 +18,6 @@
 |------|--------|------|
 | [2026-07-29-timeline-swipe-edit-delete.md](./2026-07-29-timeline-swipe-edit-delete.md) | Implemented | 时间轴左右滑细则；`ui.md` §5.2 链到本文 |
 | [2026-07-30-trusted-sync-onboarding-ui.md](./2026-07-30-trusted-sync-onboarding-ui.md) | Active | 服务器连接、根密码管理员、成员审批/QR、设备与浅同步状态 UI；`ui.md` / `sync-trusted-endpoint` 的 UI companion |
-| [2026-08-01-community-forum-design.md](./2026-08-01-community-forum-design.md) | Draft | 家庭社区论坛技术设计；**尚未**写入 PRD / 无 tracker；非正式产品合同 |
 
 ## 命名
 

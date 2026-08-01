@@ -119,7 +119,7 @@ current HEAD 上确认 blocker 已闭合后再激活，不能仅因另一个分�
 - 不新增 Gradle module，不合并现有 feature module，不拆 `AppUpdatePort`。
 - 不拆 lezi-sync 公开 HTTP/Store 合同，不改路由、schema、状态码或 wire JSON。
 - 不把 `core/image/build`、`backup/` 或空目录作为跨机器产品 ticket。
-- 不清理 `prototype/`、`design/` 或无关 `docs/design/2026-08-01-community-forum-design.md`。
+- 不清理 `prototype/`、根 `design/` 资产目录（非产品合同，非本次 docs 清理范围）。
 
 ## Closure rule
 
