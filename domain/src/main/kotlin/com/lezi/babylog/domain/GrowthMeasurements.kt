@@ -3,6 +3,7 @@ package com.lezi.babylog.domain
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.GrowthMeasurementFacts
 import com.lezi.babylog.core.model.GrowthReferenceBand
+import com.lezi.babylog.core.model.GrowthReferenceSeries
 import com.lezi.babylog.core.model.MeasurementPayload
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
@@ -50,6 +51,7 @@ data class ObserveGrowthMeasurements(
 data class GrowthMeasurementSnapshot(
     val measurements: List<GrowthMeasurementFact>,
     val referenceBands: List<GrowthReferenceBand>,
+    val referenceValidUntilMonthExclusive: Float?,
 )
 
 data class GrowthMeasurementFact(
@@ -63,7 +65,7 @@ data class GrowthMeasurementFact(
 )
 
 interface GrowthReferenceSource {
-    fun bands(type: RecordType, sex: Sex?): List<GrowthReferenceBand>
+    fun reference(type: RecordType, sex: Sex?): GrowthReferenceSeries?
 }
 
 data class SaveGrowthMeasurement(
@@ -89,7 +91,8 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
     override fun observe(
         request: ObserveGrowthMeasurements,
     ): Flow<GrowthMeasurementSnapshot> {
-        val referenceBands = references.bands(request.type, request.sex)
+        val reference = references.reference(request.type, request.sex)
+        val referenceBands = reference?.bands.orEmpty()
         return store.observe(request.babyId, request.type).map { records ->
             val measurements = records.mapNotNull { record ->
                 val payload = record.payload.payload as? MeasurementPayload
@@ -112,12 +115,14 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
                     referenceWarning = GrowthMeasurementFacts.referenceAt(
                         monthAge,
                         referenceBands,
+                        reference?.validUntilMonthExclusive,
                     )?.warningFor(displayValue.toFloat()),
                 )
             }.sortedBy(GrowthMeasurementFact::measuredAt)
             GrowthMeasurementSnapshot(
                 measurements = measurements,
                 referenceBands = referenceBands,
+                referenceValidUntilMonthExclusive = reference?.validUntilMonthExclusive,
             )
         }
     }

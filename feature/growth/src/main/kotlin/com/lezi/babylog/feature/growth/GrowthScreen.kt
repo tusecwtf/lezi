@@ -56,6 +56,7 @@ import com.lezi.babylog.core.model.RecordDateDecision
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziClockDialDialog
@@ -92,7 +93,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-enum class GrowthMetric { WEIGHT, HEIGHT, HEAD }
+enum class GrowthMetric { WEIGHT, HEIGHT }
 
 typealias CurveBand = GrowthReferenceBand
 
@@ -109,6 +110,9 @@ data class GrowthUi(
     val metric: GrowthMetric = GrowthMetric.WEIGHT,
     val points: List<MeasurePoint> = emptyList(),
     val bands: List<CurveBand> = emptyList(),
+    val birthday: LocalDate? = null,
+    val sex: Sex? = null,
+    val referenceValidUntilMonthExclusive: Float? = null,
 )
 
 @HiltViewModel
@@ -181,6 +185,10 @@ class GrowthViewModel @Inject constructor(
                         )
                     },
                     bands = snapshot.referenceBands,
+                    birthday = birth,
+                    sex = baby.sex,
+                    referenceValidUntilMonthExclusive =
+                        snapshot.referenceValidUntilMonthExclusive,
                 )
             }
         }
@@ -217,7 +225,6 @@ private val GrowthMetric.recordType: RecordType
     get() = when (this) {
         GrowthMetric.WEIGHT -> RecordType.WEIGHT
         GrowthMetric.HEIGHT -> RecordType.HEIGHT
-        GrowthMetric.HEAD -> RecordType.HEAD
     }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -317,12 +324,7 @@ fun GrowthRoute(
                 FilterChip(
                     selected = ui.metric == GrowthMetric.HEIGHT,
                     onClick = { vm.setMetric(GrowthMetric.HEIGHT) },
-                    label = { Text("身高") },
-                )
-                FilterChip(
-                    selected = ui.metric == GrowthMetric.HEAD,
-                    onClick = { vm.setMetric(GrowthMetric.HEAD) },
-                    label = { Text("头围") },
+                    label = { Text("身长/身高") },
                 )
             }
 
@@ -330,7 +332,7 @@ fun GrowthRoute(
                 StateContainer(
                     kind = StateKind.Empty,
                     title = "还没有测量",
-                    message = "添加身高或体重后，这里会显示趋势与参考曲线。",
+                    message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
                     actionLabel = "去录入",
                     onAction = { openNewMeasurement() },
                 )
@@ -340,8 +342,9 @@ fun GrowthRoute(
                     Text(
                         when (ui.metric) {
                             GrowthMetric.WEIGHT -> "最新体重"
-                            GrowthMetric.HEIGHT -> "最新身高"
-                            GrowthMetric.HEAD -> "最新头围"
+                            GrowthMetric.HEIGHT -> "最新${ui.birthday?.let { birthday ->
+                                growthLinearMeasurementLabel(birthday, latest.measuredAt, zone)
+                            } ?: "身长/身高"}"
                         },
                         style = LeziTypography.Meta,
                     )
@@ -397,12 +400,23 @@ fun GrowthRoute(
                 }
             }
 
+            growthReferenceNotice(
+                sex = ui.sex,
+                hasReferenceBands = bands.isNotEmpty(),
+                hasMeasurementsOutsideReference =
+                    ui.referenceValidUntilMonthExclusive?.let { exclusive ->
+                        ui.points.any { it.monthAge >= exclusive }
+                    } == true,
+            )?.let { notice ->
+                Text(
+                    notice,
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
-                if (ui.metric == GrowthMetric.HEAD) {
-                    "头围仅显示个人趋势 · 非医疗诊断"
-                } else {
-                    "WHO 儿童生长标准 0–24 月 P3/P50/P97（按性别）· 仅供趋势参考，非医疗诊断"
-                },
+                "WS/T 423—2022 · 按性别 P3/P50/P97 参考带 · " +
+                    "早产或特殊疾病请遵医嘱 · 非医疗诊断",
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -419,14 +433,15 @@ fun GrowthRoute(
             modifier = Modifier.imePadding(),
             properties = DialogProperties(decorFitsSystemWindows = false),
             title = {
+                val linearLabel = ui.birthday?.let { birthday ->
+                    growthLinearMeasurementLabel(birthday, activeDraft.measuredAt, zone)
+                } ?: "身长/身高"
                 Text(
                     when {
                         isEditing && ui.metric == GrowthMetric.WEIGHT -> "修改体重 (kg)"
-                        isEditing && ui.metric == GrowthMetric.HEIGHT -> "修改身高 (cm)"
-                        isEditing && ui.metric == GrowthMetric.HEAD -> "修改头围 (cm)"
+                        isEditing && ui.metric == GrowthMetric.HEIGHT -> "修改$linearLabel (cm)"
                         ui.metric == GrowthMetric.WEIGHT -> "记录体重 (kg)"
-                        ui.metric == GrowthMetric.HEIGHT -> "记录身高 (cm)"
-                        else -> "记录头围 (cm)"
+                        else -> "记录$linearLabel (cm)"
                     },
                 )
             },
@@ -536,8 +551,7 @@ fun GrowthRoute(
                     Text(
                         when (ui.metric) {
                             GrowthMetric.WEIGHT -> "删除后会从体重曲线与记录列表中移除，无法撤销。"
-                            GrowthMetric.HEIGHT -> "删除后会从身高曲线与记录列表中移除，无法撤销。"
-                            GrowthMetric.HEAD -> "删除后会从头围曲线与记录列表中移除，无法撤销。"
+                            GrowthMetric.HEIGHT -> "删除后会从身长/身高曲线与记录列表中移除，无法撤销。"
                         },
                     )
                     editor.operationError?.let { error ->
@@ -712,6 +726,26 @@ private fun formatMeasurementValue(metric: GrowthMetric, value: Float): String {
     }
 }
 
+internal fun growthLinearMeasurementLabel(
+    birthday: LocalDate,
+    measuredAt: Long,
+    zone: ZoneId,
+): String {
+    val measuredDate = Instant.ofEpochMilli(measuredAt).atZone(zone).toLocalDate()
+    return if (measuredDate.isBefore(birthday.plusYears(2))) "身长" else "身高"
+}
+
+internal fun growthReferenceNotice(
+    sex: Sex?,
+    hasReferenceBands: Boolean,
+    hasMeasurementsOutsideReference: Boolean,
+): String? = when {
+    sex == null || sex == Sex.UNKNOWN -> "未设置用于生长参考的性别，仅显示个人趋势"
+    hasMeasurementsOutsideReference -> "7岁及以上的测量仅显示个人趋势"
+    !hasReferenceBands -> "参考数据暂不可用，仅显示个人趋势"
+    else -> null
+}
+
 internal fun growthChartAccessibilitySummary(
     points: List<MeasurePoint>,
     metric: GrowthMetric,
@@ -719,8 +753,7 @@ internal fun growthChartAccessibilitySummary(
 ): String {
     val metricLabel = when (metric) {
         GrowthMetric.WEIGHT -> "体重"
-        GrowthMetric.HEIGHT -> "身高"
-        GrowthMetric.HEAD -> "头围"
+        GrowthMetric.HEIGHT -> "身长/身高"
     }
     if (points.isEmpty()) return "${metricLabel}趋势图，暂无测量"
 
@@ -742,7 +775,7 @@ internal fun growthChartAccessibilitySummary(
     }
     return buildString {
         append("${metricLabel}趋势图，共 ${points.size} 次测量；$monthRange；$valueRange")
-        if (hasReferenceBands) append("；包含 WHO P3、P50、P97 参考曲线")
+        if (hasReferenceBands) append("；包含 WS/T 423—2022 P3、P50、P97 参考曲线")
     }
 }
 
@@ -769,7 +802,13 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
                 )
             },
     ) {
-        val maxMonth = max(24f, points.maxOfOrNull { it.monthAge } ?: 12f)
+        val maxMonth = max(
+            24f,
+            max(
+                points.maxOfOrNull { it.monthAge } ?: 12f,
+                bands.maxOfOrNull { it.month } ?: 0f,
+            ),
+        )
         val yValues = points.map { it.value } + bands.flatMap { listOf(it.p3, it.p50, it.p97) }
         val yMax = (yValues.maxOrNull() ?: if (metric == GrowthMetric.WEIGHT) 12f else 90f) * 1.1f
         val yMin = (yValues.minOrNull() ?: if (metric == GrowthMetric.WEIGHT) 2f else 40f) * 0.9f

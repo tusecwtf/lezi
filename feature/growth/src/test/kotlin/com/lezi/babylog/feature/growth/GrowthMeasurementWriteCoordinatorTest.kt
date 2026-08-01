@@ -305,7 +305,7 @@ private class FakeGrowthMeasurementLifecycle(
     val deletedRecords = mutableListOf<Pair<Long, Long>>()
 
     override fun observe(request: ObserveGrowthMeasurements): Flow<GrowthMeasurementSnapshot> =
-        flowOf(GrowthMeasurementSnapshot(emptyList(), emptyList()))
+        flowOf(GrowthMeasurementSnapshot(emptyList(), emptyList(), null))
 
     override fun validationError(type: RecordType, displayValue: Double): String? =
         validationError.invoke(type, displayValue)

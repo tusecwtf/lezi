@@ -49,15 +49,27 @@ object GrowthMeasurementFacts {
         birthday: LocalDate,
         measuredDate: LocalDate,
     ): Float {
-        val chronological = ChronoUnit.DAYS.between(birthday, measuredDate) / DAYS_PER_MONTH
-        return chronological.coerceAtLeast(0.0).toFloat()
+        if (!measuredDate.isAfter(birthday)) return 0f
+        var completedMonths = ChronoUnit.MONTHS.between(birthday, measuredDate)
+        var monthStart = birthday.plusMonths(completedMonths)
+        if (monthStart.isAfter(measuredDate)) {
+            completedMonths -= 1
+            monthStart = birthday.plusMonths(completedMonths)
+        }
+        val nextMonthStart = birthday.plusMonths(completedMonths + 1)
+        val daysInMonth = ChronoUnit.DAYS.between(monthStart, nextMonthStart)
+            .coerceAtLeast(1)
+        val elapsedDays = ChronoUnit.DAYS.between(monthStart, measuredDate)
+        return (completedMonths + elapsedDays.toDouble() / daysInMonth).toFloat()
     }
 
     fun referenceAt(
         monthAge: Float,
         bands: List<GrowthReferenceBand>,
+        validUntilMonthExclusive: Float? = null,
     ): GrowthReferenceRange? {
         if (bands.isEmpty() || !monthAge.isFinite()) return null
+        if (validUntilMonthExclusive != null && monthAge >= validUntilMonthExclusive) return null
         val sorted = bands.sortedBy(GrowthReferenceBand::month)
         if (monthAge < sorted.first().month || monthAge > sorted.last().month) return null
         val upperIndex = sorted.indexOfFirst { it.month >= monthAge }
@@ -91,7 +103,6 @@ object GrowthMeasurementFacts {
     }
 
     private const val GRAMS_PER_KILOGRAM = 1_000.0
-    private const val DAYS_PER_MONTH = 30.4375
 }
 
 data class GrowthReferenceBand(
@@ -101,14 +112,21 @@ data class GrowthReferenceBand(
     val p97: Float,
 )
 
+data class GrowthReferenceSeries(
+    val bands: List<GrowthReferenceBand>,
+    val validUntilMonthExclusive: Float,
+)
+
 data class GrowthReferenceRange(
     val p3: Float,
     val p50: Float,
     val p97: Float,
 ) {
     fun warningFor(value: Float): String? = when {
-        value > p97 -> "该数值高于同月龄参考范围，请确认单位和录入值。"
-        value < p3 -> "该数值低于同月龄参考范围，请确认单位和录入值。"
+        value >= p97 ->
+            "该数值达到或高于同年龄同性别参考带，请先复测；如持续偏离请咨询儿保或儿科。"
+        value < p3 ->
+            "该数值低于同年龄同性别参考带，请先复测；如持续偏离请咨询儿保或儿科。"
         else -> null
     }
 }

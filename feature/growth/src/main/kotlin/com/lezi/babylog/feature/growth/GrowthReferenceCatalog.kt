@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.growth
 
 import android.content.Context
 import com.lezi.babylog.core.model.GrowthReferenceBand
+import com.lezi.babylog.core.model.GrowthReferenceSeries
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.domain.GrowthReferenceSource
@@ -28,35 +29,51 @@ import kotlinx.serialization.json.jsonPrimitive
 class GrowthReferenceCatalog @Inject constructor(
     @ApplicationContext private val context: Context,
 ) : GrowthReferenceSource {
-    private val cache = mutableMapOf<Pair<RecordType, Sex?>, List<GrowthReferenceBand>>()
+    private val cache = mutableMapOf<Pair<RecordType, Sex?>, GrowthReferenceSeries?>()
 
-    override fun bands(type: RecordType, sex: Sex?): List<GrowthReferenceBand> =
+    override fun reference(type: RecordType, sex: Sex?): GrowthReferenceSeries? =
         cache.getOrPut(type to sex) { load(type, sex) }
 
-    private fun load(type: RecordType, sex: Sex?): List<GrowthReferenceBand> {
-        if (type == RecordType.HEAD) return emptyList()
+    private fun load(type: RecordType, sex: Sex?): GrowthReferenceSeries? {
         val metricKey = when (type) {
             RecordType.WEIGHT -> "weight_kg"
-            RecordType.HEIGHT -> "length_cm"
-            else -> return emptyList()
+            RecordType.HEIGHT -> "length_height_cm"
+            else -> return null
         }
-        val sexKey = growthReferenceSexKey(sex) ?: return emptyList()
+        val sexKey = growthReferenceSexKey(sex) ?: return null
         return runCatching {
             val source = context.assets.open(ASSET_PATH)
                 .bufferedReader()
                 .use { it.readText() }
-            parseGrowthReferenceBands(
-                source,
-                sexKey,
-                metricKey,
+            buildUnderSevenReferenceSeries(
+                parseGrowthReferenceBands(
+                    source,
+                    sexKey,
+                    metricKey,
+                ),
             )
-        }.getOrDefault(emptyList())
+        }.getOrNull()
     }
 
     private companion object {
-        const val ASSET_PATH = "curves/who_percentiles_0_24.json"
+        const val ASSET_PATH = "curves/wst_423_2022_percentiles_under7.json"
     }
 }
+
+internal fun buildUnderSevenReferenceSeries(
+    publishedBands: List<GrowthReferenceBand>,
+): GrowthReferenceSeries? {
+    if (publishedBands.isEmpty() || publishedBands.last().month != LAST_PUBLISHED_MONTH) {
+        return null
+    }
+    return GrowthReferenceSeries(
+        bands = publishedBands + publishedBands.last().copy(month = UNDER_SEVEN_MONTH_EXCLUSIVE),
+        validUntilMonthExclusive = UNDER_SEVEN_MONTH_EXCLUSIVE,
+    )
+}
+
+private const val LAST_PUBLISHED_MONTH = 81f
+internal const val UNDER_SEVEN_MONTH_EXCLUSIVE = 84f
 
 internal fun growthReferenceSexKey(sex: Sex?): String? = when (sex) {
     Sex.MALE -> "boys"

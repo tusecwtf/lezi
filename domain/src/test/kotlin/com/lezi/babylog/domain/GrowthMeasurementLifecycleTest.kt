@@ -2,6 +2,7 @@ package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.GrowthReferenceBand
+import com.lezi.babylog.core.model.GrowthReferenceSeries
 import com.lezi.babylog.core.model.GrowthMeasurementFacts
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
@@ -147,8 +148,9 @@ class GrowthMeasurementLifecycleTest {
         ).first()
 
         assertThat(snapshot.referenceBands).hasSize(2)
+        assertThat(snapshot.referenceValidUntilMonthExclusive).isEqualTo(7f)
         assertThat(snapshot.measurements.single().referenceWarning)
-            .isEqualTo("该数值高于同月龄参考范围，请确认单位和录入值。")
+            .isEqualTo("该数值达到或高于同年龄同性别参考带，请先复测；如持续偏离请咨询儿保或儿科。")
     }
 
     @Test
@@ -178,14 +180,17 @@ class GrowthMeasurementLifecycleTest {
 }
 
 private class FakeGrowthReferenceSource : GrowthReferenceSource {
-    override fun bands(type: RecordType, sex: Sex?): List<GrowthReferenceBand> =
+    override fun reference(type: RecordType, sex: Sex?): GrowthReferenceSeries? =
         if (type == RecordType.WEIGHT) {
-            listOf(
-                GrowthReferenceBand(month = 0f, p3 = 2.5f, p50 = 3.3f, p97 = 4.5f),
-                GrowthReferenceBand(month = 6f, p3 = 6.4f, p50 = 7.9f, p97 = 9.8f),
+            GrowthReferenceSeries(
+                bands = listOf(
+                    GrowthReferenceBand(month = 0f, p3 = 2.5f, p50 = 3.3f, p97 = 4.5f),
+                    GrowthReferenceBand(month = 6f, p3 = 6.4f, p50 = 7.9f, p97 = 9.8f),
+                ),
+                validUntilMonthExclusive = 7f,
             )
         } else {
-            emptyList()
+            null
         }
 }
 

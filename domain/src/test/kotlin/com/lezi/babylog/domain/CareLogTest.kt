@@ -3737,8 +3737,7 @@ class CareLogTest {
         val lifecycle = DefaultGrowthMeasurementLifecycle(
             CareLogGrowthMeasurementRecordStore(care),
             object : GrowthReferenceSource {
-                override fun bands(type: RecordType, sex: Sex?) =
-                    emptyList<com.lezi.babylog.core.model.GrowthReferenceBand>()
+                override fun reference(type: RecordType, sex: Sex?) = null
             },
         )
 
