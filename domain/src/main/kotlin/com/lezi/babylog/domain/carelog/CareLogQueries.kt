@@ -13,7 +13,6 @@ import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
-import com.lezi.babylog.domain.careplan.FulfillmentSurface
 import com.lezi.babylog.domain.toModel
 
 /**

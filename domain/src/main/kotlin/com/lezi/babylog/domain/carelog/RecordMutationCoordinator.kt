@@ -8,6 +8,7 @@ import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.NursingPayload
@@ -30,7 +31,6 @@ import kotlinx.coroutines.sync.withLock
 import com.lezi.babylog.domain.RecordPermissionException
 import com.lezi.babylog.domain.SleepStateChangedException
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
-import com.lezi.babylog.domain.careplan.CarePlanReminderProjection
 import com.lezi.babylog.domain.nextSyncUpdatedAt
 import com.lezi.babylog.domain.requireCurrentPayloadDocument
 import com.lezi.babylog.domain.requireCurrentPayloadJson
@@ -44,7 +44,19 @@ internal class RecordMutationCoordinator(
     private val customItemDao: CustomItemDao,
     private val photoAttachmentReconciler: PhotoAttachmentReconciler,
     private val transactionRunner: DatabaseTransactionRunner,
-    private val reminderProjection: CarePlanReminderProjection,
+    /**
+     * Device-local reminder/calendar side effects after plan create from record convert.
+     * Injected from the facade so carelog does not import careplan types.
+     */
+    private val projectOrScheduleCarePlanReminder: suspend (
+        plan: CarePlan,
+        projectToSystemCalendar: Boolean,
+    ) -> Unit,
+    /**
+     * Cancel Lezi reminder and remove system-calendar projection after linked fulfillment.
+     * Injected from the facade so carelog does not import careplan types.
+     */
+    private val cancelCarePlanReminderAndProjection: suspend (carePlanId: Long) -> Unit,
     private val syncPort: SyncPort,
     private val clock: PolicyClock,
     private val sleepMutationMutex: Mutex,
@@ -343,10 +355,7 @@ internal class RecordMutationCoordinator(
         requestLocalSync()
         // Creator keeps full local plan + projection immediately.
         carePlanDao.get(planId)?.toModel()?.let { plan ->
-            reminderProjection.projectOrScheduleCarePlanReminder(
-                plan,
-                projectToSystemCalendar = projectToSystemCalendar,
-            )
+            projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar)
         }
         return planId
     }
@@ -557,8 +566,7 @@ internal class RecordMutationCoordinator(
             }
         }
         if (carePlanId != null) {
-            reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
-            reminderProjection.removeSystemCalendarProjection(carePlanId)
+            cancelCarePlanReminderAndProjection(carePlanId)
         }
         requestLocalSync()
         return id

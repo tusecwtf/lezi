@@ -6,7 +6,7 @@ import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.domain.nextSyncUpdatedAt
 
-sealed interface PhotoAttachmentOwner {
+internal sealed interface PhotoAttachmentOwner {
     val id: Long
 
     data class Record(override val id: Long) : PhotoAttachmentOwner {
@@ -22,7 +22,7 @@ sealed interface PhotoAttachmentOwner {
     }
 }
 
-data class PhotoAttachmentMutation(
+internal data class PhotoAttachmentMutation(
     val changed: Boolean,
     val tombstonedClientUuids: Set<String> = emptySet(),
 )
@@ -39,8 +39,10 @@ data class PhotoAttachmentMutation(
  * **path gate → sleepMutationMutex (when used) → Room**. Use [withInvolvedPaths] for that
  * outer exclusion; it is shared with reference-aware file GC and must receive the same
  * process-wide [MediaLocalPathGate] singleton (do not mint a private gate).
+ *
+ * Module-scoped [internal]: careplan/carelog coordinators may use it; feature modules must not.
  */
-class PhotoAttachmentReconciler(
+internal class PhotoAttachmentReconciler(
     private val mediaAssetDao: MediaAssetDao,
     private val pathGate: MediaLocalPathGate,
     private val uuidFactory: () -> String = ::newClientUuid,

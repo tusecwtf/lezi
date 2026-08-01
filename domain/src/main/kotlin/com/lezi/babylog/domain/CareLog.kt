@@ -209,7 +209,17 @@ class CareLog @Inject constructor(
         customItemDao = customItemDao,
         photoAttachmentReconciler = photoAttachmentReconciler,
         transactionRunner = transactionRunner,
-        reminderProjection = reminderProjection,
+        // Facade wires careplan projection so carelog stays free of careplan imports.
+        projectOrScheduleCarePlanReminder = { plan, projectToSystemCalendar ->
+            reminderProjection.projectOrScheduleCarePlanReminder(
+                plan,
+                projectToSystemCalendar = projectToSystemCalendar,
+            )
+        },
+        cancelCarePlanReminderAndProjection = { carePlanId ->
+            reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
+            reminderProjection.removeSystemCalendarProjection(carePlanId)
+        },
         syncPort = syncPort,
         clock = clock,
         sleepMutationMutex = sleepMutationMutex,

@@ -7,7 +7,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
-import com.lezi.babylog.domain.FakeMediaAssetDao
+
 
 class PhotoAttachmentReconcilerTest {
     @Test
