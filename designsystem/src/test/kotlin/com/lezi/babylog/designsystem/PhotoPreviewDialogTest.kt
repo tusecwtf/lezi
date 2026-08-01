@@ -14,7 +14,7 @@ class PhotoPreviewDialogTest {
                 "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordSheet.kt",
             ),
             root.resolve(
-                "feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/CalendarScreen.kt",
+                "feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/calendar/CalendarScreen.kt",
             ),
         )
 
