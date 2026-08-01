@@ -79,6 +79,7 @@ import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -94,6 +95,7 @@ import com.lezi.babylog.domain.FamilyWizardSnapshot
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.FamilyWizardStep
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
+import com.lezi.babylog.domain.projectMemberLoginQrDialog
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.FamilyEndpointDraft
@@ -378,7 +380,8 @@ class OnboardingViewModel @Inject constructor(
         viewModelScope.launch { familyWizard.forgetEndpoint(FamilyWizardEntry.Onboarding) }
     }
 
-    fun retryOwnerRecovery() {
+    /** Shared retry for all CreateSession recovery outcomes (owner reclaim, member QR, …). */
+    fun retryInitialFamilyDataRecovery() {
         viewModelScope.launch {
             familyWizard.retryReclaimedDataRecovery()
             updateRecoveredFamilyEmptiness()
@@ -406,13 +409,6 @@ class OnboardingViewModel @Inject constructor(
     fun claimMemberLoginQr(payload: MemberLoginQrPayload, deviceName: String) {
         viewModelScope.launch {
             familyWizard.claimMemberLoginQr(payload, deviceName)
-            updateRecoveredFamilyEmptiness()
-        }
-    }
-
-    fun retryMemberLoginQrRecovery() {
-        viewModelScope.launch {
-            familyWizard.retryReclaimedDataRecovery()
             updateRecoveredFamilyEmptiness()
         }
     }
@@ -1062,7 +1058,7 @@ fun OnboardingRoute(
                 }
                 Button(
                     enabled = !familyWizardBusy,
-                    onClick = vm::retryOwnerRecovery,
+                    onClick = vm::retryInitialFamilyDataRecovery,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
@@ -1109,83 +1105,46 @@ fun OnboardingRoute(
         }
     }
 
-    when (val qrState = familyWizardState) {
-        is FamilyWizardState.VerifyingMemberLoginQr -> OnboardingMemberLoginQrDialog(
-            payload = qrState.payload,
+    // Shared projection with Account so verify-retry / claim / cancel cannot drift.
+    val memberLoginQrModel = projectMemberLoginQrDialog(familyWizardState)
+    if (memberLoginQrModel != null && memberLoginQrModel.payload != null) {
+        val payload = memberLoginQrModel.payload!!
+        MemberLoginQrConfirmSurface(
+            familyName = memberLoginQrModel.display.familyName,
+            memberDisplayName = memberLoginQrModel.display.memberDisplayName,
             deviceName = memberQrDeviceName,
-            onDeviceNameChange = {},
-            feedback = "正在确认家庭服务器…",
-            verifying = true,
-            submitting = false,
-            trustReady = false,
-            recoveryRetryRequired = false,
-            onLogin = {},
-            onRetryRecovery = {},
+            onDeviceNameChange = {
+                if (memberLoginQrModel.deviceNameEditable) memberQrDeviceName = it
+            },
+            feedback = memberLoginQrModel.feedback,
+            submitting = memberLoginQrModel.submitting,
+            verificationInProgress = memberLoginQrModel.verificationInProgress,
+            verificationRetryRequired = memberLoginQrModel.verificationRetryRequired,
+            recoveryRetryRequired = memberLoginQrModel.recoveryRetryRequired,
+            deviceNameEditable = memberLoginQrModel.deviceNameEditable,
+            showConfirm = memberLoginQrModel.showConfirm,
+            confirmLabel = memberLoginQrModel.confirmLabel,
+            title = memberLoginQrModel.title,
+            onConfirm = {
+                when {
+                    memberLoginQrModel.verificationRetryRequired ->
+                        vm.verifyMemberLoginQr(payload)
+                    memberLoginQrModel.recoveryRetryRequired ->
+                        vm.retryInitialFamilyDataRecovery()
+                    else ->
+                        // Controller owns device-name validation → Ready.feedback.
+                        vm.claimMemberLoginQr(payload, memberQrDeviceName)
+                }
+            },
             onManualJoin = {
                 vm.cancelMemberLoginQr()
-                endpointDraft = qrState.payload.endpoint.origin
+                endpointDraft = payload.endpoint.origin
                 step = OnboardingStep.ConnectServer
                 vm.connectEndpoint(endpointDraft)
             },
             onDismiss = { vm.cancelMemberLoginQr() },
+            showManualJoin = !memberLoginQrModel.submitting,
         )
-        is FamilyWizardState.MemberLoginQrVerificationFailed -> OnboardingMemberLoginQrDialog(
-            payload = qrState.payload,
-            deviceName = memberQrDeviceName,
-            onDeviceNameChange = { memberQrDeviceName = it },
-            feedback = qrState.message,
-            verifying = false,
-            submitting = false,
-            trustReady = false,
-            recoveryRetryRequired = false,
-            onLogin = { vm.verifyMemberLoginQr(qrState.payload) },
-            onRetryRecovery = {},
-            onManualJoin = {
-                vm.cancelMemberLoginQr()
-                endpointDraft = qrState.payload.endpoint.origin
-                step = OnboardingStep.ConnectServer
-                vm.connectEndpoint(endpointDraft)
-            },
-            onDismiss = { vm.cancelMemberLoginQr() },
-        )
-        is FamilyWizardState.MemberLoginQrReady -> OnboardingMemberLoginQrDialog(
-            payload = qrState.payload,
-            deviceName = memberQrDeviceName,
-            onDeviceNameChange = { memberQrDeviceName = it },
-            feedback = qrState.feedback,
-            verifying = false,
-            submitting = false,
-            trustReady = true,
-            recoveryRetryRequired = false,
-            onLogin = {
-                runCatching { requireDeviceName(memberQrDeviceName) }
-                    .exceptionOrNull()?.message?.let { return@OnboardingMemberLoginQrDialog }
-                vm.claimMemberLoginQr(qrState.payload, memberQrDeviceName)
-            },
-            onRetryRecovery = {},
-            onManualJoin = {
-                vm.cancelMemberLoginQr()
-                endpointDraft = qrState.payload.endpoint.origin
-                step = OnboardingStep.ConnectServer
-                vm.connectEndpoint(endpointDraft)
-            },
-            onDismiss = { vm.cancelMemberLoginQr() },
-        )
-        is FamilyWizardState.ClaimingMemberLoginQr -> OnboardingMemberLoginQrDialog(
-            payload = qrState.payload,
-            deviceName = memberQrDeviceName,
-            onDeviceNameChange = {},
-            feedback = null,
-            verifying = false,
-            submitting = true,
-            trustReady = true,
-            recoveryRetryRequired = false,
-            onLogin = {},
-            onRetryRecovery = {},
-            onManualJoin = {},
-            onDismiss = {},
-        )
-        else -> Unit
     }
 
     if (showJoinRole) {
@@ -1520,69 +1479,6 @@ fun OnboardingRoute(
         )
     }
 
-}
-
-@Composable
-private fun OnboardingMemberLoginQrDialog(
-    payload: MemberLoginQrPayload,
-    deviceName: String,
-    onDeviceNameChange: (String) -> Unit,
-    feedback: String?,
-    verifying: Boolean,
-    submitting: Boolean,
-    trustReady: Boolean,
-    recoveryRetryRequired: Boolean,
-    onLogin: () -> Unit,
-    onRetryRecovery: () -> Unit,
-    onManualJoin: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = { if (!submitting) onDismiss() },
-        title = { Text(if (verifying) "正在确认家庭服务器…" else "登录家庭") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                if (verifying) {
-                    Text("正在验证二维码中的 HTTPS 地址和证书信任信息；完成前不会发送登录授权。")
-                } else {
-                    payload.familyName?.let { Text(it, style = LeziTypography.TitleSm) }
-                    Text("已由家庭管理员授权：${payload.memberDisplayName}")
-                    OutlinedTextField(
-                        value = deviceName,
-                        onValueChange = onDeviceNameChange,
-                        enabled = !submitting,
-                        label = { Text("这台设备的名称 *") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text("将信任管理员提供的家庭服务器配置。")
-                    feedback?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    TextButton(onClick = onManualJoin, enabled = !submitting) {
-                        Text("改用加入家庭")
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            if (!verifying) {
-                TextButton(
-                    onClick = if (recoveryRetryRequired) onRetryRecovery else onLogin,
-                    enabled = (trustReady || recoveryRetryRequired) && !submitting,
-                ) {
-                    Text(
-                        when {
-                            submitting -> "同步中…"
-                            recoveryRetryRequired -> "重试首次同步"
-                            else -> "在这台设备登录"
-                        },
-                    )
-                }
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
-        },
-    )
 }
 
 private tailrec fun Context.findActivity(): Activity? = when (this) {

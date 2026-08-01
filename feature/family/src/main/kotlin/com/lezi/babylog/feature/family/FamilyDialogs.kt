@@ -688,6 +688,48 @@ internal fun MemberLoginQrCodeDialog(
 
 @Composable
 internal fun MemberLoginQrConfirmDialog(
+    familyName: String?,
+    memberDisplayName: String,
+    deviceName: String,
+    onDeviceNameChange: (String) -> Unit,
+    feedback: String?,
+    submitting: Boolean,
+    verificationInProgress: Boolean = false,
+    verificationRetryRequired: Boolean = false,
+    recoveryRetryRequired: Boolean = false,
+    deviceNameEditable: Boolean = true,
+    showConfirm: Boolean = true,
+    confirmLabel: String = "在这台设备登录",
+    title: String = "登录家庭",
+    onConfirm: () -> Unit,
+    onManualJoin: () -> Unit,
+    onDismiss: () -> Unit,
+    showManualJoin: Boolean = true,
+) {
+    com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface(
+        familyName = familyName,
+        memberDisplayName = memberDisplayName,
+        deviceName = deviceName,
+        onDeviceNameChange = onDeviceNameChange,
+        feedback = feedback,
+        submitting = submitting,
+        verificationInProgress = verificationInProgress,
+        verificationRetryRequired = verificationRetryRequired,
+        recoveryRetryRequired = recoveryRetryRequired,
+        deviceNameEditable = deviceNameEditable,
+        showConfirm = showConfirm,
+        confirmLabel = confirmLabel,
+        title = title,
+        onConfirm = onConfirm,
+        onManualJoin = onManualJoin,
+        onDismiss = onDismiss,
+        showManualJoin = showManualJoin,
+    )
+}
+
+/** Compatibility overload for tests that still pass a live payload. */
+@Composable
+internal fun MemberLoginQrConfirmDialog(
     payload: MemberLoginQrPayload,
     deviceName: String,
     onDeviceNameChange: (String) -> Unit,
@@ -702,55 +744,32 @@ internal fun MemberLoginQrConfirmDialog(
     onManualJoin: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = { if (!submitting) onDismiss() },
-        title = { Text(if (verificationInProgress) "正在确认家庭服务器…" else "登录家庭") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                payload.familyName?.let { Text(it, style = LeziTypography.TitleSm) }
-                Text("已由家庭管理员授权：${payload.memberDisplayName}")
-                OutlinedTextField(
-                    value = deviceName,
-                    onValueChange = onDeviceNameChange,
-                    enabled = !submitting && !verificationInProgress,
-                    label = { Text("这台设备的名称 *") },
-                    singleLine = true,
-                    isError = feedback != null,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text("将信任管理员提供的家庭服务器配置。")
-                feedback?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error)
-                }
-                TextButton(onClick = onManualJoin, enabled = !submitting) {
-                    Text("改用加入家庭")
-                }
-            }
+    MemberLoginQrConfirmDialog(
+        familyName = payload.familyName,
+        memberDisplayName = payload.memberDisplayName,
+        deviceName = deviceName,
+        onDeviceNameChange = onDeviceNameChange,
+        feedback = feedback,
+        submitting = submitting,
+        verificationInProgress = verificationInProgress,
+        verificationRetryRequired = verificationRetryRequired,
+        recoveryRetryRequired = recoveryRetryRequired,
+        deviceNameEditable = !submitting && !verificationInProgress,
+        showConfirm = !verificationInProgress,
+        confirmLabel = when {
+            submitting -> "同步中…"
+            verificationRetryRequired -> "重新确认"
+            recoveryRetryRequired -> "重试首次同步"
+            else -> "在这台设备登录"
         },
-        confirmButton = {
-            if (!verificationInProgress) {
-                TextButton(
-                    onClick = when {
-                        verificationRetryRequired -> onRetryVerification
-                        recoveryRetryRequired -> onRetryRecovery
-                        else -> onLogin
-                    },
-                    enabled = !submitting,
-                ) {
-                    Text(
-                        when {
-                            submitting -> "同步中…"
-                            verificationRetryRequired -> "重新确认"
-                            recoveryRetryRequired -> "重试首次同步"
-                            else -> "在这台设备登录"
-                        },
-                    )
-                }
-            }
+        title = if (verificationInProgress) "正在确认家庭服务器…" else "登录家庭",
+        onConfirm = when {
+            verificationRetryRequired -> onRetryVerification
+            recoveryRetryRequired -> onRetryRecovery
+            else -> onLogin
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
-        },
+        onManualJoin = onManualJoin,
+        onDismiss = onDismiss,
     )
 }
 

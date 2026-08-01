@@ -191,6 +191,48 @@ class OnboardingFamilyWizardAdapterTest {
         )
     }
 
+    @Test
+    fun memberLoginQrVerificationFailedAndReadyFeedbackProjectSharedRetryPolicy() {
+        val payload = com.lezi.babylog.sync.MemberLoginQrPayload(
+            endpoint = com.lezi.babylog.sync.TrustedEndpointProfile.systemPki("https://nas.home"),
+            grant = "grant-0000000000000000000000000000000000000",
+            familyName = "乐乐一家",
+            memberDisplayName = "妈妈",
+            expiresAtEpochSeconds = 1_753_419_000,
+        )
+        val snapshot = onboardingFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Join,
+            step = FamilyWizardStep.Identity,
+            draft = FamilyEndpointDraft.fromConfig(
+                FamilyEndpointConfig(host = "nas.home"),
+            ),
+            displayName = "妈妈",
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+
+        val failed = com.lezi.babylog.domain.projectMemberLoginQrDialog(
+            FamilyWizardState.MemberLoginQrVerificationFailed(
+                snapshot = snapshot,
+                payload = payload,
+                message = "暂时无法确认二维码中的家庭服务器，请稍后重试",
+            ),
+        )!!
+        assertEquals(true, failed.verificationRetryRequired)
+        assertEquals(true, failed.confirmEnabled)
+        assertEquals("重新确认", failed.confirmLabel)
+
+        val ready = com.lezi.babylog.domain.projectMemberLoginQrDialog(
+            FamilyWizardState.MemberLoginQrReady(
+                snapshot = snapshot,
+                payload = payload,
+                feedback = "请填写设备称呼",
+            ),
+        )!!
+        assertEquals("请填写设备称呼", ready.feedback)
+        assertEquals(true, ready.confirmEnabled)
+        assertEquals("在这台设备登录", ready.confirmLabel)
+    }
+
     private fun completed(
         snapshot: com.lezi.babylog.domain.FamilyWizardSnapshot,
         outcome: FamilyWizardOutcome,

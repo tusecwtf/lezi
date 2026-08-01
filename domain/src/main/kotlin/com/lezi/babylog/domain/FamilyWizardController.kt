@@ -427,8 +427,18 @@ class FamilyWizardController(
     private val endpointJobLock = Any()
     private var activeEndpointJob: Job? = null
     private var activeMemberLoginQrJob: Job? = null
-    /** True only while a claim remembered the QR endpoint but has not completed yet. */
+    /**
+     * True only while a claim remembered the QR endpoint but has not completed a session yet.
+     * Survives claim failure → Ready so cancel/dismiss can still forget residual trust.
+     */
     private var memberLoginQrRememberedEndpoint = false
+
+    /**
+     * Set when a non-suspend path (begin/keepOffline) drops a half-trusted QR endpoint
+     * without being able to await [FamilyWizardGateway.forgetEndpoint]. Flushed on the next
+     * suspend wizard entry that can call the gateway.
+     */
+    private var pendingMemberLoginQrForget = false
 
     /** Starts a fresh UI session after a prior completion (for example after later leaving family). */
     @Synchronized
@@ -458,6 +468,7 @@ class FamilyWizardController(
             activeEndpointJob = endpointJob
         }
         try {
+            flushPendingMemberLoginQrForget()
             val requestVersion = endpointRequestVersion.incrementAndGet()
             val draft = FamilyWizardSnapshot.empty(entry).copy(endpointDraft = endpointDraft)
             mutableState.value = FamilyWizardState.ProbingEndpoint(draft)
@@ -513,8 +524,8 @@ class FamilyWizardController(
                 if (activeEndpointJob === endpointJob) activeEndpointJob = null
             }
             submission.unlock()
-                }
-            }
+        }
+    }
 
     fun keepOffline(entry: FamilyWizardEntry) {
         if (mutableState.value is FamilyWizardState.Submitting) return
@@ -544,7 +555,11 @@ class FamilyWizardController(
             activeMemberLoginQrJob.also { activeMemberLoginQrJob = null }
         }
         job?.cancel()
-        memberLoginQrRememberedEndpoint = false
+        if (memberLoginQrRememberedEndpoint) {
+            // begin/keepOffline are non-suspend; mark forget for the next suspend flush.
+            pendingMemberLoginQrForget = true
+            memberLoginQrRememberedEndpoint = false
+        }
         if (resetState) {
             val current = mutableState.value
             val entry = when (current) {
@@ -557,6 +572,18 @@ class FamilyWizardController(
             if (entry != null) {
                 mutableState.value = FamilyWizardState.Editing(FamilyWizardSnapshot.empty(entry))
             }
+        }
+    }
+
+    private suspend fun flushPendingMemberLoginQrForget() {
+        if (!pendingMemberLoginQrForget) return
+        pendingMemberLoginQrForget = false
+        try {
+            gateway.forgetEndpoint()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // Best-effort cleanup of residual half-trust.
         }
     }
 
@@ -574,6 +601,7 @@ class FamilyWizardController(
             activeMemberLoginQrJob = qrJob
         }
         try {
+            flushPendingMemberLoginQrForget()
             val requestVersion = memberLoginQrRequestVersion.incrementAndGet()
             val snapshot = memberLoginQrSnapshot(entry, payload)
             mutableState.value = FamilyWizardState.VerifyingMemberLoginQr(snapshot, payload)
@@ -594,13 +622,14 @@ class FamilyWizardController(
     /**
      * Cancels in-flight verify/claim for a member-login QR and returns to editing.
      * Does not leave a continuing claim job. If claim had remembered trust without a
-     * completed session, forgets that half-trusted endpoint.
+     * completed session (Ready after failed claim, or mid-Claiming), forgets that
+     * half-trusted endpoint so cancel never leaves residual LAN trust.
      */
     suspend fun cancelMemberLoginQr() {
-        val current = mutableState.value
-        val shouldForgetRemembered = memberLoginQrRememberedEndpoint &&
-            current is FamilyWizardState.ClaimingMemberLoginQr
+        val shouldForgetRemembered =
+            memberLoginQrRememberedEndpoint || pendingMemberLoginQrForget
         cancelMemberLoginQrWork(resetState = true)
+        pendingMemberLoginQrForget = false
         if (shouldForgetRemembered) {
             try {
                 gateway.forgetEndpoint()
@@ -618,28 +647,30 @@ class FamilyWizardController(
     ) {
         val current = mutableState.value
         val snapshot = when (current) {
-            is FamilyWizardState.MemberLoginQrReady -> current.snapshot
-            is FamilyWizardState.MemberLoginQrVerificationFailed -> current.snapshot
+            is FamilyWizardState.MemberLoginQrReady -> {
+                if (current.payload != payload) return
+                current.snapshot
+            }
             else -> return
         }
-        if (current is FamilyWizardState.MemberLoginQrVerificationFailed) return
-        if (current is FamilyWizardState.MemberLoginQrReady && current.payload != payload) return
         if (!submission.tryLock()) return
         val qrJob = currentCoroutineContext()[Job]
         synchronized(endpointJobLock) {
             activeMemberLoginQrJob = qrJob
         }
-        memberLoginQrRememberedEndpoint = false
+        // Keep memberLoginQrRememberedEndpoint across retries until success or cancel:
+        // a prior failed claim may still hold trust; clearing the flag here would lose
+        // the cancel/begin cleanup signal while residual trust remains.
         try {
+            flushPendingMemberLoginQrForget()
             val requestVersion = memberLoginQrRequestVersion.incrementAndGet()
-            val deviceNameError = runCatching {
+            val normalizedDeviceName = runCatching {
                 com.lezi.babylog.sync.requireDeviceName(deviceName)
-            }.exceptionOrNull()?.message
-            if (deviceNameError != null) {
+            }.getOrElse { error ->
                 mutableState.value = FamilyWizardState.MemberLoginQrReady(
                     snapshot = snapshot,
                     payload = payload,
-                    feedback = deviceNameError,
+                    feedback = error.message ?: "请填写设备称呼",
                 )
                 return
             }
@@ -669,11 +700,12 @@ class FamilyWizardController(
                 return
             }
             val result = try {
-                gateway.claimMemberLoginQr(payload, deviceName.trim()).getOrThrow()
+                gateway.claimMemberLoginQr(payload, normalizedDeviceName).getOrThrow()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
                 if (memberLoginQrRequestVersion.get() != requestVersion) return
+                // Keep remembered-without-session so cancel/dismiss can forget residual trust.
                 mutableState.value = FamilyWizardState.MemberLoginQrReady(
                     snapshot = snapshot,
                     payload = payload,
@@ -681,7 +713,9 @@ class FamilyWizardController(
                 )
                 return
             }
+            // Session owns the endpoint; cancel must not forget successful login trust.
             memberLoginQrRememberedEndpoint = false
+            pendingMemberLoginQrForget = false
             if (memberLoginQrRequestVersion.get() != requestVersion) return
             publishCompleted(
                 snapshot,
@@ -1223,17 +1257,20 @@ private fun mapMemberLoginQrVerifyResult(
     payload: MemberLoginQrPayload,
     result: SetupProbeResult,
 ): FamilyWizardState = when (result) {
-    is SetupProbeResult.Ready -> if (
-        result.endpoint == payload.endpoint &&
-        result.familyState == SetupFamilyState.Configured
-    ) {
-        FamilyWizardState.MemberLoginQrReady(snapshot, payload)
-    } else {
-        FamilyWizardState.MemberLoginQrVerificationFailed(
-            snapshot = snapshot,
-            payload = payload,
-            message = "这个二维码对应的服务器尚未配置家庭",
-        )
+    is SetupProbeResult.Ready -> when {
+        result.endpoint != payload.endpoint ->
+            FamilyWizardState.MemberLoginQrVerificationFailed(
+                snapshot = snapshot,
+                payload = payload,
+                message = "二维码中的家庭服务器与当前探测结果不一致，请重新扫码",
+            )
+        result.familyState != SetupFamilyState.Configured ->
+            FamilyWizardState.MemberLoginQrVerificationFailed(
+                snapshot = snapshot,
+                payload = payload,
+                message = "这个二维码对应的服务器尚未配置家庭",
+            )
+        else -> FamilyWizardState.MemberLoginQrReady(snapshot, payload)
     }
     SetupProbeResult.Failed.CertificateChanged ->
         FamilyWizardState.MemberLoginQrVerificationFailed(
@@ -1257,3 +1294,143 @@ private fun memberLoginQrClaimError(error: Throwable): String = when (error) {
         ?: familySyncError(error, "登录失败，请稍后重试")
     else -> familySyncError(error, "登录失败，请稍后重试")
 }
+
+/**
+ * Display-only chrome for member-login QR dialogs. Never carries a grant or trust mode —
+ * hosts must not reconstruct [MemberLoginQrPayload] solely for recovery UI.
+ */
+data class MemberLoginQrDisplayInfo(
+    val familyName: String?,
+    val memberDisplayName: String,
+)
+
+/**
+ * Shared Account/Onboarding projection of [FamilyWizardState] → member-login QR dialog flags.
+ * Single enablement policy so hosts cannot drift on verify-retry / claim / recovery labels.
+ */
+data class MemberLoginQrDialogModel(
+    val display: MemberLoginQrDisplayInfo,
+    /** Live payload for verify/claim/manual-join; null only for post-claim recovery chrome. */
+    val payload: MemberLoginQrPayload?,
+    val feedback: String?,
+    val submitting: Boolean,
+    val verificationInProgress: Boolean,
+    val verificationRetryRequired: Boolean,
+    val recoveryRetryRequired: Boolean,
+    val deviceNameEditable: Boolean,
+    val showConfirm: Boolean,
+    val confirmLabel: String,
+    val title: String,
+) {
+    val confirmEnabled: Boolean get() = showConfirm && !submitting
+}
+
+/** Maps wizard state to the shared QR confirm surface. Null when the dialog should not show. */
+fun projectMemberLoginQrDialog(state: FamilyWizardState): MemberLoginQrDialogModel? =
+    when (state) {
+        is FamilyWizardState.VerifyingMemberLoginQr -> MemberLoginQrDialogModel(
+            display = memberLoginQrDisplayInfo(state.payload),
+            payload = state.payload,
+            feedback = "正在确认家庭服务器…",
+            submitting = false,
+            verificationInProgress = true,
+            verificationRetryRequired = false,
+            recoveryRetryRequired = false,
+            deviceNameEditable = false,
+            showConfirm = false,
+            confirmLabel = "在这台设备登录",
+            title = "正在确认家庭服务器…",
+        )
+        is FamilyWizardState.MemberLoginQrVerificationFailed -> MemberLoginQrDialogModel(
+            display = memberLoginQrDisplayInfo(state.payload),
+            payload = state.payload,
+            feedback = state.message,
+            submitting = false,
+            verificationInProgress = false,
+            verificationRetryRequired = true,
+            recoveryRetryRequired = false,
+            deviceNameEditable = true,
+            showConfirm = true,
+            confirmLabel = "重新确认",
+            title = "登录家庭",
+        )
+        is FamilyWizardState.MemberLoginQrReady -> MemberLoginQrDialogModel(
+            display = memberLoginQrDisplayInfo(state.payload),
+            payload = state.payload,
+            feedback = state.feedback,
+            submitting = false,
+            verificationInProgress = false,
+            verificationRetryRequired = false,
+            recoveryRetryRequired = false,
+            deviceNameEditable = true,
+            showConfirm = true,
+            confirmLabel = "在这台设备登录",
+            title = "登录家庭",
+        )
+        is FamilyWizardState.ClaimingMemberLoginQr -> MemberLoginQrDialogModel(
+            display = memberLoginQrDisplayInfo(state.payload),
+            payload = state.payload,
+            feedback = null,
+            submitting = true,
+            verificationInProgress = false,
+            verificationRetryRequired = false,
+            recoveryRetryRequired = false,
+            deviceNameEditable = false,
+            showConfirm = true,
+            confirmLabel = "同步中…",
+            title = "登录家庭",
+        )
+        is FamilyWizardState.Completed -> {
+            val claimed = state.outcome as? FamilyWizardOutcome.MemberLoginQrClaimed
+            if (claimed?.dataRecovery == InitialFamilyDataRecovery.RetryRequired) {
+                MemberLoginQrDialogModel(
+                    display = memberLoginQrDisplayInfo(state.snapshot),
+                    payload = null,
+                    feedback = "已登录；首次同步失败，请重试",
+                    submitting = false,
+                    verificationInProgress = false,
+                    verificationRetryRequired = false,
+                    recoveryRetryRequired = true,
+                    deviceNameEditable = false,
+                    showConfirm = true,
+                    confirmLabel = "重试首次同步",
+                    title = "登录家庭",
+                )
+            } else {
+                null
+            }
+        }
+        is FamilyWizardState.RetryableFailure -> {
+            val claimed = state.committedOutcome as? FamilyWizardOutcome.MemberLoginQrClaimed
+            if (claimed != null) {
+                MemberLoginQrDialogModel(
+                    display = memberLoginQrDisplayInfo(state.snapshot),
+                    payload = null,
+                    feedback = state.message,
+                    submitting = false,
+                    verificationInProgress = false,
+                    verificationRetryRequired = false,
+                    recoveryRetryRequired = true,
+                    deviceNameEditable = false,
+                    showConfirm = true,
+                    confirmLabel = "重试首次同步",
+                    title = "登录家庭",
+                )
+            } else {
+                null
+            }
+        }
+        else -> null
+    }
+
+fun memberLoginQrDisplayInfo(payload: MemberLoginQrPayload): MemberLoginQrDisplayInfo =
+    MemberLoginQrDisplayInfo(
+        familyName = payload.familyName,
+        memberDisplayName = payload.memberDisplayName,
+    )
+
+fun memberLoginQrDisplayInfo(snapshot: FamilyWizardSnapshot): MemberLoginQrDisplayInfo =
+    MemberLoginQrDisplayInfo(
+        familyName = snapshot.familyName.ifBlank { null },
+        memberDisplayName = snapshot.displayName.ifBlank { "家人" },
+    )
