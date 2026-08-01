@@ -7,7 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | 统一全库整改：正确性、架构可读性、Android/Rust 私有 locality；32 个可执行票 + 1 个 wontfix |
+| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | **complete** — 32 executable done + 18 wontfix；closeout release 0.3.2 separate |
 
 `local-data-upgrade-protection` 已完成实现与本机验收，保留到下一次严格清理。
 

@@ -5,17 +5,17 @@
 
 **Source:** merged directory E1 + documentation half of B3
 **Blocked by:** 17、22、24、26、27、28、29、30、31、32
-**Status:** blocked
+**Status:** done
 **Size:** S
 
 ## Acceptance criteria
 
-- [ ] `docs/prd/tech.md` 描述实际已落地的 module/package/server locality；未完成部分明确 Later 或不写。
-- [ ] `AGENTS.md` 写清：新代码进入既有能力/调用流子包，不在已分区根继续平铺，
+- [x] `docs/prd/tech.md` 描述实际已落地的 module/package/server locality；未完成部分明确 Later 或不写。
+- [x] `AGENTS.md` 写清：新代码进入既有能力/调用流子包，不在已分区根继续平铺，
   禁止新增无产品合同的源码字符串/行数 StructureTest。
-- [ ] tech、AGENTS、实际目录与根 README/部署约定无矛盾；不新增第三份完整 Gradle 边表。
-- [ ] 删除或标 complete 前，本 tracker 32 个可执行票都有 fixed-HEAD 验收证据，18 保持 wontfix。
-- [ ] `.scratch/README.md` 只索引 active tracker；关闭后按本地 tracker 规则保留 commit/PRD 入口。
+- [x] tech、AGENTS、实际目录与根 README/部署约定无矛盾；不新增第三份完整 Gradle 边表。
+- [x] 删除或标 complete 前，本 tracker 32 个可执行票都有 fixed-HEAD 验收证据，18 保持 wontfix。
+- [x] `.scratch/README.md` 只索引 active tracker；关闭后按本地 tracker 规则保留 commit/PRD 入口。
 
 ## Validation
 
@@ -29,3 +29,8 @@
 ## Out of scope
 
 不补做未完成结构票，不添加行数守卫，不保留已合并 tracker 的重复目录。
+
+## Implementation notes
+
+- tech.md §2.1.1 maps landed package locality; AGENTS.md forbids root sprawl and StructureTest revival.
+- Tracker Status complete; 18 remains wontfix.

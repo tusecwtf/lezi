@@ -1,18 +1,19 @@
 # 2026-08-01 全库整改统一程序 · 票索引
 
 Spec: [spec.md](./spec.md)
-**Status:** ready-for-agent
+**Status:** complete
 Product validation baseline: `0aa225bf25b21315dec3a84983124086ff9858d1`
 Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Disposition
 
 - Canonical records: **33**
-- Executable: **0**
-- Done: **31**
+- Executable: **32**
+- Done: **32**
 - Current frontier (ready-for-agent): **0**
-- Blocked by dependency: **1**
+- Blocked by dependency: **0**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
+- Tracker **complete** — batch remediation closed; release version bump is separate.
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
 
@@ -34,7 +35,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**33** (blocked until batch review closes 32)
+**（空）** (blocked until batch review closes 32)
 
 ## Tickets
 
@@ -72,7 +73,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [30](./issues/30-partition-settings-package.md) | directory C6 | Settings 按 calendar/record 分包 | 06、25 | M | done |
 | [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | done |
 | [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | done |
-| [33](./issues/33-codify-implemented-layout-conventions.md) | directory E1 | 固化已落地目录约定并收口 | 17、22、24、26–32 | S | blocked |
+| [33](./issues/33-codify-implemented-layout-conventions.md) | directory E1 | 固化已落地目录约定并收口 | 17、22、24、26–32 | S | done |
 
 ## Batch closeout (operator instruction 2026-08-01)
 

@@ -4,6 +4,8 @@
 
 Lezi is a Kotlin/Jetpack Compose Android app with a Rust home-LAN sync service. `app/` owns application wiring; `core/` contains shared models, storage, and UI infrastructure; `domain/` exposes use cases; `designsystem/` holds reusable Compose tokens and components; and product screens live under `feature/<name>/`. Android sync code is in `sync/`; the Axum/SQLite NAS service is in `tools/lezi-sync/`. Keep unit tests beside each module in `src/test/` and device/Compose tests in `src/androidTest/`.
 
+**Package locality (current):** after the 2026-08 audit remediation, put new code in the existing capability/call-flow subpackages — do not keep flattening already-partitioned module roots. Keep deep façades at the root (`domain` `CareLog`, `sync` `SyncPort`/`RealSyncPort`, lezi-sync `Store`). Do not add product-less source-layout/line-count StructureTests; behavior tests are the refactor contract. Landed map: `docs/prd/tech.md` §2.1.1.
+
 Treat `docs/prd/` as product authority, `CONTEXT.md` as terminology authority, and `docs/adr/` as architecture history. Local specs and tickets live in `.scratch/`; GitHub Issues are not the tracker.
 
 ## Build, Test, and Development Commands

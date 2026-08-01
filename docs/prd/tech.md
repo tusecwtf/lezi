@@ -73,8 +73,7 @@ sideways seam（非分层违规；完整边表见 §2.2）。feature 之间无 `
 
 ### 2.1 稳定原则（Gradle 图 + 模块内就近归拢）
 
-本节目的是固定 **current** 架构边界与防回潮规则；**不**把尚未落地的目标子包路径写成
-已交付事实（包内就近归拢落地后由后续文档回写，不在本文件链接 `.scratch/` 目标）。
+本节目的是固定 **current** 架构边界与防回潮规则；只描述已交付 tree。
 
 | 原则 | 含义 |
 |------|------|
@@ -84,11 +83,28 @@ sideways seam（非分层违规；完整边表见 §2.2）。feature 之间无 `
 | **Deep façade 保留** | 保留 `CareLog`、`SyncPort` / `RealSyncPort`（及 lezi-sync `Store`）的 deep 公开面；**不拆** `SyncPort` / `CareLog` 为浅 capability port 表面 |
 | **文档只描述 current** | 本文件只描述已交付 tree 与上表规则；不以本地 tracker 草案路径作为长期产品真相 |
 | **`:sync` 为允许的横向依赖** | `app` / `domain` / 若干 feature 可直接 `implementation(project(":sync"))`（§2.2）；这是有意 seam，不是对 `app → feature → domain → core` 的违规 |
+| **禁止产品无关 StructureTest** | 不新增以源码字符串/行数/路径布局为合同的 StructureTest；行为测试才是重构合同 |
 
 运行时 `TimerState` 落在 `:feature:timer`；持久化计时 blob / clear-epoch 策略在
 `core`（datastore + model）与 domain 清空端口；log ↔ timer 协作经 `core:model` 的
 `TimerHandoffSeed` 与 app composition root，**禁止** feature:log ↔ feature:timer 工程依赖；
 完成写记录经 domain。
+
+### 2.1.1 已落地 package locality（current tree）
+
+新代码进入下表子包，**不在已分区模块根继续平铺**（根仅留导航壳 / deep façade / DI 入口）。
+
+| 模块 | 根 façade / 壳 | 已落地子包 |
+|------|----------------|------------|
+| `:feature:log` | `LogScreen` / `LogViewModel` / `LogDialogHost` | `timeline/`、`dock/`、`composer/`、`layout/`、`photo/` |
+| `:feature:family` | `FamilyScreen` 导航壳 | `overview/`、`members/`、`wizard/`、`baby/`、`components/` |
+| `:feature:onboarding` | 导航壳 | wizard 步态与 QR UI 与 Family 向导逻辑对齐（薄壳 + 步态包） |
+| `:feature:settings` | Settings 入口 | `calendar/`、`record/` |
+| `:domain` | `CareLog` | `carelog/`、`careplan/`、`family/`、`timeline/`、`catalog/`、`growth/`、`export/`、`localdata/`、`calendar/` |
+| `:sync` | `SyncPort` / `RealSyncPort` / `SyncModule` | `engine/`、`backend/`、`session/`、`media/`、`appupdate/`、`qr/`、`clear/` |
+| `tools/lezi-sync` | crate 根 + 单一 `Store` 事务面 | crate-private `handlers::*`、`store::{schema,identity,bundles,media,…}`；`offline_migrate/` 独立维护窗 CLI |
+
+Later（未在本表承诺）：不新增 Gradle module 仅为了再细分；不恢复已删 StructureTest。
 
 ### 2.2 有意的 `project(":sync")` 直接依赖边
 
