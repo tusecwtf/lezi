@@ -180,18 +180,14 @@ fun buildTimerHandoffSeed(
     if (ordered.size > MAX_RECORD_PHOTOS) {
         return TimerHandoffBuildResult.PhotoOverflow(distinctCount = ordered.size)
     }
-    val overflowProbe = mergeTimerCompletionPhotos(
-        seedPhotoPaths = ordered,
-        livePlanPhotoPaths = livePlanPhotoPaths,
-    )
+    // Single overflow predicate: uncapped distinct of seed + live plan vs max.
+    // (mergeTimerCompletionPhotos caps and must not be used as the overflow probe.)
     val distinctForComplete = (
         ordered + livePlanPhotoPaths.map(String::trim).filter(String::isNotEmpty)
         ).distinct()
     if (distinctForComplete.size > MAX_RECORD_PHOTOS) {
         return TimerHandoffBuildResult.PhotoOverflow(distinctCount = distinctForComplete.size)
     }
-    // overflowProbe always ≤ max; keep for call-site clarity / future strictness
-    check(overflowProbe.size <= MAX_RECORD_PHOTOS)
 
     val photos = ordered.map { path ->
         val ownership = when {

@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.log
 
+import com.lezi.babylog.core.model.TimerHandoffAcceptResult
 import com.lezi.babylog.core.model.TimerHandoffBuildResult
 import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.core.model.UntransferableTimerField
@@ -7,11 +8,32 @@ import com.lezi.babylog.core.model.buildTimerHandoffSeed
 import com.lezi.babylog.core.model.untransferableTimerFields
 
 /**
- * Public Composer→Timer handoff seams (Ticket 09).
+ * Internal Composer→Timer handoff seams (Ticket 09).
  *
  * Transferable fields and photos leave Composer only after Timer accepts the
  * seed; this is ownership handoff, not draft abandon.
  */
+
+/**
+ * One-shot session handed to the app shell at navigate time.
+ *
+ * Accept/reject callbacks are captured when handoff starts so release does not
+ * depend on recomposition-time registration.
+ */
+data class TimerHandoffSession(
+    val seed: TimerHandoffSeed,
+    val onAccepted: (TimerHandoffSeed) -> Unit,
+    val onRejected: () -> Unit,
+)
+
+/** True when Timer owns the seed and Composer may release transferred owned paths. */
+internal fun shouldReleaseComposerAfterHandoff(result: TimerHandoffAcceptResult): Boolean =
+    when (result) {
+        is TimerHandoffAcceptResult.Accepted,
+        TimerHandoffAcceptResult.AlreadyAccepted,
+        -> true
+        TimerHandoffAcceptResult.RejectedConflict -> false
+    }
 
 internal fun untransferableFieldsForTimerHandoff(
     draft: QuickRecordDraft,
@@ -71,6 +93,3 @@ internal fun timerHandoffUntransferableConfirmMessage(
     return "开始计时后，${labeled}不会带入计时器，将由计时重新记录。确定开始计时吗？"
 }
 
-/** Paths Composer must not delete after a successful Timer accept of [seed]. */
-internal fun transferredOwnedPaths(seed: TimerHandoffSeed): List<String> =
-    seed.composerOwnedPaths

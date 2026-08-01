@@ -323,7 +323,7 @@ class RecordComposerViewModel @Inject constructor(
      * bytes are retained for Timer; only non-transferred owned orphans are reclaimed.
      */
     internal fun closeAfterTimerHandoff(seed: TimerHandoffSeed) {
-        closeInternal(transferredOwnedPaths = transferredOwnedPaths(seed).toSet())
+        closeInternal(transferredOwnedPaths = seed.composerOwnedPaths.toSet())
     }
 
     private fun closeInternal(transferredOwnedPaths: Set<String>) {
@@ -354,14 +354,11 @@ class RecordComposerViewModel @Inject constructor(
             )
             importSave.reset()
             if (draftForCleanup != null) {
-                if (transferredOwnedPaths.isEmpty()) {
-                    photoLifecycle.cleanupAbandoned(draftForCleanup)
-                } else {
-                    photoLifecycle.releaseForTimerHandoff(
-                        draft = draftForCleanup,
-                        transferredOwnedPaths = transferredOwnedPaths,
-                    )
-                }
+                // Empty keep set reclaims all owned candidates (same as cleanupAbandoned).
+                photoLifecycle.releaseForTimerHandoff(
+                    draft = draftForCleanup,
+                    transferredOwnedPaths = transferredOwnedPaths,
+                )
             }
         }
     }

@@ -14,6 +14,7 @@ import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.TimerHandoffAcceptResult
 import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.core.model.decideTimerHandoffAccept
+import com.lezi.babylog.core.model.RecordMediaFiles
 import com.lezi.babylog.core.model.mergeTimerCompletionPhotos
 import com.lezi.babylog.core.model.nextFeedSuggestedAt
 import com.lezi.babylog.core.model.runNextFeedPlanReconciliation
@@ -22,7 +23,6 @@ import com.lezi.babylog.core.model.timerDiscardReclaimPaths
 import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -157,11 +157,13 @@ class TimerViewModel @Inject constructor(
     }
 
     private suspend fun persistLocal(s: TimerState) {
+        // Seed-only / plan-bound sessions must survive process death before L/R start
+        // (Ticket 09 AC: handoffSeed DataStore-restored across rebuild).
         settings.setNursingTimerJson(
-            if (!s.hasTimerData()) {
-                null
-            } else {
+            if (s.shouldPersistTimerSession()) {
                 s.toJson(savedBootCount = currentBootCount(app))
+            } else {
+                null
             },
         )
         _state.value = s
@@ -499,7 +501,7 @@ class TimerViewModel @Inject constructor(
                 existingHandoffId = cur.handoffSeed?.handoffId,
                 boundCarePlanId = cur.carePlanId,
                 boundBabyId = cur.babyId,
-                hasSessionData = cur.hasRunningOrAccumulatedData(),
+                hasSessionData = cur.hasTimerData(),
             )
             when (decision) {
                 TimerHandoffAcceptResult.AlreadyAccepted -> decision
@@ -555,15 +557,10 @@ class TimerViewModel @Inject constructor(
     private suspend fun reclaimComposerOwnedHandoffFiles(paths: Collection<String>) {
         if (paths.isEmpty()) return
         withContext(Dispatchers.IO) {
-            val allowedRoot = File(app.filesDir, "record-media").canonicalFile
-            paths.forEach { path ->
-                runCatching {
-                    val file = File(path).canonicalFile
-                    if (file.parentFile == allowedRoot) {
-                        file.delete()
-                    }
-                }
-            }
+            RecordMediaFiles.deleteUnderAllowedRoot(
+                filesDir = app.filesDir,
+                paths = paths,
+            )
         }
     }
 }

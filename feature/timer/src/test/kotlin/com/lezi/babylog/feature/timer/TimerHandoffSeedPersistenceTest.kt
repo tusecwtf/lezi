@@ -47,6 +47,84 @@ class TimerHandoffSeedPersistenceTest {
     }
 
     @Test
+    fun seedOnlyAcceptSessionPersistsWithoutLeftAccumMs() {
+        // Mirrors acceptHandoffSeed → persistLocal: handoff/plan bind without L/R start.
+        val seed = TimerHandoffSeed(
+            handoffId = "handoff-seed-only",
+            babyId = 7L,
+            carePlanId = 42L,
+            note = "仅交接",
+            amountMl = "45",
+            photos = listOf(
+                TimerHandoffPhoto("owned.jpg", TimerHandoffPhotoOwnership.ComposerOwned),
+            ),
+        )
+        val accepted = TimerState(
+            babyId = 7L,
+            completionClientUuid = "session-seed-only",
+            carePlanId = 42L,
+            handoffSeed = seed,
+        )
+        assertTrue(accepted.shouldPersistTimerSession())
+        assertTrue(!accepted.hasTimerData())
+        assertTrue(accepted.leftAccumMs == 0L)
+
+        val nursingTimerJson = accepted.toJson(
+            savedElapsed = 5_000L,
+            savedWall = 1_700_000_000_000L,
+            savedBootCount = 2L,
+        )
+        val restored = TimerState.fromJson(
+            raw = nursingTimerJson,
+            nowElapsed = 5_000L,
+            nowWall = 1_700_000_000_000L,
+            nowBootCount = 2L,
+        )
+        assertEquals(seed, restored.handoffSeed)
+        assertEquals("仅交接", restored.handoffSeed?.note)
+        assertEquals("45", restored.handoffSeed?.amountMl)
+        assertEquals(listOf("owned.jpg"), restored.handoffSeed?.composerOwnedPaths)
+        assertEquals(0L, restored.leftAccumMs)
+        assertNull(restored.sessionStartedAt)
+    }
+
+    @Test
+    fun corruptNestedHandoffSeedDoesNotWipeValidTimerSession() {
+        val durable = TimerState(
+            babyId = 3L,
+            completionClientUuid = "keep-me",
+            leftAccumMs = 2_500L,
+            sessionStartedAt = 1_700_000_000_000L,
+            order = "L",
+        )
+        val raw = durable.toJson(
+            savedElapsed = 9_000L,
+            savedWall = 1_700_000_000_100L,
+            savedBootCount = 1L,
+        ).replace(
+            "\"handoffSeed\":null",
+            "\"handoffSeed\":{\"handoffId\":\"\",\"babyId\":0}",
+        )
+        val restored = TimerState.fromJson(
+            raw = raw,
+            nowElapsed = 9_000L,
+            nowWall = 1_700_000_000_100L,
+            nowBootCount = 1L,
+        )
+        assertNull(restored.handoffSeed)
+        assertEquals(3L, restored.babyId)
+        assertEquals("keep-me", restored.completionClientUuid)
+        assertEquals(2_500L, restored.leftAccumMs)
+        assertEquals(1_700_000_000_000L, restored.sessionStartedAt)
+    }
+
+    @Test
+    fun emptyTimerStateDoesNotPersist() {
+        assertTrue(!TimerState().shouldPersistTimerSession())
+        assertTrue(TimerState(carePlanId = 9L).shouldPersistTimerSession())
+    }
+
+    @Test
     fun olderSnapshotsWithoutHandoffKeyStillRestore() {
         val legacy = TimerState(
             babyId = 1L,

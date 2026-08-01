@@ -219,8 +219,12 @@ internal fun TimerState.hasTimerData(): Boolean =
         rightAccumMs > 0L ||
         sessionStartedAt != null
 
-/** Session has user-visible timer progress (not mere handoff/plan bind). */
-internal fun TimerState.hasRunningOrAccumulatedData(): Boolean = hasTimerData()
+/**
+ * Durable sessions include seed-only / plan-bound handoffs that have no L/R
+ * progress yet — process death must not drop note/amount/photos or orphan files.
+ */
+internal fun TimerState.shouldPersistTimerSession(): Boolean =
+    hasTimerData() || handoffSeed != null || carePlanId != null
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.putNullableLong(
     key: String,
@@ -277,18 +281,17 @@ private inline fun <reified T : Enum<T>> JsonObject.optionalEnum(key: String): T
 }
 
 /**
- * Optional handoff seed (Ticket 09). Absent key is treated as null so older
- * schemaVersion=1 snapshots without the field still restore.
+ * Optional handoff seed (Ticket 09). Absent / null / corrupt nested payload is
+ * treated as null so a bad handoff field cannot wipe the rest of a durable
+ * timer session (matches [TimerHandoffSeed.fromJson] fail-soft).
  */
 private fun JsonObject.optionalHandoffSeed(key: String): TimerHandoffSeed? {
     val value = get(key) ?: return null
     if (value === JsonNull) return null
     return when (value) {
         is JsonPrimitive -> TimerHandoffSeed.fromJson(value.contentOrNull)
-            ?: throw IllegalArgumentException("Invalid $key")
-        is JsonObject -> runCatching { TimerHandoffSeed.fromJsonObject(value) }
-            .getOrElse { throw IllegalArgumentException("Invalid $key") }
-        else -> throw IllegalArgumentException("Invalid $key")
+        is JsonObject -> runCatching { TimerHandoffSeed.fromJsonObject(value) }.getOrNull()
+        else -> null
     }
 }
 

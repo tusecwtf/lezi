@@ -100,6 +100,7 @@ import com.lezi.babylog.feature.growth.GrowthRoute
 import com.lezi.babylog.feature.log.ComposerCreateIntent
 import com.lezi.babylog.feature.log.LogRoute
 import com.lezi.babylog.feature.log.RecordComposerHost
+import com.lezi.babylog.feature.log.TimerHandoffSession
 import com.lezi.babylog.feature.log.RecordComposerRequest
 import com.lezi.babylog.feature.log.quickDockSnackbarBottomInset
 import com.lezi.babylog.feature.onboarding.OnboardingRoute
@@ -763,9 +764,12 @@ private fun LeziMainScaffold(
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
-    /** Composer registers release after Timer accepts handoff seed (Ticket 09). */
-    var timerHandoffRelease by remember {
-        mutableStateOf<((TimerHandoffSeed) -> Unit)?>(null)
+    /**
+     * Composer→Timer handoff session captured at navigate time (Ticket 09).
+     * Accept/reject callbacks are stable for this launch — not recomposition-registered.
+     */
+    var timerHandoffSession by remember {
+        mutableStateOf<TimerHandoffSession?>(null)
     }
 
     LaunchedEffect(widgetComposerTarget) {
@@ -1051,31 +1055,38 @@ private fun LeziMainScaffold(
                     source?.get<String>(TIMER_HANDOFF_SEED_JSON_KEY),
                 )
                 TimerRoute(
-                    initialNote = handoffSeed?.note
-                        ?: source?.get<String>(TIMER_SEED_NOTE_KEY).orEmpty(),
-                    initialAmountMl = handoffSeed?.amountMl
-                        ?: source?.get<String>(TIMER_SEED_AMOUNT_KEY).orEmpty(),
-                    carePlanId = handoffSeed?.carePlanId
-                        ?: source?.get<Long>(TIMER_SEED_CARE_PLAN_ID_KEY),
-                    babyId = handoffSeed?.babyId
-                        ?: source?.get<Long>(TIMER_SEED_BABY_ID_KEY),
+                    initialNote = handoffSeed?.note.orEmpty(),
+                    initialAmountMl = handoffSeed?.amountMl.orEmpty(),
+                    carePlanId = handoffSeed?.carePlanId,
+                    babyId = handoffSeed?.babyId,
                     handoffSeed = handoffSeed,
                     onHandoffAccepted = { seed ->
                         // Timer owns the seed; release Composer without reclaiming
                         // transferred owned photos.
-                        timerHandoffRelease?.invoke(seed)
-                        timerHandoffRelease = null
+                        val session = timerHandoffSession
+                        timerHandoffSession = null
+                        session?.onAccepted?.invoke(seed)
                         source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
                     },
                     onHandoffRejected = {
                         // Keep Composer draft + photos editable; leave timer route.
+                        val session = timerHandoffSession
+                        timerHandoffSession = null
+                        session?.onRejected?.invoke()
                         source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
                         scope.launch {
                             snackbar.showSnackbar("当前已有进行中的计时，草稿仍可编辑")
                         }
                         nav.popBackStack()
                     },
-                    onDone = { nav.popBackStack() },
+                    onDone = {
+                        // Pop / discard before accept: unlock Composer without releasing files.
+                        val pending = timerHandoffSession
+                        timerHandoffSession = null
+                        pending?.onRejected?.invoke()
+                        source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
+                        nav.popBackStack()
+                    },
                 )
             }
         }
@@ -1088,20 +1099,15 @@ private fun LeziMainScaffold(
         onSaved = { message ->
             scope.launch { snackbar.showSnackbar(message) }
         },
-        onStartNursingTimer = { seed ->
+        onStartNursingTimer = { session ->
             // Ownership transfer: do NOT close Composer until Timer accepts seed.
-            nav.currentBackStackEntry?.savedStateHandle?.apply {
-                set(TIMER_HANDOFF_SEED_JSON_KEY, seed.toJson())
-                // Legacy scalar keys kept for process-restore parity of note/amount.
-                set(TIMER_SEED_NOTE_KEY, seed.note)
-                set(TIMER_SEED_AMOUNT_KEY, seed.amountMl)
-                set(TIMER_SEED_CARE_PLAN_ID_KEY, seed.carePlanId)
-                set(TIMER_SEED_BABY_ID_KEY, seed.babyId)
-            }
+            // Session callbacks are bound here — sole navigate payload is seed JSON.
+            timerHandoffSession = session
+            nav.currentBackStackEntry?.savedStateHandle?.set(
+                TIMER_HANDOFF_SEED_JSON_KEY,
+                session.seed.toJson(),
+            )
             nav.navigate("timer")
-        },
-        onRegisterTimerHandoffRelease = { release ->
-            timerHandoffRelease = release
         },
         // Ticket 21: unconfigured plan switch → explicit setup; dismiss still allows save.
         onConfigureSystemCalendar = { showSystemCalendarSetup = true },
@@ -1259,9 +1265,5 @@ private fun ForcedAppUpdateOverlay(
 internal fun shouldShowOnboarding(hasBaby: Boolean, familyRole: FamilyRole): Boolean =
     !hasBaby && familyRole != FamilyRole.Member
 
-private const val TIMER_SEED_NOTE_KEY = "timer_seed_note"
-private const val TIMER_SEED_AMOUNT_KEY = "timer_seed_amount_ml"
-private const val TIMER_SEED_CARE_PLAN_ID_KEY = "timer_seed_care_plan_id"
-private const val TIMER_SEED_BABY_ID_KEY = "timer_seed_baby_id"
-/** Full explicit Composer→Timer ownership seed (Ticket 09). */
+/** Sole Composer→Timer navigate payload (Ticket 09). */
 private const val TIMER_HANDOFF_SEED_JSON_KEY = "timer_handoff_seed_json"

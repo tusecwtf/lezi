@@ -137,16 +137,11 @@ fun RecordComposerHost(
     onPersisted: () -> Unit,
     onSaved: (String) -> Unit,
     /**
-     * Explicit Composer→Timer ownership handoff. Host keeps Composer open until
-     * Timer accepts the seed. Shell navigates with the seed and later invokes the
-     * release callback registered via [onRegisterTimerHandoffRelease].
+     * Explicit Composer→Timer ownership handoff. Shell navigates with the seed
+     * JSON and must invoke [TimerHandoffSession.onAccepted] / [TimerHandoffSession.onRejected]
+     * from the Timer accept result — no recomposition-time registration.
      */
-    onStartNursingTimer: (TimerHandoffSeed) -> Unit,
-    /**
-     * Host registers a one-shot release function: after Timer accepts, shell must
-     * call it so Composer closes without reclaiming transferred owned photos.
-     */
-    onRegisterTimerHandoffRelease: ((TimerHandoffSeed) -> Unit) -> Unit = {},
+    onStartNursingTimer: (TimerHandoffSession) -> Unit,
     /** Optional: open device-local system calendar setup (ticket 21). Cancel still saves plan. */
     onConfigureSystemCalendar: (() -> Unit)? = null,
     vm: RecordComposerViewModel = hiltViewModel(),
@@ -162,19 +157,45 @@ fun RecordComposerHost(
     var timerHandoffConfirmMessage by remember(request) { mutableStateOf<String?>(null) }
     var timerHandoffOverflowMessage by remember(request) { mutableStateOf<String?>(null) }
     var pendingTimerHandoffSeed by remember(request) { mutableStateOf<TimerHandoffSeed?>(null) }
+    /**
+     * After seed is launched to Timer, block dismiss/import/remove until accept
+     * or reject so cleanupAbandoned cannot race transferred owned paths.
+     */
+    var timerHandoffInFlight by remember(request) { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val latestOnDismiss by rememberUpdatedState(onDismiss)
     // Post-save offer + finish copy live in ViewModel/SavedState (single source of truth).
     // Any new composition after rotation observes state — never dual-mastered rememberSaveable
     // locals mutated by a late save callback from a disposed composition.
     val pendingNextFeedOffer = state.pendingNextFeedOffer
     val pendingFinishMessage = state.pendingFinishMessage
     val postSaveActive = hasComposerPostSaveStage(pendingNextFeedOffer, pendingFinishMessage)
+    val handoffBusy = timerHandoffInFlight
 
     fun finishDismiss() {
+        if (timerHandoffInFlight) return
         confirmDiscard = false
         vm.close()
         onDismiss()
+    }
+
+    fun launchTimerHandoff(seed: TimerHandoffSeed) {
+        timerHandoffInFlight = true
+        onStartNursingTimer(
+            TimerHandoffSession(
+                seed = seed,
+                onAccepted = { accepted ->
+                    timerHandoffInFlight = false
+                    vm.closeAfterTimerHandoff(accepted)
+                    latestOnDismiss()
+                },
+                onRejected = {
+                    // Keep draft + owned files editable; clear in-flight lock only.
+                    timerHandoffInFlight = false
+                },
+            ),
+        )
     }
 
     fun requestDismiss(source: ComposerDismissSource) {
@@ -182,7 +203,7 @@ fun RecordComposerHost(
             decideRecordComposerDismiss(
                 source = source,
                 hasUserChanges = state.hasUserChanges,
-                busy = state.saving || state.deleting,
+                busy = state.saving || state.deleting || handoffBusy,
             )
         ) {
             ComposerDismissDecision.DismissNow -> finishDismiss()
@@ -191,7 +212,7 @@ fun RecordComposerHost(
         }
     }
     val latestHasUserChanges by rememberUpdatedState(state.hasUserChanges)
-    val latestBusy by rememberUpdatedState(state.saving || state.deleting)
+    val latestBusy by rememberUpdatedState(state.saving || state.deleting || handoffBusy)
     val sheetConfirmValueChange: (SheetValue) -> Boolean = remember(request) {
         { target ->
             if (target != SheetValue.Hidden) {
@@ -310,16 +331,22 @@ fun RecordComposerHost(
                     preferredHand = state.preferredHand,
                     birthdayEpochDay = state.birthdayEpochDay,
                     infantFeverAdviceEnabled = state.infantFeverAdviceEnabled,
-                    saving = state.saving,
+                    saving = state.saving || handoffBusy,
                     deleting = state.deleting,
                     saveError = state.error,
                     canStartNursingTimer =
-                        state.canStartNursingTimer,
+                        state.canStartNursingTimer && !handoffBusy,
                     systemCalendarConfigured = state.systemCalendarConfigured,
                     onConfigureSystemCalendar = onConfigureSystemCalendar,
-                    onDraftChange = vm::updateDraft,
+                    onDraftChange = if (handoffBusy) {
+                        { }
+                    } else {
+                        vm::updateDraft
+                    },
                     onDismiss = ::requestDismiss,
-                    onDelete = if (draft.isEditing || draft.isEditingCarePlan) {
+                    onDelete = if (handoffBusy) {
+                        null
+                    } else if (draft.isEditing || draft.isEditingCarePlan) {
                         {
                             deleteAttempted = false
                             confirmDelete = true
@@ -328,6 +355,7 @@ fun RecordComposerHost(
                         null
                     },
                     onConfirm = {
+                        if (handoffBusy) return@QuickRecordSheet
                         // Convert is not ExplainedDisabled alone — require an explicit dialog.
                         if (draft.needsConvertToCarePlan()) {
                             confirmConvert = true
@@ -336,6 +364,7 @@ fun RecordComposerHost(
                         }
                     },
                     onStartNursingTimer = {
+                        if (handoffBusy) return@QuickRecordSheet
                         scope.launch {
                             when (val prepared = vm.buildTimerHandoffFromOpenDraft()) {
                                 null -> Unit
@@ -349,7 +378,7 @@ fun RecordComposerHost(
                                 is TimerHandoffBuildResult.Ready -> {
                                     val untransferable = vm.untransferableFieldsForOpenDraft()
                                     if (untransferable.isEmpty()) {
-                                        onStartNursingTimer(prepared.seed)
+                                        launchTimerHandoff(prepared.seed)
                                     } else {
                                         pendingTimerHandoffSeed = prepared.seed
                                         timerHandoffConfirmMessage =
@@ -362,8 +391,16 @@ fun RecordComposerHost(
                             }
                         }
                     },
-                    onImportPhotos = vm::importPhotos,
-                    onRemovePhoto = vm::removePhoto,
+                    onImportPhotos = if (handoffBusy) {
+                        { }
+                    } else {
+                        vm::importPhotos
+                    },
+                    onRemovePhoto = if (handoffBusy) {
+                        { }
+                    } else {
+                        vm::removePhoto
+                    },
                 )
             }
         }
@@ -372,9 +409,11 @@ fun RecordComposerHost(
     if (confirmTimerHandoff) {
         AlertDialog(
             onDismissRequest = {
-                confirmTimerHandoff = false
-                pendingTimerHandoffSeed = null
-                timerHandoffConfirmMessage = null
+                if (!handoffBusy) {
+                    confirmTimerHandoff = false
+                    pendingTimerHandoffSeed = null
+                    timerHandoffConfirmMessage = null
+                }
             },
             title = { Text("开始喂奶计时？") },
             text = {
@@ -391,7 +430,7 @@ fun RecordComposerHost(
                         pendingTimerHandoffSeed = null
                         timerHandoffConfirmMessage = null
                         if (seed != null) {
-                            onStartNursingTimer(seed)
+                            launchTimerHandoff(seed)
                         }
                     },
                 ) {
@@ -423,14 +462,6 @@ fun RecordComposerHost(
                 }
             },
         )
-    }
-
-    val latestOnDismiss by rememberUpdatedState(onDismiss)
-    LaunchedEffect(vm) {
-        onRegisterTimerHandoffRelease { seed ->
-            vm.closeAfterTimerHandoff(seed)
-            latestOnDismiss()
-        }
     }
 
     if (confirmDelete) {

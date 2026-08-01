@@ -111,11 +111,60 @@ class ComposerTimerHandoffTest {
             ),
         )
 
-        lifecycle.releaseForTimerHandoff(draft, transferredOwnedPaths(seed))
+        lifecycle.releaseForTimerHandoff(draft, seed.composerOwnedPaths)
 
         assertTrue(keep.isFile)
         assertTrue(plan.isFile)
         assertFalse(orphan.exists())
+    }
+
+    @Test
+    fun rejectedConflictAndCancelDoNotReleaseOwnedImports() = runBlocking {
+        val owned = photo("owned-cancel.jpg", byteArrayOf(9, 8, 7))
+        val draft = QuickRecordDraft.create(RecordType.NURSING, 1_000L).copy(
+            photos = listOf(owned.absolutePath),
+            ownedDraftPhotos = listOf(owned.absolutePath),
+        )
+        val seed = TimerHandoffSeed(
+            handoffId = "h-cancel",
+            babyId = 1L,
+            photos = listOf(
+                com.lezi.babylog.core.model.TimerHandoffPhoto(
+                    owned.absolutePath,
+                    TimerHandoffPhotoOwnership.ComposerOwned,
+                ),
+            ),
+        )
+
+        // Shell policy: only Accepted / AlreadyAccepted may closeAfterTimerHandoff.
+        assertFalse(
+            shouldReleaseComposerAfterHandoff(
+                com.lezi.babylog.core.model.TimerHandoffAcceptResult.RejectedConflict,
+            ),
+        )
+        // Cancel / pop before accept: never invoke release — owned files intact.
+        assertTrue(owned.isFile)
+        assertEquals(listOf(owned.absolutePath), seed.composerOwnedPaths)
+        // Reject path does not call releaseForTimerHandoff / cleanupAbandoned.
+        assertTrue(owned.isFile)
+        assertTrue(owned.readBytes().contentEquals(byteArrayOf(9, 8, 7)))
+        // Control: explicit abandon (user discard draft) still reclaims.
+        lifecycle.cleanupAbandoned(draft)
+        assertFalse(owned.exists())
+    }
+
+    @Test
+    fun handoffInFlightBlocksDismissLikeBusy() {
+        ComposerDismissSource.entries.forEach { source ->
+            assertEquals(
+                ComposerDismissDecision.IgnoreWhileBusy,
+                decideRecordComposerDismiss(
+                    source = source,
+                    hasUserChanges = true,
+                    busy = true, // timerHandoffInFlight maps to busy
+                ),
+            )
+        }
     }
 
     @Test

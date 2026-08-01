@@ -8,6 +8,7 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
+import com.lezi.babylog.core.model.RecordMediaFiles
 import kotlinx.coroutines.withContext
 
 @Singleton
@@ -22,7 +23,10 @@ class RecordPhotoStore @Inject constructor(
         uris: List<Uri>,
         onPathCommitted: ((String) -> Unit)? = null,
     ): List<String> = withContext(Dispatchers.IO) {
-        val directory = File(context.filesDir, "record-media").apply { mkdirs() }
+        val directory = File(
+            context.filesDir,
+            RecordMediaFiles.DIRECTORY,
+        ).apply { mkdirs() }
         BoundedRecordPhotoImporter(
             directory = directory,
             sniff = ::inspectImportedPhoto,
@@ -42,13 +46,10 @@ class RecordPhotoStore @Inject constructor(
     }
 
     suspend fun delete(paths: Collection<String>) = withContext(Dispatchers.IO) {
-        val allowedRoot = File(context.filesDir, "record-media").canonicalFile
-        paths.forEach { path ->
-            runCatching {
-                val file = File(path).canonicalFile
-                if (file.parentFile == allowedRoot) file.delete()
-            }
-        }
+        RecordMediaFiles.deleteUnderAllowedRoot(
+            filesDir = context.filesDir,
+            paths = paths,
+        )
     }
 
     private fun inspectImportedPhoto(file: File): RecordPhotoFileInspection? {
