@@ -31,6 +31,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
+import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.FamilyRole
@@ -39,8 +40,6 @@ import com.lezi.babylog.sync.FamilyEndpointDraft
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
-import com.lezi.babylog.sync.SetupFamilyState
-import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.defaultAndroidDeviceName
 import com.lezi.babylog.sync.forcedUpdateDialogBody
 import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
@@ -105,9 +104,6 @@ fun FamilyRoute(
     var endpointDraft by remember { mutableStateOf("") }
     // QR grant and device draft are intentionally process-memory only, never rememberSaveable.
     var memberQrDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
-    var memberQrFeedback by remember { mutableStateOf<String?>(null) }
-    var memberQrSubmitting by remember { mutableStateOf(false) }
-    var memberQrRecoveryRequired by remember { mutableStateOf(false) }
     // Destructive confirmation, including the root password, is process-memory only.
     var deleteFamilyName by remember { mutableStateOf("") }
     var deleteFamilyRootPassword by remember { mutableStateOf("") }
@@ -135,7 +131,9 @@ fun FamilyRoute(
     }
     val pendingMemberLogin = ui.pendingMemberLogin
     val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
-        familyWizardState is FamilyWizardState.ProbingEndpoint
+        familyWizardState is FamilyWizardState.ProbingEndpoint ||
+        familyWizardState is FamilyWizardState.VerifyingMemberLoginQr ||
+        familyWizardState is FamilyWizardState.ClaimingMemberLoginQr
     val wizardSessionActive = isWizardSessionDialog(dialog)
     LaunchedEffect(
         ui.serverHost,
@@ -210,42 +208,8 @@ fun FamilyRoute(
         dialog = FamilyDialog.ConnectEndpoint
     }
 
-    fun verifyScannedMemberLogin(memberLogin: MemberLoginQrPayload) {
-        memberQrFeedback = null
-        dialog = FamilyDialog.VerifyingMemberLoginQr(memberLogin)
-        vm.verifyMemberLoginQr(memberLogin) { result ->
-            if ((dialog as? FamilyDialog.VerifyingMemberLoginQr)?.payload != memberLogin) {
-                return@verifyMemberLoginQr
-            }
-            dialog = when (result) {
-                is SetupProbeResult.Ready -> if (
-                    result.endpoint == memberLogin.endpoint &&
-                    result.familyState == SetupFamilyState.Configured
-                ) {
-                    FamilyDialog.ConfirmMemberLoginQr(memberLogin)
-                } else {
-                    FamilyDialog.RetryMemberLoginQrVerification(
-                        memberLogin,
-                        "这个二维码对应的服务器尚未配置家庭",
-                    )
-                }
-                SetupProbeResult.Failed.CertificateChanged ->
-                    FamilyDialog.RetryMemberLoginQrVerification(
-                        memberLogin,
-                        "家庭服务器安全信息不一致，登录已停止",
-                    )
-                else -> FamilyDialog.RetryMemberLoginQrVerification(
-                    memberLogin,
-                    "暂时无法确认二维码中的家庭服务器，请稍后重试",
-                )
-            }
-        }
-    }
-
     fun useManualJoinFor(memberLogin: MemberLoginQrPayload) {
-        vm.cancelMemberLoginQrVerification()
-        memberQrFeedback = null
-        memberQrRecoveryRequired = false
+        vm.cancelMemberLoginQr()
         endpointDraft = memberLogin.endpoint.origin
         dialog = FamilyDialog.ConnectEndpoint
     }
@@ -260,7 +224,8 @@ fun FamilyRoute(
                 return
             }
             memberQrDeviceName = defaultAndroidDeviceName(context)
-            verifyScannedMemberLogin(memberLogin)
+            dialog = null
+            vm.verifyMemberLoginQr(memberLogin)
             return
         }
         showMessage("这不是可用的成员登录二维码")
@@ -306,6 +271,10 @@ fun FamilyRoute(
     LaunchedEffect(familyWizardState) {
         when (val state = familyWizardState) {
             is FamilyWizardState.RetryableFailure -> {
+                if (state.committedOutcome is FamilyWizardOutcome.MemberLoginQrClaimed) {
+                    // QR recovery stays on the shared QR projection; no wizard overlay.
+                    return@LaunchedEffect
+                }
                 val resume = FamilyDialog.Wizard(state.snapshot.mode, state.snapshot.step)
                 retainedWizardMode = state.snapshot.mode.name
                 retainedWizardStep = state.snapshot.step.name
@@ -345,7 +314,14 @@ fun FamilyRoute(
                 }
             }
             is FamilyWizardState.Completed -> {
-                vm.consumeFamilyWizardCompletion()?.let { outcome ->
+                val outcome = state.outcome
+                if (outcome is FamilyWizardOutcome.MemberLoginQrClaimed &&
+                    outcome.dataRecovery == InitialFamilyDataRecovery.RetryRequired
+                ) {
+                    // Keep projecting the QR recovery surface until recovery succeeds.
+                    return@LaunchedEffect
+                }
+                vm.consumeFamilyWizardCompletion()?.let { consumed ->
                     bootstrapSecret = ""
                     bootstrapSecretFeedback = null
                     createDisplayName = ""
@@ -361,7 +337,7 @@ fun FamilyRoute(
                     ownerRootPasswordFeedback = null
                     retainedWizardMode = null
                     retainedWizardStep = null
-                    dialog = FamilyDialog.Message(familyWizardOutcomeCopy(outcome))
+                    dialog = FamilyDialog.Message(familyWizardOutcomeCopy(consumed))
                 }
             }
             is FamilyWizardState.WaitingForMemberApproval -> {
@@ -375,6 +351,10 @@ fun FamilyRoute(
             is FamilyWizardState.EndpointReady,
             is FamilyWizardState.ProbingEndpoint,
             is FamilyWizardState.Submitting,
+            is FamilyWizardState.VerifyingMemberLoginQr,
+            is FamilyWizardState.MemberLoginQrReady,
+            is FamilyWizardState.MemberLoginQrVerificationFailed,
+            is FamilyWizardState.ClaimingMemberLoginQr,
             -> Unit
         }
     }
@@ -663,85 +643,6 @@ fun FamilyRoute(
                 null
             },
             onDismiss = { dialog = null },
-        )
-        is FamilyDialog.VerifyingMemberLoginQr -> MemberLoginQrConfirmDialog(
-            payload = active.payload,
-            deviceName = memberQrDeviceName,
-            onDeviceNameChange = {},
-            feedback = "正在确认家庭服务器…",
-            submitting = false,
-            verificationInProgress = true,
-            onLogin = {},
-            onManualJoin = { useManualJoinFor(active.payload) },
-            onDismiss = {
-                vm.cancelMemberLoginQrVerification()
-                dialog = null
-            },
-        )
-        is FamilyDialog.RetryMemberLoginQrVerification -> MemberLoginQrConfirmDialog(
-            payload = active.payload,
-            deviceName = memberQrDeviceName,
-            onDeviceNameChange = { memberQrDeviceName = it },
-            feedback = active.feedback,
-            submitting = false,
-            verificationRetryRequired = true,
-            onLogin = {},
-            onRetryVerification = { verifyScannedMemberLogin(active.payload) },
-            onManualJoin = { useManualJoinFor(active.payload) },
-            onDismiss = { dialog = null },
-        )
-        is FamilyDialog.ConfirmMemberLoginQr -> MemberLoginQrConfirmDialog(
-            payload = active.payload,
-            deviceName = memberQrDeviceName,
-            onDeviceNameChange = {
-                memberQrDeviceName = it
-                memberQrFeedback = null
-            },
-            feedback = memberQrFeedback,
-            submitting = memberQrSubmitting,
-            recoveryRetryRequired = memberQrRecoveryRequired,
-            onLogin = {
-                runCatching { requireDeviceName(memberQrDeviceName) }
-                    .exceptionOrNull()?.message?.let {
-                        memberQrFeedback = it
-                        return@MemberLoginQrConfirmDialog
-                    }
-                memberQrSubmitting = true
-                vm.claimMemberLoginQr(active.payload, memberQrDeviceName) { recovery, error ->
-                    memberQrSubmitting = false
-                    if (recovery == InitialFamilyDataRecovery.RetryRequired) {
-                        memberQrRecoveryRequired = true
-                        memberQrFeedback = "已登录；首次同步失败，请重试"
-                    } else if (error == null) {
-                        dialog = FamilyDialog.Message("已在这台设备登录家庭")
-                    } else {
-                        memberQrFeedback = error
-                    }
-                }
-            },
-            onRetryRecovery = {
-                memberQrSubmitting = true
-                vm.retryMemberLoginQrRecovery { error ->
-                    memberQrSubmitting = false
-                    if (error == null) {
-                        memberQrRecoveryRequired = false
-                        dialog = FamilyDialog.Message("已在这台设备登录家庭，首次同步完成")
-                    } else {
-                        memberQrFeedback = error
-                    }
-                }
-            },
-            onManualJoin = {
-                memberQrSubmitting = false
-                useManualJoinFor(active.payload)
-            },
-            onDismiss = {
-                if (!memberQrSubmitting) {
-                    memberQrFeedback = null
-                    memberQrRecoveryRequired = false
-                    dialog = null
-                }
-            },
         )
         is FamilyDialog.MemberLoginQrCode -> MemberLoginQrCodeDialog(
             payload = active.payload,
@@ -1391,4 +1292,121 @@ fun FamilyRoute(
         )
         null -> Unit
     }
+
+    // Member-login QR is driven solely by FamilyWizardController state (shared with onboarding).
+    when (val qrState = familyWizardState) {
+        is FamilyWizardState.VerifyingMemberLoginQr -> MemberLoginQrConfirmDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = {},
+            feedback = "正在确认家庭服务器…",
+            submitting = false,
+            verificationInProgress = true,
+            onLogin = {},
+            onManualJoin = { useManualJoinFor(qrState.payload) },
+            onDismiss = {
+                vm.cancelMemberLoginQr()
+                dialog = null
+            },
+        )
+        is FamilyWizardState.MemberLoginQrVerificationFailed -> MemberLoginQrConfirmDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = { memberQrDeviceName = it },
+            feedback = qrState.message,
+            submitting = false,
+            verificationRetryRequired = true,
+            onLogin = {},
+            onRetryVerification = { vm.verifyMemberLoginQr(qrState.payload) },
+            onManualJoin = { useManualJoinFor(qrState.payload) },
+            onDismiss = {
+                vm.cancelMemberLoginQr()
+                dialog = null
+            },
+        )
+        is FamilyWizardState.MemberLoginQrReady -> MemberLoginQrConfirmDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = { memberQrDeviceName = it },
+            feedback = qrState.feedback,
+            submitting = false,
+            onLogin = {
+                runCatching { requireDeviceName(memberQrDeviceName) }
+                    .exceptionOrNull()?.message?.let { return@MemberLoginQrConfirmDialog }
+                vm.claimMemberLoginQr(qrState.payload, memberQrDeviceName)
+            },
+            onManualJoin = { useManualJoinFor(qrState.payload) },
+            onDismiss = {
+                vm.cancelMemberLoginQr()
+                dialog = null
+            },
+        )
+        is FamilyWizardState.ClaimingMemberLoginQr -> MemberLoginQrConfirmDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = {},
+            feedback = null,
+            submitting = true,
+            onLogin = {},
+            onManualJoin = {},
+            onDismiss = {},
+        )
+        is FamilyWizardState.Completed -> {
+            val claimed = qrState.outcome as? FamilyWizardOutcome.MemberLoginQrClaimed
+            if (claimed?.dataRecovery == InitialFamilyDataRecovery.RetryRequired) {
+                MemberLoginQrConfirmDialog(
+                    payload = memberLoginQrDisplayPayload(qrState.snapshot),
+                    deviceName = memberQrDeviceName,
+                    onDeviceNameChange = {},
+                    feedback = "已登录；首次同步失败，请重试",
+                    submitting = false,
+                    recoveryRetryRequired = true,
+                    onLogin = {},
+                    onRetryRecovery = { vm.retryMemberLoginQrRecovery() },
+                    onManualJoin = {},
+                    onDismiss = {
+                        vm.consumeFamilyWizardCompletion()
+                        dialog = FamilyDialog.Message(familyWizardOutcomeCopy(claimed))
+                    },
+                )
+            }
+        }
+        is FamilyWizardState.RetryableFailure -> {
+            val claimed = qrState.committedOutcome as? FamilyWizardOutcome.MemberLoginQrClaimed
+            if (claimed != null) {
+                MemberLoginQrConfirmDialog(
+                    payload = memberLoginQrDisplayPayload(qrState.snapshot),
+                    deviceName = memberQrDeviceName,
+                    onDeviceNameChange = {},
+                    feedback = qrState.message,
+                    submitting = false,
+                    recoveryRetryRequired = true,
+                    onLogin = {},
+                    onRetryRecovery = { vm.retryMemberLoginQrRecovery() },
+                    onManualJoin = {},
+                    onDismiss = {
+                        dialog = FamilyDialog.Message(familyWizardOutcomeCopy(claimed))
+                    },
+                )
+            }
+        }
+        else -> Unit
+    }
+}
+
+/** Display-only payload after claim; grant is never shown and is not re-submitted. */
+private fun memberLoginQrDisplayPayload(
+    snapshot: com.lezi.babylog.domain.FamilyWizardSnapshot,
+): MemberLoginQrPayload {
+    val origin = snapshot.endpointDraft.ifBlank {
+        val host = snapshot.host.ifBlank { "localhost" }
+        "${snapshot.scheme}://$host:${snapshot.portText}"
+    }
+    return MemberLoginQrPayload(
+        endpoint = com.lezi.babylog.sync.TrustedEndpointProfile.systemPki(origin),
+        grant = "post-claim-display-only-placeholder-000000",
+        familyName = snapshot.familyName.ifBlank { null },
+        memberDisplayName = snapshot.displayName.ifBlank { "家人" },
+        expiresAtEpochSeconds = Long.MAX_VALUE,
+    )
 }

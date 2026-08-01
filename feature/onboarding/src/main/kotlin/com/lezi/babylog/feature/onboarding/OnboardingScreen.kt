@@ -97,15 +97,9 @@ import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.FamilyEndpointDraft
-import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
-import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
-import com.lezi.babylog.sync.MemberLoginQrUnavailableException
-import com.lezi.babylog.sync.SetupFamilyState
-import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.defaultAndroidDeviceName
 import com.lezi.babylog.sync.requireDeviceName
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -115,7 +109,6 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -257,6 +250,19 @@ internal fun onboardingFamilyWizardTransition(
                 nextStep = OnboardingStep.RecoveryPending,
             )
         }
+        is FamilyWizardOutcome.MemberLoginQrClaimed -> when (outcome.dataRecovery) {
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
+                OnboardingFamilyTransition(
+                    finishRecovery = true,
+                    nextStep = OnboardingStep.ChooseFamily,
+                )
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
+            -> OnboardingFamilyTransition(
+                finishRecovery = false,
+                nextStep = OnboardingStep.RecoveryPending,
+            )
+        }
     }
     is FamilyWizardState.RetryableFailure -> if (state.committedOutcome != null) {
         OnboardingFamilyTransition(
@@ -273,6 +279,10 @@ internal fun onboardingFamilyWizardTransition(
     is FamilyWizardState.ProbingEndpoint,
     is FamilyWizardState.Submitting,
     is FamilyWizardState.WaitingForMemberApproval,
+    is FamilyWizardState.VerifyingMemberLoginQr,
+    is FamilyWizardState.MemberLoginQrReady,
+    is FamilyWizardState.MemberLoginQrVerificationFailed,
+    is FamilyWizardState.ClaimingMemberLoginQr,
     -> null
 }
 
@@ -298,7 +308,6 @@ class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
     private val sync: SyncPort,
 ) : ViewModel() {
-    private var memberLoginQrVerificationJob: Job? = null
     private val familyWizard = FamilyWizardController(
         gateway = SyncFamilyWizardGateway(sync, careLog),
         initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding),
@@ -384,55 +393,27 @@ class OnboardingViewModel @Inject constructor(
         viewModelScope.launch { familyWizard.cancelMemberApproval() }
     }
 
-    fun verifyMemberLoginQr(
-        payload: MemberLoginQrPayload,
-        onResult: (SetupProbeResult) -> Unit,
-    ) {
-        memberLoginQrVerificationJob?.cancel()
-        memberLoginQrVerificationJob = viewModelScope.launch {
-            onResult(sync.verifyEndpoint(payload.endpoint))
+    fun verifyMemberLoginQr(payload: MemberLoginQrPayload) {
+        viewModelScope.launch {
+            familyWizard.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
         }
     }
 
-    fun cancelMemberLoginQrVerification() {
-        memberLoginQrVerificationJob?.cancel()
-        memberLoginQrVerificationJob = null
+    fun cancelMemberLoginQr() {
+        viewModelScope.launch { familyWizard.cancelMemberLoginQr() }
     }
 
-    fun claimMemberLoginQr(
-        payload: MemberLoginQrPayload,
-        deviceName: String,
-        onDone: (InitialFamilyDataRecovery?, String?) -> Unit,
-    ) {
+    fun claimMemberLoginQr(payload: MemberLoginQrPayload, deviceName: String) {
         viewModelScope.launch {
-            if (sync.rememberEndpoint(payload.endpoint).isFailure) {
-                onDone(null, "无法保存家庭服务器信任信息，请重试")
-                return@launch
-            }
-            sync.claimMemberLoginQr(payload, deviceName).fold(
-                onSuccess = { onDone(it.dataRecovery, null) },
-                onFailure = { error ->
-                    onDone(
-                        null,
-                        when (error) {
-                            is MemberLoginQrUnavailableException,
-                            is MemberLoginQrTrustChangedException,
-                            -> error.message
-                            else -> productUiError(error, "登录失败，请稍后重试")
-                        },
-                    )
-                },
-            )
+            familyWizard.claimMemberLoginQr(payload, deviceName)
+            updateRecoveredFamilyEmptiness()
         }
     }
 
-    fun retryMemberLoginQrRecovery(onDone: (String?) -> Unit) {
+    fun retryMemberLoginQrRecovery() {
         viewModelScope.launch {
-            onDone(
-                sync.sync(SyncTrigger.PullToRefresh).exceptionOrNull()?.let {
-                    productUiError(it, "首次同步仍未完成，请稍后重试")
-                },
-            )
+            familyWizard.retryReclaimedDataRecovery()
+            updateRecoveredFamilyEmptiness()
         }
     }
 
@@ -551,19 +532,15 @@ fun OnboardingRoute(
     var ownerRootPassword by remember { mutableStateOf("") }
     var nameError by rememberSaveable { mutableStateOf(false) }
     var formError by rememberSaveable { mutableStateOf<String?>(null) }
-    // The one-time grant must not survive process recreation.
-    var memberQrPayload by remember { mutableStateOf<MemberLoginQrPayload?>(null) }
+    // Device draft for QR claim is process-memory only; grant lives only in controller state.
     var memberQrDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
-    var memberQrFeedback by remember { mutableStateOf<String?>(null) }
-    var memberQrVerifying by remember { mutableStateOf(false) }
-    var memberQrTrustReady by remember { mutableStateOf(false) }
-    var memberQrSubmitting by remember { mutableStateOf(false) }
-    var memberQrRecoveryRequired by remember { mutableStateOf(false) }
     val familyWizardState by vm.familyWizardState.collectAsState()
     val pendingMemberLogin by vm.pendingMemberLogin.collectAsState()
     val verifiedEndpoint by vm.verifiedEndpoint.collectAsState(initial = null)
     val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
-        familyWizardState is FamilyWizardState.ProbingEndpoint
+        familyWizardState is FamilyWizardState.ProbingEndpoint ||
+        familyWizardState is FamilyWizardState.VerifyingMemberLoginQr ||
+        familyWizardState is FamilyWizardState.ClaimingMemberLoginQr
     val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
     val novice = remember { FamilyEndpointConfig.emptyDraft() }
     var joinDraft by rememberSaveable(stateSaver = FamilyEndpointDraftSaver) {
@@ -594,29 +571,9 @@ fun OnboardingRoute(
                 formError = "这个二维码已失效，请让管理员重新生成"
                 return
             }
-            memberQrPayload = memberLogin
             memberQrDeviceName = defaultAndroidDeviceName(context)
-            memberQrFeedback = null
-            memberQrVerifying = true
-            memberQrTrustReady = false
-            memberQrRecoveryRequired = false
-            vm.verifyMemberLoginQr(memberLogin) { result ->
-                if (memberQrPayload != memberLogin) return@verifyMemberLoginQr
-                memberQrVerifying = false
-                when (result) {
-                    is SetupProbeResult.Ready -> if (
-                        result.endpoint != memberLogin.endpoint ||
-                        result.familyState != SetupFamilyState.Configured
-                    ) {
-                        memberQrFeedback = "这个二维码对应的服务器尚未配置家庭"
-                    } else {
-                        memberQrTrustReady = true
-                    }
-                    SetupProbeResult.Failed.CertificateChanged ->
-                        memberQrFeedback = "家庭服务器安全信息不一致，登录已停止"
-                    else -> memberQrFeedback = "暂时无法确认二维码中的家庭服务器，请稍后重试"
-                }
-            }
+            formError = null
+            vm.verifyMemberLoginQr(memberLogin)
             return
         }
         formError = "这不是可用的成员登录二维码"
@@ -1152,68 +1109,83 @@ fun OnboardingRoute(
         }
     }
 
-    memberQrPayload?.let { payload ->
-        OnboardingMemberLoginQrDialog(
-            payload = payload,
+    when (val qrState = familyWizardState) {
+        is FamilyWizardState.VerifyingMemberLoginQr -> OnboardingMemberLoginQrDialog(
+            payload = qrState.payload,
             deviceName = memberQrDeviceName,
-            onDeviceNameChange = {
-                memberQrDeviceName = it
-                memberQrFeedback = null
-            },
-            feedback = memberQrFeedback,
-            verifying = memberQrVerifying,
-            submitting = memberQrSubmitting,
-            trustReady = memberQrTrustReady,
-            recoveryRetryRequired = memberQrRecoveryRequired,
-            onLogin = {
-                runCatching { requireDeviceName(memberQrDeviceName) }
-                    .exceptionOrNull()?.message?.let {
-                        memberQrFeedback = it
-                        return@OnboardingMemberLoginQrDialog
-                    }
-                memberQrSubmitting = true
-                vm.claimMemberLoginQr(payload, memberQrDeviceName) { recovery, error ->
-                    memberQrSubmitting = false
-                    if (recovery == InitialFamilyDataRecovery.RetryRequired) {
-                        memberQrRecoveryRequired = true
-                        memberQrFeedback = "已登录；首次同步失败，请重试"
-                    } else if (error == null) {
-                        memberQrPayload = null
-                        onFinished()
-                    } else {
-                        memberQrFeedback = error
-                    }
-                }
-            },
-            onRetryRecovery = {
-                memberQrSubmitting = true
-                vm.retryMemberLoginQrRecovery { error ->
-                    memberQrSubmitting = false
-                    if (error == null) {
-                        memberQrPayload = null
-                        memberQrRecoveryRequired = false
-                        onFinished()
-                    } else {
-                        memberQrFeedback = error
-                    }
-                }
-            },
+            onDeviceNameChange = {},
+            feedback = "正在确认家庭服务器…",
+            verifying = true,
+            submitting = false,
+            trustReady = false,
+            recoveryRetryRequired = false,
+            onLogin = {},
+            onRetryRecovery = {},
             onManualJoin = {
-                memberQrPayload = null
-                memberQrFeedback = null
-                endpointDraft = payload.endpoint.origin
+                vm.cancelMemberLoginQr()
+                endpointDraft = qrState.payload.endpoint.origin
                 step = OnboardingStep.ConnectServer
                 vm.connectEndpoint(endpointDraft)
             },
-            onDismiss = {
-                if (!memberQrSubmitting) {
-                    vm.cancelMemberLoginQrVerification()
-                    memberQrPayload = null
-                    memberQrFeedback = null
-                    memberQrRecoveryRequired = false
-                }
-            },
+            onDismiss = { vm.cancelMemberLoginQr() },
         )
+        is FamilyWizardState.MemberLoginQrVerificationFailed -> OnboardingMemberLoginQrDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = { memberQrDeviceName = it },
+            feedback = qrState.message,
+            verifying = false,
+            submitting = false,
+            trustReady = false,
+            recoveryRetryRequired = false,
+            onLogin = { vm.verifyMemberLoginQr(qrState.payload) },
+            onRetryRecovery = {},
+            onManualJoin = {
+                vm.cancelMemberLoginQr()
+                endpointDraft = qrState.payload.endpoint.origin
+                step = OnboardingStep.ConnectServer
+                vm.connectEndpoint(endpointDraft)
+            },
+            onDismiss = { vm.cancelMemberLoginQr() },
+        )
+        is FamilyWizardState.MemberLoginQrReady -> OnboardingMemberLoginQrDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = { memberQrDeviceName = it },
+            feedback = qrState.feedback,
+            verifying = false,
+            submitting = false,
+            trustReady = true,
+            recoveryRetryRequired = false,
+            onLogin = {
+                runCatching { requireDeviceName(memberQrDeviceName) }
+                    .exceptionOrNull()?.message?.let { return@OnboardingMemberLoginQrDialog }
+                vm.claimMemberLoginQr(qrState.payload, memberQrDeviceName)
+            },
+            onRetryRecovery = {},
+            onManualJoin = {
+                vm.cancelMemberLoginQr()
+                endpointDraft = qrState.payload.endpoint.origin
+                step = OnboardingStep.ConnectServer
+                vm.connectEndpoint(endpointDraft)
+            },
+            onDismiss = { vm.cancelMemberLoginQr() },
+        )
+        is FamilyWizardState.ClaimingMemberLoginQr -> OnboardingMemberLoginQrDialog(
+            payload = qrState.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = {},
+            feedback = null,
+            verifying = false,
+            submitting = true,
+            trustReady = true,
+            recoveryRetryRequired = false,
+            onLogin = {},
+            onRetryRecovery = {},
+            onManualJoin = {},
+            onDismiss = {},
+        )
+        else -> Unit
     }
 
     if (showJoinRole) {

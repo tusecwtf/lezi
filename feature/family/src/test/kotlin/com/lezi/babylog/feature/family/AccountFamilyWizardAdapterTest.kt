@@ -59,6 +59,24 @@ class AccountFamilyWizardAdapterTest {
                 ),
             ),
         )
+        assertEquals(
+            "已在这台设备登录家庭",
+            familyWizardOutcomeCopy(
+                FamilyWizardOutcome.MemberLoginQrClaimed(
+                    memberSession(),
+                    InitialFamilyDataRecovery.Complete,
+                ),
+            ),
+        )
+        assertEquals(
+            "已登录；首次同步失败，请重试",
+            familyWizardOutcomeCopy(
+                FamilyWizardOutcome.MemberLoginQrClaimed(
+                    memberSession(),
+                    InitialFamilyDataRecovery.RetryRequired,
+                ),
+            ),
+        )
     }
 }
 

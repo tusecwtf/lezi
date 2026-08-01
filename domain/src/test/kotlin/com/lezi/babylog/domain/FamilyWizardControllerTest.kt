@@ -7,6 +7,9 @@ import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.MemberLoginCheckResult
+import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.MemberLoginQrResult
+import com.lezi.babylog.sync.MemberLoginQrUnavailableException
 import com.lezi.babylog.sync.MemberLoginStatus
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.SetupFamilyState
@@ -14,10 +17,14 @@ import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.SyncSession
 import com.lezi.babylog.sync.TrustedEndpointProfile
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class FamilyWizardControllerTest {
     @Test
     fun selfSignedCertificateMustBeAcceptedBeforeProbeRoutingAndAnyLoginSecret() = runTest {
@@ -624,6 +631,198 @@ class FamilyWizardControllerTest {
         assertThat(waiting.feedback).contains("检查失败")
     }
 
+    @Test
+    fun memberLoginQrVerifySuccessReadyThenClaimCompletesWithFamilySyncErrorsOnFailure() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val payload = memberLoginQrPayload(endpoint)
+        val gateway = RecordingFamilyWizardGateway(
+            memberLoginQrVerifyResult = SetupProbeResult.Ready(
+                endpoint,
+                SetupFamilyState.Configured,
+            ),
+            memberLoginQrClaimResult = Result.success(
+                MemberLoginQrResult(memberSession(), InitialFamilyDataRecovery.Complete),
+            ),
+        )
+        val controller = FamilyWizardController(gateway)
+
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
+
+        val ready = controller.state.value as FamilyWizardState.MemberLoginQrReady
+        assertThat(ready.payload).isEqualTo(payload)
+        assertThat(gateway.events).containsExactly("verify-member-login-qr")
+        assertThat(gateway.rememberedEndpoints).isEmpty()
+
+        controller.claimMemberLoginQr(payload, "  Pixel Tablet  ")
+
+        val completed = controller.state.value as FamilyWizardState.Completed
+        assertThat(completed.outcome).isEqualTo(
+            FamilyWizardOutcome.MemberLoginQrClaimed(
+                memberSession(),
+                InitialFamilyDataRecovery.Complete,
+            ),
+        )
+        assertThat(gateway.events).containsExactly(
+            "verify-member-login-qr",
+            "remember",
+            "claim-member-login-qr",
+        ).inOrder()
+        assertThat(gateway.lastMemberLoginQrDeviceName).isEqualTo("Pixel Tablet")
+        assertThat(controller.consumeCompletion()).isEqualTo(completed.outcome)
+        assertThat(controller.consumeCompletion()).isNull()
+    }
+
+    @Test
+    fun memberLoginQrVerifyFailureKeepsPayloadForRetryAndCancelClearsWithoutClaim() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val payload = memberLoginQrPayload(endpoint)
+        val gateway = RecordingFamilyWizardGateway(
+            memberLoginQrVerifyResult = SetupProbeResult.Failed.Unreachable,
+        )
+        val controller = FamilyWizardController(gateway)
+
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
+        val failed = controller.state.value as FamilyWizardState.MemberLoginQrVerificationFailed
+        assertThat(failed.message).isEqualTo("暂时无法确认二维码中的家庭服务器，请稍后重试")
+        assertThat(failed.payload).isEqualTo(payload)
+
+        gateway.memberLoginQrVerifyResult = SetupProbeResult.Ready(
+            endpoint,
+            SetupFamilyState.Empty,
+        )
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
+        val notConfigured =
+            controller.state.value as FamilyWizardState.MemberLoginQrVerificationFailed
+        assertThat(notConfigured.message).isEqualTo("这个二维码对应的服务器尚未配置家庭")
+
+        gateway.memberLoginQrVerifyResult = SetupProbeResult.Failed.CertificateChanged
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
+        assertThat(
+            (controller.state.value as FamilyWizardState.MemberLoginQrVerificationFailed).message,
+        ).isEqualTo("家庭服务器安全信息不一致，登录已停止")
+
+        controller.cancelMemberLoginQr()
+        assertThat(controller.state.value).isEqualTo(
+            FamilyWizardState.Editing(FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding)),
+        )
+        assertThat(gateway.memberLoginQrClaimCalls).isEqualTo(0)
+        assertThat(gateway.rememberedEndpoints).isEmpty()
+    }
+
+    @Test
+    fun memberLoginQrClaimFailureUsesFamilySyncErrorAndAllowsRetry() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val payload = memberLoginQrPayload(endpoint)
+        val gateway = RecordingFamilyWizardGateway(
+            memberLoginQrVerifyResult = SetupProbeResult.Ready(
+                endpoint,
+                SetupFamilyState.Configured,
+            ),
+            memberLoginQrClaimResult = Result.failure(MemberLoginQrUnavailableException()),
+        )
+        val controller = FamilyWizardController(gateway)
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
+
+        controller.claimMemberLoginQr(payload, "Pixel")
+
+        val ready = controller.state.value as FamilyWizardState.MemberLoginQrReady
+        assertThat(ready.feedback).isEqualTo("这个二维码已失效，请让管理员重新生成")
+        assertThat(gateway.memberLoginQrClaimCalls).isEqualTo(1)
+
+        gateway.memberLoginQrClaimResult = Result.success(
+            MemberLoginQrResult(memberSession(), InitialFamilyDataRecovery.RetryRequired),
+        )
+        controller.claimMemberLoginQr(payload, "Pixel")
+        assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
+            FamilyWizardOutcome.MemberLoginQrClaimed(
+                memberSession(),
+                InitialFamilyDataRecovery.RetryRequired,
+            ),
+        )
+        gateway.recoveryResult = Result.success(Unit)
+        controller.retryReclaimedDataRecovery()
+        assertThat((controller.state.value as FamilyWizardState.Completed).outcome).isEqualTo(
+            FamilyWizardOutcome.MemberLoginQrClaimed(
+                memberSession(),
+                InitialFamilyDataRecovery.Complete,
+            ),
+        )
+    }
+
+    @Test
+    fun memberLoginQrCancelDuringVerifyDropsLateResultAndLocalTrustFailureIsProductCopy() =
+        runTest {
+            val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+            val payload = memberLoginQrPayload(endpoint)
+            val gateway = RecordingFamilyWizardGateway(
+                memberLoginQrVerifyResult = SetupProbeResult.Ready(
+                    endpoint,
+                    SetupFamilyState.Configured,
+                ),
+            )
+            gateway.memberLoginQrVerifyStarted = CompletableDeferred()
+            gateway.memberLoginQrVerifyRelease = CompletableDeferred()
+            val controller = FamilyWizardController(gateway)
+
+            val verify = launch {
+                controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
+            }
+            gateway.memberLoginQrVerifyStarted!!.await()
+            assertThat(controller.state.value)
+                .isInstanceOf(FamilyWizardState.VerifyingMemberLoginQr::class.java)
+            controller.cancelMemberLoginQr()
+            gateway.memberLoginQrVerifyRelease!!.complete(Unit)
+            verify.join()
+            advanceUntilIdle()
+
+            assertThat(controller.state.value).isEqualTo(
+                FamilyWizardState.Editing(FamilyWizardSnapshot.empty(FamilyWizardEntry.Account)),
+            )
+            assertThat(gateway.rememberedEndpoints).isEmpty()
+
+            gateway.memberLoginQrVerifyStarted = null
+            gateway.memberLoginQrVerifyRelease = null
+            controller.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
+            gateway.rememberEndpointResult = Result.failure(IllegalStateException("disk full"))
+            controller.claimMemberLoginQr(payload, "Pixel")
+            val ready = controller.state.value as FamilyWizardState.MemberLoginQrReady
+            assertThat(ready.feedback).isEqualTo("无法保存家庭服务器信任信息，请重试")
+            assertThat(gateway.memberLoginQrClaimCalls).isEqualTo(0)
+        }
+
+    @Test
+    fun memberLoginQrCompletionSurvivesConfigRebuildDeliveryViaConsumeCompletion() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val payload = memberLoginQrPayload(endpoint)
+        val gateway = RecordingFamilyWizardGateway(
+            memberLoginQrVerifyResult = SetupProbeResult.Ready(
+                endpoint,
+                SetupFamilyState.Configured,
+            ),
+            memberLoginQrClaimResult = Result.success(
+                MemberLoginQrResult(memberSession(), InitialFamilyDataRecovery.Complete),
+            ),
+        )
+        val controller = FamilyWizardController(gateway)
+        controller.verifyMemberLoginQr(FamilyWizardEntry.Onboarding, payload)
+        controller.claimMemberLoginQr(payload, "Pixel")
+
+        // Config rebuild re-collects state; completion is still deliverable once.
+        assertThat(controller.state.value).isInstanceOf(FamilyWizardState.Completed::class.java)
+        val first = controller.consumeCompletion()
+        assertThat(first).isInstanceOf(FamilyWizardOutcome.MemberLoginQrClaimed::class.java)
+        assertThat(controller.consumeCompletion()).isNull()
+    }
+
+    private fun memberLoginQrPayload(
+        endpoint: TrustedEndpointProfile,
+    ) = MemberLoginQrPayload(
+        endpoint = endpoint,
+        grant = "grant-0000000000000000000000000000000000000",
+        familyName = "乐乐一家",
+        memberDisplayName = "妈妈",
+        expiresAtEpochSeconds = 1_753_419_000,
+    )
 
     private fun snapshot(
         entry: FamilyWizardEntry,
@@ -666,6 +865,11 @@ private class RecordingFamilyWizardGateway(
     var recoveryResult: Result<Unit> = Result.success(Unit),
     var probeResult: SetupProbeResult = SetupProbeResult.Failed.Unreachable,
     var certificateAcceptanceResult: SetupProbeResult = SetupProbeResult.Failed.Unreachable,
+    var memberLoginQrVerifyResult: SetupProbeResult = SetupProbeResult.Failed.Unreachable,
+    var memberLoginQrClaimResult: Result<MemberLoginQrResult> = Result.failure(
+        IllegalStateException("member login qr not stubbed"),
+    ),
+    var rememberEndpointResult: Result<Unit> = Result.success(Unit),
 ) : FamilyWizardGateway {
     val pendingRequest = PendingMemberLogin(
         requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -678,6 +882,8 @@ private class RecordingFamilyWizardGateway(
     )
     var memberRequestCalls = 0
     var cancelMemberCalls = 0
+    var memberLoginQrClaimCalls = 0
+    var lastMemberLoginQrDeviceName: String? = null
     val events = mutableListOf<String>()
     var request: CreateRequest? = null
     var ownerLoginRequest: OwnerLoginRequest? = null
@@ -687,6 +893,8 @@ private class RecordingFamilyWizardGateway(
     var probeRelease: CompletableDeferred<Unit>? = null
     var rememberStarted: CompletableDeferred<Unit>? = null
     var rememberRelease: CompletableDeferred<Unit>? = null
+    var memberLoginQrVerifyStarted: CompletableDeferred<Unit>? = null
+    var memberLoginQrVerifyRelease: CompletableDeferred<Unit>? = null
     val rememberedEndpoints = mutableListOf<TrustedEndpointProfile>()
     var verifiedEndpoint: TrustedEndpointProfile? =
         TrustedEndpointProfile.systemPki("https://nas.home")
@@ -707,9 +915,11 @@ private class RecordingFamilyWizardGateway(
         events += "remember"
         rememberStarted?.complete(Unit)
         rememberRelease?.await()
-        rememberedEndpoints += endpoint
-        verifiedEndpoint = endpoint
-        return Result.success(Unit)
+        if (rememberEndpointResult.isSuccess) {
+            rememberedEndpoints += endpoint
+            verifiedEndpoint = endpoint
+        }
+        return rememberEndpointResult
     }
 
     override suspend fun forgetEndpoint(): Result<Unit> {
@@ -766,6 +976,25 @@ private class RecordingFamilyWizardGateway(
     override suspend fun cancelMemberLogin(): Result<Unit> {
         cancelMemberCalls++
         return Result.success(Unit)
+    }
+
+    override suspend fun verifyMemberLoginEndpoint(
+        endpoint: TrustedEndpointProfile,
+    ): SetupProbeResult {
+        events += "verify-member-login-qr"
+        memberLoginQrVerifyStarted?.complete(Unit)
+        memberLoginQrVerifyRelease?.await()
+        return memberLoginQrVerifyResult
+    }
+
+    override suspend fun claimMemberLoginQr(
+        payload: MemberLoginQrPayload,
+        deviceName: String,
+    ): Result<MemberLoginQrResult> {
+        events += "claim-member-login-qr"
+        memberLoginQrClaimCalls++
+        lastMemberLoginQrDeviceName = deviceName
+        return memberLoginQrClaimResult
     }
 
     override suspend fun retryReclaimedDataRecovery(): Result<Unit> {

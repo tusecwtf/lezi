@@ -4,8 +4,8 @@
 承载页面状态和命令，并让目录与这些 seam 对齐；改成员/设备页不必读完整五流 God 表面。
 
 **Source:** merged readability 03 + directory C4
-**Blocked by:** 23 — QR 状态机先归一到 FamilyWizardController
-**Status:** blocked
+**Blocked by:** 23 — QR 状态机先归一到 FamilyWizardController (done)
+**Status:** ready-for-agent
 **Size:** M–L
 
 ## Acceptance criteria

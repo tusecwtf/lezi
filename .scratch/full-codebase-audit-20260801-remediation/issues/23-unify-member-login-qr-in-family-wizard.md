@@ -5,17 +5,17 @@
 
 **Source:** merged readability 02
 **Blocked by:** None — can start immediately
-**Status:** ready-for-agent
+**Status:** done
 **Size:** M
 
 ## Acceptance criteria
 
-- [ ] verify、claim、取消进行中校验与重试由 `FamilyWizardController` 经既有 gateway 统一承担。
-- [ ] Account 与 Onboarding host 不再各维护一套 QR Job、恢复或错误分支。
-- [ ] 两个入口默认使用 `familySyncError`；只有纯本机信任写入等非同步失败可使用 product UI error。
-- [ ] 成功领取后恢复家庭向导/会话状态；取消不留下继续执行的 claim 或半可信 endpoint。
-- [ ] 控制器/public host 测试覆盖成功、失败、取消、重试和配置重建后的结果交付。
-- [ ] 邀请家人 QR 载荷、十分钟单次授权、TOFU/SPKI 与管理员不通过 QR 登录的合同不变。
+- [x] verify、claim、取消进行中校验与重试由 `FamilyWizardController` 经既有 gateway 统一承担。
+- [x] Account 与 Onboarding host 不再各维护一套 QR Job、恢复或错误分支。
+- [x] 两个入口默认使用 `familySyncError`；只有纯本机信任写入等非同步失败可使用 product UI error。
+- [x] 成功领取后恢复家庭向导/会话状态；取消不留下继续执行的 claim 或半可信 endpoint。
+- [x] 控制器/public host 测试覆盖成功、失败、取消、重试和配置重建后的结果交付。
+- [x] 邀请家人 QR 载荷、十分钟单次授权、TOFU/SPKI 与管理员不通过 QR 登录的合同不变。
 
 ## Validation
 
@@ -29,3 +29,24 @@
 ## Out of scope
 
 不在本票拆 Family 三 host（Ticket 24），不重做扫码视觉，不新增 feature→feature 依赖。
+
+## Design notes (public seams)
+
+- `FamilyWizardGateway.verifyMemberLoginEndpoint` / `claimMemberLoginQr` — narrow side-effect seam;
+  production `SyncFamilyWizardGateway` maps to `SyncPort.verifyEndpoint` + scaffold + `claimMemberLoginQr`.
+- `FamilyWizardController.verifyMemberLoginQr` / `claimMemberLoginQr` / `cancelMemberLoginQr` /
+  `retryReclaimedDataRecovery` — single state machine for Account + Onboarding.
+- States: `VerifyingMemberLoginQr`, `MemberLoginQrReady`, `MemberLoginQrVerificationFailed`,
+  `ClaimingMemberLoginQr`, plus `Completed(MemberLoginQrClaimed)` / recovery via existing
+  `RetryableFailure(committedOutcome)`.
+- Hosts only thin-launch controller methods and project `familyWizardState`; no per-host QR Job.
+
+## Implementation evidence
+
+- Domain: gateway + controller own verify/claim/cancel; claim errors use `familySyncError`
+  (except local trust write fixed copy and typed QR exceptions).
+- FamilyViewModel / OnboardingViewModel: removed `memberLoginQrVerificationJob` and duplicate
+  error branches; delegate to `FamilyWizardController`.
+- UI projects controller QR states; owner **create** QR (invite) path unchanged.
+- Tests: `FamilyWizardControllerTest` (success/fail/cancel/retry/consume-once), account +
+  onboarding adapter outcome projections for `MemberLoginQrClaimed`.

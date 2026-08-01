@@ -4,8 +4,8 @@
 同模块内形成导航壳、wizard 步态与 QR UI 文件，业务逻辑复用家庭向导 seam。
 
 **Source:** merged directory C5
-**Blocked by:** 23 — 成员登录 QR 逻辑先归一
-**Status:** blocked
+**Blocked by:** 23 — 成员登录 QR 逻辑先归一 (done)
+**Status:** ready-for-agent
 **Size:** M
 
 ## Acceptance criteria

@@ -9,9 +9,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **22**
-- Current frontier (ready-for-agent): **3**
-- Blocked by dependency: **8**
+- Done: **23**
+- Current frontier (ready-for-agent): **4**
+- Blocked by dependency: **6**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**23、25、31**
+**24、25、29、31**
 
 ## Tickets
 
@@ -62,13 +62,13 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [20](./issues/20-retain-layout-undo-across-recreation.md) | Audit P2-06 | 布局 undo 跨配置重建 | — | S–M | done |
 | [21](./issues/21-document-offline-migrate-boundary.md) | Audit P2-07 | 写清 offline-migrate 架构边界 | 14 | S | done |
 | [22](./issues/22-delete-source-structure-tests.md) | readability 01 | 删除无契约源码结构测试 | — | S | done |
-| [23](./issues/23-unify-member-login-qr-in-family-wizard.md) | readability 02 | 成员登录 QR 归一到家庭向导 | — | M | ready-for-agent |
-| [24](./issues/24-split-family-hosts-and-align-directories.md) | readability 03 + directory C4 | Family 三 host 与目录对齐 | 23 | M–L | blocked |
+| [23](./issues/23-unify-member-login-qr-in-family-wizard.md) | readability 02 | 成员登录 QR 归一到家庭向导 | — | M | done |
+| [24](./issues/24-split-family-hosts-and-align-directories.md) | readability 03 + directory C4 | Family 三 host 与目录对齐 | 23 | M–L | ready-for-agent |
 | [25](./issues/25-remove-low-value-tests-and-placeholders.md) | readability 06 | 清理低价值测试与占位 API | — | S–M | ready-for-agent |
 | [26](./issues/26-partition-log-package-by-flow.md) | directory C1 | feature/log 按调用流分包 | 09、12、20、22 | M–L | blocked |
 | [27](./issues/27-partition-domain-package-by-capability.md) | directory C2 | domain 按能力分包并保留 CareLog façade | 05、06、07、08、13、22 | M–L | blocked |
 | [28](./issues/28-partition-sync-package-by-capability.md) | directory C3 | sync 按能力分包并保留 Sync façade | 01、03、06、15、16、19 | M–L | blocked |
-| [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | blocked |
+| [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | ready-for-agent |
 | [30](./issues/30-partition-settings-package.md) | directory C6 | Settings 按 calendar/record 分包 | 06、25 | M | blocked |
 | [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | ready-for-agent |
 | [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | blocked |

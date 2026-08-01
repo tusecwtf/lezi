@@ -21,11 +21,7 @@ import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.DisplayNameUpdateResult
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
-import com.lezi.babylog.sync.MemberLoginQrUnavailableException
-import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.PendingMemberLoginRequest
 import com.lezi.babylog.sync.PendingMemberRenameRequest
@@ -36,7 +32,6 @@ import com.lezi.babylog.sync.appUpdateUiOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -106,7 +101,6 @@ class FamilyViewModel @Inject constructor(
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
 ) : ViewModel() {
-    private var memberLoginQrVerificationJob: Job? = null
     private val profileSaveMutex = Mutex()
     private val memberRefreshMutex = Mutex()
     private val familyMembers = MutableStateFlow(FamilyMembersState())
@@ -577,56 +571,31 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    fun verifyMemberLoginQr(
-        payload: MemberLoginQrPayload,
-        onResult: (SetupProbeResult) -> Unit,
-    ) {
-        memberLoginQrVerificationJob?.cancel()
-        memberLoginQrVerificationJob = viewModelScope.launch {
-            onResult(sync.verifyEndpoint(payload.endpoint))
+    fun verifyMemberLoginQr(payload: MemberLoginQrPayload) {
+        viewModelScope.launch {
+            familyWizard.verifyMemberLoginQr(FamilyWizardEntry.Account, payload)
         }
     }
 
-    fun cancelMemberLoginQrVerification() {
-        memberLoginQrVerificationJob?.cancel()
-        memberLoginQrVerificationJob = null
+    fun cancelMemberLoginQr() {
+        viewModelScope.launch { familyWizard.cancelMemberLoginQr() }
     }
 
-    fun claimMemberLoginQr(
-        payload: MemberLoginQrPayload,
-        deviceName: String,
-        onDone: (InitialFamilyDataRecovery?, String?) -> Unit,
-    ) {
+    fun claimMemberLoginQr(payload: MemberLoginQrPayload, deviceName: String) {
         viewModelScope.launch {
-            val trusted = sync.rememberEndpoint(payload.endpoint)
-            if (trusted.isFailure) {
-                onDone(null, "无法保存家庭服务器信任信息，请重试")
-                return@launch
+            familyWizard.claimMemberLoginQr(payload, deviceName)
+            if (familyWizard.state.value is FamilyWizardState.Completed) {
+                refreshMembersNow(showErrors = true)
             }
-            val result = sync.claimMemberLoginQr(payload, deviceName)
-            result.fold(
-                onSuccess = { onDone(it.dataRecovery, null) },
-                onFailure = { error ->
-                    onDone(
-                        null,
-                        when (error) {
-                            is MemberLoginQrUnavailableException -> error.message
-                            is MemberLoginQrTrustChangedException -> error.message
-                            else -> familySyncError(error, "登录失败，请稍后重试")
-                        },
-                    )
-                },
-            )
         }
     }
 
-    fun retryMemberLoginQrRecovery(onDone: (String?) -> Unit) {
+    fun retryMemberLoginQrRecovery() {
         viewModelScope.launch {
-            onDone(
-                sync.sync(SyncTrigger.PullToRefresh).exceptionOrNull()?.let {
-                    familySyncError(it, "首次同步仍未完成，请稍后重试")
-                },
-            )
+            familyWizard.retryReclaimedDataRecovery()
+            if (familyWizard.state.value is FamilyWizardState.Completed) {
+                refreshMembersNow(showErrors = true)
+            }
         }
     }
 

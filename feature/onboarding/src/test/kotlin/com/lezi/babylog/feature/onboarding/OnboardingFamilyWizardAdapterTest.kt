@@ -135,6 +135,32 @@ class OnboardingFamilyWizardAdapterTest {
                 reclaimedFamilyEmpty = null,
             ),
         )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberLoginQrClaimed(
+                        memberSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(false, OnboardingStep.RecoveryPending),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberLoginQrClaimed(
+                        memberSession(),
+                        InitialFamilyDataRecovery.RetryRequired,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
     }
 
     @Test

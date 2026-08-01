@@ -77,6 +77,11 @@ internal fun familyWizardOutcomeCopy(outcome: FamilyWizardOutcome): String = whe
         InitialFamilyDataRecovery.RetryRequired -> "管理员已确认；首次同步失败，可稍后重试"
         InitialFamilyDataRecovery.NotRequired -> "管理员已确认，正在首次同步"
     }
+    is FamilyWizardOutcome.MemberLoginQrClaimed -> when (outcome.dataRecovery) {
+        InitialFamilyDataRecovery.Complete -> "已在这台设备登录家庭"
+        InitialFamilyDataRecovery.RetryRequired -> "已登录；首次同步失败，请重试"
+        InitialFamilyDataRecovery.NotRequired -> "已在这台设备登录家庭，正在首次同步"
+    }
 }
 
 /** Exactly one family overlay can be active at a time. */
@@ -86,12 +91,6 @@ internal sealed interface FamilyDialog {
     data object OwnerTakeoverConfirm : FamilyDialog
     data object MembersList : FamilyDialog
     data class ReviewPendingMember(val request: PendingMemberLoginRequest) : FamilyDialog
-    data class VerifyingMemberLoginQr(val payload: MemberLoginQrPayload) : FamilyDialog
-    data class RetryMemberLoginQrVerification(
-        val payload: MemberLoginQrPayload,
-        val feedback: String,
-    ) : FamilyDialog
-    data class ConfirmMemberLoginQr(val payload: MemberLoginQrPayload) : FamilyDialog
     data class MemberLoginQrCode(val payload: MemberLoginQrPayload) : FamilyDialog
     data object EditMyDisplayName : FamilyDialog
     data object AddFamilyMember : FamilyDialog
