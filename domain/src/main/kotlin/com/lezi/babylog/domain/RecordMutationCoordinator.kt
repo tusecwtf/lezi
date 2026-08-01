@@ -231,104 +231,103 @@ internal class RecordMutationCoordinator(
             "该项目不可转为护理计划"
         }
 
+        // Global lock order: path gate → sleepMutationMutex → Room (never invert).
         val recordOwner = PhotoAttachmentOwner.Record(recordId)
-        suspend fun writeConvert(): Pair<Long, Set<String>> =
-            photoAttachmentReconciler.withInvolvedPaths(
-                owner = recordOwner,
-                additionalPaths = photos,
-            ) {
-                transactionRunner.run {
-            val existing = recordDao.get(recordId) ?: error("记录不存在")
-            if (existing.deletedAt != null) error("记录已删除")
-            requireCanManageRecord(existing)
-            requireActiveBaby(existing.babyId)
-            val resolvedType = RecordType.fromKey(existing.type) ?: error("未知记录类型")
-            requireCurrentPayloadDocument(
-                resolvedType,
-                existing.payloadJson,
-                existing.schemaVersion,
-            )
-            require(resolvedType.isPlanableCarePlanType || resolvedType == RecordType.CUSTOM) {
-                "该项目不可转为护理计划"
-            }
-            val nextPayload = payloadJson ?: existing.payloadJson
-            requireCurrentPayloadDocument(resolvedType, nextPayload, schemaVersion)
-            val resolvedCustomItemId: Long?
-            val stampedPayload: String
-            if (resolvedType == RecordType.CUSTOM) {
-                val decoded = RecordPayloadCodec.decode(
-                    RecordType.CUSTOM,
-                    nextPayload,
-                    schemaVersion,
-                ).payload as? CustomPayload
-                val id = decoded?.customItemId?.takeIf { it > 0L }
-                    ?: error("具体自定义项目才可转为护理计划")
-                resolvedCustomItemId = id
-                val def = customItemDao.getById(id)
-                stampedPayload = if (def != null && def.deletedAt == null) {
-                    stampCustomItemSnapshotIntoPayload(
-                        payloadJson = nextPayload,
-                        customItemId = id,
-                        titleSnapshot = def.name,
-                        iconSlot = def.iconSlot,
-                    )
+        val (planId, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(
+            owner = recordOwner,
+            additionalPaths = photos,
+        ) {
+            suspend fun writeConvert(): Pair<Long, Set<String>> = transactionRunner.run {
+                val existing = recordDao.get(recordId) ?: error("记录不存在")
+                if (existing.deletedAt != null) error("记录已删除")
+                requireCanManageRecord(existing)
+                requireActiveBaby(existing.babyId)
+                val resolvedType = RecordType.fromKey(existing.type) ?: error("未知记录类型")
+                requireCurrentPayloadDocument(
+                    resolvedType,
+                    existing.payloadJson,
+                    existing.schemaVersion,
+                )
+                require(resolvedType.isPlanableCarePlanType || resolvedType == RecordType.CUSTOM) {
+                    "该项目不可转为护理计划"
+                }
+                val nextPayload = payloadJson ?: existing.payloadJson
+                requireCurrentPayloadDocument(resolvedType, nextPayload, schemaVersion)
+                val resolvedCustomItemId: Long?
+                val stampedPayload: String
+                if (resolvedType == RecordType.CUSTOM) {
+                    val decoded = RecordPayloadCodec.decode(
+                        RecordType.CUSTOM,
+                        nextPayload,
+                        schemaVersion,
+                    ).payload as? CustomPayload
+                    val id = decoded?.customItemId?.takeIf { it > 0L }
+                        ?: error("具体自定义项目才可转为护理计划")
+                    resolvedCustomItemId = id
+                    val def = customItemDao.getById(id)
+                    stampedPayload = if (def != null && def.deletedAt == null) {
+                        stampCustomItemSnapshotIntoPayload(
+                            payloadJson = nextPayload,
+                            customItemId = id,
+                            titleSnapshot = def.name,
+                            iconSlot = def.iconSlot,
+                        )
+                    } else {
+                        // Keep historical name/icon snapshot when definition is gone.
+                        nextPayload
+                    }
                 } else {
-                    // Keep historical name/icon snapshot when definition is gone.
-                    nextPayload
+                    resolvedCustomItemId = null
+                    stampedPayload = nextPayload
                 }
-            } else {
-                resolvedCustomItemId = null
-                stampedPayload = nextPayload
-            }
-            val persistedPayload = requireCurrentPayloadJson(
-                type = resolvedType,
-                payloadJson = stampedPayload,
-                schemaVersion = schemaVersion,
-            )
-
-            val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
-            recordDao.softDelete(recordId, at)
-            val recordPhotoMutation = photoAttachmentReconciler.tombstone(
-                PhotoAttachmentOwner.Record(recordId),
-                at,
-            )
-
-            // Plan media rows are new ownership (separate clientUuids); record media
-            // remain tombstoned only. Same localUri may be referenced by both, but
-            // only plan rows stay active after commit.
-            val planId = carePlanDao.upsert(
-                CarePlanEntity(
-                    clientUuid = newClientUuid(),
-                    babyId = existing.babyId,
-                    type = resolvedType.key,
-                    customItemId = resolvedCustomItemId,
-                    scheduledAt = scheduledAt,
-                    scheduledZoneId = zone.id,
-                    note = note,
-                    payloadJson = persistedPayload,
+                val persistedPayload = requireCurrentPayloadJson(
+                    type = resolvedType,
+                    payloadJson = stampedPayload,
                     schemaVersion = schemaVersion,
-                    status = CarePlanStatus.PENDING.storageKey,
-                    createdByMembershipId = currentMembershipActorId(),
-                    sourceRecordClientUuid = existing.clientUuid,
-                    updatedAt = at,
-                    syncDirty = true,
-                    systemCalendarProjectionEnabled = projectToSystemCalendar,
-                ),
-            )
-            photoAttachmentReconciler.reconcile(
-                PhotoAttachmentOwner.CarePlan(planId),
-                photos,
-                at,
-            )
-            planId to recordPhotoMutation.tombstonedClientUuids
-                }
-            }
+                )
 
-        val (planId, cleanupCandidates) = if (type == RecordType.SLEEP) {
-            // Same mutex as soft-delete/open-sleep so convert cannot leave half-live intervals.
-            sleepMutationMutex.withLock { writeConvert() }
-        } else {
-            writeConvert()
+                val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
+                recordDao.softDelete(recordId, at)
+                val recordPhotoMutation = photoAttachmentReconciler.tombstone(
+                    PhotoAttachmentOwner.Record(recordId),
+                    at,
+                )
+
+                // Plan media rows are new ownership (separate clientUuids); record media
+                // remain tombstoned only. Same localUri may be referenced by both, but
+                // only plan rows stay active after commit.
+                val planId = carePlanDao.upsert(
+                    CarePlanEntity(
+                        clientUuid = newClientUuid(),
+                        babyId = existing.babyId,
+                        type = resolvedType.key,
+                        customItemId = resolvedCustomItemId,
+                        scheduledAt = scheduledAt,
+                        scheduledZoneId = zone.id,
+                        note = note,
+                        payloadJson = persistedPayload,
+                        schemaVersion = schemaVersion,
+                        status = CarePlanStatus.PENDING.storageKey,
+                        createdByMembershipId = currentMembershipActorId(),
+                        sourceRecordClientUuid = existing.clientUuid,
+                        updatedAt = at,
+                        syncDirty = true,
+                        systemCalendarProjectionEnabled = projectToSystemCalendar,
+                    ),
+                )
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.CarePlan(planId),
+                    photos,
+                    at,
+                )
+                planId to recordPhotoMutation.tombstonedClientUuids
+            }
+            if (type == RecordType.SLEEP) {
+                // Same mutex as soft-delete/open-sleep so convert cannot leave half-live intervals.
+                sleepMutationMutex.withLock { writeConvert() }
+            } else {
+                writeConvert()
+            }
         }
         // The converted family data is publishable before optional device-local projection.
         cleanupCommittedPhotoTombstones(cleanupCandidates)

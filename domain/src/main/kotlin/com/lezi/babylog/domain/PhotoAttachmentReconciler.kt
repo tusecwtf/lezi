@@ -35,17 +35,26 @@ data class PhotoAttachmentMutation(
  * root/attachment state.
  *
  * Callers that may attach, revive, or tombstone paths must hold [MediaLocalPathGate] for every
- * involved `local_uri` **before** opening the Room write lease (lock order: path gate → Room).
- * Use [withInvolvedPaths] for that outer exclusion; it is shared with reference-aware file GC.
+ * involved `local_uri` **before** opening the Room write lease. Global lock order is
+ * **path gate → sleepMutationMutex (when used) → Room**. Use [withInvolvedPaths] for that
+ * outer exclusion; it is shared with reference-aware file GC and must receive the same
+ * process-wide [MediaLocalPathGate] singleton (do not mint a private gate).
  */
 class PhotoAttachmentReconciler(
     private val mediaAssetDao: MediaAssetDao,
-    private val pathGate: MediaLocalPathGate = MediaLocalPathGate(),
+    private val pathGate: MediaLocalPathGate,
     private val uuidFactory: () -> String = ::newClientUuid,
 ) {
     /**
      * Acquires path locks for existing owner media plus [additionalPaths], then runs [block].
      * Must wrap the Room transaction that calls [reconcile] / [tombstone], never the reverse.
+     *
+     * **Snapshot race (intentional, bounded):** owner paths are listed once before locking.
+     * A concurrent rebinding of a *different* path onto this owner between list and lock is
+     * not covered by this set. Callers still hold locks for every path they attach in
+     * [additionalPaths] and for the pre-list snapshot; file reclaim re-resolves under its
+     * own path lock and claim identity, so a missed rebinding cannot reclaim active bytes.
+     * Blank paths are ignored.
      */
     suspend fun <T> withInvolvedPaths(
         owner: PhotoAttachmentOwner?,

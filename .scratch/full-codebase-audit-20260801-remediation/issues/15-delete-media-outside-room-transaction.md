@@ -9,7 +9,7 @@
 
 ## Acceptance criteria
 
-- [x] `mediaFiles.delete` 不在 `DatabaseTransactionRunner.run` 或 Room 写租约内执行。
+- [x] Reference-aware reclaim 路径的 `mediaFiles.delete` 不在 `DatabaseTransactionRunner.run` 或 Room 写租约内执行（审计源 P2-01 / CR-20260730-P1-03）。`LocalReplicaClearCoordinator` 仍可在写租约内删文件，不属本 ticket 的 reclaim 约束。
 - [x] DB 阶段原子创建带 client UUID/path/revision 的 durable cleanup claim；文件阶段与 attach/import/复活共享路径级互斥或等价机制。
 - [x] claim 后出现新 active reference 时不得删除其文件；ABA（同路径重新使用）由 revision/identity 防护。
 - [x] 文件删除成功后只在 claim 和 tombstone 仍匹配时清 marker；失败/进程死亡保留可重试证据。
@@ -44,6 +44,6 @@ Focused gates run:
 Public seams:
 
 1. `ReferenceAwareMediaFileCleanup.cleanupTombstones` / `cleanupPendingTombstones`
-2. `SyncMediaFileStore.delete` must observe `DatabaseTransactionRunner` depth == 0
-3. `MediaLocalPathGate` / `MediaFileCleanupClaim` (clientUuid + path + updatedAt + deletedAt)
-4. `PhotoAttachmentReconciler.withInvolvedPaths` — attach/import/revive outer exclusion before Room
+2. Reclaim-scoped caller invariant: `ReferenceAwareMediaFileCleanup` runs `SyncMediaFileStore.delete` outside any `DatabaseTransactionRunner` / Room write lease. **Do not** put a global depth==0 guard on shared `SyncMediaFileStore.delete` — `LocalReplicaClearCoordinator` intentionally deletes under a write lease while wiping the DB.
+3. `MediaLocalPathGate` / `MediaFileCleanupClaim` (clientUuid + path + updatedAt + deletedAt). Global lock order: **path gate → sleepMutationMutex (when used) → Room**.
+4. `PhotoAttachmentReconciler.withInvolvedPaths` — attach/import/revive outer exclusion before Room; must share the process-wide gate singleton with reclaim.

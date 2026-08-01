@@ -66,6 +66,17 @@ interface SyncMediaFileStore {
         bytes: ByteArray,
         mime: String?,
     ): String
+
+    /**
+     * Deletes a local media file when present (missing = success).
+     *
+     * **Caller invariant (not enforced here):** reference-aware reclaim
+     * ([ReferenceAwareMediaFileCleanup]) must call this **outside** any
+     * [com.lezi.babylog.core.database.DatabaseTransactionRunner] / Room write lease so
+     * slow FS work cannot hold the write connection. Local replica clear intentionally
+     * deletes under a write lease while wiping the DB; do not add a shared depth==0
+     * guard on this method or that path breaks.
+     */
     suspend fun delete(localUri: String)
 }
 

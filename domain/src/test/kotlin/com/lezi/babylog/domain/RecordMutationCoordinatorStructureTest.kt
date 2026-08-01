@@ -75,6 +75,51 @@ class RecordMutationCoordinatorStructureTest {
         assertFalse("record soft-delete returned to facade", "recordDao.softDelete(" in facade)
     }
 
+    @Test
+    fun mediaPathWritersUsePathGateThenSleepMutexThenRoom() {
+        val coordinator = source("RecordMutationCoordinator.kt")
+        val carePlans = source("CarePlanCoordinator.kt")
+        // convertRecordToCarePlan used to invert sleep → path; keep path outer.
+        fun assertPathGateBeforeSleep(label: String, body: String) {
+            val pathAt = body.indexOf("photoAttachmentReconciler.withInvolvedPaths(")
+            val sleepAt = body.indexOf("sleepMutationMutex.withLock")
+            assertTrue("$label must open path gate", pathAt >= 0)
+            assertTrue("$label must still take sleep mutex when needed", sleepAt >= 0)
+            assertTrue(
+                "$label must open path gate before sleep (global order path → sleep → Room)",
+                pathAt < sleepAt,
+            )
+            // Sleep must live inside the path-gate lambda (deeper indent than withInvolvedPaths call).
+            val sleepLine = body.lineSequence().first { "sleepMutationMutex.withLock" in it }
+            val pathLine = body.lineSequence().first {
+                "photoAttachmentReconciler.withInvolvedPaths(" in it
+            }
+            assertTrue(
+                "$label sleep lock must nest inside withInvolvedPaths block",
+                sleepLine.takeWhile { it == ' ' }.length >
+                    pathLine.takeWhile { it == ' ' }.length,
+            )
+        }
+        assertPathGateBeforeSleep(
+            "convertRecordToCarePlan",
+            coordinator
+                .substringAfter("suspend fun convertRecordToCarePlan(")
+                .substringBefore("suspend fun deleteRecord("),
+        )
+        assertPathGateBeforeSleep(
+            "fulfillCarePlan",
+            carePlans
+                .substringAfter("suspend fun fulfillCarePlan(")
+                .substringBefore("internal suspend fun completeOpenCarePlanWithRecord("),
+        )
+        assertPathGateBeforeSleep(
+            "convertConflictNotAdoptedToIndependentRecord",
+            carePlans
+                .substringAfter("suspend fun convertConflictNotAdoptedToIndependentRecord(")
+                .substringBefore("fun canManageCarePlan("),
+        )
+    }
+
     private fun source(name: String): String = sourceDir.resolve(name).readText()
 
     private fun repositoryRoot(): File = generateSequence(

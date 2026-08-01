@@ -2,6 +2,10 @@ package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.MediaLocalPathGate
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
@@ -10,7 +14,9 @@ class PhotoAttachmentReconcilerTest {
     fun recordReconcileNormalizesPathsAndCreatesOnlyRecordOwnedRows() = runTest {
         val media = FakeMediaAssetDao()
         val generatedUuids = ArrayDeque(listOf("media-a", "media-b"))
-        val reconciler = PhotoAttachmentReconciler(media) { generatedUuids.removeFirst() }
+        val reconciler = PhotoAttachmentReconciler(media, MediaLocalPathGate()) {
+            generatedUuids.removeFirst()
+        }
 
         reconciler.reconcile(
             owner = PhotoAttachmentOwner.Record(7L),
@@ -61,7 +67,7 @@ class PhotoAttachmentReconcilerTest {
             ).copy(deletedAt = 90L, updatedAt = 130L, syncDirty = false),
         )
         var generatedUuidCount = 0
-        val reconciler = PhotoAttachmentReconciler(media) {
+        val reconciler = PhotoAttachmentReconciler(media, MediaLocalPathGate()) {
             generatedUuidCount += 1
             "new-uuid-$generatedUuidCount"
         }
@@ -141,7 +147,7 @@ class PhotoAttachmentReconcilerTest {
                 at = 20L,
             ).copy(syncDirty = false),
         )
-        val reconciler = PhotoAttachmentReconciler(media) {
+        val reconciler = PhotoAttachmentReconciler(media, MediaLocalPathGate()) {
             error("tombstone must not generate a UUID")
         }
 
@@ -207,7 +213,7 @@ class PhotoAttachmentReconcilerTest {
     fun recordAndCarePlanApplyTheSameNormalizedLimitAndExplicitClear() = runTest {
         val media = FakeMediaAssetDao()
         var uuidCount = 0
-        val reconciler = PhotoAttachmentReconciler(media) {
+        val reconciler = PhotoAttachmentReconciler(media, MediaLocalPathGate()) {
             uuidCount += 1
             "media-$uuidCount"
         }
@@ -257,6 +263,61 @@ class PhotoAttachmentReconcilerTest {
             .isInstanceOf(IllegalArgumentException::class.java)
         assertThat(runCatching { PhotoAttachmentOwner.CarePlan(-1L) }.exceptionOrNull())
             .isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun withInvolvedPathsLocksExistingAndAdditionalPathsAndIgnoresBlanks() = runTest {
+        val media = FakeMediaAssetDao()
+        val pathGate = MediaLocalPathGate()
+        media.seed(
+            mediaAsset(
+                id = 1L,
+                clientUuid = "existing",
+                recordId = 7L,
+                localUri = "photos/existing.jpg",
+                at = 10L,
+            ),
+        )
+        val reconciler = PhotoAttachmentReconciler(media, pathGate)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+
+        val holder = async {
+            reconciler.withInvolvedPaths(
+                owner = PhotoAttachmentOwner.Record(7L),
+                additionalPaths = listOf(" photos/new.jpg ", "", "  "),
+            ) {
+                entered.complete(Unit)
+                release.await()
+                "ok"
+            }
+        }
+        entered.await()
+
+        val contender = async {
+            // Contends on existing owner path held by withInvolvedPaths.
+            pathGate.withLock("photos/existing.jpg") {
+                secondStarted.complete(Unit)
+            }
+        }
+        delay(50)
+        assertThat(secondStarted.isCompleted).isFalse()
+
+        val additionalContender = async {
+            pathGate.withLock("photos/new.jpg") {
+                "unlocked-after"
+            }
+        }
+        delay(50)
+        // additional path is also locked; blank paths must not be required.
+        assertThat(additionalContender.isCompleted).isFalse()
+
+        release.complete(Unit)
+        assertThat(holder.await()).isEqualTo("ok")
+        contender.await()
+        assertThat(additionalContender.await()).isEqualTo("unlocked-after")
+        assertThat(secondStarted.isCompleted).isTrue()
     }
 }
 

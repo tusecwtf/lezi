@@ -364,111 +364,111 @@ internal class CarePlanCoordinator(
             planPeek.customItemId,
         )
 
-        suspend fun writeFulfill(): Long = photoAttachmentReconciler.withInvolvedPaths(
+        // Global lock order: path gate → sleepMutationMutex → Room (never invert).
+        val recordId = photoAttachmentReconciler.withInvolvedPaths(
             owner = PhotoAttachmentOwner.CarePlan(carePlanId),
             additionalPaths = photos,
         ) {
-            transactionRunner.run {
-            val plan = carePlanDao.get(carePlanId)
-                ?: error("护理计划不存在")
-            if (plan.deletedAt != null) error("护理计划已删除")
-            val status = CarePlanStatus.fromStorage(plan.status)
-            require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
-                "该护理计划不可履行"
-            }
-            // Fulfill is allowed for any member; no author manage ACL here.
-            requireActiveBaby(plan.babyId)
-            val type = RecordType.fromKey(plan.type) ?: error("未知记录类型")
-            requireCurrentPayloadDocument(type, plan.payloadJson, plan.schemaVersion)
-            requireCustomPayloadMatches(
-                type,
-                plan.payloadJson,
-                plan.schemaVersion,
-                plan.customItemId,
-            )
-            val resolvedEnd = endTimestamp
-            if (type == RecordType.SLEEP) {
-                validateSleepInterval(RecordType.SLEEP, actualTimestamp, resolvedEnd)
-                recordMutations.healDuplicateOpenSleeps(plan.babyId)
-                val currentOpen = recordDao.findOpenSleep(plan.babyId)
-                // Open-interval fulfill and closed-interval fulfill both require
-                // no competing open sleep for a different interval.
-                if (currentOpen != null) {
-                    throw SleepStateChangedException()
+            suspend fun writeFulfill(): Long = transactionRunner.run {
+                val plan = carePlanDao.get(carePlanId)
+                    ?: error("护理计划不存在")
+                if (plan.deletedAt != null) error("护理计划已删除")
+                val status = CarePlanStatus.fromStorage(plan.status)
+                require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
+                    "该护理计划不可履行"
                 }
-            } else if (resolvedEnd != null) {
-                // Non-sleep types do not use interval ends on fulfill.
-                error("该项目履行不支持结束时间")
+                // Fulfill is allowed for any member; no author manage ACL here.
+                requireActiveBaby(plan.babyId)
+                val type = RecordType.fromKey(plan.type) ?: error("未知记录类型")
+                requireCurrentPayloadDocument(type, plan.payloadJson, plan.schemaVersion)
+                requireCustomPayloadMatches(
+                    type,
+                    plan.payloadJson,
+                    plan.schemaVersion,
+                    plan.customItemId,
+                )
+                val resolvedEnd = endTimestamp
+                if (type == RecordType.SLEEP) {
+                    validateSleepInterval(RecordType.SLEEP, actualTimestamp, resolvedEnd)
+                    recordMutations.healDuplicateOpenSleeps(plan.babyId)
+                    val currentOpen = recordDao.findOpenSleep(plan.babyId)
+                    // Open-interval fulfill and closed-interval fulfill both require
+                    // no competing open sleep for a different interval.
+                    if (currentOpen != null) {
+                        throw SleepStateChangedException()
+                    }
+                } else if (resolvedEnd != null) {
+                    // Non-sleep types do not use interval ends on fulfill.
+                    error("该项目履行不支持结束时间")
+                }
+                val nextPayload = payloadJson ?: plan.payloadJson
+                val persistedPayload = requireCurrentPayloadJson(
+                    type = type,
+                    payloadJson = nextPayload,
+                    schemaVersion = schemaVersion,
+                )
+                requireCustomPayloadMatches(
+                    type,
+                    persistedPayload,
+                    schemaVersion,
+                    plan.customItemId,
+                )
+                val recordClientUuid = newClientUuid()
+                // Next-feed plans store an internal protocol marker on the plan row. The
+                // fulfilled care-record fact must never carry that prefix: omit note derives
+                // the visible part; explicit notes are still fail-closed stripped when the
+                // plan is a next-feed plan (never invent a marker; never leave one on the fact).
+                // Non-next-feed plans keep note ?: plan.note without incidental trim/null.
+                val recordNote = if (isNextFeedPlanNote(plan.note)) {
+                    visibleCarePlanNote(note ?: plan.note)
+                } else {
+                    note ?: plan.note
+                }
+                val record = RecordEntity(
+                    clientUuid = recordClientUuid,
+                    babyId = plan.babyId,
+                    type = type.key,
+                    timestamp = actualTimestamp,
+                    endTimestamp = resolvedEnd,
+                    note = recordNote,
+                    payloadJson = persistedPayload,
+                    schemaVersion = schemaVersion,
+                    updatedAt = now,
+                )
+                val inserted = recordMutations.insertRecord(record)
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.Record(inserted),
+                    photos,
+                    now,
+                )
+                // Manager (creator/owner) may LWW-push completed plan status. Non-managers
+                // complete only locally — server forbids care_plan rewrites for them;
+                // peers re-link via fulfillment_candidate + resolveFulfillmentAuthority.
+                val publishPlanCompletion = actorCanManageCarePlan(plan)
+                carePlanDao.update(
+                    plan.copy(
+                        status = CarePlanStatus.COMPLETED.storageKey,
+                        fulfilledRecordClientUuid = recordClientUuid,
+                        fulfilledAt = confirmedAt,
+                        updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
+                        syncDirty = publishPlanCompletion,
+                    ),
+                )
+                ensureFulfillmentCandidate(
+                    carePlanClientUuid = plan.clientUuid,
+                    recordClientUuid = recordClientUuid,
+                    actualTimestamp = actualTimestamp,
+                    confirmedAt = confirmedAt,
+                )
+                // Local multi-candidate sets (rare) re-link the plan to the authority.
+                resolveFulfillmentAuthorityForPlan(plan.clientUuid)
+                inserted
             }
-            val nextPayload = payloadJson ?: plan.payloadJson
-            val persistedPayload = requireCurrentPayloadJson(
-                type = type,
-                payloadJson = nextPayload,
-                schemaVersion = schemaVersion,
-            )
-            requireCustomPayloadMatches(
-                type,
-                persistedPayload,
-                schemaVersion,
-                plan.customItemId,
-            )
-            val recordClientUuid = newClientUuid()
-            // Next-feed plans store an internal protocol marker on the plan row. The
-            // fulfilled care-record fact must never carry that prefix: omit note derives
-            // the visible part; explicit notes are still fail-closed stripped when the
-            // plan is a next-feed plan (never invent a marker; never leave one on the fact).
-            // Non-next-feed plans keep note ?: plan.note without incidental trim/null.
-            val recordNote = if (isNextFeedPlanNote(plan.note)) {
-                visibleCarePlanNote(note ?: plan.note)
+            if (planType == RecordType.SLEEP) {
+                sleepMutationMutex.withLock { writeFulfill() }
             } else {
-                note ?: plan.note
+                writeFulfill()
             }
-            val record = RecordEntity(
-                clientUuid = recordClientUuid,
-                babyId = plan.babyId,
-                type = type.key,
-                timestamp = actualTimestamp,
-                endTimestamp = resolvedEnd,
-                note = recordNote,
-                payloadJson = persistedPayload,
-                schemaVersion = schemaVersion,
-                updatedAt = now,
-            )
-            val inserted = recordMutations.insertRecord(record)
-            photoAttachmentReconciler.reconcile(
-                PhotoAttachmentOwner.Record(inserted),
-                photos,
-                now,
-            )
-            // Manager (creator/owner) may LWW-push completed plan status. Non-managers
-            // complete only locally — server forbids care_plan rewrites for them;
-            // peers re-link via fulfillment_candidate + resolveFulfillmentAuthority.
-            val publishPlanCompletion = actorCanManageCarePlan(plan)
-            carePlanDao.update(
-                plan.copy(
-                    status = CarePlanStatus.COMPLETED.storageKey,
-                    fulfilledRecordClientUuid = recordClientUuid,
-                    fulfilledAt = confirmedAt,
-                    updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
-                    syncDirty = publishPlanCompletion,
-                ),
-            )
-            ensureFulfillmentCandidate(
-                carePlanClientUuid = plan.clientUuid,
-                recordClientUuid = recordClientUuid,
-                actualTimestamp = actualTimestamp,
-                confirmedAt = confirmedAt,
-            )
-            // Local multi-candidate sets (rare) re-link the plan to the authority.
-            resolveFulfillmentAuthorityForPlan(plan.clientUuid)
-            inserted
-            }
-        }
-
-        val recordId = if (planType == RecordType.SLEEP) {
-            sleepMutationMutex.withLock { writeFulfill() }
-        } else {
-            writeFulfill()
         }
         reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
         reminderProjection.removeSystemCalendarProjection(carePlanId)
@@ -694,44 +694,11 @@ internal class CarePlanCoordinator(
     ): Long {
         if (!isFamilyAdmin()) throw ConflictAuditPermissionException()
 
-        suspend fun writeConvert(): Long {
-            val candidatePeek = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
-                ?: error("冲突未采纳履行不存在")
-            val sourcePeek = recordDao.getByClientUuid(candidatePeek.recordClientUuid)
-            val photoPaths = sourcePeek?.let { source ->
-                if (source.deletedAt == null) {
-                    listRecordPhotoPaths(source.id)
-                } else {
-                    mediaAssetDao.listForRecord(source.id)
-                        .map(MediaAssetEntity::localUri)
-                        .filter(String::isNotBlank)
-                        .distinct()
-                }
-            }.orEmpty()
-            return photoAttachmentReconciler.withInvolvedPaths(
-                owner = null,
-                additionalPaths = photoPaths,
-            ) {
-                transactionRunner.run {
-            val candidate = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
-                ?: error("冲突未采纳履行不存在")
-            if (candidate.deletedAt != null) error("冲突未采纳履行已删除")
-            require(candidate.adoptionStatus == FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED) {
-                "仅冲突未采纳履行可转为独立记录"
-            }
-
-            val existingPointer = candidate.convertedRecordClientUuid.trim()
-            if (existingPointer.isNotEmpty()) {
-                val existing = recordDao.getByClientUuid(existingPointer)
-                if (existing != null && existing.deletedAt == null) {
-                    return@run existing.id
-                }
-            }
-
-            val source = recordDao.getByClientUuid(candidate.recordClientUuid)
-                ?: error("未采纳履行对应的记录不存在")
-            // MediaAsset is the sole current photo source, including tombstoned facts.
-            val photos = if (source.deletedAt == null) {
+        val candidatePeek = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
+            ?: error("冲突未采纳履行不存在")
+        val sourcePeek = recordDao.getByClientUuid(candidatePeek.recordClientUuid)
+        val photoPaths = sourcePeek?.let { source ->
+            if (source.deletedAt == null) {
                 listRecordPhotoPaths(source.id)
             } else {
                 mediaAssetDao.listForRecord(source.id)
@@ -739,59 +706,89 @@ internal class CarePlanCoordinator(
                     .filter(String::isNotBlank)
                     .distinct()
             }
-            val targetUuid = existingPointer.ifEmpty { newClientUuid() }
-            val at = nowMillis.coerceAtLeast(source.updatedAt + 1)
-            val type = RecordType.fromKey(source.type) ?: error("未知记录类型")
-            if (type == RecordType.SLEEP) {
-                validateSleepInterval(type, source.timestamp, source.endTimestamp)
-            }
-            requireActiveBaby(source.babyId)
-            if (type == RecordType.SLEEP && source.endTimestamp == null) {
-                // Open sleep from a fulfill is unexpected; still guard open-sleep invariants.
-                recordMutations.healDuplicateOpenSleeps(source.babyId)
-                if (recordDao.findOpenSleep(source.babyId) != null) {
-                    throw SleepStateChangedException()
+        }.orEmpty()
+        val sourceType = sourcePeek?.type
+        // Global lock order: path gate → sleepMutationMutex → Room (never invert).
+        val recordId = photoAttachmentReconciler.withInvolvedPaths(
+            owner = null,
+            additionalPaths = photoPaths,
+        ) {
+            suspend fun writeConvert(): Long = transactionRunner.run {
+                val candidate = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
+                    ?: error("冲突未采纳履行不存在")
+                if (candidate.deletedAt != null) error("冲突未采纳履行已删除")
+                require(candidate.adoptionStatus == FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED) {
+                    "仅冲突未采纳履行可转为独立记录"
                 }
-            }
-            val newRecord = RecordEntity(
-                // Reuse pointer uuid on retry so we never mint a second ordinary fact.
-                id = recordDao.getByClientUuid(targetUuid)?.id ?: 0L,
-                clientUuid = targetUuid,
-                babyId = source.babyId,
-                type = source.type,
-                timestamp = source.timestamp,
-                endTimestamp = source.endTimestamp,
-                note = source.note,
-                payloadJson = source.payloadJson,
-                schemaVersion = source.schemaVersion,
-                updatedAt = at,
-                deletedAt = null,
-                syncDirty = true,
-            )
-            val inserted = recordMutations.insertRecord(newRecord)
-            photoAttachmentReconciler.reconcile(
-                PhotoAttachmentOwner.Record(inserted),
-                photos,
-                at,
-            )
 
-            // Pointer only — never touch adoptionStatus or plan authority.
-            if (candidate.convertedRecordClientUuid != targetUuid) {
-                fulfillmentCandidateDao.update(
-                    candidate.copy(convertedRecordClientUuid = targetUuid),
+                val existingPointer = candidate.convertedRecordClientUuid.trim()
+                if (existingPointer.isNotEmpty()) {
+                    val existing = recordDao.getByClientUuid(existingPointer)
+                    if (existing != null && existing.deletedAt == null) {
+                        return@run existing.id
+                    }
+                }
+
+                val source = recordDao.getByClientUuid(candidate.recordClientUuid)
+                    ?: error("未采纳履行对应的记录不存在")
+                // MediaAsset is the sole current photo source, including tombstoned facts.
+                val photos = if (source.deletedAt == null) {
+                    listRecordPhotoPaths(source.id)
+                } else {
+                    mediaAssetDao.listForRecord(source.id)
+                        .map(MediaAssetEntity::localUri)
+                        .filter(String::isNotBlank)
+                        .distinct()
+                }
+                val targetUuid = existingPointer.ifEmpty { newClientUuid() }
+                val at = nowMillis.coerceAtLeast(source.updatedAt + 1)
+                val type = RecordType.fromKey(source.type) ?: error("未知记录类型")
+                if (type == RecordType.SLEEP) {
+                    validateSleepInterval(type, source.timestamp, source.endTimestamp)
+                }
+                requireActiveBaby(source.babyId)
+                if (type == RecordType.SLEEP && source.endTimestamp == null) {
+                    // Open sleep from a fulfill is unexpected; still guard open-sleep invariants.
+                    recordMutations.healDuplicateOpenSleeps(source.babyId)
+                    if (recordDao.findOpenSleep(source.babyId) != null) {
+                        throw SleepStateChangedException()
+                    }
+                }
+                val newRecord = RecordEntity(
+                    // Reuse pointer uuid on retry so we never mint a second ordinary fact.
+                    id = recordDao.getByClientUuid(targetUuid)?.id ?: 0L,
+                    clientUuid = targetUuid,
+                    babyId = source.babyId,
+                    type = source.type,
+                    timestamp = source.timestamp,
+                    endTimestamp = source.endTimestamp,
+                    note = source.note,
+                    payloadJson = source.payloadJson,
+                    schemaVersion = source.schemaVersion,
+                    updatedAt = at,
+                    deletedAt = null,
+                    syncDirty = true,
                 )
-            }
-            inserted
-                }
-            }
-        }
+                val inserted = recordMutations.insertRecord(newRecord)
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.Record(inserted),
+                    photos,
+                    at,
+                )
 
-        val sourceType = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
-            ?.let { recordDao.getByClientUuid(it.recordClientUuid)?.type }
-        val recordId = if (sourceType == RecordType.SLEEP.key) {
-            sleepMutationMutex.withLock { writeConvert() }
-        } else {
-            writeConvert()
+                // Pointer only — never touch adoptionStatus or plan authority.
+                if (candidate.convertedRecordClientUuid != targetUuid) {
+                    fulfillmentCandidateDao.update(
+                        candidate.copy(convertedRecordClientUuid = targetUuid),
+                    )
+                }
+                inserted
+            }
+            if (sourceType == RecordType.SLEEP.key) {
+                sleepMutationMutex.withLock { writeConvert() }
+            } else {
+                writeConvert()
+            }
         }
         requestLocalSync()
         return recordId
@@ -864,87 +861,89 @@ internal class CarePlanCoordinator(
             additionalPaths = photos.orEmpty(),
         ) {
             transactionRunner.run {
-            val plan = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
-            if (plan.deletedAt != null) error("护理计划已删除")
-            val status = CarePlanStatus.fromStorage(plan.status)
-            require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
-                "已完成或已跳过的计划不可编辑"
-            }
-            requireCanManageCarePlan(plan)
-            requireActiveBaby(plan.babyId)
-            val type = RecordType.fromKey(plan.type) ?: error("未知记录类型")
-            requireCurrentPayloadDocument(type, plan.payloadJson, plan.schemaVersion)
-            requireCustomPayloadMatches(
-                type,
-                plan.payloadJson,
-                plan.schemaVersion,
-                plan.customItemId,
-            )
-            val at = nowMillis.coerceAtLeast(plan.updatedAt + 1)
-            val nextSchemaVersion = schemaVersion ?: plan.schemaVersion
-            val rawNextPayload = payloadJson ?: plan.payloadJson
-            val nextPayload = if (photos != null) {
-                requireCurrentPayloadJson(
-                    type = type,
-                    payloadJson = rawNextPayload,
-                    schemaVersion = nextSchemaVersion,
+                val plan = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
+                if (plan.deletedAt != null) error("护理计划已删除")
+                val status = CarePlanStatus.fromStorage(plan.status)
+                require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
+                    "已完成或已跳过的计划不可编辑"
+                }
+                requireCanManageCarePlan(plan)
+                requireActiveBaby(plan.babyId)
+                val type = RecordType.fromKey(plan.type) ?: error("未知记录类型")
+                requireCurrentPayloadDocument(type, plan.payloadJson, plan.schemaVersion)
+                requireCustomPayloadMatches(
+                    type,
+                    plan.payloadJson,
+                    plan.schemaVersion,
+                    plan.customItemId,
                 )
-            } else {
-                requireCurrentPayloadDocument(type, rawNextPayload, nextSchemaVersion)
-                rawNextPayload
-            }
-            requireCustomPayloadMatches(
-                type,
-                nextPayload,
-                nextSchemaVersion,
-                plan.customItemId,
-            )
-            val nextZoneId = zone?.id ?: plan.scheduledZoneId
-            val desiredProjection =
-                projectToSystemCalendar ?: plan.systemCalendarProjectionEnabled
-            val persistedNote = if (isNextFeedPlanNote(plan.note)) {
-                nextFeedPlanNote(note)
-            } else {
-                note
-            }
-            val sharedChanged =
-                plan.scheduledAt != scheduledAt ||
-                    plan.scheduledZoneId != nextZoneId ||
-                    plan.note != persistedNote ||
-                    plan.payloadJson != nextPayload ||
-                    plan.schemaVersion != nextSchemaVersion ||
-                    plan.status != CarePlanStatus.PENDING.storageKey
-            // Photo-only edits are still atomic CarePlan bundle mutations. Reconcile first so an
-            // identical explicit list remains a no-op; the enclosing transaction owns both writes.
-            val photoMutation = photos?.let {
-                photoAttachmentReconciler.reconcile(
-                    PhotoAttachmentOwner.CarePlan(carePlanId),
-                    it,
-                    at,
+                val at = nowMillis.coerceAtLeast(plan.updatedAt + 1)
+                val nextSchemaVersion = schemaVersion ?: plan.schemaVersion
+                val rawNextPayload = payloadJson ?: plan.payloadJson
+                val nextPayload = if (photos != null) {
+                    requireCurrentPayloadJson(
+                        type = type,
+                        payloadJson = rawNextPayload,
+                        schemaVersion = nextSchemaVersion,
+                    )
+                } else {
+                    requireCurrentPayloadDocument(type, rawNextPayload, nextSchemaVersion)
+                    rawNextPayload
+                }
+                requireCustomPayloadMatches(
+                    type,
+                    nextPayload,
+                    nextSchemaVersion,
+                    plan.customItemId,
                 )
-            }
-            val photosChanged = photoMutation?.changed == true
-            if (sharedChanged || photosChanged) {
-                // Persist stored status as pending; missed is always derived from clock.
-                carePlanDao.update(plan.copy(
-                    scheduledAt = scheduledAt,
-                    scheduledZoneId = nextZoneId,
-                    note = persistedNote,
-                    payloadJson = nextPayload,
-                    schemaVersion = nextSchemaVersion,
-                    status = CarePlanStatus.PENDING.storageKey,
-                    updatedAt = at,
-                    syncDirty = true,
-                    systemCalendarProjectionEnabled = desiredProjection,
-                    systemCalendarReminderReady = false,
-                ))
-            } else if (desiredProjection != plan.systemCalendarProjectionEnabled) {
-                carePlanDao.updateSystemCalendarProjectionEnabled(
-                    clientUuid = plan.clientUuid,
-                    enabled = desiredProjection,
-                )
-            }
-            photoMutation?.tombstonedClientUuids.orEmpty()
+                val nextZoneId = zone?.id ?: plan.scheduledZoneId
+                val desiredProjection =
+                    projectToSystemCalendar ?: plan.systemCalendarProjectionEnabled
+                val persistedNote = if (isNextFeedPlanNote(plan.note)) {
+                    nextFeedPlanNote(note)
+                } else {
+                    note
+                }
+                val sharedChanged =
+                    plan.scheduledAt != scheduledAt ||
+                        plan.scheduledZoneId != nextZoneId ||
+                        plan.note != persistedNote ||
+                        plan.payloadJson != nextPayload ||
+                        plan.schemaVersion != nextSchemaVersion ||
+                        plan.status != CarePlanStatus.PENDING.storageKey
+                // Photo-only edits are still atomic CarePlan bundle mutations. Reconcile first so an
+                // identical explicit list remains a no-op; the enclosing transaction owns both writes.
+                val photoMutation = photos?.let {
+                    photoAttachmentReconciler.reconcile(
+                        PhotoAttachmentOwner.CarePlan(carePlanId),
+                        it,
+                        at,
+                    )
+                }
+                val photosChanged = photoMutation?.changed == true
+                if (sharedChanged || photosChanged) {
+                    // Persist stored status as pending; missed is always derived from clock.
+                    carePlanDao.update(
+                        plan.copy(
+                            scheduledAt = scheduledAt,
+                            scheduledZoneId = nextZoneId,
+                            note = persistedNote,
+                            payloadJson = nextPayload,
+                            schemaVersion = nextSchemaVersion,
+                            status = CarePlanStatus.PENDING.storageKey,
+                            updatedAt = at,
+                            syncDirty = true,
+                            systemCalendarProjectionEnabled = desiredProjection,
+                            systemCalendarReminderReady = false,
+                        ),
+                    )
+                } else if (desiredProjection != plan.systemCalendarProjectionEnabled) {
+                    carePlanDao.updateSystemCalendarProjectionEnabled(
+                        clientUuid = plan.clientUuid,
+                        enabled = desiredProjection,
+                    )
+                }
+                photoMutation?.tombstonedClientUuids.orEmpty()
             }
         }
         // Shared update is committed and publishable before optional local side effects.

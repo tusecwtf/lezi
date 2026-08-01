@@ -9,14 +9,22 @@ import kotlinx.coroutines.sync.withLock
 /**
  * Per-path mutual exclusion for media file ownership changes.
  *
- * Lock order is always **path gate → Room write transaction**. Never acquire a path
- * lock while a Room write lease is already held (would deadlock with cleanup, which
- * takes path then Room around short claim/clear transactions and holds path across
- * the slow filesystem delete).
+ * Global lock order (never invert):
+ * 1. **path gate** ([withLock] / [withLocks])
+ * 2. **sleepMutationMutex** (when the writer also mutates open-sleep state)
+ * 3. **Room write transaction**
+ *
+ * Never acquire a path lock while a Room write lease is already held (would deadlock
+ * with cleanup, which takes path then Room around short claim/clear transactions and
+ * holds path across the slow filesystem delete). Never take sleepMutationMutex *outside*
+ * the path gate when the same critical section also needs path locks.
  *
  * Shared by:
  * - reference-aware tombstone file reclaim (file phase)
  * - attach / import path binding / revive of a tombstoned `local_uri`
+ *
+ * Note: remote media materialization still serializes reclaim work via the sync engine
+ * mutex rather than this gate; domain attach/reclaim coordination uses this type.
  */
 @Singleton
 class MediaLocalPathGate @Inject constructor() {

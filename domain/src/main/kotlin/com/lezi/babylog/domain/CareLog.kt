@@ -138,7 +138,8 @@ class CareLog @Inject constructor(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
     private val clock: PolicyClock,
-    private val mediaPathGate: MediaLocalPathGate = MediaLocalPathGate(),
+    /** Process-wide path gate shared with reference-aware media reclaim (Hilt singleton). */
+    private val mediaPathGate: MediaLocalPathGate,
 ) {
     private val queries = CareLogQueries(
         babyDao = babyDao,

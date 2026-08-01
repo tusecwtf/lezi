@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MediaLocalPathGate
 import java.io.File
@@ -16,7 +17,8 @@ import org.junit.rules.TemporaryFolder
 /**
  * Public seams under test:
  * - [ReferenceAwareMediaFileCleanup.cleanupTombstones] / [ReferenceAwareMediaFileCleanup.cleanupPendingTombstones]
- * - [SyncMediaFileStore.delete] must not run inside [com.lezi.babylog.core.database.DatabaseTransactionRunner.run]
+ * - reclaim-scoped caller invariant: delete runs outside Room write lease (not a shared
+ *   [SyncMediaFileStore] depth==0 guard; local replica clear may delete under a lease)
  * - [MediaLocalPathGate] serializes file reclaim with concurrent path rebinding
  * - tombstone `localUri` remains durable retry evidence until a matching claim clears it
  */
@@ -395,6 +397,62 @@ class ReferenceAwareMediaFileCleanupTest {
         assertThat(files.deletedPaths).isEmpty()
         assertThat(media.getByClientUuid(tombstoneUuid)?.localUri).isEmpty()
         assertThat(media.getByClientUuid(tombstoneUuid)?.deletedAt).isEqualTo(200L)
+    }
+
+    @Test
+    fun pathHintMismatchUnderLockRetriesOnceAndConvergesInSameCall() = runTest {
+        val media = MemoryMediaDao()
+        val files = RealTemporaryMediaFileStore()
+        val pathGate = MediaLocalPathGate()
+        val first = temporaryFolder.newFile("hint-first.jpg").apply {
+            writeBytes(byteArrayOf(22, 23, 24))
+        }
+        val second = temporaryFolder.newFile("hint-second.jpg").apply {
+            writeBytes(byteArrayOf(25, 26, 27))
+        }
+        val clientUuid = "10101010-1010-3010-8010-101010101010"
+        media.seed(
+            logMedia(
+                clientUuid = clientUuid,
+                localUri = first.absolutePath,
+                recordId = 1L,
+                deletedAt = 200L,
+                updatedAt = 200L,
+            ),
+        )
+        // Between outer peek and lock acquisition, rebind the tombstone path.
+        // cleanupOne must release the wrong lock, re-lock the live path, and reclaim.
+        val cleanup = ReferenceAwareMediaFileCleanup(
+            mediaDao = object : MediaAssetDao by media {
+                private var peeks = 0
+                override suspend fun getByClientUuid(clientUuid: String): MediaAssetEntity? {
+                    val current = media.getByClientUuid(clientUuid) ?: return null
+                    peeks += 1
+                    // First outer peek returns the stale path while rebinding the row so the
+                    // under-lock read sees the new path and triggers RetryWithPath once.
+                    if (peeks == 1) {
+                        media.update(
+                            current.copy(
+                                localUri = second.absolutePath,
+                                updatedAt = 300L,
+                            ),
+                        )
+                        return current
+                    }
+                    return media.getByClientUuid(clientUuid)
+                }
+            },
+            mediaFiles = files,
+            transactionRunner = RecordingTransactionRunner(),
+            pathGate = pathGate,
+        )
+
+        cleanup.cleanupTombstones(setOf(clientUuid))
+
+        assertThat(second.exists()).isFalse()
+        assertThat(first.exists()).isTrue()
+        assertThat(media.getByClientUuid(clientUuid)?.localUri).isEmpty()
+        assertThat(files.deletedPaths).containsExactly(second.absolutePath)
     }
 
     @Test

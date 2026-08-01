@@ -305,11 +305,15 @@ Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和�
 1. **DB claim（短写事务）**：在路径级互斥下重新读取精确 tombstone；若同 path 仍有
    active 引用，只清该 tombstone 的 `local_uri` marker；若无 active 引用，冻结
    `client_uuid` + path + `updated_at`（revision）+ `deleted_at` 的 cleanup claim。
-2. **文件阶段（路径互斥、事务外）**：与 attach/import/复活共享 `MediaLocalPathGate`
-   （锁序固定为 **path gate → Room**）。再校验 claim 与 active 引用后执行
-   `mediaFiles.delete`；成功后仅当 claim 仍与 tombstone 匹配时清 marker。IO/权限失败或
+2. **文件阶段（路径互斥、事务外）**：与 attach/import/复活共享 `MediaLocalPathGate`。
+   全局锁序固定为 **path gate → sleepMutationMutex（涉及 open-sleep 写时）→ Room**，
+   不得反序。再校验 claim 与 active 引用后，由 reclaim 路径在事务外执行
+   `mediaFiles.delete`（共享 store 本身不做 depth==0 硬护栏；本地 replica clear 仍可在
+   写租约内删文件）。成功后仅当 claim 仍与 tombstone 匹配时清 marker。IO/权限失败或
    进程死亡保留非空 `local_uri` 作为可重试证据；文件已缺失视为幂等成功。同 path 被新
    active 引用或 revision ABA 时不得删其文件，也不得清不匹配的 marker。
+   远程 materialization 仍主要通过 sync 引擎 `syncMutex` 串行 reclaim，而非
+   `MediaLocalPathGate`；domain attach 与 reference-aware reclaim 才共享 path gate。
 
 #### 原子包 prepare / commit 与 domain revision 的 CAS 边界
 

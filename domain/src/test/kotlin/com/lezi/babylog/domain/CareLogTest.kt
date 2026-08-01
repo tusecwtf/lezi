@@ -3475,6 +3475,7 @@ class CareLogTest {
             memberFakes.fulfillmentCandidates,
             memberFakes.calendarReminderMutationGuard,
             memberFakes.clock,
+            mediaPathGate = com.lezi.babylog.core.database.MediaLocalPathGate(),
         )
         val audits = adminCare.listConflictNotAdoptedAudits(carePlanClientUuid = planUuid)
         assertThat(audits).hasSize(1)
@@ -6533,6 +6534,7 @@ private class Fakes(
         fulfillmentCandidates,
         calendarReminderMutationGuard,
         clock,
+        mediaPathGate = com.lezi.babylog.core.database.MediaLocalPathGate(),
     )
 }
 
