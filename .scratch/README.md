@@ -1,26 +1,76 @@
-# Scratch · 当前规格与票单
+# Scratch · 工作项收口总结（2026-08-01）
 
-本目录保留当前 active tracker、审查残差与仍需引用的验收上下文；使用方式见
-[`docs/agents/issue-tracker.md`](../docs/agents/issue-tracker.md)。
+本目录是 **active** 规格与票单的工作区（约定见
+[`docs/agents/issue-tracker.md`](../docs/agents/issue-tracker.md)）。
 
-| 主题 | Spec | 票索引 | 状态 |
-|------|------|--------|------|
-| 文档–代码 gap 整改（原子同步 / UI / 契约） | [spec](./doc-code-gap-remediation/spec.md) | [ISSUES](./doc-code-gap-remediation/ISSUES.md)（7 票） | complete · 7/7 |
-| Post-0.3.0 code-review 残差 | [spec](./post-0.3.0-code-review-remediation/spec.md) | [票索引](./post-0.3.0-code-review-remediation/ISSUES.md) | complete · 9/9 · fixed-point gates passed |
-| 0.3.0 APK 逐页验收整改 | [spec](./apk-0.3.0-page-acceptance-remediation/spec.md) | [票索引](./apk-0.3.0-page-acceptance-remediation/ISSUES.md) | complete · 1/1 · fixed-point gates passed |
-| 可信同步 endpoint、鉴权与 NAS→VPS 迁移 | [spec](./trusted-sync-endpoint-auth/spec.md) | [ISSUES](./trusted-sync-endpoint-auth/ISSUES.md)（17 票） | **complete · 17/17** · 0.3.1 artifacts · [evidence/17](./trusted-sync-endpoint-auth/evidence/17/validation.md) |
-| Trusted-sync 实现后 code-review 残差 | [spec](./trusted-sync-review-residuals/spec.md) | [ISSUES](./trusted-sync-review-residuals/ISSUES.md)（13 票） | complete · 13/13 Must · fixed-point gates passed |
-| 审查残差 P1（domain/composer + 网络层 0.3.1 复核） | [spec](./p1-review-residuals/spec.md) | [ISSUES](./p1-review-residuals/ISSUES.md)（8 票） | **complete · 01–04 done · 05–08 cancelled**（0.3.1 cutover 覆盖） |
-| 自托管应用内更新（侧载 APK + NAS 部署带包） | [spec](./self-hosted-app-update/spec.md) | [ISSUES](./self-hosted-app-update/ISSUES.md)（5 票 · 垂直切片） | complete · 5/5 · [evidence/05](./self-hosted-app-update/evidence/05/validation.md) |
-| 应用内更新审查残差（SyncStatus/安装/minSupported/强制 UI） | [spec](./app-update-review-residuals/spec.md) | [ISSUES](./app-update-review-residuals/ISSUES.md)（6 票） | complete · 6/6 · [evidence/06](./app-update-review-residuals/evidence/06/validation.md) |
-| NAS v3 离线一次升级（拷出→本机转换→拷回） | [spec](./nas-v3-offline-migrate/spec.md) | [ISSUES](./nas-v3-offline-migrate/ISSUES.md)（7 票） | **complete · 7/7** · 现网 HTTPS 0.3.0 · [evidence/07](./nas-v3-offline-migrate/evidence/07/RESULT.md) · 实现多在 worktree（skip_commit；01–04 部分已提交） |
+**当前：无 open tracker / 无 frontier 票。**
 
-产品契约已写回 [`docs/prd/`](../docs/prd/)；残差与验收边界以各 tracker 的当前证据为准。
+产品权威仍在 [`docs/prd/`](../docs/prd/)、[`docs/adr/`](../docs/adr/)、
+[`CONTEXT.md`](../CONTEXT.md)。已关闭票的实现与证据在 git 历史中，不在本目录长期堆放。
 
-## 2026-07-30 APK 逐页验收（grill 已收口）
+---
 
-- 审计：[`docs/reviews/2026-07-30-apk-page-acceptance-audit.md`](../docs/reviews/2026-07-30-apk-page-acceptance-audit.md)
-- Tracker：[apk-0.3.0-page-acceptance-remediation](./apk-0.3.0-page-acceptance-remediation/spec.md) · **01 complete**
-- Residual：右滑删除 [compound](./apk-0.3.0-page-acceptance-swipe-delete-compound.md)
-- 最终门禁：与 Post-0.3.0 tracker 共用
-  [`final/validation.md`](./post-0.3.0-code-review-remediation/evidence/final/validation.md)。
+## 本轮清掉了什么
+
+2026-08-01 清理时，下列 tracker 均为 **complete**（或 05–08 **cancelled**），已从
+`.scratch/` 删除：
+
+| Tracker | 结果 | 代表交付 |
+|---------|------|----------|
+| `trusted-sync-endpoint-auth` | 17/17 complete | 可信 HTTPS、设备会话、成员/设备生命周期；**0.3.1** 发版 |
+| `trusted-sync-review-residuals` | 13/13 complete | 实现后 review 阻断项（pending clobber、限流、SPKI freeze 等） |
+| `p1-review-residuals` | 01–04 done · 05–08 cancelled | domain/composer 即时修；网络层由 0.3.1 cutover 覆盖后复核取消 |
+| `nas-v3-offline-migrate` | 7/7 complete | 家庭 NAS v3→current 离线一次升级 + TLS cutover |
+| `self-hosted-app-update` | 5/5 complete | 侧载 APK 自托管更新通道 |
+| `app-update-review-residuals` | 6/6 complete | 安装/minSupported/强制 UI 等审查残差 |
+| `doc-code-gap-remediation` | 7/7 complete | 原子包 / ordinary 退役 / PRD hygiene |
+| `post-0.3.0-code-review-remediation` | 9/9 complete | next-feed / CareLog seams / composer 拆分 |
+| `apk-0.3.0-page-acceptance-remediation` | 1/1 complete | Snackbar 不压快捷坞 |
+| `record-layout-edit-remediation` | complete | 布局编辑拖放/撤销/无障碍 |
+| `p1-redundancy-ui-debt` | 10/10 complete | 确认面/照片/LogScreen 拆分等还债 |
+| `offline-mode` | 6/6 complete | 引导离线模式与稍后建家/加入 |
+| `2c6bbf6-program-audit-remediation` | 26/26 complete | 程序审计全量整改 |
+| `self-hosted-app-update-review-residuals` | 空壳 | 无票，已删 |
+
+一并删除的散文件：
+
+- `apk-0.3.0-page-acceptance-audit.md`
+- `apk-0.3.0-page-acceptance-swipe-delete-compound.md`（accepted residual / B-evidence，非 open 票）
+- `post-0.3.0-code-review-p0-p1.md`
+
+---
+
+## 当前产品落点（0.3.1）
+
+| 面 | 状态 |
+|----|------|
+| App | `versionName=0.3.1` · `versionCode=7` |
+| Server | `lezi-sync` crate/image `0.3.1` |
+| 同步合同 | 可信 HTTPS + 每设备会话；旧 SSID/明文/长期 family token 已退役 |
+| 本地交付物（gitignored） | `dist/lezi-sync-0.3.1-nas/` · `dist/release-0.3.1/` |
+| 收口提交 | `aa7d3df` release bump + tracker close；细节以该 commit 与前后历史为准 |
+
+**未自动做的运维：** 家庭 NAS 上的 `push-and-deploy.sh` 容器替换仍须按根目录
+`AGENTS.md` 维护窗确认后再跑。
+
+---
+
+## 以后怎么用 `.scratch/`
+
+1. 新工作：`.scratch/<feature-slug>/spec.md` + `issues/01-….md` + `ISSUES.md`
+2. Tracker **complete** 且证据已进 git / PRD 后：可删目录，只在本 README 或 commit
+   里留一行索引（避免再堆 closed 考古层）
+3. 需要翻旧票：`git log -- .scratch/<slug>` / `git show <commit>:.scratch/...`
+
+### 历史检索提示
+
+```bash
+# 0.3.1 发版与 trusted-sync / p1 收口
+git show aa7d3df --stat
+
+# NAS v3 离线迁移收口
+git log --oneline --grep='nas-v3'
+
+# 某已删路径的最后内容
+git log --all --full-history -- .scratch/trusted-sync-endpoint-auth/
+```
