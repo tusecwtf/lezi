@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **20**
-- Current frontier (ready-for-agent): **4**
+- Done: **22**
+- Current frontier (ready-for-agent): **3**
 - Blocked by dependency: **8**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**22、23、25、31**
+**23、25、31**
 
 ## Tickets
 
@@ -61,7 +61,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [19](./issues/19-guard-next-feed-marker-cross-language.md) | Audit P2-05 | 用跨语言 fixture 锁定 next-feed marker | — | S–M | done |
 | [20](./issues/20-retain-layout-undo-across-recreation.md) | Audit P2-06 | 布局 undo 跨配置重建 | — | S–M | done |
 | [21](./issues/21-document-offline-migrate-boundary.md) | Audit P2-07 | 写清 offline-migrate 架构边界 | 14 | S | done |
-| [22](./issues/22-delete-source-structure-tests.md) | readability 01 | 删除无契约源码结构测试 | — | S | ready-for-agent |
+| [22](./issues/22-delete-source-structure-tests.md) | readability 01 | 删除无契约源码结构测试 | — | S | done |
 | [23](./issues/23-unify-member-login-qr-in-family-wizard.md) | readability 02 | 成员登录 QR 归一到家庭向导 | — | M | ready-for-agent |
 | [24](./issues/24-split-family-hosts-and-align-directories.md) | readability 03 + directory C4 | Family 三 host 与目录对齐 | 23 | M–L | blocked |
 | [25](./issues/25-remove-low-value-tests-and-placeholders.md) | readability 06 | 清理低价值测试与占位 API | — | S–M | ready-for-agent |
