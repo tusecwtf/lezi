@@ -122,21 +122,22 @@ class NursingTimerService : Service() {
     }
 
     private fun buildNotification(leftMs: Long, rightMs: Long): Notification {
-        val launch = packageManager.getLaunchIntentForPackage(packageName)
-        val pi = PendingIntent.getActivity(
-            this,
-            0,
-            launch,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val contentIntent = packageManager.getLaunchIntentForPackage(packageName)?.let { launch ->
+            PendingIntent.getActivity(
+                this,
+                0,
+                launch,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
         val text = "左 ${formatTimerMs(leftMs)} · 右 ${formatTimerMs(rightMs)}"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("乐记 · 喂奶计时中")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_recent_history)
-            .setContentIntent(pi)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .apply { contentIntent?.let(::setContentIntent) }
             .build()
     }
 

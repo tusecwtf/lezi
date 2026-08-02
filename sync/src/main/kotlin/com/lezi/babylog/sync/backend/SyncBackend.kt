@@ -173,7 +173,105 @@ data class BundleCommitResult(
     val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
 )
 
+data class AnonymousHealth(
+    val version: String,
+    val capabilities: Set<String>,
+)
+
+data class AnonymousReadiness(
+    val version: String,
+)
+
+data class DisasterRestoreBatch(
+    val batchId: String,
+    /** High-entropy, short-lived capability; process/secure storage only. */
+    val recoveryToken: String,
+    val status: String,
+    val expiresAtEpochSeconds: Long,
+) {
+    override fun toString(): String =
+        "DisasterRestoreBatch(batchId=$batchId, status=$status, " +
+            "expiresAtEpochSeconds=$expiresAtEpochSeconds, recoveryToken=<redacted>)"
+}
+
+data class DisasterRestoreMediaSpec(
+    val clientUuid: String,
+    val byteSize: Long,
+    val sha256: String,
+)
+
+data class DisasterRestoreStatus(
+    val batchId: String,
+    val status: String,
+    val expiresAtEpochSeconds: Long,
+) {
+    val readyToCommit: Boolean get() = status == "ready_to_commit"
+    val committed: Boolean get() = status == "committed"
+}
+
 interface SyncBackend {
+    /** Trusted TLS only; never sends family credentials or client data. */
+    suspend fun anonymousHealth(endpoint: TrustedEndpointProfile): AnonymousHealth =
+        throw UnsupportedOperationException("Anonymous health is not implemented")
+
+    /** Trusted TLS only; never sends family credentials or client data. */
+    suspend fun anonymousReady(endpoint: TrustedEndpointProfile): AnonymousReadiness =
+        throw UnsupportedOperationException("Anonymous readiness is not implemented")
+
+    /** Empty-server Owner recovery start. Root password is request-scoped and never returned. */
+    suspend fun startDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        requestId: String,
+        familyId: String,
+        familyName: String,
+        ownerDisplayName: String,
+        deviceName: String,
+        rootPassword: String,
+    ): DisasterRestoreBatch =
+        throw UnsupportedOperationException("Disaster restore is not implemented")
+
+    suspend fun putDisasterRestoreManifest(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        requestId: String,
+        entities: List<SyncEntity>,
+        media: List<DisasterRestoreMediaSpec>,
+    ): DisasterRestoreStatus =
+        throw UnsupportedOperationException("Disaster restore is not implemented")
+
+    suspend fun putDisasterRestoreMedia(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        clientUuid: String,
+        source: SyncMediaUploadSource,
+    ): DisasterRestoreStatus =
+        throw UnsupportedOperationException("Disaster restore is not implemented")
+
+    suspend fun disasterRestoreStatus(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+    ): DisasterRestoreStatus =
+        throw UnsupportedOperationException("Disaster restore is not implemented")
+
+    suspend fun commitDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        requestId: String,
+        rootPassword: String,
+    ): SessionBootstrapResult =
+        throw UnsupportedOperationException("Disaster restore is not implemented")
+
+    suspend fun cancelDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+    ): DisasterRestoreStatus =
+        throw UnsupportedOperationException("Disaster restore is not implemented")
+
     suspend fun create(
         baseUrl: String,
         deviceId: String,
@@ -200,21 +298,55 @@ interface SyncBackend {
         takeover: Boolean,
     ): SessionBootstrapResult = throw UnsupportedOperationException("Owner login is not implemented")
 
+    /** Candidate transport identity is explicit so an active-session resolver cannot leak creds. */
+    suspend fun ownerLogin(
+        endpoint: TrustedEndpointProfile,
+        deviceName: String,
+        loginRequestId: String,
+        rootPassword: String,
+        takeover: Boolean,
+    ): SessionBootstrapResult = ownerLogin(
+        endpoint.origin,
+        deviceName,
+        loginRequestId,
+        rootPassword,
+        takeover,
+    )
+
     suspend fun requestMemberLogin(
         baseUrl: String,
         displayName: String,
         deviceName: String,
     ): MemberLoginReceipt = throw UnsupportedOperationException("Member login request is not implemented")
 
+    suspend fun requestMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        displayName: String,
+        deviceName: String,
+    ): MemberLoginReceipt = requestMemberLogin(endpoint.origin, displayName, deviceName)
+
     suspend fun memberLoginStatus(baseUrl: String, pendingSecret: String): MemberLoginStatus =
         throw UnsupportedOperationException("Member login status is not implemented")
+
+    suspend fun memberLoginStatus(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ): MemberLoginStatus = memberLoginStatus(endpoint.origin, pendingSecret)
 
     suspend fun cancelMemberLogin(baseUrl: String, pendingSecret: String) {
         throw UnsupportedOperationException("Member login cancellation is not implemented")
     }
 
+    suspend fun cancelMemberLogin(endpoint: TrustedEndpointProfile, pendingSecret: String) =
+        cancelMemberLogin(endpoint.origin, pendingSecret)
+
     suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): SessionBootstrapResult =
         throw UnsupportedOperationException("Member login claim is not implemented")
+
+    suspend fun claimMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ): SessionBootstrapResult = claimMemberLogin(endpoint.origin, pendingSecret)
 
     suspend fun pendingMemberLogins(session: SyncSession): List<PendingMemberLoginRequest> =
         throw UnsupportedOperationException("Pending member login list is not implemented")

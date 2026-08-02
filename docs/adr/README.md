@@ -17,6 +17,7 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0011](./0011-root-admin-and-multi-device-membership.md) | 根密码声索唯一管理员，成员与设备分层 | accepted |
 | [0012](./0012-preserve-android-local-data-across-in-place-upgrades.md) | Android 原地升级永久保留已承诺的本地数据 | accepted |
 | [0013](./0013-offline-migrate-is-maintenance-window-cutover.md) | offline-migrate 是已授权维护窗中的离线切割工具 | accepted |
+| [0014](./0014-owner-device-restores-only-empty-family-servers.md) | 只允许旧 Owner 设备恢复空家庭服务器 | accepted |
 
 ## Numbering
 

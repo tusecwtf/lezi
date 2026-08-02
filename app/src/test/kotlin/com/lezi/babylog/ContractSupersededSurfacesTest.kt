@@ -148,7 +148,7 @@ class ContractSupersededSurfacesTest {
             refreshHosts[2],
         )
         refreshDelegates.forEach {
-            assertThat(it).contains("syncPort.sync(SyncTrigger.PullToRefresh)")
+            assertThat(it).contains("syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh)")
         }
         assertThat(source(
             "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/overview/FamilySharingContent.kt",

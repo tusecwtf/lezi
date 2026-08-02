@@ -16,6 +16,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::handlers::disaster_restore;
 use crate::model::{
     normalized_display_name_key, BindExistingMemberRequest, ClaimMemberLoginGrantRequest,
     CreateMemberLoginGrantRequest, DeleteFamilyRequest, EmptyRequest, FamilyCreateRequest,
@@ -27,8 +28,9 @@ use crate::store::{CreateFamilyInput, CreateMemberLoginRequestInput, StoreError}
 use crate::{
     authenticate, json_body, require_bootstrap_secret, require_owner, require_owner_root_password,
     secure_session_token, sync_directory, ApiError, AppState, CAPABILITY_ATOMIC_BUNDLE,
-    CAPABILITY_DEVICE_SESSIONS, CAPABILITY_MEMBERSHIP_DEVICES, CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
-    CAPABILITY_TRUSTED_HTTPS_ENDPOINT, MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
+    CAPABILITY_DEVICE_SESSIONS, CAPABILITY_DISASTER_RESTORE, CAPABILITY_MEMBERSHIP_DEVICES,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR, CAPABILITY_TRUSTED_HTTPS_ENDPOINT,
+    MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
 };
 
 pub(crate) async fn setup_status(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
@@ -48,6 +50,7 @@ pub(crate) async fn setup_status(State(state): State<Arc<AppState>>) -> Result<R
             CAPABILITY_MEMBERSHIP_DEVICES,
             CAPABILITY_ATOMIC_BUNDLE,
             CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            CAPABILITY_DISASTER_RESTORE,
         ],
         "family_state": family_state,
     }))
@@ -65,6 +68,11 @@ pub(crate) async fn create_family(
     if state.bootstrap_secret.is_some() && !state.store.family_ids()?.is_empty() {
         return Err(ApiError::conflict("Family already exists"));
     }
+    if disaster_restore::has_active_batch(&state.data_root, state.now())? {
+        return Err(ApiError::conflict(
+            "Family creation is unavailable while disaster restore is active",
+        ));
+    }
     require_bootstrap_secret(&state, &headers, source)?;
     let request = json_body(body)?;
     let (display_name, family_name, device_name) = request.validate()?;
@@ -73,6 +81,19 @@ pub(crate) async fn create_family(
     if !state.create_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
             "Too many family create attempts; try again later",
+        ));
+    }
+    // Family creation and empty-server disaster restore are the two mutually exclusive
+    // provisioning paths. Recheck both predicates under one process-wide lock so concurrent
+    // requests cannot both pass their initial read-only gates.
+    let provisioning_lock = state.family_lock(crate::PROVISIONING_LOCK_KEY).await;
+    let _provisioning_guard = provisioning_lock.lock().await;
+    // Do not preempt Store's strict create_request_id replay here: a retry after a lost
+    // response must still receive its original credentials. Store atomically rejects any
+    // different request once a family exists.
+    if disaster_restore::has_active_batch(&state.data_root, state.now())? {
+        return Err(ApiError::conflict(
+            "Family creation is unavailable while disaster restore is active",
         ));
     }
     let signing_state = state.clone();

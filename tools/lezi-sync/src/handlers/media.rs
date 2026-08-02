@@ -512,6 +512,7 @@ fn media_file_integrity_sha256(
 pub(crate) fn collect_orphan_family_media(
     store: &Store,
     media_root: &Path,
+    restore_family_ids: &BTreeSet<String>,
 ) -> Result<(), ApiError> {
     let family_ids = store.family_ids()?;
     let mut removed_any = false;
@@ -526,7 +527,9 @@ pub(crate) fn collect_orphan_family_media(
         let Ok(family_id) = Uuid::parse_str(&name) else {
             continue;
         };
-        if family_ids.contains(&family_id.to_string()) {
+        if family_ids.contains(&family_id.to_string())
+            || restore_family_ids.contains(&family_id.to_string())
+        {
             continue;
         }
         match fs::remove_dir_all(entry.path()) {

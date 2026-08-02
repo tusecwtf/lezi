@@ -244,7 +244,7 @@ class SummaryViewModel @Inject constructor(
     }
 
     fun refresh() {
-        viewModelScope.launch { syncPort.sync(SyncTrigger.PullToRefresh) }
+        viewModelScope.launch { syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh) }
     }
 }
 

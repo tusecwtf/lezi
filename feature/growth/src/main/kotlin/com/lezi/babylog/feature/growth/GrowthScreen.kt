@@ -216,7 +216,7 @@ class GrowthViewModel @Inject constructor(
     fun deleteMeasurement(): Boolean = writes.submitDelete()
 
     fun refresh() {
-        viewModelScope.launch { syncPort.sync(SyncTrigger.PullToRefresh) }
+        viewModelScope.launch { syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh) }
     }
 
 }

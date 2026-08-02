@@ -24,12 +24,11 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
-import kotlinx.coroutines.flow.onStart
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 import com.lezi.babylog.domain.toModel
 
@@ -120,11 +119,10 @@ class TimelineWindowRepository @Inject constructor(
     private val timelineWindowDao: TimelineWindowDao,
     private val syncPort: SyncPort,
 ) {
-    private val memberRefreshes = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private val revisions = AtomicLong(0L)
 
     fun refreshMembers() {
-        memberRefreshes.tryEmit(Unit)
+        syncPort.refreshFamilyMemberDirectory()
     }
 
     fun observe(request: TimelineWindowRequest): Flow<TimelineWindowSnapshot> =
@@ -147,21 +145,21 @@ class TimelineWindowRepository @Inject constructor(
         requests.flatMapLatest(::observe)
 
     private fun audienceSeeds(): Flow<TimelineAudienceSeed> =
-        syncPort.session()
-            .map { it.toTimelineAudienceKey() }
-            .distinctUntilChanged()
-            .flatMapLatest { key ->
-                memberRefreshes.onStart { emit(Unit) }.mapLatest {
-                    val members = if (key.isFamilyJoined) {
-                        syncPort.listFamilyMembers().getOrNull()
-                            ?.mapNotNull { it.toUploaderRef() }
-                            .orEmpty()
-                    } else {
-                        emptyList()
-                    }
-                    TimelineAudienceSeed(key, members)
-                }
-            }
+        combine(
+            syncPort.session()
+                .map { it.toTimelineAudienceKey() }
+                .distinctUntilChanged(),
+            syncPort.familyMemberDirectory(),
+        ) { key, directory ->
+            TimelineAudienceSeed(
+                key = key,
+                members = if (key.isFamilyJoined) {
+                    directory.mapNotNull { it.toUploaderRef() }
+                } else {
+                    emptyList()
+                },
+            )
+        }.distinctUntilChanged()
 
     private suspend fun assemble(
         request: TimelineWindowRequest,
@@ -323,5 +321,4 @@ private fun recordOverlapsWindow(
                 )
         )
 }
-
 

@@ -13,11 +13,15 @@ import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,9 +35,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import com.lezi.babylog.sync.availability.AvailabilityProbeReason
+import com.lezi.babylog.sync.availability.FamilyServerAvailability
+import com.lezi.babylog.sync.availability.FamilyServerAvailabilityPolicy
+import com.lezi.babylog.sync.availability.FamilyServerUnavailableReason
 import com.lezi.babylog.sync.appupdate.APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE
 import com.lezi.babylog.sync.appupdate.AppUpdateApkIdentityReader
 import com.lezi.babylog.sync.appupdate.AppUpdateInstaller
@@ -46,6 +56,7 @@ import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.appupdate.verifyStagedApkIdentity
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
+import com.lezi.babylog.sync.backend.DisasterRestoreStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import com.lezi.babylog.sync.backend.ReauthRequiredException
@@ -56,6 +67,7 @@ import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 import com.lezi.babylog.sync.clear.LocalReplicaClearCoordinator
+import com.lezi.babylog.sync.disasterrecovery.DisasterRecoverySnapshotBuilder
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
@@ -70,7 +82,11 @@ import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
+import com.lezi.babylog.sync.session.CAPABILITY_DISASTER_RESTORE
+import com.lezi.babylog.sync.session.CAPABILITY_RECORD_MEMBERSHIP_AUTHOR
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilySessionCommand
 import com.lezi.babylog.sync.session.FamilySessionCoordinator
 import com.lezi.babylog.sync.session.FamilySessionOutcome
@@ -82,7 +98,11 @@ import com.lezi.babylog.sync.session.SpkiPinMismatchException
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
+import com.lezi.babylog.sync.session.DisasterRestoreCheckpoint
 import com.lezi.babylog.sync.session.matchesOrigin
+import com.lezi.babylog.sync.session.requireDeviceName
+import com.lezi.babylog.sync.session.requireMemberDisplayName
+import com.lezi.babylog.sync.session.receiptFor
 
 @Singleton
 class RealSyncPort @Inject constructor(
@@ -120,6 +140,11 @@ class RealSyncPort @Inject constructor(
         File(System.getProperty("java.io.tmpdir"), "lezi-app-update-test"),
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
+    private val currentAvailability =
+        MutableStateFlow<FamilyServerAvailability>(FamilyServerAvailability.Disabled)
+    private val availabilityProbeMutex = Mutex()
+    private val reconnectMutex = Mutex()
+    private val pendingReconnectMember = AtomicReference<CandidateMemberReconnectAttempt?>(null)
     private val optionalAppUpdateState =
         MutableStateFlow<AppUpdateMetadata?>(null)
     private val forcedAppUpdateState =
@@ -164,6 +189,15 @@ class RealSyncPort @Inject constructor(
             currentStatus.value = SyncStatus.Syncing
         },
     )
+    private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
+        babyDao = babyDao,
+        recordDao = recordDao,
+        carePlanDao = carePlanDao,
+        customItemDao = customItemDao,
+        fulfillmentCandidateDao = fulfillmentCandidateDao,
+        mediaDao = mediaDao,
+        mediaFiles = mediaFiles,
+    )
     private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
         barrier = syncMutex,
         preferences = preferences,
@@ -196,6 +230,8 @@ class RealSyncPort @Inject constructor(
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)
+    private val pendingAvailabilityReason =
+        AtomicReference(AvailabilityProbeReason.LocalChanges)
     @Volatile private var cachedSession = SyncSession()
 
     init {
@@ -230,17 +266,48 @@ class RealSyncPort @Inject constructor(
             var scheduledRetry: Job? = null
             var scheduledRetryNeedsPull = false
             for (ignored in syncSignal) {
+                if (!foregroundState.isForeground()) continue
                 if (scheduledRetryNeedsPull) {
                     pullRequested.set(true)
                 }
                 scheduledRetryNeedsPull = false
-                scheduledRetry?.cancel()
-                scheduledRetry = null
                 val trigger = if (pullRequested.getAndSet(false)) {
                     SyncTrigger.Foreground
                 } else {
                     SyncTrigger.LocalWrite
                 }
+                val probeReason = pendingAvailabilityReason.getAndSet(
+                    AvailabilityProbeReason.LocalChanges,
+                )
+                val availability = probeServerAvailability(probeReason).getOrNull()
+                if (availability !is FamilyServerAvailability.Available) {
+                    if (trigger != SyncTrigger.LocalWrite) {
+                        scheduledRetryNeedsPull = true
+                    }
+                    val unavailable = availability as? FamilyServerAvailability.Unavailable
+                    if (unavailable != null) {
+                        val forced = probeReason == AvailabilityProbeReason.Foreground ||
+                            probeReason == AvailabilityProbeReason.NetworkRecovered ||
+                            probeReason == AvailabilityProbeReason.PullToRefresh
+                        if (scheduledRetry?.isActive != true || forced) {
+                            scheduledRetry?.cancel()
+                            val retryDelay =
+                                (unavailable.nextProbeAtMillis - clock.nowMillis()).coerceAtLeast(0)
+                            scheduledRetry = processScope.launch {
+                                delay(retryDelay)
+                                if (foregroundState.isForeground()) {
+                                    pendingAvailabilityReason.set(
+                                        AvailabilityProbeReason.RetryDeadline,
+                                    )
+                                    syncSignal.trySend(Unit)
+                                }
+                            }
+                        }
+                    }
+                    continue
+                }
+                scheduledRetry?.cancel()
+                scheduledRetry = null
                 val result = sync(trigger)
                 val failure = result.exceptionOrNull()
                 if (failure == null) {
@@ -270,7 +337,115 @@ class RealSyncPort @Inject constructor(
     }
 
     override fun status(): Flow<SyncStatus> = currentStatus
+    override fun availability(): Flow<FamilyServerAvailability> = currentAvailability
+    override fun lastServerHealthyAt(): Flow<Long?> = preferences.lastServerHealthyAt
     override fun session(): Flow<SyncSession> = preferences.session
+    override fun familyMemberDirectory(): Flow<List<FamilyMember>> =
+        preferences.familyMemberDirectory
+
+    override fun refreshFamilyMemberDirectory() {
+        processScope.launch { listFamilyMembers() }
+    }
+
+    override suspend fun probeServerAvailability(
+        reason: AvailabilityProbeReason,
+    ): Result<FamilyServerAvailability> {
+        val endpoint = preferences.verifiedEndpoint.first()
+            ?: return Result.success(FamilyServerAvailability.Disabled).also {
+                currentAvailability.value = FamilyServerAvailability.Disabled
+            }
+        val now = clock.nowMillis()
+        if (!FamilyServerAvailabilityPolicy.shouldProbe(currentAvailability.value, reason, now)) {
+            return Result.success(currentAvailability.value)
+        }
+        return availabilityProbeMutex.withLock {
+            val lockedNow = clock.nowMillis()
+            if (
+                !FamilyServerAvailabilityPolicy.shouldProbe(
+                    currentAvailability.value,
+                    reason,
+                    lockedNow,
+                )
+            ) {
+                return@withLock Result.success(currentAvailability.value)
+            }
+            val previous = currentAvailability.value
+            val lastHealthyAt = when (previous) {
+                is FamilyServerAvailability.Available -> previous.lastHealthyAtMillis
+                is FamilyServerAvailability.Checking -> previous.lastHealthyAtMillis
+                is FamilyServerAvailability.Unavailable -> previous.lastHealthyAtMillis
+                FamilyServerAvailability.Disabled -> null
+            }
+            currentAvailability.value = FamilyServerAvailability.Checking(lastHealthyAt)
+            try {
+                val (healthOutcome, readyOutcome, setupOutcome) =
+                    withTimeout(AVAILABILITY_TIMEOUT_MILLIS) {
+                        supervisorScope {
+                            val health = async {
+                                captureAvailabilityProbe {
+                                    backend.anonymousHealth(endpoint)
+                                }
+                            }
+                            val ready = async {
+                                captureAvailabilityProbe {
+                                    backend.anonymousReady(endpoint)
+                                }
+                            }
+                            val setup = async {
+                                captureAvailabilityProbe {
+                                    setupProbe.probe(endpoint.origin, endpoint)
+                                }
+                            }
+                            Triple(health.await(), ready.await(), setup.await())
+                        }
+                    }
+                val setup = setupOutcome.getOrElse { failure ->
+                    throw AvailabilityProbeFailure(failure.toAvailabilityUnavailableReason())
+                }
+                val setupReady = setup as? SetupProbeResult.Ready
+                    ?: throw AvailabilityProbeFailure(setup.toUnavailableReason())
+                val health = healthOutcome.getOrElse { failure ->
+                    throw AvailabilityProbeFailure(failure.toAvailabilityUnavailableReason())
+                }
+                val ready = readyOutcome.getOrElse { failure ->
+                    throw AvailabilityProbeFailure(failure.toAvailabilityUnavailableReason())
+                }
+                if (
+                    !health.capabilities.containsAll(REQUIRED_HEALTH_CAPABILITIES) ||
+                    health.version != ready.version
+                ) {
+                    throw AvailabilityProbeFailure(FamilyServerUnavailableReason.Incompatible)
+                }
+                val healthyAt = clock.nowMillis()
+                preferences.saveLastServerHealthyAt(healthyAt)
+                val available = FamilyServerAvailability.Available(
+                    endpointOrigin = endpoint.origin,
+                    serverVersion = health.version,
+                    lastHealthyAtMillis = healthyAt,
+                    leaseUntilMillis = healthyAt + FamilyServerAvailabilityPolicy.HEALTHY_LEASE_MILLIS,
+                    familyState = setupReady.familyState,
+                )
+                currentAvailability.value = available
+                Result.success(available)
+            } catch (timeout: TimeoutCancellationException) {
+                publishAvailabilityFailure(
+                    previous = previous,
+                    lastHealthyAt = lastHealthyAt,
+                    reason = FamilyServerUnavailableReason.Unreachable,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: AvailabilityProbeFailure) {
+                publishAvailabilityFailure(previous, lastHealthyAt, failure.reason)
+            } catch (_: Throwable) {
+                publishAvailabilityFailure(
+                    previous,
+                    lastHealthyAt,
+                    FamilyServerUnavailableReason.Unreachable,
+                )
+            }
+        }
+    }
     override fun verifiedEndpoint(): Flow<TrustedEndpointProfile?> = preferences.verifiedEndpoint
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = preferences.pendingMemberLogin
     override fun memberLoginChecks(): Flow<MemberLoginCheckResult> = memberLoginCheckEvents
@@ -318,6 +493,64 @@ class RealSyncPort @Inject constructor(
         return result
     }
 
+    override suspend fun probeReconnectEndpoint(endpointDraft: String): SetupProbeResult =
+        probeReconnectCandidate(endpointDraft, null)
+
+    override suspend fun trustReconnectCertificate(
+        candidate: CertificateTrustCandidate,
+    ): SetupProbeResult {
+        val endpoint = candidate.trustedEndpoint()
+        return probeReconnectCandidate(endpoint.origin, endpoint)
+    }
+
+    private suspend fun probeReconnectCandidate(
+        endpointDraft: String,
+        trustedEndpoint: TrustedEndpointProfile?,
+    ): SetupProbeResult = try {
+        withTimeout(AVAILABILITY_TIMEOUT_MILLIS) {
+            val setup = setupProbe.probe(endpointDraft, trustedEndpoint)
+            if (setup !is SetupProbeResult.Ready) return@withTimeout setup
+            val (healthOutcome, readyOutcome) = supervisorScope {
+                val health = async {
+                    captureAvailabilityProbe { backend.anonymousHealth(setup.endpoint) }
+                }
+                val ready = async {
+                    captureAvailabilityProbe { backend.anonymousReady(setup.endpoint) }
+                }
+                health.await() to ready.await()
+            }
+            val health = healthOutcome.getOrElse { failure ->
+                throw AvailabilityProbeFailure(failure.toAvailabilityUnavailableReason())
+            }
+            val ready = readyOutcome.getOrElse { failure ->
+                throw AvailabilityProbeFailure(failure.toAvailabilityUnavailableReason())
+            }
+            if (
+                !health.capabilities.containsAll(REQUIRED_HEALTH_CAPABILITIES) ||
+                health.version != ready.version
+            ) {
+                SetupProbeResult.Failed.Incompatible
+            } else {
+                setup
+            }
+        }
+    } catch (_: TimeoutCancellationException) {
+        SetupProbeResult.Failed.Unreachable
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: AvailabilityProbeFailure) {
+        when (failure.reason) {
+            FamilyServerUnavailableReason.Maintenance -> SetupProbeResult.Failed.Maintenance
+            FamilyServerUnavailableReason.Incompatible -> SetupProbeResult.Failed.Incompatible
+            FamilyServerUnavailableReason.NotLezi -> SetupProbeResult.Failed.NotLezi
+            FamilyServerUnavailableReason.TrustChanged ->
+                SetupProbeResult.Failed.CertificateChanged
+            FamilyServerUnavailableReason.Unreachable -> SetupProbeResult.Failed.Unreachable
+        }
+    } catch (_: Throwable) {
+        SetupProbeResult.Failed.Unreachable
+    }
+
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit> =
         try {
             preferences.rememberEndpoint(endpoint)
@@ -342,6 +575,22 @@ class RealSyncPort @Inject constructor(
         if (trigger != SyncTrigger.LocalWrite) {
             pullRequested.set(true)
         }
+        pendingAvailabilityReason.accumulateAndGet(trigger.toAvailabilityProbeReason()) {
+                current,
+                incoming,
+            ->
+            mergeAvailabilityProbeReason(current, incoming)
+        }
+        syncSignal.trySend(Unit)
+    }
+
+    override fun notifyLocalChanges() {
+        requestSync(SyncTrigger.LocalWrite)
+    }
+
+    override fun notifyNetworkRecovered() {
+        pullRequested.set(true)
+        pendingAvailabilityReason.set(AvailabilityProbeReason.NetworkRecovered)
         syncSignal.trySend(Unit)
     }
 
@@ -398,12 +647,307 @@ class RealSyncPort @Inject constructor(
             )
         }
 
+    override suspend fun reconnectOwner(
+        endpoint: TrustedEndpointProfile,
+        deviceName: String,
+        rootPassword: String,
+    ): Result<OwnerLoginResult> = runCatching {
+        require(rootPassword.isNotBlank()) { "请填写管理员根密码" }
+        val candidate = probeReconnectCandidate(endpoint.origin, endpoint)
+        require(candidate is SetupProbeResult.Ready) { "候选家庭服务器尚未通过连接校验" }
+        require(candidate.familyState == com.lezi.babylog.sync.session.SetupFamilyState.Configured) {
+            "空服务器只能使用家庭灾难恢复"
+        }
+        syncMutex.withLock {
+            require(preferences.disasterRestoreCheckpoint.first() == null) {
+                "请先完成或取消当前家庭灾难恢复"
+            }
+            val previous = preferences.session.first()
+            require(previous.familyId.isNotBlank()) { "本机没有可重连的家庭身份" }
+            val joined = try {
+                backend.ownerLogin(
+                    endpoint = endpoint,
+                    deviceName = com.lezi.babylog.sync.session.requireDeviceName(deviceName),
+                    loginRequestId = UUID.randomUUID().toString(),
+                    rootPassword = rootPassword,
+                    takeover = false,
+                )
+            } catch (error: SyncHttpException) {
+                if (error.statusCode == 401 || error.statusCode == 403) {
+                    throw OwnerRootPasswordRejectedException()
+                }
+                throw error
+            }
+            require(joined.role == FamilyRole.Owner) { "管理员登录响应角色无效" }
+            if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
+            val config = FamilyEndpointConfig.fromBaseUrl(endpoint.origin).withNormalized()
+            val session = SyncSession(
+                familyId = joined.familyId,
+                accessToken = joined.accessToken,
+                refreshToken = joined.refreshToken,
+                accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+                deviceId = joined.deviceId,
+                role = joined.role,
+                pullCursor = 0L,
+                pullGeneration = joined.generation,
+                serverHost = config.host,
+                serverPort = config.port,
+                serverScheme = config.scheme,
+                familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
+                membershipId = joined.membershipId.trim(),
+                pendingCreatorAcknowledgements = previous.pendingCreatorAcknowledgements,
+            )
+            preferences.saveReconnectedSession(session, endpoint)
+            publishSession(session)
+            currentAvailability.value = FamilyServerAvailability.Disabled
+            requestSync(SyncTrigger.Foreground)
+            OwnerLoginResult(session, InitialFamilyDataRecovery.Complete)
+        }
+    }
+
+    override suspend fun prepareDisasterRecovery(): Result<DisasterRecoverySummary> = runCatching {
+        requireRetainedOwnerSession()
+        disasterRecoverySnapshotBuilder.build().use { it.summary }
+    }
+
+    override suspend fun startDisasterRecovery(
+        endpoint: TrustedEndpointProfile,
+        ownerDisplayName: String,
+        deviceName: String,
+        rootPassword: String,
+    ): Result<DisasterRecoveryProgress> = runCatching {
+        require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
+        syncMutex.withLock {
+            preferences.disasterRestoreCheckpoint.first()?.let {
+                return@withLock resumeDisasterRecoveryLocked(it)
+            }
+            val previous = requireRetainedOwnerSession()
+            val probe = probeReconnectCandidate(endpoint.origin, endpoint)
+            require(
+                probe is SetupProbeResult.Ready &&
+                    probe.familyState == com.lezi.babylog.sync.session.SetupFamilyState.Empty,
+            ) { "家庭灾难恢复只适用于已校验的空服务器" }
+            val familyName = requireNotNull(previous.familyName?.trim()?.takeIf(String::isNotEmpty)) {
+                "本机缺少旧家庭名称，无法安全恢复"
+            }
+            val requestIds = preferences.ensureDisasterRestoreRequestIds()
+            disasterRecoverySnapshotBuilder.build().use { snapshot ->
+                val batch = backend.startDisasterRestore(
+                    endpoint = endpoint,
+                    requestId = requestIds.start,
+                    familyId = previous.familyId,
+                    familyName = familyName,
+                    ownerDisplayName = requireMemberDisplayName(ownerDisplayName),
+                    deviceName = requireDeviceName(deviceName),
+                    rootPassword = rootPassword,
+                )
+                var checkpoint = DisasterRestoreCheckpoint(
+                    batchId = batch.batchId,
+                    endpoint = endpoint,
+                    familyId = previous.familyId,
+                    startRequestId = requestIds.start,
+                    manifestRequestId = requestIds.manifest,
+                    commitRequestId = requestIds.commit,
+                    expiresAtEpochSeconds = batch.expiresAtEpochSeconds,
+                    status = batch.status,
+                    entityVersions = snapshot.retirementVersions,
+                )
+                preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
+                val status = uploadDisasterRecoverySnapshot(
+                    checkpoint,
+                    batch.recoveryToken,
+                    snapshot,
+                    uploadManifest = true,
+                )
+                checkpoint = checkpoint.copy(
+                    status = status.status,
+                    expiresAtEpochSeconds = status.expiresAtEpochSeconds,
+                )
+                preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
+                DisasterRecoveryProgress(
+                    summary = snapshot.summary,
+                    status = status.status,
+                    expiresAtEpochSeconds = status.expiresAtEpochSeconds,
+                )
+            }
+        }
+    }
+
+    override suspend fun resumeDisasterRecovery(): Result<DisasterRecoveryProgress> = runCatching {
+        syncMutex.withLock {
+            val checkpoint = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
+                "没有可继续的家庭恢复批次"
+            }
+            resumeDisasterRecoveryLocked(checkpoint)
+        }
+    }
+
+    override suspend fun commitDisasterRecovery(
+        rootPassword: String,
+    ): Result<OwnerLoginResult> = runCatching {
+        require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
+        syncMutex.withLock {
+            val checkpoint = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
+                "没有等待提交的家庭恢复批次"
+            }
+            val token = preferences.disasterRestoreToken().also {
+                require(it.isNotBlank()) { "家庭恢复凭据已丢失，请取消后重新开始" }
+            }
+            val previous = requireRetainedOwnerSession()
+            require(previous.familyId == checkpoint.familyId) {
+                "本机家庭身份已变化，恢复已停止"
+            }
+            val joined = backend.commitDisasterRestore(
+                endpoint = checkpoint.endpoint,
+                batchId = checkpoint.batchId,
+                recoveryToken = token,
+                requestId = checkpoint.commitRequestId,
+                rootPassword = rootPassword,
+            )
+            require(joined.role == FamilyRole.Owner) { "家庭恢复响应角色无效" }
+            if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
+            val config = FamilyEndpointConfig.fromBaseUrl(checkpoint.endpoint.origin).withNormalized()
+            val session = SyncSession(
+                familyId = joined.familyId,
+                accessToken = joined.accessToken,
+                refreshToken = joined.refreshToken,
+                accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+                deviceId = joined.deviceId,
+                role = joined.role,
+                pullCursor = 0L,
+                pullGeneration = joined.generation,
+                serverHost = config.host,
+                serverPort = config.port,
+                serverScheme = config.scheme,
+                familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
+                membershipId = joined.membershipId.trim(),
+            )
+            retireDisasterRestoreReceipts(previous, session, checkpoint)
+            preferences.saveReconnectedSession(session, checkpoint.endpoint)
+            preferences.clearDisasterRestoreCheckpoint()
+            publishSession(session)
+            currentAvailability.value = FamilyServerAvailability.Disabled
+            requestSync(SyncTrigger.Foreground)
+            OwnerLoginResult(session, InitialFamilyDataRecovery.Complete)
+        }
+    }
+
+    override suspend fun cancelDisasterRecovery(): Result<Unit> = runCatching {
+        syncMutex.withLock {
+            val checkpoint = preferences.disasterRestoreCheckpoint.first() ?: return@withLock
+            val token = preferences.disasterRestoreToken()
+            require(token.isNotBlank()) { "家庭恢复凭据已丢失，请清除本机恢复状态" }
+            backend.cancelDisasterRestore(
+                checkpoint.endpoint,
+                checkpoint.batchId,
+                token,
+            )
+            preferences.clearDisasterRestoreCheckpoint()
+        }
+    }
+
     override suspend fun requestMemberLogin(
         displayName: String,
         deviceName: String,
     ): Result<PendingMemberLogin> = executeFamily(
         FamilySessionCommand.RequestMemberLogin(displayName, deviceName),
     ).map { (it as FamilySessionOutcome.MemberLoginRequested).request }
+
+    override suspend fun requestReconnectMember(
+        endpoint: TrustedEndpointProfile,
+        displayName: String,
+        deviceName: String,
+    ): Result<PendingMemberLogin> = runCatching {
+        reconnectMutex.withLock {
+            require(pendingReconnectMember.get() == null) {
+                "已有一条候选服务器加入申请"
+            }
+            val probe = probeReconnectCandidate(endpoint.origin, endpoint)
+            require(
+                probe is SetupProbeResult.Ready &&
+                    probe.familyState == com.lezi.babylog.sync.session.SetupFamilyState.Configured,
+            ) { "候选家庭服务器尚未完成配置或连接校验" }
+            val normalizedDisplayName = requireMemberDisplayName(displayName)
+            val normalizedDeviceName = requireDeviceName(deviceName)
+            val receipt = backend.requestMemberLogin(
+                endpoint,
+                normalizedDisplayName,
+                normalizedDeviceName,
+            )
+            val public = PendingMemberLogin(
+                requestId = receipt.requestId,
+                displayName = normalizedDisplayName,
+                deviceName = normalizedDeviceName,
+                expiresAtEpochSeconds = receipt.expiresAtEpochSeconds,
+            )
+            pendingReconnectMember.set(
+                CandidateMemberReconnectAttempt(
+                    endpoint = endpoint,
+                    pendingSecret = receipt.pendingSecret,
+                    request = public,
+                ),
+            )
+            public
+        }
+    }
+
+    override suspend fun checkReconnectMember(): Result<MemberLoginCheckResult> = runCatching {
+        reconnectMutex.withLock {
+            val attempt = requireNotNull(pendingReconnectMember.get()) {
+                "没有等待管理员确认的候选服务器申请"
+            }
+            when (val status = backend.memberLoginStatus(attempt.endpoint, attempt.pendingSecret)) {
+                com.lezi.babylog.sync.backend.MemberLoginStatus.Pending ->
+                    MemberLoginCheckResult.Waiting(attempt.request)
+                com.lezi.babylog.sync.backend.MemberLoginStatus.Approved -> {
+                    val joined = backend.claimMemberLogin(attempt.endpoint, attempt.pendingSecret)
+                    pendingReconnectMember.set(null)
+                    val previous = preferences.session.first()
+                    if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
+                    require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
+                    val config = FamilyEndpointConfig.fromBaseUrl(attempt.endpoint.origin)
+                        .withNormalized()
+                    val session = SyncSession(
+                        familyId = joined.familyId,
+                        accessToken = joined.accessToken,
+                        refreshToken = joined.refreshToken,
+                        accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+                        deviceId = joined.deviceId,
+                        role = joined.role,
+                        pullCursor = 0L,
+                        pullGeneration = joined.generation,
+                        serverHost = config.host,
+                        serverPort = config.port,
+                        serverScheme = config.scheme,
+                        familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
+                        membershipId = joined.membershipId.trim(),
+                        pendingCreatorAcknowledgements = previous.pendingCreatorAcknowledgements,
+                    )
+                    syncMutex.withLock {
+                        preferences.saveReconnectedSession(session, attempt.endpoint)
+                        publishSession(session)
+                        currentAvailability.value = FamilyServerAvailability.Disabled
+                    }
+                    requestSync(SyncTrigger.Foreground)
+                    MemberLoginCheckResult.Joined(
+                        session,
+                        InitialFamilyDataRecovery.Complete,
+                    )
+                }
+                else -> {
+                    pendingReconnectMember.set(null)
+                    MemberLoginCheckResult.Terminal(status)
+                }
+            }
+        }
+    }
+
+    override suspend fun cancelReconnectMember(): Result<Unit> = runCatching {
+        reconnectMutex.withLock {
+            val attempt = pendingReconnectMember.getAndSet(null) ?: return@withLock
+            backend.cancelMemberLogin(attempt.endpoint, attempt.pendingSecret)
+        }
+    }
 
     override suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> {
         val result = executeFamily(FamilySessionCommand.CheckMemberLogin)
@@ -488,9 +1032,19 @@ class RealSyncPort @Inject constructor(
     override suspend fun renameFamily(familyName: String?): Result<Unit> =
         executeFamily(FamilySessionCommand.RenameFamily(familyName)).map { Unit }
 
-    override suspend fun listFamilyMembers(): Result<List<FamilyMember>> =
-        executeFamily(FamilySessionCommand.ListMembers)
-            .map { (it as FamilySessionOutcome.MembersListed).members }
+    override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
+        val remote = executeFamily(FamilySessionCommand.ListMembers)
+        val members = remote.getOrElse { return Result.failure(it) }
+            .let { (it as FamilySessionOutcome.MembersListed).members }
+        return try {
+            preferences.saveFamilyMemberDirectory(members)
+            Result.success(members)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Result.failure(failure)
+        }
+    }
 
     override suspend fun updateMyDisplayName(
         displayName: String,
@@ -530,7 +1084,16 @@ class RealSyncPort @Inject constructor(
         deviceName: String,
     ): Result<Unit> = executeFamily(
         FamilySessionCommand.RenameFamilyDevice(deviceId, deviceName),
-    ).map { Unit }
+        ).map { Unit }
+
+    override suspend fun syncWhenAvailable(trigger: SyncTrigger): Result<Unit> {
+        val availability = probeServerAvailability(trigger.toAvailabilityProbeReason())
+            .getOrElse { return Result.failure(it) }
+        if (availability !is FamilyServerAvailability.Available) {
+            return Result.failure(FamilyServerCurrentlyUnavailableException())
+        }
+        return sync(trigger)
+    }
 
     override suspend fun sync(trigger: SyncTrigger): Result<Unit> {
         val result = runCatching {
@@ -1118,6 +1681,249 @@ class RealSyncPort @Inject constructor(
         }
     }
 
+    private suspend fun requireRetainedOwnerSession(): SyncSession =
+        preferences.session.first().also { session ->
+            require(session.familyId.isNotBlank() && session.role == FamilyRole.Owner) {
+                "只有仍保留旧家庭管理员身份的设备可以恢复空服务器"
+            }
+        }
+
+    private suspend fun resumeDisasterRecoveryLocked(
+        checkpoint: DisasterRestoreCheckpoint,
+    ): DisasterRecoveryProgress {
+        val token = preferences.disasterRestoreToken().also {
+            require(it.isNotBlank()) { "家庭恢复凭据已丢失，请取消后重新开始" }
+        }
+        requireRetainedOwnerSession().also {
+            require(it.familyId == checkpoint.familyId) { "本机家庭身份已变化，恢复已停止" }
+        }
+        val remote = try {
+            backend.disasterRestoreStatus(
+                checkpoint.endpoint,
+                checkpoint.batchId,
+                token,
+            )
+        } catch (error: SyncHttpException) {
+            if (error.statusCode == 404 || error.statusCode == 410) {
+                preferences.clearDisasterRestoreCheckpoint()
+                throw IllegalStateException("家庭恢复批次已失效，请重新开始", error)
+            }
+            throw error
+        }
+        if (remote.readyToCommit || remote.committed) {
+            preferences.saveDisasterRestoreCheckpoint(
+                checkpoint.copy(
+                    status = remote.status,
+                    expiresAtEpochSeconds = remote.expiresAtEpochSeconds,
+                ),
+                token,
+            )
+            return DisasterRecoveryProgress(null, remote.status, remote.expiresAtEpochSeconds)
+        }
+        disasterRecoverySnapshotBuilder.build().use { snapshot ->
+            val uploadManifest = remote.status == "started"
+            val activeCheckpoint = if (uploadManifest) {
+                checkpoint.copy(entityVersions = snapshot.retirementVersions)
+            } else {
+                checkpoint
+            }
+            val status = uploadDisasterRecoverySnapshot(
+                activeCheckpoint,
+                token,
+                snapshot,
+                uploadManifest,
+            )
+            preferences.saveDisasterRestoreCheckpoint(
+                activeCheckpoint.copy(
+                    status = status.status,
+                    expiresAtEpochSeconds = status.expiresAtEpochSeconds,
+                ),
+                token,
+            )
+            return DisasterRecoveryProgress(
+                snapshot.summary,
+                status.status,
+                status.expiresAtEpochSeconds,
+            )
+        }
+    }
+
+    private suspend fun uploadDisasterRecoverySnapshot(
+        checkpoint: DisasterRestoreCheckpoint,
+        token: String,
+        snapshot: com.lezi.babylog.sync.disasterrecovery.DisasterRecoverySnapshot,
+        uploadManifest: Boolean,
+    ): DisasterRestoreStatus {
+        if (uploadManifest) {
+            backend.putDisasterRestoreManifest(
+                endpoint = checkpoint.endpoint,
+                batchId = checkpoint.batchId,
+                recoveryToken = token,
+                requestId = checkpoint.manifestRequestId,
+                entities = snapshot.entities,
+                media = snapshot.media.map { it.spec },
+            )
+        }
+        snapshot.media.forEach { media ->
+            backend.putDisasterRestoreMedia(
+                endpoint = checkpoint.endpoint,
+                batchId = checkpoint.batchId,
+                recoveryToken = token,
+                clientUuid = media.clientUuid,
+                source = media.source,
+            )
+        }
+        return backend.disasterRestoreStatus(
+            checkpoint.endpoint,
+            checkpoint.batchId,
+            token,
+        ).also {
+            require(it.readyToCommit || it.committed) {
+                "家庭数据或照片尚未完整上传"
+            }
+        }
+    }
+
+    private suspend fun retireDisasterRestoreReceipts(
+        previous: SyncSession,
+        restored: SyncSession,
+        checkpoint: DisasterRestoreCheckpoint,
+    ) {
+        transactionRunner.run {
+            // Care remains writable while a restore batch uploads. Re-author every local row to
+            // the new Owner, including rows created after the immutable restore manifest, but
+            // retire publication state only when the Room/outbox version is exactly the version
+            // activated by the server. Newer local work stays dirty and publishes after switch.
+            recordDao.listAllIncludingDeleted().forEach { record ->
+                if (record.createdByMembershipId != restored.membershipId) {
+                    recordDao.update(record.copy(createdByMembershipId = restored.membershipId))
+                }
+            }
+            carePlanDao.listAllIncludingDeleted().forEach { plan ->
+                if (plan.createdByMembershipId != restored.membershipId) {
+                    carePlanDao.update(plan.copy(createdByMembershipId = restored.membershipId))
+                }
+            }
+            customItemDao.listAllIncludingDeleted().forEach { item ->
+                if (item.createdByMembershipId != restored.membershipId) {
+                    customItemDao.update(item.copy(createdByMembershipId = restored.membershipId))
+                }
+            }
+            fulfillmentCandidateDao.listAllIncludingDeleted().forEach { candidate ->
+                if (
+                    candidate.submitterMembershipId != restored.membershipId ||
+                    candidate.submitterRole != "owner"
+                ) {
+                    fulfillmentCandidateDao.update(
+                        candidate.copy(
+                            submitterMembershipId = restored.membershipId,
+                            submitterRole = "owner",
+                        ),
+                    )
+                }
+            }
+            val retiredOutboxIds = mutableListOf<Long>()
+            checkpoint.entityVersions.forEach { version ->
+                when (version.type) {
+                    "baby" -> babyDao.markSynced(version.clientUuid, version.updatedAt)
+                    "record" -> recordDao.getByClientUuid(version.clientUuid)
+                        ?.takeIf { it.updatedAt == version.updatedAt }
+                        ?.let { record ->
+                            recordDao.update(
+                                record.copy(
+                                    createdByMembershipId = if (version.restored) {
+                                        restored.membershipId
+                                    } else {
+                                        record.createdByMembershipId
+                                    },
+                                    familyPublishedUpdatedAt = if (version.restored) {
+                                        record.updatedAt
+                                    } else {
+                                        record.familyPublishedUpdatedAt
+                                    },
+                                    syncDirty = false,
+                                ),
+                            )
+                        }
+                    "care_plan" -> carePlanDao.getByClientUuid(version.clientUuid)
+                        ?.takeIf { it.updatedAt == version.updatedAt }
+                        ?.let { plan ->
+                            carePlanDao.update(
+                                plan.copy(
+                                    createdByMembershipId = if (version.restored) {
+                                        restored.membershipId
+                                    } else {
+                                        plan.createdByMembershipId
+                                    },
+                                    familyPublishedUpdatedAt = if (version.restored) {
+                                        plan.updatedAt
+                                    } else {
+                                        plan.familyPublishedUpdatedAt
+                                    },
+                                    syncDirty = false,
+                                ),
+                            )
+                        }
+                    "custom_item" -> customItemDao.getByClientUuid(version.clientUuid)
+                        ?.takeIf { it.updatedAt == version.updatedAt }
+                        ?.let { item ->
+                            customItemDao.update(
+                                item.copy(
+                                    createdByMembershipId = if (version.restored) {
+                                        restored.membershipId
+                                    } else {
+                                        item.createdByMembershipId
+                                    },
+                                    syncDirty = false,
+                                ),
+                            )
+                        }
+                    "fulfillment_candidate" ->
+                        fulfillmentCandidateDao.getByClientUuid(version.clientUuid)
+                            ?.takeIf { it.updatedAt == version.updatedAt }
+                            ?.let { candidate ->
+                                fulfillmentCandidateDao.update(
+                                    candidate.copy(
+                                        submitterMembershipId = if (version.restored) {
+                                            restored.membershipId
+                                        } else {
+                                            candidate.submitterMembershipId
+                                        },
+                                        submitterRole = if (version.restored) {
+                                            "owner"
+                                        } else {
+                                            candidate.submitterRole
+                                        },
+                                        syncDirty = false,
+                                    ),
+                                )
+                            }
+                    "media" -> mediaDao.getByClientUuid(version.clientUuid)
+                        ?.takeIf { it.updatedAt == version.updatedAt }
+                        ?.let { media ->
+                            mediaDao.update(
+                                media.copy(
+                                    remoteUri = if (version.restored) {
+                                        restored.receiptFor(media.clientUuid)
+                                    } else {
+                                        media.remoteUri
+                                    },
+                                    syncDirty = false,
+                                ),
+                            )
+                        }
+                }
+                outboxDao.find(previous.familyId, version.type, version.clientUuid)
+                    ?.takeIf { row ->
+                        row.updatedAt == version.updatedAt &&
+                            (row.deletedAt == null) == version.restored
+                    }
+                    ?.let { retiredOutboxIds += it.id }
+            }
+            if (retiredOutboxIds.isNotEmpty()) outboxDao.deleteIds(retiredOutboxIds)
+        }
+    }
+
     private suspend fun executeFamily(
         command: FamilySessionCommand,
     ): Result<FamilySessionOutcome> =
@@ -1156,7 +1962,96 @@ class RealSyncPort @Inject constructor(
             else -> SyncStatus.Error
         }
     }
+
+    private fun publishAvailabilityFailure(
+        previous: FamilyServerAvailability,
+        lastHealthyAt: Long?,
+        reason: FamilyServerUnavailableReason,
+    ): Result<FamilyServerAvailability> {
+        val failures = (previous as? FamilyServerAvailability.Unavailable)
+            ?.consecutiveFailures
+            ?.plus(1)
+            ?: 1
+        val unavailable = FamilyServerAvailability.Unavailable(
+            reason = reason,
+            lastHealthyAtMillis = lastHealthyAt,
+            nextProbeAtMillis = clock.nowMillis() +
+                FamilyServerAvailabilityPolicy.retryDelayMillis(failures),
+            consecutiveFailures = failures,
+        )
+        currentAvailability.value = unavailable
+        return Result.success(unavailable)
+    }
 }
+
+private data class CandidateMemberReconnectAttempt(
+    val endpoint: TrustedEndpointProfile,
+    val pendingSecret: String,
+    val request: PendingMemberLogin,
+) {
+    override fun toString(): String =
+        "CandidateMemberReconnectAttempt(endpoint=$endpoint, requestId=${request.requestId}, " +
+            "pendingSecret=<redacted>)"
+}
+
+private class AvailabilityProbeFailure(
+    val reason: FamilyServerUnavailableReason,
+) : Exception()
+
+private fun SetupProbeResult.toUnavailableReason(): FamilyServerUnavailableReason = when (this) {
+    is SetupProbeResult.Ready -> error("ready availability must be handled before failure mapping")
+    is SetupProbeResult.CertificateApprovalRequired -> FamilyServerUnavailableReason.TrustChanged
+    SetupProbeResult.Failed.CertificateChanged -> FamilyServerUnavailableReason.TrustChanged
+    SetupProbeResult.Failed.Maintenance -> FamilyServerUnavailableReason.Maintenance
+    SetupProbeResult.Failed.Incompatible -> FamilyServerUnavailableReason.Incompatible
+    SetupProbeResult.Failed.NotLezi,
+    SetupProbeResult.Failed.InvalidAddress,
+    -> FamilyServerUnavailableReason.NotLezi
+    SetupProbeResult.Failed.Unreachable -> FamilyServerUnavailableReason.Unreachable
+}
+
+private suspend fun <T> captureAvailabilityProbe(block: suspend () -> T): Result<T> = try {
+    Result.success(block())
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (failure: Throwable) {
+    Result.failure(failure)
+}
+
+private fun Throwable.toAvailabilityUnavailableReason(): FamilyServerUnavailableReason = when {
+    causeChainContains<SpkiPinMismatchException>() -> FamilyServerUnavailableReason.TrustChanged
+    this is SyncHttpException && statusCode >= 500 -> FamilyServerUnavailableReason.Maintenance
+    this is SyncHttpException && statusCode == 404 -> FamilyServerUnavailableReason.NotLezi
+    this is IllegalArgumentException -> FamilyServerUnavailableReason.Incompatible
+    else -> FamilyServerUnavailableReason.Unreachable
+}
+
+private const val AVAILABILITY_TIMEOUT_MILLIS = 8_000L
+private val REQUIRED_HEALTH_CAPABILITIES = setOf(
+    CAPABILITY_ATOMIC_BUNDLE,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    CAPABILITY_DISASTER_RESTORE,
+)
+
+private fun SyncTrigger.toAvailabilityProbeReason(): AvailabilityProbeReason = when (this) {
+    SyncTrigger.Foreground -> AvailabilityProbeReason.Foreground
+    SyncTrigger.PullToRefresh -> AvailabilityProbeReason.PullToRefresh
+    SyncTrigger.LocalWrite -> AvailabilityProbeReason.LocalChanges
+}
+
+private fun mergeAvailabilityProbeReason(
+    current: AvailabilityProbeReason,
+    incoming: AvailabilityProbeReason,
+): AvailabilityProbeReason = if (incoming.priority >= current.priority) incoming else current
+
+private val AvailabilityProbeReason.priority: Int
+    get() = when (this) {
+        AvailabilityProbeReason.LocalChanges -> 0
+        AvailabilityProbeReason.RetryDeadline -> 1
+        AvailabilityProbeReason.Foreground -> 2
+        AvailabilityProbeReason.PullToRefresh -> 3
+        AvailabilityProbeReason.NetworkRecovered -> 4
+    }
 
 private inline fun <reified T : Throwable> Throwable.causeChainContains(): Boolean =
     generateSequence(this) { it.cause }.any { it is T }

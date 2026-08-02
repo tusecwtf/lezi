@@ -183,7 +183,7 @@ class MembersDevicesHost @Inject constructor(
 
     fun refreshFamilyForDeletion() {
         viewModelScope.launch {
-            sync.sync(SyncTrigger.PullToRefresh)
+            sync.syncWhenAvailable(SyncTrigger.PullToRefresh)
             familyMembers.value = actions.refreshMembersNow(familyMembers.value, showErrors = true)
         }
     }

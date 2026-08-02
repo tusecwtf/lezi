@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Barrier};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -451,7 +451,11 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
     assert_eq!(body["version"], VERSION);
     assert_eq!(
         body["capabilities"],
-        json!(["atomic_bundle", "record_membership_author"])
+        json!([
+            "atomic_bundle",
+            "record_membership_author",
+            "device_disaster_restore_v1"
+        ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
     assert_eq!(ready_status, StatusCode::OK);
@@ -520,6 +524,7 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "membership_devices_v1",
                 "atomic_bundle",
                 "record_membership_author",
+                "device_disaster_restore_v1",
             ],
             "family_state": "empty",
         })
@@ -550,10 +555,478 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "membership_devices_v1",
                 "atomic_bundle",
                 "record_membership_author",
+                "device_disaster_restore_v1",
             ],
             "family_state": "configured",
         })
     );
+}
+
+#[tokio::test]
+async fn disaster_restore_rejects_a_configured_server_even_with_the_root_password() {
+    let root = "correct-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    create_family_with_root(
+        &rig.app,
+        "existing-owner",
+        "existing-family-request-000000000001",
+        root,
+    )
+    .await;
+
+    let (status, body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-start-request-000000000001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("empty"), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn family_create_and_disaster_restore_have_exactly_one_provisioning_winner() {
+    let root = "concurrent-provisioning-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let barrier = Arc::new(Barrier::new(2));
+
+    let restore_app = rig.app.clone();
+    let restore_barrier = barrier.clone();
+    let restore = tokio::spawn(async move {
+        restore_barrier.wait().await;
+        json_request_with_headers(
+            &restore_app,
+            Method::POST,
+            "/v1/disaster-restore/batches",
+            None,
+            json!({
+                "request_id": "concurrent-restore-start-request-000001",
+                "family_id": Uuid::new_v4(),
+                "family_name": "恢复家庭",
+                "owner_display_name": "妈妈",
+                "device_name": "恢复手机",
+            }),
+            &[("x-lezi-bootstrap-secret", root)],
+        )
+        .await
+        .0
+    });
+    let create_app = rig.app.clone();
+    let create = tokio::spawn(async move {
+        barrier.wait().await;
+        json_request_with_headers(
+            &create_app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            json!({
+                "create_request_id": "concurrent-family-create-request-00001",
+                "display_name": "另一位管理员",
+                "device_name": "另一台手机",
+                "family_name": "另一个家庭",
+            }),
+            &[("x-lezi-bootstrap-secret", root)],
+        )
+        .await
+        .0
+    });
+
+    let statuses = [restore.await.unwrap(), create.await.unwrap()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| { **status == StatusCode::OK || **status == StatusCode::CREATED })
+            .count(),
+        1,
+        "provisioning paths must have one winner: {statuses:?}",
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1,
+        "the losing provisioning path must fail closed: {statuses:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_restore_manifest_replay_serializes_conflicting_content() {
+    let root = "concurrent-restore-manifest-root";
+    let family_id = Uuid::new_v4().to_string();
+    let baby_id = Uuid::new_v4().to_string();
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "concurrent-manifest-start-request-000001",
+            "family_id": family_id,
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().unwrap().to_owned();
+    let recovery_token = started["recovery_token"].as_str().unwrap().to_owned();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let mut tasks = Vec::new();
+    for nickname in ["宝宝甲", "宝宝乙"] {
+        let app = rig.app.clone();
+        let barrier = barrier.clone();
+        let batch_id = batch_id.clone();
+        let recovery_token = recovery_token.clone();
+        let baby_id = baby_id.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            json_request(
+                &app,
+                Method::PUT,
+                &format!("/v1/disaster-restore/batches/{batch_id}/manifest"),
+                Some(&recovery_token),
+                json!({
+                    "request_id": "concurrent-manifest-put-request-0000001",
+                    "entities": [{
+                        "type": "baby",
+                        "client_uuid": baby_id,
+                        "updated_at": 1000,
+                        "payload": baby_payload(nickname, None),
+                    }],
+                    "media": [],
+                }),
+            )
+            .await
+            .0
+        }));
+    }
+
+    let statuses = [
+        tasks.remove(0).await.unwrap(),
+        tasks.remove(0).await.unwrap(),
+    ];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "one immutable manifest must win: {statuses:?}",
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1,
+        "conflicting replay must fail closed: {statuses:?}",
+    );
+}
+
+#[tokio::test]
+async fn disaster_restore_is_staged_restart_safe_atomic_and_reauthors_history() {
+    let root = "correct-root-password";
+    let family_id = Uuid::new_v4().to_string();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bytes = vec![1_u8, 2, 3];
+    let digest = hex::encode(Sha256::digest(&bytes));
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+
+    let (start_status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-start-request-000000000002",
+            "family_id": family_id,
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::CREATED, "{started}");
+    let batch_id = started["batch_id"].as_str().unwrap();
+    let recovery_token = started["recovery_token"].as_str().unwrap();
+    assert!(!started.to_string().contains(root));
+    let journal = fs::read_to_string(
+        rig.directory
+            .path()
+            .join("disaster-restore")
+            .join(batch_id)
+            .join("journal.json"),
+    )
+    .unwrap();
+    assert!(
+        !journal.contains(root),
+        "root password must never be journaled"
+    );
+    assert!(
+        !journal.contains(recovery_token),
+        "restore credential must be stored only as a hash"
+    );
+
+    let (manifest_status, manifest) = json_request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/disaster-restore/batches/{batch_id}/manifest"),
+        Some(recovery_token),
+        json!({
+            "request_id": "restore-manifest-request-0000000001",
+            "entities": [
+                {
+                    "type": "baby",
+                    "client_uuid": baby_id,
+                    "updated_at": 1000,
+                    "payload": baby_payload("宝宝", None),
+                },
+                {
+                    "type": "record",
+                    "client_uuid": record_id,
+                    "updated_at": 1001,
+                    "payload": {
+                        "baby_client_uuid": baby_id,
+                        "type": "formula",
+                        "custom_item_client_uuid": null,
+                        "timestamp": 100,
+                        "end_timestamp": null,
+                        "note": null,
+                        "payload_json": {"amount_ml": 120},
+                        "schema_version": 2,
+                        "created_by_membership_id": "old-owner-membership"
+                    }
+                },
+                {
+                    "type": "media",
+                    "client_uuid": media_id,
+                    "updated_at": 1002,
+                    "payload": log_media_payload(&record_id),
+                }
+            ],
+            "media": [{
+                "client_uuid": media_id,
+                "byte_size": bytes.len(),
+                "sha256": digest,
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(manifest_status, StatusCode::OK, "{manifest}");
+
+    // A staged batch has no family visibility and blocks ordinary family creation until it is
+    // committed or cancelled, so normal join/sync cannot observe a partial dataset.
+    let (create_during_restore_status, _) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "create-during-restore-request-000001",
+            "display_name": "另一个管理员",
+            "device_name": "另一台手机",
+            "family_name": "另一个家庭",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(create_during_restore_status, StatusCode::CONFLICT);
+    assert_eq!(
+        get_json(&rig.app, "/v1/setup-status", None).await.1["family_state"],
+        "empty"
+    );
+
+    let media_response = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/disaster-restore/batches/{batch_id}/media/{media_id}"),
+        Some(recovery_token),
+        Body::from(bytes),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(media_response.status(), StatusCode::OK);
+
+    let restarted = rig.restart_with_config("generation-restored", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
+    let (status_code, staged) = get_json(
+        &restarted,
+        &format!("/v1/disaster-restore/batches/{batch_id}/status"),
+        Some(recovery_token),
+    )
+    .await;
+    assert_eq!(status_code, StatusCode::OK, "{staged}");
+    assert_eq!(staged["status"], "ready_to_commit");
+
+    let (commit_status, committed) = json_request_with_headers(
+        &restarted,
+        Method::POST,
+        &format!("/v1/disaster-restore/batches/{batch_id}/commit"),
+        Some(recovery_token),
+        json!({"request_id": "restore-commit-request-00000000001"}),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["family_id"], family_id);
+    assert_eq!(committed["role"], "owner");
+    let new_owner = committed["membership_id"].as_str().unwrap();
+    assert_ne!(new_owner, "old-owner-membership");
+
+    let access = committed["access_token"].as_str().unwrap();
+    test_client_sessions().lock().unwrap().insert(
+        access.to_owned(),
+        TestClientSession {
+            generation: "generation-restored".to_owned(),
+        },
+    );
+    let (pull_status, pulled) = get_json(&restarted, "/v1/pull?cursor=0", Some(access)).await;
+    assert_eq!(pull_status, StatusCode::OK, "{pulled}");
+    let record = pulled["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record")
+        .unwrap();
+    assert_eq!(record["payload"]["created_by_membership_id"], new_owner);
+    assert_eq!(pulled["entities"].as_array().unwrap().len(), 3);
+
+    let (retry_status, retry) = json_request_with_headers(
+        &restarted,
+        Method::POST,
+        &format!("/v1/disaster-restore/batches/{batch_id}/commit"),
+        Some(recovery_token),
+        json!({"request_id": "restore-commit-request-00000000001"}),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["access_token"], committed["access_token"]);
+}
+
+#[tokio::test]
+async fn disaster_restore_expires_after_twenty_four_hours_and_startup_cleans_staging() {
+    let root = "correct-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-expiry-start-request-0000001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    let batch_id = started["batch_id"].as_str().unwrap();
+    let recovery_token = started["recovery_token"].as_str().unwrap();
+    let batch_path = rig.directory.path().join("disaster-restore").join(batch_id);
+    assert!(batch_path.is_dir());
+
+    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
+    let (expired_status, expired) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{batch_id}/status"),
+        Some(recovery_token),
+    )
+    .await;
+    assert_eq!(expired_status, StatusCode::GONE, "{expired}");
+
+    let _restarted = rig.restart_with_config("generation-after-expiry", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
+    assert!(!batch_path.exists());
+}
+
+#[tokio::test]
+async fn disaster_restore_rejects_manifest_tampering_without_activating_a_family() {
+    let root = "correct-root-password";
+    let family_id = Uuid::new_v4().to_string();
+    let baby_id = Uuid::new_v4().to_string();
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-tamper-start-request-000001",
+            "family_id": family_id,
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    let batch_id = started["batch_id"].as_str().unwrap();
+    let recovery_token = started["recovery_token"].as_str().unwrap();
+    let (status, body) = json_request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/disaster-restore/batches/{batch_id}/manifest"),
+        Some(recovery_token),
+        json!({
+            "request_id": "restore-tamper-manifest-request-0001",
+            "entities": [{
+                "type": "baby",
+                "client_uuid": baby_id,
+                "updated_at": 1000,
+                "payload": baby_payload("宝宝", None),
+            }],
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let manifest_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("manifest.json");
+    let mut manifest = fs::read(&manifest_path).unwrap();
+    manifest.push(b' ');
+    fs::write(&manifest_path, manifest).unwrap();
+
+    let (status, body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/disaster-restore/batches/{batch_id}/commit"),
+        Some(recovery_token),
+        json!({"request_id": "restore-tamper-commit-request-00001"}),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (setup_status, setup) = get_json(&rig.app, "/v1/setup-status", None).await;
+    assert_eq!(setup_status, StatusCode::OK);
+    assert_eq!(setup["family_state"], "empty");
 }
 
 #[tokio::test]

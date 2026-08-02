@@ -7,6 +7,8 @@ import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
+import com.lezi.babylog.sync.availability.AvailabilityProbeReason
+import com.lezi.babylog.sync.availability.FamilyServerAvailability
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
@@ -97,6 +99,10 @@ class BootstrapSecretRejectedException : Exception("初始化口令不正确，�
 class OwnerRootPasswordRejectedException : Exception("管理员根密码不正确，请重试")
 class MemberLoginQrUnavailableException : Exception("这个二维码已失效，请让管理员重新生成")
 class MemberLoginQrTrustChangedException : Exception("家庭服务器安全信息不一致，登录已停止")
+class DifferentFamilyServerException :
+    Exception("候选服务器属于另一个已配置家庭，不能合并或替换当前家庭")
+class FamilyServerCurrentlyUnavailableException :
+    Exception("家庭服务器当前不可连接，本机护理功能不受影响")
 
 /** Outcome of [SyncPort.createFamily]: owner session plus whether the NAS reclaimed. */
 enum class InitialFamilyDataRecovery {
@@ -114,6 +120,25 @@ data class CreateFamilyResult(
 data class OwnerLoginResult(
     val session: SyncSession,
     val dataRecovery: InitialFamilyDataRecovery,
+)
+
+data class DisasterRecoverySummary(
+    val babies: Int,
+    val records: Int,
+    val carePlans: Int,
+    val fulfillmentRelations: Int,
+    val customItems: Int,
+    val photos: Int,
+    val mediaBytes: Long,
+) {
+    val totalEntities: Int
+        get() = babies + records + carePlans + fulfillmentRelations + customItems + photos
+}
+
+data class DisasterRecoveryProgress(
+    val summary: DisasterRecoverySummary?,
+    val status: String,
+    val expiresAtEpochSeconds: Long,
 )
 
 data class MemberLoginQrResult(
@@ -162,7 +187,7 @@ data class ClientAppVersion(
 
     companion object {
         /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
-        val FALLBACK = ClientAppVersion(versionCode = 8, versionName = "0.3.1")
+        val FALLBACK = ClientAppVersion(versionCode = 10, versionName = "0.3.3")
     }
 }
 
@@ -271,12 +296,27 @@ class AppUpdateInstallInProgressException :
 
 interface SyncPort {
     fun status(): Flow<SyncStatus>
+    fun availability(): Flow<FamilyServerAvailability> =
+        kotlinx.coroutines.flow.flowOf(FamilyServerAvailability.Disabled)
+    fun lastServerHealthyAt(): Flow<Long?> = kotlinx.coroutines.flow.flowOf(null)
+    suspend fun probeServerAvailability(
+        reason: AvailabilityProbeReason,
+    ): Result<FamilyServerAvailability> = Result.success(FamilyServerAvailability.Disabled)
     fun session(): Flow<SyncSession>
+    /** Device-local minimal roster; never waits for the family server. */
+    fun familyMemberDirectory(): Flow<List<FamilyMember>> =
+        kotlinx.coroutines.flow.flowOf(emptyList())
+    /** Best-effort foreground refresh; callers never await network I/O. */
+    fun refreshFamilyMemberDirectory() = Unit
     fun verifiedEndpoint(): Flow<TrustedEndpointProfile?> = kotlinx.coroutines.flow.flowOf(null)
     fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     /** Exact foreground/manual member-login checks observed by an open approval UI. */
     fun memberLoginChecks(): Flow<MemberLoginCheckResult> = kotlinx.coroutines.flow.emptyFlow()
     fun requestSync(trigger: SyncTrigger)
+    /** Local Room committed; asynchronous publication may be coalesced. */
+    fun notifyLocalChanges() = requestSync(SyncTrigger.LocalWrite)
+    /** Android reported a usable network; no public-internet VALIDATED requirement applies. */
+    fun notifyNetworkRecovered() = requestSync(SyncTrigger.Foreground)
     suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
         SetupProbeResult.Failed.Unreachable
     /** Verifies a QR-provided endpoint and pin without persisting its grant or trust decision. */
@@ -284,6 +324,13 @@ interface SyncPort {
         SetupProbeResult.Failed.Unreachable
     suspend fun trustCertificate(candidate: CertificateTrustCandidate): SetupProbeResult =
         SetupProbeResult.Failed.Unreachable
+    /** Candidate-only probe: never reads or writes the active endpoint/session. */
+    suspend fun probeReconnectEndpoint(endpointDraft: String): SetupProbeResult =
+        SetupProbeResult.Failed.Unreachable
+    /** Candidate-only TOFU confirmation: validates the pin but does not persist it. */
+    suspend fun trustReconnectCertificate(
+        candidate: CertificateTrustCandidate,
+    ): SetupProbeResult = SetupProbeResult.Failed.Unreachable
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit> =
         Result.failure(SyncNotEnabledException())
     suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
@@ -306,10 +353,47 @@ interface SyncPort {
         rootPassword: String,
         takeover: Boolean = false,
     ): Result<OwnerLoginResult> = Result.failure(SyncNotEnabledException())
+    /**
+     * Logs in only against [endpoint]. The active endpoint/session is replaced only after the
+     * returned family id equals the locally retained family id.
+     */
+    suspend fun reconnectOwner(
+        endpoint: TrustedEndpointProfile,
+        deviceName: String,
+        rootPassword: String,
+    ): Result<OwnerLoginResult> = Result.failure(SyncNotEnabledException())
+    /** Room-only preview; performs no network request and does not persist a recovery credential. */
+    suspend fun prepareDisasterRecovery(): Result<DisasterRecoverySummary> =
+        Result.failure(SyncNotEnabledException())
+    /** Owner old identity → already-probed empty candidate. Root password is request-scoped. */
+    suspend fun startDisasterRecovery(
+        endpoint: TrustedEndpointProfile,
+        ownerDisplayName: String,
+        deviceName: String,
+        rootPassword: String,
+    ): Result<DisasterRecoveryProgress> = Result.failure(SyncNotEnabledException())
+    /** Queries and resumes an existing secure checkpoint after process/network interruption. */
+    suspend fun resumeDisasterRecovery(): Result<DisasterRecoveryProgress> =
+        Result.failure(SyncNotEnabledException())
+    /** Final second root-password confirmation and atomic endpoint/session switch. */
+    suspend fun commitDisasterRecovery(rootPassword: String): Result<OwnerLoginResult> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun cancelDisasterRecovery(): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
     suspend fun requestMemberLogin(
         displayName: String,
         deviceName: String,
     ): Result<PendingMemberLogin> = Result.failure(SyncNotEnabledException())
+    /** Candidate member request keeps its pending secret inside the sync implementation. */
+    suspend fun requestReconnectMember(
+        endpoint: TrustedEndpointProfile,
+        displayName: String,
+        deviceName: String,
+    ): Result<PendingMemberLogin> = Result.failure(SyncNotEnabledException())
+    suspend fun checkReconnectMember(): Result<MemberLoginCheckResult> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun cancelReconnectMember(): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
     suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> =
         Result.failure(SyncNotEnabledException())
     suspend fun cancelMemberLogin(): Result<Unit> = Result.failure(SyncNotEnabledException())
@@ -332,6 +416,8 @@ interface SyncPort {
     /** Owner-only rename of the shared family name; current wire requires non-empty. */
     suspend fun renameFamily(familyName: String?): Result<Unit>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
+    /** UI/manual path guarded by anonymous health; defaults to legacy behavior for test fakes. */
+    suspend fun syncWhenAvailable(trigger: SyncTrigger): Result<Unit> = sync(trigger)
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     /** Owner updates immediately; Member receives a pending approval request. */
     suspend fun updateMyDisplayName(displayName: String): Result<DisplayNameUpdateResult>

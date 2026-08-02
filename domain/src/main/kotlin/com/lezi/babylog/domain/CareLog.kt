@@ -19,7 +19,6 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.CarePlan
@@ -804,7 +803,7 @@ class CareLog @Inject constructor(
 
 
     private fun requestLocalSync() {
-        syncPort.requestSync(SyncTrigger.LocalWrite)
+        syncPort.notifyLocalChanges()
     }
 
 

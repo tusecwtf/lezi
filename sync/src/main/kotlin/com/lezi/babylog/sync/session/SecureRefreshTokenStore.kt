@@ -21,6 +21,9 @@ interface SecureRefreshTokenStore {
     fun getPendingMemberSecret(): String = ""
     fun setPendingMemberSecret(secret: String) = Unit
     fun clearPendingMemberSecret() = Unit
+    fun getDisasterRestoreToken(): String = ""
+    fun setDisasterRestoreToken(token: String) = Unit
+    fun clearDisasterRestoreToken() = Unit
     fun verifyReadable() = Unit
 }
 
@@ -28,6 +31,7 @@ interface SecureRefreshTokenStore {
 class InMemorySecureRefreshTokenStore : SecureRefreshTokenStore {
     private val token = AtomicReference("")
     private val pendingMemberSecret = AtomicReference("")
+    private val disasterRestoreToken = AtomicReference("")
 
     override fun getToken(): String = token.get()
 
@@ -47,6 +51,16 @@ class InMemorySecureRefreshTokenStore : SecureRefreshTokenStore {
 
     override fun clearPendingMemberSecret() {
         pendingMemberSecret.set("")
+    }
+
+    override fun getDisasterRestoreToken(): String = disasterRestoreToken.get()
+
+    override fun setDisasterRestoreToken(token: String) {
+        disasterRestoreToken.set(token)
+    }
+
+    override fun clearDisasterRestoreToken() {
+        disasterRestoreToken.set("")
     }
 }
 
@@ -96,6 +110,25 @@ class EncryptedSecureRefreshTokenStore @Inject constructor(
         }
     }
 
+    override fun getDisasterRestoreToken(): String =
+        prefs.getString(KEY_DISASTER_RESTORE_TOKEN, "").orEmpty()
+
+    override fun setDisasterRestoreToken(token: String) {
+        if (token.isBlank()) {
+            clearDisasterRestoreToken()
+            return
+        }
+        check(prefs.edit().putString(KEY_DISASTER_RESTORE_TOKEN, token).commit()) {
+            "Unable to persist encrypted disaster restore token"
+        }
+    }
+
+    override fun clearDisasterRestoreToken() {
+        check(prefs.edit().remove(KEY_DISASTER_RESTORE_TOKEN).commit()) {
+            "Unable to clear encrypted disaster restore token"
+        }
+    }
+
     override fun verifyReadable() {
         prefs.all
     }
@@ -104,6 +137,7 @@ class EncryptedSecureRefreshTokenStore @Inject constructor(
         const val PREFS_NAME = "lezi_secure_family"
         const val KEY_REFRESH_TOKEN = "refresh_token"
         const val KEY_PENDING_MEMBER_SECRET = "pending_member_secret"
+        const val KEY_DISASTER_RESTORE_TOKEN = "disaster_restore_token"
 
         fun createPrefs(context: Context): SharedPreferences {
             val masterKey = MasterKey.Builder(context)

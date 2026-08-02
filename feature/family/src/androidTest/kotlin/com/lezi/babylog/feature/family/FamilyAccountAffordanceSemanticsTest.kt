@@ -141,12 +141,19 @@ class FamilyAccountAffordanceSemanticsTest {
             }
         }
 
-        for (copy in listOf("乐乐一家", "管理员 ★", "家人记录已对齐", "退出这台设备", "删除家庭")) {
+        for (copy in listOf(
+            "乐乐一家",
+            "管理员 ★",
+            "家人记录已对齐",
+            "家庭网络设置",
+            "退出这台设备",
+            "删除家庭",
+        )) {
             compose.onNodeWithText(copy).assertIsDisplayed()
         }
         compose.onNodeWithContentDescription("家庭成员与设备：1 位家人").assertIsDisplayed()
         compose.onAllNodesWithText("退出家庭").assertCountEquals(0)
-        for (extra in listOf("改名", "改称呼", "网络设置", "邀请家人", "点同步状态")) {
+        for (extra in listOf("改名", "改称呼", "邀请家人", "点同步状态")) {
             compose.onAllNodesWithText(extra, substring = true).assertCountEquals(0)
         }
     }

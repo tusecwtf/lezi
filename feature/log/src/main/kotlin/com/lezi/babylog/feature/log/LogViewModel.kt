@@ -340,7 +340,7 @@ class LogViewModel @Inject constructor(
         if (!refreshing.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
             try {
-                syncPort.sync(SyncTrigger.PullToRefresh)
+                syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh)
                 timelineWindowRepository.refreshMembers()
             } finally {
                 refreshing.value = false

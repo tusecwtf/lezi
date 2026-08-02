@@ -2,7 +2,8 @@
 
 > 决策锁定：2026-07-31（连续 grilling，用户逐项确认）
 > 实现基线：`39426a037986df574d16b0512a3db10f7c225382`
-> 架构决策：[ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)
+> 架构决策：[ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)、
+> [ADR-0014](../adr/0014-owner-device-restores-only-empty-family-servers.md)
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
 本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；未改变的 Room/Outbox、本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线。
@@ -29,7 +30,7 @@ ping 和 health 都不再充当身份或同步门闩。
 | 兼容 | 一次 fresh-current 切换，不保留旧 HTTP、SSID、邀请码或长期 token 降级旁路 |
 
 继续明确不做：后台轮询、FCM、永久前台服务、P2P、逐条伴侣通知、多家庭 SaaS、全局用户
-中心、OAuth/OIDC、多主复制、客户端 NAS→VPS 迁移/恢复协议、产品级审计系统和登录历史页。
+中心、OAuth/OIDC、多主复制、两个已配置家庭的迁移/合并、产品级审计系统和登录历史页。
 
 ## 3. 身份、设备与凭证
 
@@ -222,12 +223,17 @@ session，不影响 membership 和其它设备。
 
 ### 7.1 触发
 
-只保留以下触发器，并共用一个 sync mutex：
+只保留以下触发器，并共用一个 sync mutex 与前台 availability 协调器：
 
 - App 回到前台；
-- 本地事实写入成功；
+- 本地事实写入成功（只通知“有待发布内容”，不在写入调用栈执行网络）；
 - 记录、汇总、成长页进入时的节流刷新；
 - 用户在记录、汇总、成长页下拉刷新。
+
+健康探测不要求公网 `VALIDATED`，只要求 Android 网络可用与可信 TLS。`/health`、`/ready`
+和 setup capability 匿名并行验证，总等待不超过 8 秒且不得携带 access/refresh token 或家庭
+数据。健康成功产生 30 秒租约；失败使用 30 秒/2 分钟/10 分钟退避。本地写事件只合并待发布
+信号，不打破失败退避；回前台、网络恢复和下拉刷新可以立即探测。进入后台停止探测和同步。
 
 前三项是静默自动同步，不是用户主动发起的「同步动作」，也不增加任何 UI 入口。用户可主动
 触发的「立即同步」只有记录、汇总、成长三页的下拉刷新；账户页无同步按钮、独立同步页或
@@ -285,14 +291,16 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 
 ### 8.1 账户页
 
-小白用户只看到：家庭名、我的称呼、一句同步结果和「家庭成员与设备」。管理员同时看到
+小白用户只看到：家庭名、我的称呼、一句同步结果、「家庭成员与设备」和「家庭网络设置」。
+管理员同时看到
 「待确认设备」角标。页面底部按角色显示：
 
 - 普通成员：`退出这台设备`、`退出家庭`；
 - 管理员：`退出这台设备`、`删除家庭`。
 
 服务器连接尚未完成时，从这里进入「连接家庭服务器」；管理员接管整合在「加入家庭」流程，
-不单独建立恢复页。
+已加入设备则从「退出这台设备」上方进入「家庭网络设置」。该子页只展示当前 HTTPS 地址、
+结果向连接状态、最近健康时间和必要操作，不展示 token、server ID、登录历史或“立即同步”。
 
 ### 8.2 家庭成员与设备
 
@@ -325,17 +333,26 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 所有身份判断只从已验证 credential 与服务端状态推导，不能信任请求体自报 family、membership、
 device 或 role。服务端不得记录根密码、access/refresh token、grant 或敏感请求体。
 
-## 10. 服务端部署与地址改变
+## 10. 家庭网络设置、地址改变与灾难恢复
 
-App 不提供 NAS→VPS 迁移、handoff、备份恢复、server identity 搬迁或自动 endpoint 替换。
-服务器运维者可以按部署流程搬迁同一数据库和媒体；若 endpoint 发生变化：
+服务器运维者仍可按部署流程完整搬迁同一数据库、媒体和 TLS 身份。已加入设备同时提供安全
+重连路径：地址编辑只产生候选配置；候选必须在不发送旧凭证的前提下通过可信 TLS、Lezi
+`/health` + `/ready` + setup probe。失败、取消或进程中断不改变旧 endpoint、session、Room、
+Outbox 或 media。
 
-- 所有 App 将其视为新的连接地址；
-- 管理员用根密码登录；普通成员重新申请并获批或扫描管理员 QR；
-- 旧 endpoint 凭证绝不能在信任新 endpoint 前发送；
-- 同一家庭是否保留历史取决于服务端部署是否完整保留数据库，不由客户端迁移协议保证。
-
-该部署工作不属于本产品 Spec 的 App/同步拆票范围。
+- 地址或 TOFU 证书变化都视为新信任边界；自签名变化显示旧/新指纹并二次确认，接受后仍须
+  重新登录/审批。系统 PKI 地址继续只按平台证书校验。
+- configured 候选走普通 Owner 登录或成员申请；新会话 `family_id` 必须与旧会话相同才原子
+  切换。不同 configured 家庭直接阻断，不提供合并。
+- empty 候选只在本机仍保留旧 Owner 身份时提供「从本机恢复家庭」。用户输入新服务器根密码、
+  查看恢复摘要并最终二次确认；普通成员不能恢复。
+- 恢复有效护理数据：宝宝、记录、计划、履行关系、自定义项目、照片与尚未发布的本机修改；
+  排除旧 membership/device/session/申请/设置/墓碑/游标/凭证，历史作者统一归新 Owner。
+- 服务端提供版本化 start/manifest/media/status/commit/cancel API。根密码只在 start/commit 验证
+  且不落盘；中段用高熵、限时、可撤销恢复凭证。`/data` staging/journal 校验引用、大小与
+  SHA-256 后一次激活，24 小时过期；request ID 幂等，重启与 commit 回包丢失后可查询续传。
+- staging 提交前不能加入或普通同步。commit 成功后客户端在 sync mutex 内切换 endpoint/session、
+  替换成员目录并退休旧 Outbox/回执。现有 configured 数据根升级 0.3.3 不进入恢复路径。
 
 ## 11. 验收标准
 
@@ -356,10 +373,14 @@ App 不提供 NAS→VPS 迁移、handoff、备份恢复、server identity 搬迁
 11. 自托管更新：无会话不能拉元数据/APK；已加入可检查；低于 minSupported 时权威同步失败且
     UI 进入强制升级，同时仍可下载安装；打包缺 release APK 失败；升级后应用私有目录无 APK 残留
     （系统安装器缓存不在承诺范围）。
+12. NAS 断开或 roster 请求永久挂起时，Room 首屏与全部本地护理写入仍完成；恢复健康后待发布
+    内容自动收敛。候选地址失败可证明旧配置未变，不同 family ID 被阻断。
+13. 隔离空 0.3.3 服务可完成 Owner 设备灾难恢复、重启续传与幂等 commit；非空服务、普通成员、
+    manifest/media 篡改和过期批次都 fail closed，且不在现有家庭 NAS 执行破坏性恢复测试。
 
 ## 12. 文档与代码处置
 
-- 本文与 ADR-0011 是当前合同；ADR-0009、ADR-0010 已被取代。
+- 本文、ADR-0011 与 ADR-0014 是当前合同；ADR-0009、ADR-0010 已被取代。
 - 旧 `sync-home-lan` 合同已删除；不得据 git 历史中的旧文恢复旧 wire、配置或界面。
 - 0.3.1 已完成 fresh-current 收口：生产只保留可信 HTTPS、每设备会话、成员申请/审批与
   单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。

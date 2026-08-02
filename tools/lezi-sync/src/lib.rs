@@ -34,7 +34,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use handlers::{app_update, health, identity, media, sync};
+use handlers::{app_update, disaster_restore, health, identity, media, sync};
 use hmac::{Hmac, Mac};
 use members::{
     add_family_member, approve_member_rename_request, cancel_my_member_rename_request,
@@ -67,6 +67,8 @@ pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 /// Advertised on `/health` so clients only send the additive server-owned author field
 /// to servers that accept and canonicalize it.
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
+pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
+pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
 pub const CAPABILITY_DEVICE_SESSIONS: &str = "device_sessions_v1";
@@ -413,7 +415,8 @@ pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
     }
     let store = Store::open(database_path)?;
     store.reconcile_owner_root_fingerprint((config.clock)(), owner_root_fingerprint.as_deref())?;
-    media::collect_orphan_family_media(&store, &media_root)?;
+    let restore_family_ids = disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
+    media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
     media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
     let app_update_metadata_path = config
         .app_update_metadata_path
@@ -452,6 +455,30 @@ pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
         .route("/v1/app-update", get(app_update::get_app_update))
         .route("/v1/app-update/apk", get(app_update::get_app_update_apk))
         .route("/v1/family/create", post(identity::create_family))
+        .route(
+            "/v1/disaster-restore/batches",
+            post(disaster_restore::start),
+        )
+        .route(
+            "/v1/disaster-restore/batches/{batch_id}/manifest",
+            put(disaster_restore::put_manifest),
+        )
+        .route(
+            "/v1/disaster-restore/batches/{batch_id}/media/{client_uuid}",
+            put(disaster_restore::put_media),
+        )
+        .route(
+            "/v1/disaster-restore/batches/{batch_id}/status",
+            get(disaster_restore::status),
+        )
+        .route(
+            "/v1/disaster-restore/batches/{batch_id}/commit",
+            post(disaster_restore::commit),
+        )
+        .route(
+            "/v1/disaster-restore/batches/{batch_id}/cancel",
+            post(disaster_restore::cancel),
+        )
         .route("/v1/owner/login", post(identity::owner_login_device))
         .route("/v1/owner/takeover", post(identity::owner_takeover))
         .route(

@@ -70,6 +70,8 @@ import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
 import com.lezi.babylog.feature.family.wizard.MemberLoginRequestDialog
 import com.lezi.babylog.feature.family.wizard.OwnerLoginDialog
 import com.lezi.babylog.feature.family.wizard.OwnerTakeoverConfirmationDialog
+import com.lezi.babylog.feature.family.networksettings.FamilyNetworkSettingsHost
+import com.lezi.babylog.feature.family.networksettings.FamilyNetworkSettingsScreen
 import com.lezi.babylog.feature.family.components.FamilyMessageDialog
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyEndpointDraft
@@ -102,6 +104,7 @@ fun FamilyRoute(
     overviewHost: AccountOverviewHost = hiltViewModel(),
     membersHost: MembersDevicesHost = hiltViewModel(),
     wizardHost: AccountFamilyWizardHost = hiltViewModel(),
+    networkSettingsHost: FamilyNetworkSettingsHost = hiltViewModel(),
 ) {
     val overview by overviewHost.ui.collectAsStateWithLifecycle()
     val members by membersHost.ui.collectAsStateWithLifecycle()
@@ -109,6 +112,7 @@ fun FamilyRoute(
     val checkingAppUpdate by overviewHost.checkingAppUpdate.collectAsStateWithLifecycle()
     val installingAppUpdate by overviewHost.installingAppUpdate.collectAsStateWithLifecycle()
     val endpointSeed by wizardHost.endpointSeed.collectAsStateWithLifecycle()
+    val networkSettings by networkSettingsHost.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
     var retainedWizardMode by rememberSaveable { mutableStateOf<String?>(null) }
@@ -147,6 +151,7 @@ fun FamilyRoute(
     var deleteFamilyRootPassword by remember { mutableStateOf("") }
     var deleteFamilyFeedback by remember { mutableStateOf<String?>(null) }
     var deletingFamily by remember { mutableStateOf(false) }
+    var showNetworkSettings by rememberSaveable { mutableStateOf(false) }
 
     val familyWizardState by wizardHost.familyWizardState.collectAsStateWithLifecycle()
     val verifiedEndpoint by wizardHost.verifiedEndpoint.collectAsStateWithLifecycle(initialValue = null)
@@ -394,6 +399,27 @@ fun FamilyRoute(
         }
     }
 
+    if (showNetworkSettings) {
+        LaunchedEffect(Unit) { networkSettingsHost.entered() }
+        FamilyNetworkSettingsScreen(
+            ui = networkSettings,
+            onBack = { showNetworkSettings = false },
+            onEndpointDraftChange = networkSettingsHost::updateEndpointDraft,
+            onProbeCandidate = networkSettingsHost::probeCandidate,
+            onTrustCandidate = networkSettingsHost::trustCandidate,
+            onRefreshAvailability = networkSettingsHost::refreshAvailability,
+            onReconnectOwner = networkSettingsHost::reconnectOwner,
+            onRequestReconnectMember = networkSettingsHost::requestReconnectMember,
+            onCheckReconnectMember = networkSettingsHost::checkReconnectMember,
+            onCancelReconnectMember = networkSettingsHost::cancelReconnectMember,
+            onPrepareDisasterRecovery = networkSettingsHost::prepareDisasterRecovery,
+            onStartDisasterRecovery = networkSettingsHost::startDisasterRecovery,
+            onCommitDisasterRecovery = networkSettingsHost::commitDisasterRecovery,
+            onCancelDisasterRecovery = networkSettingsHost::cancelDisasterRecovery,
+        )
+        return
+    }
+
     PageScaffoldBackground {
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(LeziSpacing.Page),
@@ -418,6 +444,7 @@ fun FamilyRoute(
                 },
                 onConnectFamily = ::openEndpointConnection,
                 onScanMemberLoginQr = ::scanWithPermission,
+                onOpenNetworkSettings = { showNetworkSettings = true },
                 onLogoutCurrentDevice = { dialog = FamilyDialog.ConfirmDeviceLogout },
                 onLeaveFamily = { dialog = FamilyDialog.ConfirmLeave },
                 onDeleteFamily = {

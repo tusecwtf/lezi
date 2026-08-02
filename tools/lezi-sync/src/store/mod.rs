@@ -20,6 +20,7 @@ mod bundles;
 mod identity;
 mod media;
 mod pull;
+mod restore;
 mod schema;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -80,6 +81,22 @@ pub struct CreateMemberLoginRequestInput<'a> {
     pub display_name_key: &'a str,
     pub device_name: &'a str,
     pub pending_secret: &'a str,
+}
+
+pub struct DisasterRestoreIdentityInput<'a> {
+    pub now: i64,
+    pub family_id: &'a str,
+    pub family_name: &'a str,
+    pub owner_membership_id: &'a str,
+    pub owner_display_name: &'a str,
+    pub owner_display_name_key: &'a str,
+    pub device_id: &'a str,
+    pub device_name: &'a str,
+    pub session_id: &'a str,
+    pub access_token: &'a str,
+    pub access_expires_at: i64,
+    pub refresh_token: &'a str,
+    pub owner_root_fingerprint: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

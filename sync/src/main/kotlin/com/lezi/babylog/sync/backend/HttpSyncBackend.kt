@@ -85,6 +85,191 @@ class HttpSyncBackend internal constructor(
         },
         clientVersionCode = clientAppVersion.versionCode,
     )
+
+    override suspend fun anonymousHealth(endpoint: TrustedEndpointProfile): AnonymousHealth {
+        val json = get(endpoint, "/health")
+        require(json.requiredBoolean("ok", "health")) { "家庭服务器 health 未就绪" }
+        val capabilities = json.requiredArray("capabilities", "health").mapIndexed { index, value ->
+            (value as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("health.capabilities[$index] 无效")
+        }.toSet()
+        return AnonymousHealth(
+            version = json.requiredNonBlankString("version", "health"),
+            capabilities = capabilities,
+        )
+    }
+
+    override suspend fun anonymousReady(endpoint: TrustedEndpointProfile): AnonymousReadiness {
+        val json = get(endpoint, "/ready")
+        require(json.requiredBoolean("ok", "ready")) { "家庭服务器尚未 ready" }
+        require(json.requiredString("status", "ready") == "ready") {
+            "家庭服务器 readiness 状态无效"
+        }
+        return AnonymousReadiness(
+            version = json.requiredNonBlankString("version", "ready"),
+        )
+    }
+
+    override suspend fun startDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        requestId: String,
+        familyId: String,
+        familyName: String,
+        ownerDisplayName: String,
+        deviceName: String,
+        rootPassword: String,
+    ): DisasterRestoreBatch {
+        require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
+        val json = post(
+            endpoint = endpoint,
+            path = "/v1/disaster-restore/batches",
+            token = null,
+            body = buildJsonObject {
+                put("request_id", requestId)
+                put("family_id", familyId)
+                put("family_name", requireNotNull(normalizeFamilyNameForWire(familyName)))
+                put("owner_display_name", requireMemberDisplayName(ownerDisplayName))
+                put("device_name", requireDeviceName(deviceName))
+            },
+            extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
+        )
+        require(json.requiredLong("protocol_version", "disaster restore start") == 1L) {
+            "家庭恢复协议版本不兼容"
+        }
+        return DisasterRestoreBatch(
+            batchId = json.requiredNonBlankString("batch_id", "disaster restore start"),
+            recoveryToken = json.requiredNonBlankString(
+                "recovery_token",
+                "disaster restore start",
+            ),
+            status = json.requiredNonBlankString("status", "disaster restore start"),
+            expiresAtEpochSeconds = json.requiredLong(
+                "expires_at",
+                "disaster restore start",
+            ),
+        )
+    }
+
+    override suspend fun putDisasterRestoreManifest(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        requestId: String,
+        entities: List<SyncEntity>,
+        media: List<DisasterRestoreMediaSpec>,
+    ): DisasterRestoreStatus = requestJson(
+        base = endpoint.origin,
+        path = "/v1/disaster-restore/batches/$batchId/manifest",
+        method = "PUT",
+        token = recoveryToken.requireRestoreCredential(),
+        body = buildJsonObject {
+            put("request_id", requestId)
+            put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
+            put("media", buildJsonArray {
+                media.forEach { spec ->
+                    add(buildJsonObject {
+                        put("client_uuid", spec.clientUuid)
+                        put("byte_size", spec.byteSize)
+                        put("sha256", spec.sha256)
+                    })
+                }
+            })
+        },
+        trustedEndpoint = endpoint,
+    ).toDisasterRestoreStatus()
+
+    override suspend fun putDisasterRestoreMedia(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        clientUuid: String,
+        source: SyncMediaUploadSource,
+    ): DisasterRestoreStatus = requestJsonStream(
+        base = endpoint.origin,
+        path = "/v1/disaster-restore/batches/$batchId/media/$clientUuid",
+        method = "PUT",
+        token = recoveryToken.requireRestoreCredential(),
+        source = source,
+        trustedEndpoint = endpoint,
+    ).toDisasterRestoreStatus()
+
+    override suspend fun disasterRestoreStatus(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+    ): DisasterRestoreStatus = requestJson(
+        base = endpoint.origin,
+        path = "/v1/disaster-restore/batches/$batchId/status",
+        method = "GET",
+        token = recoveryToken.requireRestoreCredential(),
+        body = null,
+        trustedEndpoint = endpoint,
+    ).toDisasterRestoreStatus()
+
+    override suspend fun commitDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        requestId: String,
+        rootPassword: String,
+    ): SessionBootstrapResult {
+        require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
+        val json = requestJson(
+            base = endpoint.origin,
+            path = "/v1/disaster-restore/batches/$batchId/commit",
+            method = "POST",
+            token = recoveryToken.requireRestoreCredential(),
+            body = buildJsonObject { put("request_id", requestId) },
+            extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
+            trustedEndpoint = endpoint,
+        )
+        require(json.requiredLong("protocol_version", "disaster restore commit") == 1L) {
+            "家庭恢复协议版本不兼容"
+        }
+        require(json.requiredString("status", "disaster restore commit") == "committed") {
+            "家庭恢复提交状态无效"
+        }
+        require(json.requiredString("role", "disaster restore commit") == "owner") {
+            "家庭恢复提交身份无效"
+        }
+        return SessionBootstrapResult(
+            familyId = json.requiredNonBlankString("family_id", "disaster restore commit"),
+            accessToken = json.requiredNonBlankString(
+                "access_token",
+                "disaster restore commit",
+            ),
+            refreshToken = json.requiredNonBlankString(
+                "refresh_token",
+                "disaster restore commit",
+            ),
+            accessExpiresAtEpochSeconds = json.requiredLong(
+                "access_expires_at",
+                "disaster restore commit",
+            ),
+            deviceId = json.requiredNonBlankString("device_id", "disaster restore commit"),
+            role = FamilyRole.Owner,
+            generation = json.requiredNonBlankString("generation", "disaster restore commit"),
+            familyName = json.requiredFamilyName("disaster restore commit"),
+            membershipId = json.requiredNonBlankString(
+                "membership_id",
+                "disaster restore commit",
+            ),
+        )
+    }
+
+    override suspend fun cancelDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+    ): DisasterRestoreStatus = requestJson(
+        base = endpoint.origin,
+        path = "/v1/disaster-restore/batches/$batchId/cancel",
+        method = "POST",
+        token = recoveryToken.requireRestoreCredential(),
+        body = buildJsonObject {},
+        trustedEndpoint = endpoint,
+    ).toDisasterRestoreStatus()
+
     override suspend fun create(
         baseUrl: String,
         deviceId: String,
@@ -152,6 +337,26 @@ class HttpSyncBackend internal constructor(
         ).toOwnerLoginResult()
     }
 
+    override suspend fun ownerLogin(
+        endpoint: TrustedEndpointProfile,
+        deviceName: String,
+        loginRequestId: String,
+        rootPassword: String,
+        takeover: Boolean,
+    ): SessionBootstrapResult {
+        require(rootPassword.isNotBlank()) { "请填写管理员根密码" }
+        return post(
+            endpoint = endpoint,
+            path = if (takeover) "/v1/owner/takeover" else "/v1/owner/login",
+            token = null,
+            body = buildJsonObject {
+                put("login_request_id", loginRequestId)
+                put("device_name", requireDeviceName(deviceName))
+            },
+            extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
+        ).toOwnerLoginResult()
+    }
+
     override suspend fun requestMemberLogin(
         baseUrl: String,
         displayName: String,
@@ -176,6 +381,30 @@ class HttpSyncBackend internal constructor(
         )
     }
 
+    override suspend fun requestMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        displayName: String,
+        deviceName: String,
+    ): MemberLoginReceipt {
+        val json = post(
+            endpoint = endpoint,
+            path = "/v1/member/requests",
+            token = null,
+            body = buildJsonObject {
+                put("display_name", requireMemberDisplayName(displayName))
+                put("device_name", requireDeviceName(deviceName))
+            },
+        )
+        require(json.requiredString("status", "member request") == "pending") {
+            "member request 响应 status 无效"
+        }
+        return MemberLoginReceipt(
+            requestId = json.requiredNonBlankString("request_id", "member request"),
+            pendingSecret = json.requiredNonBlankString("pending_secret", "member request"),
+            expiresAtEpochSeconds = json.requiredLong("expires_at", "member request"),
+        )
+    }
+
     override suspend fun memberLoginStatus(
         baseUrl: String,
         pendingSecret: String,
@@ -184,6 +413,16 @@ class HttpSyncBackend internal constructor(
         "/v1/member/requests/status",
         null,
         pendingSecretBody(pendingSecret),
+    ).requiredMemberLoginStatus("member request status")
+
+    override suspend fun memberLoginStatus(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ): MemberLoginStatus = post(
+        endpoint = endpoint,
+        path = "/v1/member/requests/status",
+        token = null,
+        body = pendingSecretBody(pendingSecret),
     ).requiredMemberLoginStatus("member request status")
 
     override suspend fun cancelMemberLogin(baseUrl: String, pendingSecret: String) {
@@ -195,6 +434,18 @@ class HttpSyncBackend internal constructor(
         )
     }
 
+    override suspend fun cancelMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ) {
+        post(
+            endpoint = endpoint,
+            path = "/v1/member/requests/cancel",
+            token = null,
+            body = pendingSecretBody(pendingSecret),
+        )
+    }
+
     override suspend fun claimMemberLogin(
         baseUrl: String,
         pendingSecret: String,
@@ -203,6 +454,16 @@ class HttpSyncBackend internal constructor(
         "/v1/member/requests/claim",
         null,
         pendingSecretBody(pendingSecret),
+    ).toMemberClaimResult()
+
+    override suspend fun claimMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ): SessionBootstrapResult = post(
+        endpoint = endpoint,
+        path = "/v1/member/requests/claim",
+        token = null,
+        body = pendingSecretBody(pendingSecret),
     ).toMemberClaimResult()
 
     override suspend fun pendingMemberLogins(
@@ -651,10 +912,29 @@ class HttpSyncBackend internal constructor(
         path: String,
         token: String?,
         body: JsonObject,
-    ): JsonObject = requestJson(endpoint.origin, path, "POST", token, body, trustedEndpoint = endpoint)
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): JsonObject = requestJson(
+        endpoint.origin,
+        path,
+        "POST",
+        token,
+        body,
+        extraHeaders,
+        trustedEndpoint = endpoint,
+    )
 
     private suspend fun get(base: String, path: String, token: String?): JsonObject =
         requestJson(base, path, "GET", token, null)
+
+    private suspend fun get(endpoint: TrustedEndpointProfile, path: String): JsonObject =
+        requestJson(
+            base = endpoint.origin,
+            path = path,
+            method = "GET",
+            token = null,
+            body = null,
+            trustedEndpoint = endpoint,
+        )
 
     private suspend fun requestJson(
         base: String,
@@ -731,8 +1011,9 @@ class HttpSyncBackend internal constructor(
         method: String,
         token: String,
         source: SyncMediaUploadSource,
+        trustedEndpoint: TrustedEndpointProfile? = null,
     ): JsonObject {
-        val resolvedEndpoint = trustedEndpointResolver?.resolve(base)
+        val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
             require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
                 "待上传媒体大小超出支持范围"
@@ -924,6 +1205,21 @@ private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageSta
     missingMedia = requiredStringArray("missing_media", "bundle stage"),
     stagedMedia = requiredStringArray("staged_media", "bundle stage"),
 )
+
+private fun JsonObject.toDisasterRestoreStatus(): DisasterRestoreStatus {
+    require(requiredLong("protocol_version", "disaster restore status") == 1L) {
+        "家庭恢复协议版本不兼容"
+    }
+    return DisasterRestoreStatus(
+        batchId = requiredNonBlankString("batch_id", "disaster restore status"),
+        status = requiredNonBlankString("status", "disaster restore status"),
+        expiresAtEpochSeconds = requiredLong("expires_at", "disaster restore status"),
+    )
+}
+
+private fun String.requireRestoreCredential(): String = trim().also {
+    require(it.isNotEmpty()) { "家庭恢复凭据已丢失，请取消后重新开始" }
+}
 
 private fun JsonObject.toCreateResult(): SessionBootstrapResult {
     require(requiredString("role", "create") == "owner") { "create 响应 role 无效" }

@@ -12,6 +12,18 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
+import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.backend.MemberLoginReceipt
 
@@ -31,6 +43,31 @@ enum class FamilyRole {
 data class CreatorAcknowledgementRef(
     val entityType: String,
     val clientUuid: String,
+)
+
+data class DisasterRestoreCheckpoint(
+    val batchId: String,
+    val endpoint: TrustedEndpointProfile,
+    val familyId: String,
+    val startRequestId: String,
+    val manifestRequestId: String,
+    val commitRequestId: String,
+    val expiresAtEpochSeconds: Long,
+    val status: String,
+    val entityVersions: List<DisasterRestoreEntityVersion>,
+)
+
+data class DisasterRestoreEntityVersion(
+    val type: String,
+    val clientUuid: String,
+    val updatedAt: Long,
+    val restored: Boolean,
+)
+
+data class DisasterRestoreRequestIds(
+    val start: String,
+    val manifest: String,
+    val commit: String,
 )
 
 data class SyncSession(
@@ -89,12 +126,29 @@ data class SyncSession(
 interface SyncPreferences {
     val session: Flow<SyncSession>
     val verifiedEndpoint: Flow<TrustedEndpointProfile?>
+    val familyMemberDirectory: Flow<List<FamilyMember>>
+        get() = kotlinx.coroutines.flow.flowOf(emptyList())
+    val lastServerHealthyAt: Flow<Long?>
+        get() = kotlinx.coroutines.flow.flowOf(null)
     val pendingMemberLogin: Flow<PendingMemberLogin?>
+        get() = kotlinx.coroutines.flow.flowOf(null)
+    val disasterRestoreCheckpoint: Flow<DisasterRestoreCheckpoint?>
         get() = kotlinx.coroutines.flow.flowOf(null)
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile)
     suspend fun forgetEndpoint()
+    suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) = Unit
+    suspend fun clearFamilyMemberDirectory() = Unit
+    suspend fun saveLastServerHealthyAt(atMillis: Long) = Unit
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
+    /**
+     * Candidate reconnect commit: endpoint trust, session identity, and retirement of the old
+     * member directory share one durable commit.
+     */
+    suspend fun saveReconnectedSession(
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+    )
     /** Durably stores a claimed session but keeps it non-pushable until old receipts reset. */
     suspend fun saveSessionPendingReplicaReset(session: SyncSession, previous: SyncSession) {
         saveSession(session)
@@ -123,6 +177,18 @@ interface SyncPreferences {
     ): Unit = throw UnsupportedOperationException("Pending member login is not implemented")
     suspend fun pendingMemberSecret(): String = ""
     suspend fun clearPendingMemberLogin() = Unit
+    suspend fun saveDisasterRestoreCheckpoint(
+        checkpoint: DisasterRestoreCheckpoint,
+        recoveryToken: String,
+    ) = Unit
+    suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds =
+        DisasterRestoreRequestIds(
+            start = UUID.randomUUID().toString(),
+            manifest = UUID.randomUUID().toString(),
+            commit = UUID.randomUUID().toString(),
+        )
+    suspend fun disasterRestoreToken(): String = ""
+    suspend fun clearDisasterRestoreCheckpoint() = Unit
     suspend fun clearCreateRequestId()
     /** Wipes the endpoint, trust profile, credentials, and family session. */
     suspend fun clearAllLocalSyncConfig()
@@ -167,6 +233,12 @@ class DataStoreSyncPreferences @Inject constructor(
             }
         }.getOrNull()
     }
+    override val familyMemberDirectory: Flow<List<FamilyMember>> = dataStore.data.map { prefs ->
+        decodeFamilyMemberDirectory(prefs[Keys.FAMILY_MEMBER_DIRECTORY])
+    }
+    override val lastServerHealthyAt: Flow<Long?> = dataStore.data.map { prefs ->
+        prefs[Keys.LAST_SERVER_HEALTHY_AT]
+    }
     override val pendingMemberLogin: Flow<PendingMemberLogin?> = dataStore.data.map { prefs ->
         val requestId = prefs[Keys.PENDING_MEMBER_REQUEST_ID].orEmpty()
         if (requestId.isBlank() || secureTokenStore.getPendingMemberSecret().isBlank()) {
@@ -179,6 +251,8 @@ class DataStoreSyncPreferences @Inject constructor(
             expiresAtEpochSeconds = prefs[Keys.PENDING_MEMBER_EXPIRES_AT] ?: 0L,
         )
     }
+    override val disasterRestoreCheckpoint: Flow<DisasterRestoreCheckpoint?> =
+        dataStore.data.map(::mapDisasterRestoreCheckpoint)
 
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile) {
         dataStore.edit { prefs ->
@@ -199,6 +273,26 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
             prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
         }
+    }
+
+    override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
+        val encoded = encodeFamilyMemberDirectory(members)
+        dataStore.edit { prefs ->
+            if (encoded == "[]") {
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+            } else {
+                prefs[Keys.FAMILY_MEMBER_DIRECTORY] = encoded
+            }
+        }
+    }
+
+    override suspend fun clearFamilyMemberDirectory() {
+        dataStore.edit { it.remove(Keys.FAMILY_MEMBER_DIRECTORY) }
+    }
+
+    override suspend fun saveLastServerHealthyAt(atMillis: Long) {
+        require(atMillis >= 0) { "server healthy time must be non-negative" }
+        dataStore.edit { it[Keys.LAST_SERVER_HEALTHY_AT] = atMillis }
     }
 
     private fun mapSession(prefs: Preferences): SyncSession {
@@ -270,24 +364,43 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.SERVER_SCHEME] = normalized.scheme
             }
         }
-        if (shouldClearSession) secureTokenStore.clearPendingMemberSecret()
+        if (shouldClearSession) {
+            secureTokenStore.clearPendingMemberSecret()
+            secureTokenStore.clearDisasterRestoreToken()
+        }
         finishPendingFamilyCredentialClear()
     }
 
     override suspend fun saveSession(session: SyncSession) {
-        persistSession(session, pendingReplicaResetPrevious = null)
+        persistSession(session, pendingReplicaResetPrevious = null, reconnectedEndpoint = null)
+    }
+
+    override suspend fun saveReconnectedSession(
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+    ) {
+        persistSession(
+            session,
+            pendingReplicaResetPrevious = null,
+            reconnectedEndpoint = endpoint,
+        )
     }
 
     override suspend fun saveSessionPendingReplicaReset(
         session: SyncSession,
         previous: SyncSession,
     ) {
-        persistSession(session, pendingReplicaResetPrevious = previous)
+        persistSession(
+            session,
+            pendingReplicaResetPrevious = previous,
+            reconnectedEndpoint = null,
+        )
     }
 
     private suspend fun persistSession(
         session: SyncSession,
         pendingReplicaResetPrevious: SyncSession?,
+        reconnectedEndpoint: TrustedEndpointProfile?,
     ) {
         val config = session.endpointConfig.withNormalized()
         dataStore.edit { prefs ->
@@ -303,9 +416,21 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.SERVER_PORT] = config.port
                 prefs[Keys.SERVER_SCHEME] = config.scheme
             }
+            reconnectedEndpoint?.let { endpoint ->
+                prefs[Keys.VERIFIED_ENDPOINT_ORIGIN] = endpoint.origin
+                prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE] = endpoint.trustMode.name
+                endpoint.spkiSha256?.let { pin ->
+                    prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256] = pin
+                } ?: prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+                // Membership ids belong to the server identity, even when the restored
+                // family_id is intentionally preserved. Retire the old display projection in
+                // the same DataStore commit as endpoint/session activation.
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+            }
             prefs[Keys.FAMILY_ID] = session.familyId
             if (previousFamilyId != session.familyId) {
                 prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
             }
             // The owner session and retirement of its idempotency key are one
             // durable commit. A separate post-commit edit can fail after the UI
@@ -490,6 +615,64 @@ class DataStoreSyncPreferences @Inject constructor(
         secureTokenStore.clearPendingMemberSecret()
     }
 
+    override suspend fun saveDisasterRestoreCheckpoint(
+        checkpoint: DisasterRestoreCheckpoint,
+        recoveryToken: String,
+    ) {
+        require(recoveryToken.isNotBlank()) { "disaster restore token is required" }
+        secureTokenStore.setDisasterRestoreToken(recoveryToken)
+        dataStore.edit { prefs ->
+            prefs[Keys.RESTORE_BATCH_ID] = checkpoint.batchId
+            prefs[Keys.RESTORE_ENDPOINT_ORIGIN] = checkpoint.endpoint.origin
+            prefs[Keys.RESTORE_ENDPOINT_TRUST_MODE] = checkpoint.endpoint.trustMode.name
+            checkpoint.endpoint.spkiSha256?.let { pin ->
+                prefs[Keys.RESTORE_ENDPOINT_SPKI_SHA256] = pin
+            } ?: prefs.remove(Keys.RESTORE_ENDPOINT_SPKI_SHA256)
+            prefs[Keys.RESTORE_FAMILY_ID] = checkpoint.familyId
+            prefs[Keys.RESTORE_START_REQUEST_ID] = checkpoint.startRequestId
+            prefs[Keys.RESTORE_MANIFEST_REQUEST_ID] = checkpoint.manifestRequestId
+            prefs[Keys.RESTORE_COMMIT_REQUEST_ID] = checkpoint.commitRequestId
+            prefs[Keys.RESTORE_EXPIRES_AT] = checkpoint.expiresAtEpochSeconds
+            prefs[Keys.RESTORE_STATUS] = checkpoint.status
+            prefs[Keys.RESTORE_ENTITY_VERSIONS] = encodeDisasterRestoreEntityVersions(
+                checkpoint.entityVersions,
+            )
+        }
+    }
+
+    override suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds {
+        val generated = DisasterRestoreRequestIds(
+            UUID.randomUUID().toString(),
+            UUID.randomUUID().toString(),
+            UUID.randomUUID().toString(),
+        )
+        dataStore.edit { prefs ->
+            if (prefs[Keys.RESTORE_START_REQUEST_ID].isNullOrBlank()) {
+                prefs[Keys.RESTORE_START_REQUEST_ID] = generated.start
+            }
+            if (prefs[Keys.RESTORE_MANIFEST_REQUEST_ID].isNullOrBlank()) {
+                prefs[Keys.RESTORE_MANIFEST_REQUEST_ID] = generated.manifest
+            }
+            if (prefs[Keys.RESTORE_COMMIT_REQUEST_ID].isNullOrBlank()) {
+                prefs[Keys.RESTORE_COMMIT_REQUEST_ID] = generated.commit
+            }
+        }
+        val prefs = dataStore.data.first()
+        return DisasterRestoreRequestIds(
+            start = requireNotNull(prefs[Keys.RESTORE_START_REQUEST_ID]),
+            manifest = requireNotNull(prefs[Keys.RESTORE_MANIFEST_REQUEST_ID]),
+            commit = requireNotNull(prefs[Keys.RESTORE_COMMIT_REQUEST_ID]),
+        )
+    }
+
+    override suspend fun disasterRestoreToken(): String =
+        secureTokenStore.getDisasterRestoreToken()
+
+    override suspend fun clearDisasterRestoreCheckpoint() {
+        dataStore.edit(::clearDisasterRestoreValues)
+        secureTokenStore.clearDisasterRestoreToken()
+    }
+
     override suspend fun clearCreateRequestId() {
         dataStore.edit { it.remove(Keys.CREATE_REQUEST_ID) }
     }
@@ -504,9 +687,11 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
             prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
             prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+            prefs.remove(Keys.LAST_SERVER_HEALTHY_AT)
         }
         finishPendingFamilyCredentialClear()
         secureTokenStore.clearPendingMemberSecret()
+        clearDisasterRestoreCheckpoint()
     }
 
     override suspend fun clearDeviceCredentialsForReauth() {
@@ -627,8 +812,82 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.FAMILY_NAME)
         prefs.remove(Keys.MEMBERSHIP_ID)
         prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+        prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
         prefs.remove(Keys.REAUTH_REQUIRED)
         clearPendingReplicaReset(prefs)
+        clearDisasterRestoreValues(prefs)
+    }
+
+    private fun mapDisasterRestoreCheckpoint(prefs: Preferences): DisasterRestoreCheckpoint? {
+        val batchId = prefs[Keys.RESTORE_BATCH_ID].orEmpty()
+        val origin = prefs[Keys.RESTORE_ENDPOINT_ORIGIN].orEmpty()
+        if (batchId.isBlank() || origin.isBlank()) return null
+        val endpoint = runCatching {
+            when (prefs[Keys.RESTORE_ENDPOINT_TRUST_MODE]) {
+                EndpointTrustMode.SystemPki.name -> TrustedEndpointProfile.systemPki(origin)
+                EndpointTrustMode.TofuSpki.name -> TrustedEndpointProfile.tofuSpki(
+                    origin,
+                    prefs[Keys.RESTORE_ENDPOINT_SPKI_SHA256].orEmpty(),
+                )
+                else -> return null
+            }
+        }.getOrNull() ?: return null
+        return DisasterRestoreCheckpoint(
+            batchId = batchId,
+            endpoint = endpoint,
+            familyId = prefs[Keys.RESTORE_FAMILY_ID].orEmpty(),
+            startRequestId = prefs[Keys.RESTORE_START_REQUEST_ID].orEmpty(),
+            manifestRequestId = prefs[Keys.RESTORE_MANIFEST_REQUEST_ID].orEmpty(),
+            commitRequestId = prefs[Keys.RESTORE_COMMIT_REQUEST_ID].orEmpty(),
+            expiresAtEpochSeconds = prefs[Keys.RESTORE_EXPIRES_AT] ?: 0L,
+            status = prefs[Keys.RESTORE_STATUS].orEmpty(),
+            entityVersions = decodeDisasterRestoreEntityVersions(
+                prefs[Keys.RESTORE_ENTITY_VERSIONS],
+            ),
+        )
+    }
+
+    private fun encodeDisasterRestoreEntityVersions(
+        versions: List<DisasterRestoreEntityVersion>,
+    ): String = buildJsonArray {
+        versions.forEach { version ->
+            add(buildJsonObject {
+                put("type", version.type)
+                put("client_uuid", version.clientUuid)
+                put("updated_at", version.updatedAt)
+                put("restored", version.restored)
+            })
+        }
+    }.toString()
+
+    private fun decodeDisasterRestoreEntityVersions(
+        raw: String?,
+    ): List<DisasterRestoreEntityVersion> = runCatching {
+        Json.parseToJsonElement(raw.orEmpty()).jsonArray.map { element ->
+            val value = element.jsonObject
+            DisasterRestoreEntityVersion(
+                type = value.getValue("type").jsonPrimitive.content,
+                clientUuid = value.getValue("client_uuid").jsonPrimitive.content,
+                updatedAt = value.getValue("updated_at").jsonPrimitive.long,
+                restored = value.getValue("restored").jsonPrimitive.boolean,
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    private fun clearDisasterRestoreValues(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+    ) {
+        prefs.remove(Keys.RESTORE_BATCH_ID)
+        prefs.remove(Keys.RESTORE_ENDPOINT_ORIGIN)
+        prefs.remove(Keys.RESTORE_ENDPOINT_TRUST_MODE)
+        prefs.remove(Keys.RESTORE_ENDPOINT_SPKI_SHA256)
+        prefs.remove(Keys.RESTORE_FAMILY_ID)
+        prefs.remove(Keys.RESTORE_START_REQUEST_ID)
+        prefs.remove(Keys.RESTORE_MANIFEST_REQUEST_ID)
+        prefs.remove(Keys.RESTORE_COMMIT_REQUEST_ID)
+        prefs.remove(Keys.RESTORE_EXPIRES_AT)
+        prefs.remove(Keys.RESTORE_STATUS)
+        prefs.remove(Keys.RESTORE_ENTITY_VERSIONS)
     }
 
     private fun clearPendingMemberValues(
@@ -665,6 +924,58 @@ class DataStoreSyncPreferences @Inject constructor(
             }
             .toSet()
 
+    private fun encodeFamilyMemberDirectory(members: List<FamilyMember>): String =
+        buildJsonArray {
+            members.asSequence()
+                .mapNotNull(::normalizeDirectoryMember)
+                .distinctBy(FamilyMember::membershipId)
+                .forEach { member ->
+                    add(
+                        buildJsonObject {
+                            put("membership_id", member.membershipId)
+                            put("display_name", member.displayName)
+                            put("role", member.role.name)
+                            put("is_self", member.isSelf)
+                        },
+                    )
+                }
+        }.toString()
+
+    private fun decodeFamilyMemberDirectory(raw: String?): List<FamilyMember> = runCatching {
+        Json.parseToJsonElement(raw.orEmpty().ifBlank { "[]" }).jsonArray.mapNotNull { element ->
+            val value = element.jsonObject
+            val membershipId = value["membership_id"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val displayName = value["display_name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val role = value["role"]?.jsonPrimitive?.contentOrNull
+                ?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
+                ?: return@mapNotNull null
+            val isSelf = value["is_self"]?.jsonPrimitive?.booleanOrNull
+                ?: return@mapNotNull null
+            normalizeDirectoryMember(
+                FamilyMember(
+                    displayName = displayName,
+                    role = role,
+                    isSelf = isSelf,
+                    membershipId = membershipId,
+                    devices = null,
+                ),
+            )
+        }.distinctBy(FamilyMember::membershipId)
+    }.getOrDefault(emptyList())
+
+    private fun normalizeDirectoryMember(member: FamilyMember): FamilyMember? {
+        val membershipId = member.membershipId.trim()
+        val displayName = member.displayName.trim()
+        if (membershipId.isEmpty() || displayName.isEmpty() || member.role == FamilyRole.None) return null
+        return FamilyMember(
+            displayName = displayName,
+            role = member.role,
+            isSelf = member.isSelf,
+            membershipId = membershipId,
+            devices = null,
+        )
+    }
+
     private fun normalizeCreatorAcknowledgements(
         refs: Set<CreatorAcknowledgementRef>,
     ): Set<CreatorAcknowledgementRef> = refs.mapNotNull(::normalizeCreatorAcknowledgement).toSet()
@@ -694,6 +1005,7 @@ class DataStoreSyncPreferences @Inject constructor(
         val PULL_CURSOR = longPreferencesKey("sync_pull_cursor")
         val PULL_GENERATION = stringPreferencesKey("sync_pull_generation")
         val LAST_SUCCESS_AT = longPreferencesKey("sync_last_success_at")
+        val LAST_SERVER_HEALTHY_AT = longPreferencesKey("sync_last_server_healthy_at")
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
         val OWNER_LOGIN_REQUEST_ID = stringPreferencesKey("sync_owner_login_request_id")
         val PENDING_MEMBER_REQUEST_ID = stringPreferencesKey("sync_pending_member_request_id")
@@ -729,6 +1041,18 @@ class DataStoreSyncPreferences @Inject constructor(
             stringPreferencesKey("sync_verified_endpoint_trust_mode")
         val VERIFIED_ENDPOINT_SPKI_SHA256 =
             stringPreferencesKey("sync_verified_endpoint_spki_sha256")
+        val FAMILY_MEMBER_DIRECTORY = stringPreferencesKey("sync_family_member_directory_v1")
+        val RESTORE_BATCH_ID = stringPreferencesKey("sync_restore_batch_id")
+        val RESTORE_ENDPOINT_ORIGIN = stringPreferencesKey("sync_restore_endpoint_origin")
+        val RESTORE_ENDPOINT_TRUST_MODE = stringPreferencesKey("sync_restore_endpoint_trust_mode")
+        val RESTORE_ENDPOINT_SPKI_SHA256 = stringPreferencesKey("sync_restore_endpoint_spki_sha256")
+        val RESTORE_FAMILY_ID = stringPreferencesKey("sync_restore_family_id")
+        val RESTORE_START_REQUEST_ID = stringPreferencesKey("sync_restore_start_request_id")
+        val RESTORE_MANIFEST_REQUEST_ID = stringPreferencesKey("sync_restore_manifest_request_id")
+        val RESTORE_COMMIT_REQUEST_ID = stringPreferencesKey("sync_restore_commit_request_id")
+        val RESTORE_EXPIRES_AT = longPreferencesKey("sync_restore_expires_at")
+        val RESTORE_STATUS = stringPreferencesKey("sync_restore_status")
+        val RESTORE_ENTITY_VERSIONS = stringPreferencesKey("sync_restore_entity_versions_v1")
     }
 
     private companion object {

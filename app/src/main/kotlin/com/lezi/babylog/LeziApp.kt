@@ -1,6 +1,8 @@
 package com.lezi.babylog
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -32,6 +34,12 @@ class LeziApp : Application(), DefaultLifecycleObserver {
     @Inject lateinit var localDataClearCoordinator: Lazy<LocalDataClearCoordinator>
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val persistentStartupStarted = AtomicBoolean(false)
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (foregroundState.isForeground()) syncPort.get().notifyNetworkRecovered()
+        }
+    }
+    private var networkCallbackRegistered = false
 
     override fun onCreate() {
         super<Application>.onCreate()
@@ -68,6 +76,17 @@ class LeziApp : Application(), DefaultLifecycleObserver {
 
     override fun onStart(owner: LifecycleOwner) {
         foregroundState.setForeground(true)
+        if (!networkCallbackRegistered) {
+            try {
+                (getSystemService(ConnectivityManager::class.java)).registerDefaultNetworkCallback(
+                    networkCallback,
+                )
+                networkCallbackRegistered = true
+            } catch (_: RuntimeException) {
+                // Foreground sync still performs its own anonymous probe; callback support is an
+                // acceleration only and must never prevent Room-first app startup.
+            }
+        }
         applicationScope.launch(Dispatchers.IO) {
             if (!localDataGate.ensureReady()) return@launch
             startPersistentServices()
@@ -85,6 +104,16 @@ class LeziApp : Application(), DefaultLifecycleObserver {
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        if (networkCallbackRegistered) {
+            try {
+                (getSystemService(ConnectivityManager::class.java)).unregisterNetworkCallback(
+                    networkCallback,
+                )
+            } catch (_: IllegalArgumentException) {
+                // Android may already have dropped the callback during process/network teardown.
+            }
+            networkCallbackRegistered = false
+        }
         foregroundState.setForeground(false)
     }
 }

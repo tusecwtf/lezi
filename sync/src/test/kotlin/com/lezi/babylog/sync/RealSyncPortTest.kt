@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
@@ -45,6 +46,9 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import org.junit.Test
 import com.lezi.babylog.sync.appupdate.APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE
+import com.lezi.babylog.sync.availability.AvailabilityProbeReason
+import com.lezi.babylog.sync.availability.FamilyServerAvailability
+import com.lezi.babylog.sync.availability.FamilyServerUnavailableReason
 import com.lezi.babylog.sync.appupdate.APP_UPDATE_PACKAGE_INVALID_MESSAGE
 import com.lezi.babylog.sync.appupdate.AppUpdateApkIdentityReader
 import com.lezi.babylog.sync.appupdate.AppUpdateInstaller
@@ -55,11 +59,16 @@ import com.lezi.babylog.sync.appupdate.appUpdateStagingDir
 import com.lezi.babylog.sync.appupdate.appUpdateUiOutcome
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
+import com.lezi.babylog.sync.backend.AnonymousHealth
+import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CanonicalRecordAuthor
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
+import com.lezi.babylog.sync.backend.DisasterRestoreBatch
+import com.lezi.babylog.sync.backend.DisasterRestoreMediaSpec
+import com.lezi.babylog.sync.backend.DisasterRestoreStatus
 import com.lezi.babylog.sync.backend.MemberLoginGrant
 import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
@@ -85,6 +94,8 @@ import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
+import com.lezi.babylog.sync.session.DisasterRestoreCheckpoint
+import com.lezi.babylog.sync.session.DisasterRestoreRequestIds
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.ForegroundState
@@ -102,6 +113,374 @@ import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 class RealSyncPortTest {
+    @Test
+    fun reconnectCandidateRequiresSetupHealthAndReadyWithoutTouchingCurrentReplica() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, _ ->
+                SetupProbeResult.Ready(
+                    candidate,
+                    SetupFamilyState.Configured,
+                )
+            },
+        )
+        val oldSession = rig.preferences.current()
+        val oldEndpoint = rig.preferences.verifiedEndpoint.first()
+
+        val result = rig.port.probeReconnectEndpoint(candidate.origin)
+
+        assertThat(result).isEqualTo(
+            SetupProbeResult.Ready(candidate, SetupFamilyState.Configured),
+        )
+        assertThat(rig.backend.anonymousHealthEndpoints).containsExactly(candidate)
+        assertThat(rig.backend.anonymousReadyEndpoints).containsExactly(candidate)
+        assertThat(rig.preferences.current()).isEqualTo(oldSession)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
+    }
+
+    @Test
+    fun reconnectCandidateRejectsMissingHealthCapabilityAndVersionDrift() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        fun rig() = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, _ ->
+                SetupProbeResult.Ready(candidate, SetupFamilyState.Configured)
+            },
+        )
+
+        val missingCapability = rig().also {
+            it.backend.anonymousHealthResult = it.backend.anonymousHealthResult.copy(
+                capabilities = setOf("atomic_bundle"),
+            )
+        }
+        assertThat(missingCapability.port.probeReconnectEndpoint(candidate.origin))
+            .isEqualTo(SetupProbeResult.Failed.Incompatible)
+
+        val versionDrift = rig().also {
+            it.backend.anonymousReadyResult = AnonymousReadiness(version = "0.3.2")
+        }
+        assertThat(versionDrift.port.probeReconnectEndpoint(candidate.origin))
+            .isEqualTo(SetupProbeResult.Failed.Incompatible)
+    }
+
+    @Test
+    fun reconnectCandidateWaitsForCertificateApprovalBeforeAnonymousProtocolProbes() = runTest {
+        val candidate = CertificateTrustCandidate.fromSpki(
+            TrustedEndpointProfile.systemPki("https://nas-new.example.test"),
+            "new-nas-public-key".toByteArray(),
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                if (trusted == null) {
+                    SetupProbeResult.CertificateApprovalRequired(candidate)
+                } else {
+                    SetupProbeResult.Ready(trusted, SetupFamilyState.Empty)
+                }
+            },
+        )
+
+        assertThat(rig.port.probeReconnectEndpoint(candidate.endpointOrigin)).isEqualTo(
+            SetupProbeResult.CertificateApprovalRequired(candidate),
+        )
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(0)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(0)
+
+        assertThat(rig.port.trustReconnectCertificate(candidate)).isEqualTo(
+            SetupProbeResult.Ready(candidate.trustedEndpoint(), SetupFamilyState.Empty),
+        )
+        assertThat(rig.backend.anonymousHealthEndpoints)
+            .containsExactly(candidate.trustedEndpoint())
+        assertThat(rig.backend.anonymousReadyEndpoints)
+            .containsExactly(candidate.trustedEndpoint())
+    }
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun reconnectCandidateProtocolProbeHasOneBoundedTimeout() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, _ ->
+                SetupProbeResult.Ready(candidate, SetupFamilyState.Configured)
+            },
+        )
+        rig.backend.anonymousHealthGate = CompletableDeferred()
+
+        assertThat(rig.port.probeReconnectEndpoint(candidate.origin))
+            .isEqualTo(SetupProbeResult.Failed.Unreachable)
+        assertThat(currentTime).isEqualTo(8_000L)
+    }
+
+    @Test
+    fun configuredCandidateWithDifferentFamilyNeverReplacesCurrentEndpointOrSession() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        val oldSession = rig.preferences.current()
+        val oldEndpoint = rig.preferences.verifiedEndpoint.first()
+        rig.backend.nextOwnerLoginFamilyId = "family-b"
+
+        val result = rig.port.reconnectOwner(
+            endpoint = candidate,
+            deviceName = "新 NAS 登录",
+            rootPassword = "root-password",
+        )
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(DifferentFamilyServerException::class.java)
+        assertThat(rig.preferences.current()).isEqualTo(oldSession)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
+        assertThat(rig.backend.ownerLoginCandidateEndpoints).containsExactly(candidate)
+        assertThat(rig.backend.ownerLoginRootPasswords).containsExactly("root-password")
+    }
+
+    @Test
+    fun configuredCandidateForSameFamilySwitchesEndpointAndSessionTogether() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.backend.nextOwnerLoginFamilyId = "family-a"
+
+        val joined = rig.port.reconnectOwner(
+            endpoint = candidate,
+            deviceName = "新 NAS 登录",
+            rootPassword = "root-password",
+        ).getOrThrow().session
+
+        assertThat(joined.familyId).isEqualTo("family-a")
+        assertThat(TrustedEndpointProfile.systemPki(joined.baseUrl)).isEqualTo(candidate)
+        assertThat(rig.preferences.current()).isEqualTo(joined)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
+        assertThat(rig.preferences.familyMemberDirectory.first()).isEmpty()
+    }
+
+    @Test
+    fun memberCandidateWaitsWithoutReplacingOldSessionThenBlocksDifferentFamilyClaim() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        val oldSession = rig.preferences.current()
+        val oldEndpoint = rig.preferences.verifiedEndpoint.first()
+
+        val pending = rig.port.requestReconnectMember(candidate, "妈妈", "妈妈手机")
+            .getOrThrow()
+
+        assertThat(pending.requestId).isEqualTo(rig.backend.nextMemberLoginReceipt.requestId)
+        assertThat(rig.preferences.current()).isEqualTo(oldSession)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
+        assertThat(rig.backend.memberLoginCandidateEndpoints).containsExactly(candidate)
+
+        rig.backend.memberLoginStatuses += MemberLoginStatus.Approved
+        rig.backend.nextMemberLoginClaim = rig.backend.nextMemberLoginClaim.copy(
+            familyId = "family-b",
+        )
+        val result = rig.port.checkReconnectMember()
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(DifferentFamilyServerException::class.java)
+        assertThat(rig.preferences.current()).isEqualTo(oldSession)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
+    }
+
+    @Test
+    fun ownerRestoresCompleteLocalSnapshotBeforeAtomicallyRetiringOldReplica() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-replacement.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+            },
+        )
+        rig.awaitStartupRecovery()
+        val oldSession = rig.preferences.current()
+        val oldEndpoint = rig.preferences.verifiedEndpoint.first()
+        val babyId = rig.babies.seed(localBaby())
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(createdByMembershipId = oldSession.membershipId),
+        )
+        rig.carePlans.seed(localCarePlan(babyId))
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-local",
+                kind = "log",
+                localUri = "records/media-local.jpg",
+                createdAt = 120,
+                updatedAt = 120,
+            ),
+        )
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = oldSession.familyId,
+                entityType = "record",
+                clientUuid = "record-local",
+                payloadJson = "{}",
+                updatedAt = 120,
+            ),
+        )
+
+        val summary = rig.port.prepareDisasterRecovery().getOrThrow()
+        val staged = rig.port.startDisasterRecovery(
+            endpoint = candidate,
+            ownerDisplayName = "管理员",
+            deviceName = "新管理员手机",
+            rootPassword = "start-root-secret",
+        ).getOrThrow()
+
+        assertThat(summary.babies).isEqualTo(1)
+        assertThat(summary.records).isEqualTo(1)
+        assertThat(summary.carePlans).isEqualTo(1)
+        assertThat(summary.photos).isEqualTo(1)
+        assertThat(staged.status).isEqualTo("ready_to_commit")
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
+        assertThat(rig.preferences.current()).isEqualTo(oldSession)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
+        assertThat(rig.outbox.all()).hasSize(1)
+        assertThat(rig.backend.disasterRestoreStartEndpoints).containsExactly(candidate)
+        assertThat(rig.backend.disasterRestoreStartFamilyIds).containsExactly("family-a")
+        assertThat(rig.backend.disasterRestoreStartRootPasswords)
+            .containsExactly("start-root-secret")
+        assertThat(rig.backend.disasterRestoreManifestEntities.single().map { it.type })
+            .containsExactly("baby", "record", "care_plan", "media")
+        assertThat(rig.backend.disasterRestoreManifestMedia.single().single())
+            .isEqualTo(
+                DisasterRestoreMediaSpec(
+                    clientUuid = "media-local",
+                    byteSize = 1,
+                    sha256 =
+                        "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+                ),
+            )
+        assertThat(rig.backend.disasterRestoreMediaUuids).containsExactly("media-local")
+        assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNotNull()
+        assertThat(rig.preferences.disasterRestoreToken()).isEqualTo("recovery-token-secret")
+
+        // Nursing work remains Room-first while media uploads. This row was not in the immutable
+        // restore manifest and must survive endpoint activation as a publishable local change.
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-after-restore-start",
+                timestamp = 130,
+                updatedAt = 130,
+                createdByMembershipId = oldSession.membershipId,
+            ),
+        )
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = oldSession.familyId,
+                entityType = "record",
+                clientUuid = "record-after-restore-start",
+                payloadJson = "{}",
+                updatedAt = 130,
+            ),
+        )
+
+        val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
+
+        assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
+        assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
+        assertThat(rig.preferences.current()).isEqualTo(committed.session)
+        assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
+        assertThat(rig.records.getByClientUuid("record-local")?.createdByMembershipId)
+            .isEqualTo("restored-owner-membership")
+        assertThat(rig.records.getByClientUuid("record-local")?.syncDirty).isFalse()
+        assertThat(rig.carePlans.getByClientUuid("plan-local")?.createdByMembershipId)
+            .isEqualTo("restored-owner-membership")
+        assertThat(rig.carePlans.getByClientUuid("plan-local")?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid("media-local")?.remoteUri).isNotNull()
+        assertThat(rig.media.getByClientUuid("media-local")?.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.createdByMembershipId)
+            .isEqualTo("restored-owner-membership")
+        assertThat(rig.records.getByClientUuid("record-after-restore-start")?.syncDirty).isTrue()
+        assertThat(rig.outbox.all().map { it.clientUuid })
+            .containsExactly("record-after-restore-start")
+        assertThat(rig.backend.disasterRestoreCommitRootPasswords)
+            .containsExactly("commit-root-secret")
+        assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
+        assertThat(rig.preferences.disasterRestoreToken()).isEmpty()
+    }
+
+    @Test
+    fun availabilityProbePublishesThirtySecondAnonymousHealthLease() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://192.168.1.20:8787")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.clock.now = 50_000
+
+        val result = rig.port.probeServerAvailability(AvailabilityProbeReason.Foreground)
+            .getOrThrow() as FamilyServerAvailability.Available
+
+        assertThat(result.endpointOrigin).isEqualTo(endpoint.origin)
+        assertThat(result.serverVersion).isEqualTo("0.3.3")
+        assertThat(result.lastHealthyAtMillis).isEqualTo(50_000)
+        assertThat(result.leaseUntilMillis).isEqualTo(80_000)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
+        assertThat(rig.port.availability().first()).isEqualTo(result)
+        assertThat(rig.preferences.lastServerHealthyAt.first()).isEqualTo(50_000)
+
+        rig.clock.now = 79_999
+        val leased = rig.port.probeServerAvailability(AvailabilityProbeReason.LocalChanges)
+            .getOrThrow()
+        assertThat(leased).isEqualTo(result)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun availabilityProbePrefersTrustChangeWhenParallelHealthRequestsFail() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, _ -> SetupProbeResult.Failed.CertificateChanged },
+        )
+        rig.backend.anonymousHealthFailure = IllegalStateException("offline")
+        rig.backend.anonymousReadyFailure = SyncHttpException(503, "maintenance")
+
+        val result = rig.port.probeServerAvailability(AvailabilityProbeReason.Foreground)
+            .getOrThrow() as FamilyServerAvailability.Unavailable
+
+        assertThat(result.reason).isEqualTo(FamilyServerUnavailableReason.TrustChanged)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun availabilityProbeClassifiesServerFailureAsMaintenance() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.backend.anonymousReadyFailure = SyncHttpException(503, "maintenance")
+
+        val result = rig.port.probeServerAvailability(AvailabilityProbeReason.Foreground)
+            .getOrThrow() as FamilyServerAvailability.Unavailable
+
+        assertThat(result.reason).isEqualTo(FamilyServerUnavailableReason.Maintenance)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
+    }
+
     @Test
     fun checkAppUpdateReturnsNotJoinedWithoutCallingBackend() = runTest {
         val rig = SyncRig(session = SyncSession())
@@ -1369,7 +1748,7 @@ class RealSyncPortTest {
             removedDeviceLocalClearGate = resumedGate,
         )
         resumedGate.firstCall.await()
-        withTimeout(2_000) { preferences.session.filter { !it.isJoined }.first() }
+        preferences.membershipDeletionClearCompleted.await()
         assertThat(preferences.current()).isEqualTo(SyncSession())
         assertThat(preferences.pendingMembershipDeletionClear).isFalse()
     }
@@ -3390,9 +3769,21 @@ class RealSyncPortTest {
     @Test
     fun familyMemberListUsesTrustedEndpointWithoutTransportIdentity() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "membership-a",
+                devices = listOf(FamilyDevice("device", "手机", 1, true)),
+            ),
+        )
 
         assertThat(rig.port.listFamilyMembers().isSuccess).isTrue()
         assertThat(rig.backend.memberCalls).isEqualTo(1)
+        assertThat(rig.port.familyMemberDirectory().first()).containsExactly(
+            FamilyMember("妈妈", FamilyRole.Owner, true, "membership-a", devices = null),
+        )
     }
 
     @Test
@@ -8040,9 +8431,11 @@ internal class RecordingSyncBackend : SyncBackend {
     val ownerLoginDeviceNames = mutableListOf<String>()
     val ownerLoginRootPasswords = mutableListOf<String>()
     val ownerLoginTakeovers = mutableListOf<Boolean>()
+    val ownerLoginCandidateEndpoints = mutableListOf<TrustedEndpointProfile>()
     var ownerLoginFailure: Throwable? = null
     var nextOwnerLoginFamilyId = "family-owner-login"
     val memberLoginRequests = mutableListOf<Triple<String, String, String>>()
+    val memberLoginCandidateEndpoints = mutableListOf<TrustedEndpointProfile>()
     var nextMemberLoginReceipt = MemberLoginReceipt(
         requestId = "99999999-9999-9999-9999-999999999999",
         pendingSecret = "pending-secret-000000000000000000000001",
@@ -8084,10 +8477,145 @@ internal class RecordingSyncBackend : SyncBackend {
     var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextCreateReclaimed: Boolean = false
     var memberCalls = 0
+    var anonymousHealthCalls = 0
+    var anonymousReadyCalls = 0
+    val anonymousHealthEndpoints = mutableListOf<TrustedEndpointProfile>()
+    val anonymousReadyEndpoints = mutableListOf<TrustedEndpointProfile>()
+    var anonymousHealthResult = AnonymousHealth(
+        version = "0.3.3",
+        capabilities = setOf(
+            "atomic_bundle",
+            "record_membership_author",
+            "device_disaster_restore_v1",
+        ),
+    )
+    var anonymousReadyResult = AnonymousReadiness(version = "0.3.3")
+    var anonymousHealthFailure: Throwable? = null
+    var anonymousReadyFailure: Throwable? = null
+    var anonymousHealthGate: CompletableDeferred<Unit>? = null
+    var anonymousReadyGate: CompletableDeferred<Unit>? = null
+    val disasterRestoreStartEndpoints = mutableListOf<TrustedEndpointProfile>()
+    val disasterRestoreStartRequestIds = mutableListOf<String>()
+    val disasterRestoreStartFamilyIds = mutableListOf<String>()
+    val disasterRestoreStartRootPasswords = mutableListOf<String>()
+    val disasterRestoreManifestEntities = mutableListOf<List<SyncEntity>>()
+    val disasterRestoreManifestMedia = mutableListOf<List<DisasterRestoreMediaSpec>>()
+    val disasterRestoreMediaUuids = mutableListOf<String>()
+    val disasterRestoreCommitRootPasswords = mutableListOf<String>()
+    var disasterRestoreStatus = DisasterRestoreStatus(
+        batchId = "restore-batch-a",
+        status = "ready_to_commit",
+        expiresAtEpochSeconds = 1_753_591_200,
+    )
+    var nextDisasterRestoreCommit = SessionBootstrapResult(
+        familyId = "family-a",
+        accessToken = "restored-owner-access",
+        refreshToken = "restored-owner-refresh",
+        accessExpiresAtEpochSeconds = 1_753_419_300,
+        deviceId = "restored-owner-device",
+        role = FamilyRole.Owner,
+        generation = "restored-generation",
+        familyName = "乐乐一家",
+        membershipId = "restored-owner-membership",
+    )
     private val knownEntities = mutableSetOf<Pair<String, String>>()
 
     fun remember(type: String, clientUuid: String) {
         knownEntities += type to clientUuid
+    }
+
+    override suspend fun anonymousHealth(endpoint: TrustedEndpointProfile): AnonymousHealth {
+        anonymousHealthCalls++
+        anonymousHealthEndpoints += endpoint
+        anonymousHealthGate?.await()
+        anonymousHealthFailure?.let { throw it }
+        return anonymousHealthResult
+    }
+
+    override suspend fun anonymousReady(endpoint: TrustedEndpointProfile): AnonymousReadiness {
+        anonymousReadyCalls++
+        anonymousReadyEndpoints += endpoint
+        anonymousReadyGate?.await()
+        anonymousReadyFailure?.let { throw it }
+        return anonymousReadyResult
+    }
+
+    override suspend fun startDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        requestId: String,
+        familyId: String,
+        familyName: String,
+        ownerDisplayName: String,
+        deviceName: String,
+        rootPassword: String,
+    ): DisasterRestoreBatch {
+        disasterRestoreStartEndpoints += endpoint
+        disasterRestoreStartRequestIds += requestId
+        disasterRestoreStartFamilyIds += familyId
+        disasterRestoreStartRootPasswords += rootPassword
+        return DisasterRestoreBatch(
+            batchId = disasterRestoreStatus.batchId,
+            recoveryToken = "recovery-token-secret",
+            status = "started",
+            expiresAtEpochSeconds = disasterRestoreStatus.expiresAtEpochSeconds,
+        )
+    }
+
+    override suspend fun putDisasterRestoreManifest(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        requestId: String,
+        entities: List<SyncEntity>,
+        media: List<DisasterRestoreMediaSpec>,
+    ): DisasterRestoreStatus {
+        require(recoveryToken == "recovery-token-secret")
+        disasterRestoreManifestEntities += entities
+        disasterRestoreManifestMedia += media
+        return disasterRestoreStatus.copy(status = "manifest_staged")
+    }
+
+    override suspend fun putDisasterRestoreMedia(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        clientUuid: String,
+        source: SyncMediaUploadSource,
+    ): DisasterRestoreStatus {
+        require(recoveryToken == "recovery-token-secret")
+        require(source.contentLength > 0)
+        disasterRestoreMediaUuids += clientUuid
+        return disasterRestoreStatus
+    }
+
+    override suspend fun disasterRestoreStatus(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+    ): DisasterRestoreStatus {
+        require(recoveryToken == "recovery-token-secret")
+        return disasterRestoreStatus
+    }
+
+    override suspend fun commitDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+        requestId: String,
+        rootPassword: String,
+    ): SessionBootstrapResult {
+        require(recoveryToken == "recovery-token-secret")
+        disasterRestoreCommitRootPasswords += rootPassword
+        return nextDisasterRestoreCommit
+    }
+
+    override suspend fun cancelDisasterRestore(
+        endpoint: TrustedEndpointProfile,
+        batchId: String,
+        recoveryToken: String,
+    ): DisasterRestoreStatus {
+        require(recoveryToken == "recovery-token-secret")
+        return disasterRestoreStatus.copy(status = "cancelled")
     }
 
     override suspend fun create(
@@ -8145,6 +8673,17 @@ internal class RecordingSyncBackend : SyncBackend {
         )
     }
 
+    override suspend fun ownerLogin(
+        endpoint: TrustedEndpointProfile,
+        deviceName: String,
+        loginRequestId: String,
+        rootPassword: String,
+        takeover: Boolean,
+    ): SessionBootstrapResult {
+        ownerLoginCandidateEndpoints += endpoint
+        return ownerLogin(endpoint.origin, deviceName, loginRequestId, rootPassword, takeover)
+    }
+
     override suspend fun requestMemberLogin(
         baseUrl: String,
         displayName: String,
@@ -8154,19 +8693,43 @@ internal class RecordingSyncBackend : SyncBackend {
         return nextMemberLoginReceipt
     }
 
+    override suspend fun requestMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        displayName: String,
+        deviceName: String,
+    ): MemberLoginReceipt {
+        memberLoginCandidateEndpoints += endpoint
+        return requestMemberLogin(endpoint.origin, displayName, deviceName)
+    }
+
     override suspend fun memberLoginStatus(
         baseUrl: String,
         pendingSecret: String,
     ): MemberLoginStatus = memberLoginStatuses.removeFirstOrNull() ?: MemberLoginStatus.Pending
 
+    override suspend fun memberLoginStatus(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ): MemberLoginStatus = memberLoginStatus(endpoint.origin, pendingSecret)
+
     override suspend fun cancelMemberLogin(baseUrl: String, pendingSecret: String) {
         cancelMemberLoginCalls++
     }
+
+    override suspend fun cancelMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ) = cancelMemberLogin(endpoint.origin, pendingSecret)
 
     override suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): SessionBootstrapResult {
         memberLoginClaimCalls++
         return nextMemberLoginClaim
     }
+
+    override suspend fun claimMemberLogin(
+        endpoint: TrustedEndpointProfile,
+        pendingSecret: String,
+    ): SessionBootstrapResult = claimMemberLogin(endpoint.origin, pendingSecret)
 
     override suspend fun pendingMemberLogins(
         session: SyncSession,
@@ -8500,8 +9063,13 @@ internal class MemorySyncPreferences(
 ) : SyncPreferences {
     private val state = MutableStateFlow(initial)
     private val endpointState = MutableStateFlow<TrustedEndpointProfile?>(null)
+    private val memberDirectoryState = MutableStateFlow<List<FamilyMember>>(emptyList())
+    private val lastHealthyState = MutableStateFlow<Long?>(null)
     private val pendingMemberState = MutableStateFlow<PendingMemberLogin?>(null)
+    private val disasterRestoreState = MutableStateFlow<DisasterRestoreCheckpoint?>(null)
     private var memberPendingSecret = ""
+    private var disasterRestoreRecoveryToken = ""
+    private var disasterRestoreRequestIds: DisasterRestoreRequestIds? = null
     private var createRequestId: String? = null
     private var ownerLoginRequestId: String? = null
     private val shouldBlockSecretMigration = AtomicBoolean(blockFirstSecretMigration)
@@ -8516,10 +9084,15 @@ internal class MemorySyncPreferences(
     var pendingFamilyDeletionClear = false
     private var pendingReplicaResetPrevious: SyncSession? = null
     private var pendingReplicaResetSession: SyncSession? = null
+    val membershipDeletionClearCompleted = CompletableDeferred<Unit>()
     val familyDeletionClearCompleted = CompletableDeferred<Unit>()
     override val session: Flow<SyncSession> = state
     override val verifiedEndpoint: Flow<TrustedEndpointProfile?> = endpointState
+    override val familyMemberDirectory: Flow<List<FamilyMember>> = memberDirectoryState
+    override val lastServerHealthyAt: Flow<Long?> = lastHealthyState
     override val pendingMemberLogin: Flow<PendingMemberLogin?> = pendingMemberState
+    override val disasterRestoreCheckpoint: Flow<DisasterRestoreCheckpoint?> =
+        disasterRestoreState
 
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile) {
         endpointState.value = endpoint
@@ -8527,6 +9100,20 @@ internal class MemorySyncPreferences(
 
     override suspend fun forgetEndpoint() {
         endpointState.value = null
+    }
+
+    override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
+        memberDirectoryState.value = members.map {
+            it.copy(devices = null)
+        }
+    }
+
+    override suspend fun clearFamilyMemberDirectory() {
+        memberDirectoryState.value = emptyList()
+    }
+
+    override suspend fun saveLastServerHealthyAt(atMillis: Long) {
+        lastHealthyState.value = atMillis
     }
 
     fun current(): SyncSession = state.value
@@ -8570,6 +9157,7 @@ internal class MemorySyncPreferences(
             )
             pendingMemberState.value = null
             memberPendingSecret = ""
+            memberDirectoryState.value = emptyList()
         }
         state.value = next
     }
@@ -8583,6 +9171,9 @@ internal class MemorySyncPreferences(
         pendingReplicaResetPrevious = null
         pendingReplicaResetSession = null
         val previous = state.value
+        if (previous.familyId != session.familyId) {
+            memberDirectoryState.value = emptyList()
+        }
         state.value = session.copy(
             pendingCreatorAcknowledgements = if (previous.familyId == session.familyId) {
                 previous.pendingCreatorAcknowledgements
@@ -8590,6 +9181,15 @@ internal class MemorySyncPreferences(
                 emptySet()
             },
         )
+    }
+
+    override suspend fun saveReconnectedSession(
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+    ) {
+        saveSession(session)
+        endpointState.value = endpoint
+        memberDirectoryState.value = emptyList()
     }
 
     override suspend fun saveSessionPendingReplicaReset(
@@ -8704,6 +9304,34 @@ internal class MemorySyncPreferences(
         memberPendingSecret = ""
     }
 
+    override suspend fun saveDisasterRestoreCheckpoint(
+        checkpoint: DisasterRestoreCheckpoint,
+        recoveryToken: String,
+    ) {
+        disasterRestoreState.value = checkpoint
+        disasterRestoreRecoveryToken = recoveryToken
+        disasterRestoreRequestIds = DisasterRestoreRequestIds(
+            start = checkpoint.startRequestId,
+            manifest = checkpoint.manifestRequestId,
+            commit = checkpoint.commitRequestId,
+        )
+    }
+
+    override suspend fun ensureDisasterRestoreRequestIds(): DisasterRestoreRequestIds =
+        disasterRestoreRequestIds ?: DisasterRestoreRequestIds(
+            start = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            manifest = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            commit = "cccccccc-cccc-cccc-cccc-cccccccccccc",
+        ).also { disasterRestoreRequestIds = it }
+
+    override suspend fun disasterRestoreToken(): String = disasterRestoreRecoveryToken
+
+    override suspend fun clearDisasterRestoreCheckpoint() {
+        disasterRestoreState.value = null
+        disasterRestoreRecoveryToken = ""
+        disasterRestoreRequestIds = null
+    }
+
     override suspend fun clearCreateRequestId() {
         clearCreateRequestIdCalls += 1
         clearCreateRequestIdFailure?.let { throw it }
@@ -8712,8 +9340,12 @@ internal class MemorySyncPreferences(
 
     override suspend fun clearAllLocalSyncConfig() {
         state.value = SyncSession()
+        memberDirectoryState.value = emptyList()
         pendingMemberState.value = null
         memberPendingSecret = ""
+        disasterRestoreState.value = null
+        disasterRestoreRecoveryToken = ""
+        disasterRestoreRequestIds = null
         pendingReplicaResetPrevious = null
         pendingReplicaResetSession = null
     }
@@ -8746,6 +9378,7 @@ internal class MemorySyncPreferences(
 
     override suspend fun clearPendingMembershipDeletionClear() {
         pendingMembershipDeletionClear = false
+        membershipDeletionClearCompleted.complete(Unit)
     }
 
     override suspend fun markPendingFamilyDeletionClear() {

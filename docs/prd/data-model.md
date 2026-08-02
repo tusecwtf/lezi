@@ -573,6 +573,9 @@ enum class SyncStatus {
 | device session | device/membership/family 本机投影 + 安全存储 refresh；access 只在内存 |
 | pending request | 无权限 request ID 与 expiry；不包含家庭数据 |
 | pull checkpoint | cursor 与 familyName 缓存；成功后原子更新 |
+| member directory | membership ID、称呼、role、本人标记；不含设备/申请；身份退出时清除 |
+| availability | 当前结果、最近健康时间与租约/退避时点；不进入家庭 wire |
+| restore credential | 空服恢复批次的限时 token；仅安全凭证存储，不含根密码 |
 
 `familyName` 是 NAS 权威共享家庭名的本机会话缓存：create/login/claim/本机 rename 会立即
 写入；之后每次允许的前台/下拉 pull 都可刷新，即使该页没有实体。NAS 显式
@@ -587,9 +590,13 @@ enum class SyncStatus {
 interface SyncPort {
   fun status(): Flow<SyncStatus>
   fun session(): Flow<SyncSession>
+  fun availability(): Flow<FamilyServerAvailability>
+  fun familyMemberDirectory(): Flow<List<FamilyMemberView>>
 
   /** 前台非阻塞触发；未认证时 no-op */
   fun requestSync(trigger: SyncTrigger)
+  fun notifyLocalChanges()
+  suspend fun probeAvailability(reason: AvailabilityProbeReason): Result<FamilyServerAvailability>
 
   suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult
   suspend fun trustCertificate(candidate: CertificateTrustCandidate): SetupProbeResult
@@ -610,6 +617,11 @@ interface SyncPort {
 
   /** 当前设备会话所在家庭的 active 成员安全视图（含称呼与 role） */
   suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
+  suspend fun reconnectCandidate(candidate: TrustedEndpointProfile, credentials: ReconnectCredentials): Result<ReconnectResult>
+  suspend fun startDisasterRestore(...): Result<DisasterRestoreBatch>
+  suspend fun uploadDisasterRestore(...): Result<DisasterRestoreStatus>
+  suspend fun commitDisasterRestore(...): Result<ReconnectResult>
+  suspend fun cancelDisasterRestore(batchId: String): Result<Unit>
   /** 退出当前设备的家庭会话（无 familyId；始终针对当前会话） */
   suspend fun leave(): Result<Unit>
   /** 仅 owner：按 membership_id 移除另一 active member */
@@ -629,6 +641,10 @@ interface SyncPort {
   suspend fun cleanupAppUpdateStaging(): Result<Unit>
 }
 ```
+
+`listFamilyMembers()` 是显式远端刷新并在成功后替换最小目录；护理读取只订阅
+`familyMemberDirectory()`。灾难恢复导出 current active 护理图，不导出旧身份、凭证、设置、
+墓碑或游标；服务器 commit 统一用新 Owner membership 给历史作者盖章。
 
 ### 6.3 未配置实现
 

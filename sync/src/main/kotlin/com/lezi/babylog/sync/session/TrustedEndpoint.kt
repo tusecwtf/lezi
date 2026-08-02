@@ -31,6 +31,7 @@ const val CAPABILITY_DEVICE_SESSIONS = "device_sessions_v1"
 const val CAPABILITY_MEMBERSHIP_DEVICES = "membership_devices_v1"
 const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
 const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
+const val CAPABILITY_DISASTER_RESTORE = "device_disaster_restore_v1"
 
 enum class EndpointTrustMode {
     SystemPki,
@@ -43,6 +44,13 @@ class TrustedEndpointProfile private constructor(
     val trustMode: EndpointTrustMode,
     val spkiSha256: String?,
 ) {
+    /** Human-readable TOFU fingerprint. Null for platform-PKI endpoints. */
+    val fingerprint: String?
+        get() = spkiSha256?.let { encoded ->
+            runCatching { Base64.getDecoder().decode(encoded) }
+                .getOrNull()
+                ?.joinToString(":") { byte -> "%02X".format(byte.toInt() and 0xff) }
+        }
     internal val host: String
         get() = URI(origin).host
     internal val port: Int
@@ -438,4 +446,5 @@ private val REQUIRED_SETUP_CAPABILITIES = setOf(
     CAPABILITY_MEMBERSHIP_DEVICES,
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    CAPABILITY_DISASTER_RESTORE,
 )

@@ -27,17 +27,47 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TimelineWindowRepositoryTest {
+    @Test
+    fun hangingRemoteMemberRequestCannotDelayTheFirstRoomSnapshot() = runTest {
+        val day = LocalDate.of(2026, 8, 2)
+        val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val sync = TimelineSyncPort(
+            session = joinedSession(FamilyRole.Member, "self"),
+            members = Result.success(
+                listOf(FamilyMember("妈妈", FamilyRole.Member, true, "self")),
+            ),
+        ).apply {
+            blockMemberQuery = true
+        }
+        val repository = TimelineWindowRepository(
+            timelineWindowDao = FakeTimelineWindowDao(
+                records = listOf(record(1, at, 100, null, creator = "self")),
+                plans = emptyList(),
+                media = emptyList(),
+            ),
+            syncPort = sync,
+        )
+
+        val snapshot = withTimeout(1_000) {
+            repository.observe(request(day, at)).first()
+        }
+
+        assertThat(snapshot.recordRows).hasSize(1)
+        assertThat(snapshot.audience.members.map { it.displayName }).containsExactly("妈妈")
+        assertThat(sync.memberQueryCount).isEqualTo(0)
+    }
+
     @Test
     fun rootPublicationAndMediaReadinessAreIndependentForZeroAndPhotoRows() = runTest {
         val day = LocalDate.of(2026, 7, 30)
@@ -230,8 +260,8 @@ class TimelineWindowRepositoryTest {
 
         assertThat(singleDatabase.totalQueryCount).isEqualTo(4)
         assertThat(largeDatabase.totalQueryCount).isEqualTo(4)
-        assertThat(singleSync.memberQueryCount).isEqualTo(1)
-        assertThat(largeSync.memberQueryCount).isEqualTo(1)
+        assertThat(singleSync.memberQueryCount).isEqualTo(0)
+        assertThat(largeSync.memberQueryCount).isEqualTo(0)
     }
 
     @Test
@@ -331,7 +361,7 @@ class TimelineWindowRepositoryTest {
     }
 
     @Test
-    fun switchingFamilyCancelsTheOldAudienceBeforeItCanPublish() = runTest {
+    fun switchingFamilyPublishesTheNewLocalAudienceWithoutRemoteMemberQuery() = runTest {
         val day = LocalDate.of(2026, 7, 30)
         val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
         val database = FakeTimelineWindowDao(
@@ -341,26 +371,23 @@ class TimelineWindowRepositoryTest {
         )
         val sync = TimelineSyncPort(
             session = joinedSession(FamilyRole.Member, "self-a", familyId = "family-a"),
-        ).apply {
-            blockMemberQueryForFamily = "family-a"
-        }
+        )
         val result = async(start = CoroutineStart.UNDISPATCHED) {
             TimelineWindowRepository(database, sync)
                 .observe(request(day, at))
-                .first()
+                .first { it.audience.familyId == "family-b" }
         }
 
-        sync.memberQueryStarted.await()
         sync.setSession(joinedSession(FamilyRole.Owner, "self-b", familyId = "family-b"))
         val snapshot = result.await()
 
         assertThat(snapshot.audience.familyId).isEqualTo("family-b")
         assertThat(snapshot.audience.membershipId).isEqualTo("self-b")
-        assertThat(sync.cancelledMemberQueryCount).isEqualTo(1)
+        assertThat(sync.memberQueryCount).isEqualTo(0)
     }
 
     @Test
-    fun newerMemberRefreshCancelsTheOlderResultBeforePublication() = runTest {
+    fun localMemberDirectoryRefreshPublishesTheNewerLabelWithoutRemoteRead() = runTest {
         val day = LocalDate.of(2026, 7, 30)
         val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
         val oldMember = FamilyMember("旧称呼", FamilyRole.Member, false, "author")
@@ -377,27 +404,19 @@ class TimelineWindowRepositoryTest {
             ),
             syncPort = sync,
         )
-        val firstPublished = CompletableDeferred<Unit>()
-        val snapshots = async(start = CoroutineStart.UNDISPATCHED) {
+        val newer = async(start = CoroutineStart.UNDISPATCHED) {
             repository.observe(request(day, at))
-                .onEach { firstPublished.complete(Unit) }
-                .take(2)
-                .toList()
+                .first { it.recordRows.single().uploaderLabel == "新称呼" }
         }
-        firstPublished.await()
+        runCurrent()
 
         sync.replaceMembers(Result.success(listOf(newMember)))
-        sync.blockMemberQuery = true
         repository.refreshMembers()
-        runCurrent()
-        sync.memberQueryStarted.await()
-        sync.blockMemberQuery = false
-        repository.refreshMembers()
-        val (old, new) = snapshots.await()
+        val snapshot = newer.await()
 
-        assertThat(old.recordRows.single().uploaderLabel).isEqualTo("旧称呼")
-        assertThat(new.recordRows.single().uploaderLabel).isEqualTo("新称呼")
-        assertThat(sync.cancelledMemberQueryCount).isEqualTo(1)
+        assertThat(snapshot.recordRows.single().uploaderLabel).isEqualTo("新称呼")
+        assertThat(sync.memberDirectoryRefreshCount).isEqualTo(1)
+        assertThat(sync.memberQueryCount).isEqualTo(0)
     }
 
     @Test
@@ -512,6 +531,7 @@ private class TimelineSyncPort(
     private var members: Result<List<FamilyMember>> = Result.success(emptyList()),
 ) : SyncPort by NoOpSyncPort() {
     private val sessionFlow = MutableStateFlow(session)
+    private val memberDirectoryFlow = MutableStateFlow(members.getOrDefault(emptyList()))
     var memberQueryCount: Int = 0
         private set
     var blockMemberQueryForFamily: String? = null
@@ -519,8 +539,15 @@ private class TimelineSyncPort(
     val memberQueryStarted = CompletableDeferred<Unit>()
     var cancelledMemberQueryCount: Int = 0
         private set
+    var memberDirectoryRefreshCount: Int = 0
+        private set
 
     override fun session(): Flow<SyncSession> = sessionFlow
+    override fun familyMemberDirectory(): Flow<List<FamilyMember>> = memberDirectoryFlow
+
+    override fun refreshFamilyMemberDirectory() {
+        memberDirectoryRefreshCount += 1
+    }
 
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
         memberQueryCount += 1
@@ -542,6 +569,7 @@ private class TimelineSyncPort(
 
     fun replaceMembers(members: Result<List<FamilyMember>>) {
         this.members = members
+        members.getOrNull()?.let { memberDirectoryFlow.value = it }
     }
 }
 

@@ -16,6 +16,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import com.lezi.babylog.sync.PendingMemberLogin
+import com.lezi.babylog.sync.FamilyDevice
+import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.backend.MemberLoginReceipt
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -24,6 +26,97 @@ class SyncPreferencesTest {
         store: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>,
         tokens: SecureRefreshTokenStore = InMemorySecureRefreshTokenStore(),
     ) = DataStoreSyncPreferences(store, tokens)
+
+    @Test
+    fun minimalMemberDirectorySurvivesRestartButIdentityClearRemovesIt() = runTest {
+        val file = File.createTempFile("lezi-member-directory-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureRefreshTokenStore()
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(
+            PreferenceDataStoreFactory.create(scope = firstScope) { file },
+            tokens,
+        )
+        first.saveSession(
+            SyncSession(
+                serverHost = "nas",
+                familyId = "family",
+                accessToken = "access",
+                refreshToken = "refresh",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+                membershipId = "owner",
+            ),
+        )
+        first.saveFamilyMemberDirectory(
+            listOf(
+                FamilyMember(
+                    displayName = "妈妈",
+                    role = FamilyRole.Owner,
+                    isSelf = true,
+                    membershipId = "owner",
+                    devices = listOf(FamilyDevice("device", "手机", 7, true)),
+                ),
+                FamilyMember("爸爸", FamilyRole.Member, false, "member"),
+            ),
+        )
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(
+            PreferenceDataStoreFactory.create(scope = secondScope) { file },
+            tokens,
+        )
+        val directory = restored.familyMemberDirectory.first()
+
+        assertThat(directory.map(FamilyMember::displayName)).containsExactly("妈妈", "爸爸").inOrder()
+        assertThat(directory.all { it.devices == null }).isTrue()
+
+        restored.clearAllLocalSyncConfig()
+        assertThat(restored.familyMemberDirectory.first()).isEmpty()
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun reconnectedSessionAtomicallyRetiresSameFamilyMemberDirectory() = runTest {
+        val file = File.createTempFile("lezi-reconnected-directory-", ".preferences_pb")
+            .also { it.delete() }
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store)
+        preferences.saveSession(
+            SyncSession(
+                serverHost = "old.example.com",
+                familyId = "family-preserved",
+                accessToken = "old-access",
+                refreshToken = "old-refresh",
+                deviceId = "old-device",
+                role = FamilyRole.Owner,
+                membershipId = "old-owner",
+            ),
+        )
+        preferences.saveFamilyMemberDirectory(
+            listOf(FamilyMember("旧管理员", FamilyRole.Owner, true, "old-owner")),
+        )
+        val endpoint = TrustedEndpointProfile.systemPki("https://new.example.com")
+        val restored = SyncSession(
+            serverHost = "new.example.com",
+            familyId = "family-preserved",
+            accessToken = "new-access",
+            refreshToken = "new-refresh",
+            deviceId = "new-device",
+            role = FamilyRole.Owner,
+            membershipId = "new-owner",
+        )
+
+        preferences.saveReconnectedSession(restored, endpoint)
+
+        assertThat(preferences.session.first()).isEqualTo(restored)
+        assertThat(preferences.verifiedEndpoint.first()).isEqualTo(endpoint)
+        assertThat(preferences.familyMemberDirectory.first()).isEmpty()
+        file.delete()
+    }
 
     @Test
     fun sessionBaseUrlIsDerivedFromStructuredEndpoint() {
@@ -777,6 +870,54 @@ class SyncPreferencesTest {
         )
         assertThat(restored.pendingMemberLogin.first()).isNull()
         assertThat(tokens.getPendingMemberSecret()).isEmpty()
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun disasterRestoreCheckpointSurvivesRestartWithoutWritingCredentialToDataStore() = runTest {
+        val file = File.createTempFile("lezi-restore-checkpoint-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureRefreshTokenStore()
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(
+            PreferenceDataStoreFactory.create(scope = firstScope) { file },
+            tokens,
+        )
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.home:8765")
+        val checkpoint = DisasterRestoreCheckpoint(
+            batchId = "batch-a",
+            endpoint = endpoint,
+            familyId = "family-a",
+            startRequestId = "start-request-00000000000000000001",
+            manifestRequestId = "manifest-request-0000000000000001",
+            commitRequestId = "commit-request-000000000000000001",
+            expiresAtEpochSeconds = 1_753_504_800,
+            status = "manifest_received",
+            entityVersions = listOf(
+                DisasterRestoreEntityVersion("record", "record-a", 42, true),
+            ),
+        )
+        val recoveryToken = "restore-token-000000000000000000000001"
+
+        first.saveDisasterRestoreCheckpoint(checkpoint, recoveryToken)
+        assertThat(first.disasterRestoreToken()).isEqualTo(recoveryToken)
+        assertThat(file.readBytes().toString(Charsets.ISO_8859_1))
+            .doesNotContain(recoveryToken)
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(
+            PreferenceDataStoreFactory.create(scope = secondScope) { file },
+            tokens,
+        )
+        assertThat(restored.disasterRestoreCheckpoint.first()).isEqualTo(checkpoint)
+        assertThat(restored.disasterRestoreToken()).isEqualTo(recoveryToken)
+
+        restored.clearDisasterRestoreCheckpoint()
+        assertThat(restored.disasterRestoreCheckpoint.first()).isNull()
+        assertThat(restored.disasterRestoreToken()).isEmpty()
         secondScope.cancel()
         file.delete()
     }

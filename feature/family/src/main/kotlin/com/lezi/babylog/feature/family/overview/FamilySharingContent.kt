@@ -38,8 +38,8 @@ internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
 
 /**
  * Account Tab family zone: overview family card + primary CTAs.
- * Endpoint setup stays in the family wizard; device logout and member-only identity deletion
- * remain distinct Account-bottom actions.
+ * Endpoint maintenance opens the independent family network settings page. Device logout and
+ * member-only identity deletion remain distinct Account-bottom actions.
  * Full member list opens from the member-count entry (secondary surface).
  */
 @Composable
@@ -51,6 +51,7 @@ internal fun FamilySharingContent(
     onOpenMembers: () -> Unit,
     onConnectFamily: () -> Unit,
     onScanMemberLoginQr: () -> Unit,
+    onOpenNetworkSettings: () -> Unit = {},
     onLogoutCurrentDevice: () -> Unit = {},
     onLeaveFamily: () -> Unit = {},
     onDeleteFamily: () -> Unit = {},
@@ -186,6 +187,12 @@ internal fun FamilySharingContent(
     }
     if (overview.enabled) {
         Spacer(Modifier.height(LeziSpacing.Sm))
+        LeziSecondaryButton(
+            "家庭网络设置",
+            onClick = onOpenNetworkSettings,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(LeziSpacing.Xs))
         LeziSecondaryButton(
             "退出这台设备",
             onClick = onLogoutCurrentDevice,

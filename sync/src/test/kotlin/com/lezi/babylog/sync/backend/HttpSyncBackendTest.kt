@@ -27,6 +27,146 @@ import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 class HttpSyncBackendTest {
     @Test
+    fun disasterRestoreUsesRootOnlyAtBoundariesAndRecoveryTokenInTheMiddle() = runTest {
+        val server = ServerSocket(0, 3, InetAddress.getByName("127.0.0.1"))
+        val captured = mutableListOf<String>()
+        val responder = thread(name = "lezi-disaster-restore-test-server") {
+            repeat(3) {
+                server.accept().use { socket ->
+                    val request = readRequest(socket).also(captured::add)
+                    val body = when {
+                        request.startsWith("POST /v1/disaster-restore/batches ") ->
+                            """{"protocol_version":1,"batch_id":"batch-a","status":"started","expires_at":1753500000,"recovery_token":"restore-token-00000000000000000000"}"""
+                        request.startsWith("PUT /v1/disaster-restore/batches/batch-a/manifest ") ->
+                            """{"protocol_version":1,"batch_id":"batch-a","status":"ready_to_commit","expires_at":1753500000}"""
+                        else ->
+                            """{"protocol_version":1,"batch_id":"batch-a","status":"committed","family_id":"00000000-0000-0000-0000-000000000001","family_name":"乐乐一家","membership_id":"membership-owner","device_id":"device-new","session_id":"session-new","role":"owner","access_token":"new-access","access_expires_at":1753419300,"refresh_token":"new-refresh","generation":"generation-new"}"""
+                    }.toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+        val endpoint = TrustedEndpointProfile.systemPki(
+            "https://${server.inetAddress.hostAddress}:${server.localPort}",
+        )
+        val backend = loopbackBackend(clientVersionCode = 10)
+
+        try {
+            val batch = backend.startDisasterRestore(
+                endpoint,
+                "start-request-00000000000000000001",
+                "00000000-0000-0000-0000-000000000001",
+                "Lezi Home",
+                "Mom",
+                "Pixel 9",
+                "new-server-root",
+            )
+            backend.putDisasterRestoreManifest(
+                endpoint,
+                batch.batchId,
+                batch.recoveryToken,
+                "manifest-request-0000000000000001",
+                listOf(
+                    SyncEntity(
+                        type = "baby",
+                        clientUuid = "00000000-0000-0000-0000-000000000010",
+                        payloadJson = """{"nickname":"Baby","sex":null,"birthday":"2025-01-01","birth_weight_grams":null,"avatar_media_uuid":null}""",
+                        updatedAt = 1,
+                    ),
+                ),
+                emptyList(),
+            )
+            val session = backend.commitDisasterRestore(
+                endpoint,
+                batch.batchId,
+                batch.recoveryToken,
+                "commit-request-000000000000000001",
+                "new-server-root",
+            )
+
+            assertThat(session.familyId).isEqualTo("00000000-0000-0000-0000-000000000001")
+            assertThat(session.role).isEqualTo(FamilyRole.Owner)
+            assertThat(captured[0]).contains("X-Lezi-Bootstrap-Secret: new-server-root")
+            assertThat(captured[0]).doesNotContain("Authorization:")
+            assertThat(captured[0].substringAfter("\n\n")).doesNotContain("new-server-root")
+            assertThat(captured[1]).contains(
+                "Authorization: Bearer restore-token-00000000000000000000",
+            )
+            assertThat(captured[1]).doesNotContain("X-Lezi-Bootstrap-Secret:")
+            assertThat(captured[1]).doesNotContain("family-token")
+            assertThat(captured[2]).contains(
+                "Authorization: Bearer restore-token-00000000000000000000",
+            )
+            assertThat(captured[2]).contains("X-Lezi-Bootstrap-Secret: new-server-root")
+            assertThat(captured[2].substringAfter("\n\n")).doesNotContain("new-server-root")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun anonymousHealthAndReadyNeverSendFamilyCredentials() = runTest {
+        val server = ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
+        val captured = mutableListOf<String>()
+        val responder = thread(name = "lezi-anonymous-health-test-server") {
+            repeat(2) {
+                server.accept().use { socket ->
+                    val request = readRequest(socket)
+                    captured += request
+                    val body = if (request.startsWith("GET /health ")) {
+                        """{"ok":true,"version":"0.3.3","capabilities":["atomic_bundle","record_membership_author"]}"""
+                    } else {
+                        """{"ok":true,"status":"ready","version":"0.3.3"}"""
+                    }.toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+        val endpoint = TrustedEndpointProfile.systemPki(
+            "https://${server.inetAddress.hostAddress}:${server.localPort}",
+        )
+
+        try {
+            val health = loopbackBackend().anonymousHealth(endpoint)
+            val ready = loopbackBackend().anonymousReady(endpoint)
+
+            assertThat(health.version).isEqualTo("0.3.3")
+            assertThat(health.capabilities).contains("atomic_bundle")
+            assertThat(ready.version).isEqualTo("0.3.3")
+            assertThat(captured.map { it.lineSequence().first() }).containsExactly(
+                "GET /health HTTP/1.1",
+                "GET /ready HTTP/1.1",
+            ).inOrder()
+            assertThat(captured.all { "Authorization:" !in it }).isTrue()
+            assertThat(captured.all { "X-Lezi-Client-Version-Code:" !in it }).isTrue()
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun familyDeleteSendsNormalizedNameAndRequestScopedRootOutsideTheJsonBody() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = CompletableFuture<String>()

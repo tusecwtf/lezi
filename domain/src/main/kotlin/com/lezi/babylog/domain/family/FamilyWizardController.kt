@@ -413,7 +413,7 @@ class SyncFamilyWizardGateway private constructor(
     }
 
     override suspend fun retryReclaimedDataRecovery(): Result<Unit> =
-        sync.sync(SyncTrigger.PullToRefresh)
+        sync.syncWhenAvailable(SyncTrigger.PullToRefresh)
 }
 
 /**

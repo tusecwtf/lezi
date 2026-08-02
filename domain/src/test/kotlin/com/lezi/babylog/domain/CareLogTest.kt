@@ -6816,6 +6816,10 @@ private class RecordingSyncPort(
         requests++
     }
 
+    override fun notifyLocalChanges() {
+        requests++
+    }
+
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit> {
         mediaCleanupCandidates += clientUuids
         return mediaCleanupFailures.removeFirstOrNull()
