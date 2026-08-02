@@ -1,0 +1,11 @@
+# 33 — Owner reconnect without ghost devices or sticky login id
+
+**What to build:** Network-settings owner reconnect does not silently mint unbounded active Owner devices for the same phone recovery path. Login request id lifecycle allows recovery after crash and forbids permanent conflict when takeover/login mode flips. Same device name reconnect is workable (replace or revoke-old).
+
+**Blocked by:** None.
+
+**Status:** ready-for-agent
+
+- [ ] Reconnect same device does not leave an extra active Owner device by default.
+- [ ] Durable login request id retry-safe; conflict surfaces recoverable Chinese copy.
+- [ ] Takeover vs login mode cannot permanently brick against a committed server row without a new id path.
