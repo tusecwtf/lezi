@@ -69,7 +69,7 @@ LEZI_SYNC_VERSION=0.3.3 ./build-image.sh
 
 普通 NAS CD、回滚和容器重启不得替换已有 TLS identity；下面的 `init-tls.sh` 生成路径只用于
 经确认的全新空数据根。已有家庭的数据根若证书缺失、无效、错配或容器内不可读，应停止部署，
-不得借 CD 自动补证书。部署前后 SPKI 必须完全一致；完整约束见
+不得借 CD 自动补证书。部署前后完整证书文件 SHA-256 与 SPKI 必须完全一致；完整约束见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md) § TLS identity。
 
 ```bash
@@ -84,8 +84,9 @@ sudo chown -R 10001:10001 /volume1/docker/lezi
 export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
 export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
 
-# 首次生成、以后验证并复用同一 SPKI；生产默认在镜像内调用 openssl。
-./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.3 nas.example.lan
+# 仅首次、已确认全新空数据根：显式授权生成；以后不设置该变量，只验证并复用。
+LEZI_ALLOW_TLS_BOOTSTRAP=1 \
+  ./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.3 nas.example.lan
 
 docker compose up -d
 docker compose ps
@@ -214,7 +215,8 @@ cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
 
 tmp_data="$(mktemp -d)"
-LEZI_TLS_USE_HOST_OPENSSL=1 ./deploy/init-tls.sh "${tmp_data}" ignored localhost
+LEZI_ALLOW_TLS_BOOTSTRAP=1 LEZI_TLS_USE_HOST_OPENSSL=1 \
+  ./deploy/init-tls.sh "${tmp_data}" ignored localhost
 LEZI_DATA_DIR="${tmp_data}" \
   LEZI_TLS_CERTFILE="${tmp_data}/tls/server.crt" \
   LEZI_TLS_KEYFILE="${tmp_data}/tls/server.key" \
@@ -223,7 +225,7 @@ LEZI_DATA_DIR="${tmp_data}" \
 
 证书生成、替换、过期、错配、TOFU 变化和证书重连测试必须沿用这类临时数据根和开发者自建
 服务，并使用非生产端口；禁止把 `tmp_data` 或测试配置改指向真实家庭 NAS、现网容器或其
-数据 bind。真实家庭 NAS 只允许只读检查证书/SAN/公开指纹和比较 CD 前后 SPKI。
+数据 bind。真实家庭 NAS 只允许只读检查证书/SAN/公开指纹和比较 CD 前后完整证书哈希与 SPKI。
 
 容器健康检查调用同一个 Rust 二进制：
 

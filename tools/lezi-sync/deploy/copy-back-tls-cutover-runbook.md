@@ -58,7 +58,7 @@ From tickets 01–05 (local only):
 5. CD package ready on the dev machine (`./build-image.sh` + package, or known-good `dist/`). **Do not** run `push-and-deploy` until the operator confirms the replace window.
 6. Record the **migration-time new root password** — it becomes `LEZI_BOOTSTRAP_SECRET` after cutover. The pre-cutover container secret is **void** for owner re-login (`OwnerReauth::NewRootPasswordAtMigration`).
 
-`out/` must be copy-back-ready: current-schema `lezi.db` (full preflight shape, not version alone), regenerated `server.secret` (≥32 bytes), media authority files as migrated, **no** residual `lezi.db-wal` / `-shm` / `-journal`. **`tls/` is not required inside `out/`** (`AbsentOrCreateAtCutover`); `remote-deploy` / `init-tls.sh` creates identity under the data bind.
+`out/` must be copy-back-ready: current-schema `lezi.db` (full preflight shape, not version alone), regenerated `server.secret` (≥32 bytes), media authority files as migrated, **no** residual `lezi.db-wal` / `-shm` / `-journal`. **`tls/` is not required inside `out/`** (`AbsentOrCreateAtCutover`); only the explicitly confirmed cutover sets `LEZI_ALLOW_TLS_BOOTSTRAP=1` so `remote-deploy` / `init-tls.sh` may create the first identity under the data bind.
 
 ## Step 0 — Capture pre-cutover image (required for rollback)
 
@@ -178,9 +178,11 @@ Even if a container were still present, **inheriting the pre-cutover secret is w
 export LEZI_BOOTSTRAP_SECRET='…migration-time new root password (≥16 chars)…'
 # Opt-in SSH forward (required): ordinary CD never forwards a local secret over SSH.
 export LEZI_FORWARD_BOOTSTRAP_SECRET=1
+# The migrated out/ tree has no TLS identity; authorize exactly this first generation.
+export LEZI_ALLOW_TLS_BOOTSTRAP=1
 # NEVER: leave unset hoping remote-deploy inherits the old container
 # NEVER: export the pre-cutover container LEZI_BOOTSTRAP_SECRET
-# After cutover: unset LEZI_BOOTSTRAP_SECRET and LEZI_FORWARD_BOOTSTRAP_SECRET so ordinary CD inherits from live.
+# After cutover: unset all three variables so ordinary CD inherits from live and cannot generate TLS.
 ```
 
 From `tools/lezi-sync` on the dev machine (after confirm):
@@ -188,20 +190,21 @@ From `tools/lezi-sync` on the dev machine (after confirm):
 ```bash
 export LEZI_BOOTSTRAP_SECRET='…migration-time new root password…'
 export LEZI_FORWARD_BOOTSTRAP_SECRET=1
+export LEZI_ALLOW_TLS_BOOTSTRAP=1
 ./build-image.sh
 ./deploy/push-and-deploy.sh
 # Or, only if dist/ already embeds the intended image:
 # LEZI_SKIP_PACKAGE=1 ./deploy/push-and-deploy.sh
-# After green health: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET
+# After green health: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET LEZI_ALLOW_TLS_BOOTSTRAP
 ```
 
-`push-and-deploy.sh` **forwards** `LEZI_BOOTSTRAP_SECRET` into remote `remote-deploy.sh` only when **both** `LEZI_BOOTSTRAP_SECRET` and `LEZI_FORWARD_BOOTSTRAP_SECRET=1` are set. Ordinary CD (flag unset) never injects a local secret over SSH — remote-deploy inherits from the live container. **This cutover must set both** (container already removed in Step 1; migration password must not be the pre-cutover inherit).
+`push-and-deploy.sh` **forwards** `LEZI_BOOTSTRAP_SECRET` into remote `remote-deploy.sh` only when **both** `LEZI_BOOTSTRAP_SECRET` and `LEZI_FORWARD_BOOTSTRAP_SECRET=1` are set. It forwards the separate `LEZI_ALLOW_TLS_BOOTSTRAP=1` authorization only when explicitly set. Ordinary CD leaves all three flags unset: it inherits the secret from the live container and refuses to generate a missing certificate. **This cutover must set all three** because the container was removed in Step 1 and the migrated `out/` intentionally has no TLS identity.
 
 `remote-deploy.sh` on the NAS will:
 
 - `docker load` the image tar
 - use forwarded `LEZI_BOOTSTRAP_SECRET` (migration password) — **not** pre-cutover inherit for this path
-- `init-tls.sh` under the data bind (`tls/` create-or-reuse)
+- `init-tls.sh` under the data bind (one-time `tls/` creation authorized by `LEZI_ALLOW_TLS_BOOTSTRAP=1`)
 - install app-update artifacts
 - stop/rm + compose up project `lezi` (container already absent after Step 1)
 - probe HTTPS health/ready inside the deploy script

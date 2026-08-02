@@ -22,6 +22,16 @@ NAS_REMOTE_DIR="${NAS_REMOTE_DIR:-/tmp/lezi-sync-releases/lezi-sync-${version}-n
 PACKAGE_DIR="${LEZI_NAS_PACKAGE_DIR:-${REPO_ROOT}/dist/lezi-sync-${version}-nas}"
 SKIP_PACKAGE="${LEZI_SKIP_PACKAGE:-0}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -p "${NAS_SSH_PORT}")
+allow_tls_bootstrap="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
+
+if [[ "${allow_tls_bootstrap}" != "0" && "${allow_tls_bootstrap}" != "1" ]]; then
+  echo "error: LEZI_ALLOW_TLS_BOOTSTRAP must be 0 or 1" >&2
+  exit 1
+fi
+tls_bootstrap_remote_prefix=""
+if [[ "${allow_tls_bootstrap}" == "1" ]]; then
+  tls_bootstrap_remote_prefix="LEZI_ALLOW_TLS_BOOTSTRAP=1 "
+fi
 
 echo "==> push-and-deploy lezi-sync ${version}"
 echo "    nas:     ${NAS_SSH} port ${NAS_SSH_PORT}"
@@ -76,7 +86,7 @@ if [[ "${LEZI_FORWARD_BOOTSTRAP_SECRET:-}" == "1" ]]; then
   # printf %q → safe single remote argv; secret is not written to a remote file by this script.
   secret_q="$(printf '%q' "${LEZI_BOOTSTRAP_SECRET}")"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
-    "cd '${NAS_REMOTE_DIR}' && chmod +x remote-deploy.sh && LEZI_BOOTSTRAP_SECRET=${secret_q} ./remote-deploy.sh"
+    "cd '${NAS_REMOTE_DIR}' && chmod +x remote-deploy.sh && ${tls_bootstrap_remote_prefix}LEZI_BOOTSTRAP_SECRET=${secret_q} ./remote-deploy.sh"
 else
   if [[ -n "${LEZI_BOOTSTRAP_SECRET:-}" ]]; then
     echo "==> LEZI_BOOTSTRAP_SECRET is set locally but NOT forwarded (ordinary CD inherit path)"
@@ -84,9 +94,12 @@ else
   else
     echo "==> LEZI_BOOTSTRAP_SECRET unset; remote-deploy may inherit from live container"
   fi
+  if [[ "${allow_tls_bootstrap}" == "1" ]]; then
+    echo "==> WARNING: authorizing one-time TLS identity generation on a verified fresh data root"
+  fi
   echo "    (cutover must export migration password + LEZI_FORWARD_BOOTSTRAP_SECRET=1 — see copy-back-tls-cutover-runbook.md)"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
-    "cd '${NAS_REMOTE_DIR}' && chmod +x remote-deploy.sh && ./remote-deploy.sh"
+    "cd '${NAS_REMOTE_DIR}' && chmod +x remote-deploy.sh && ${tls_bootstrap_remote_prefix}./remote-deploy.sh"
 fi
 
 echo "==> done"

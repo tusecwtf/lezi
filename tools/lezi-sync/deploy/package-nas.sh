@@ -284,8 +284,12 @@ sed \
 cp -a "${SCRIPT_DIR}/.env.example" "${out_root}/.env.example"
 cp -a "${SCRIPT_DIR}/remote-deploy.sh" "${out_root}/remote-deploy.sh"
 cp -a "${SCRIPT_DIR}/init-tls.sh" "${out_root}/init-tls.sh"
+cp -a "${SCRIPT_DIR}/tls-certificate-sha256.sh" "${out_root}/tls-certificate-sha256.sh"
+cp -a "${SCRIPT_DIR}/tls-spki.sh" "${out_root}/tls-spki.sh"
 chmod +x "${out_root}/remote-deploy.sh"
 chmod +x "${out_root}/init-tls.sh"
+chmod +x "${out_root}/tls-certificate-sha256.sh"
+chmod +x "${out_root}/tls-spki.sh"
 
 image_id=""
 if docker image inspect "${image}" >/dev/null 2>&1; then
@@ -319,6 +323,7 @@ EOF
 (
   cd "${out_root}"
   sha256sum "${tar_name}" docker-compose.yml MANIFEST.json remote-deploy.sh init-tls.sh \
+    tls-certificate-sha256.sh tls-spki.sh \
     app-update/app-release.apk app-update/app-update.json \
     > SHA256SUMS
 )

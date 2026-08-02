@@ -16,6 +16,12 @@ tls_directory="${data_root}/tls"
 certificate="${tls_directory}/server.crt"
 private_key="${tls_directory}/server.key"
 host_openssl="${LEZI_TLS_USE_HOST_OPENSSL:-0}"
+allow_tls_bootstrap="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
+
+if [[ "${allow_tls_bootstrap}" != "0" && "${allow_tls_bootstrap}" != "1" ]]; then
+  echo "error: LEZI_ALLOW_TLS_BOOTSTRAP must be 0 or 1" >&2
+  exit 1
+fi
 
 if [[ "${host_openssl}" == "1" ]]; then
   command -v openssl >/dev/null
@@ -115,6 +121,12 @@ if [[ "${certificate_exists}" -eq 1 ]]; then
   echo "==> reusing persistent TLS identity"
   print_spki_fingerprint
   exit 0
+fi
+
+if [[ "${allow_tls_bootstrap}" != "1" ]]; then
+  echo "error: TLS identity is absent; ordinary CD refuses to generate a replacement" >&2
+  echo "  set LEZI_ALLOW_TLS_BOOTSTRAP=1 only for a verified fresh data root" >&2
+  exit 1
 fi
 
 if [[ "${tls_host}" == *:* ]] || [[ "${tls_host}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

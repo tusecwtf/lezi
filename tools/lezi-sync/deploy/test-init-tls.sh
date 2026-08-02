@@ -15,7 +15,14 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-LEZI_TLS_USE_HOST_OPENSSL=1 \
+if LEZI_TLS_USE_HOST_OPENSSL=1 \
+    "${SCRIPT_DIR}/init-tls.sh" "${test_root}" ignored localhost; then
+  echo "error: empty data root generated TLS identity without explicit bootstrap" >&2
+  exit 1
+fi
+
+LEZI_ALLOW_TLS_BOOTSTRAP=1 \
+  LEZI_TLS_USE_HOST_OPENSSL=1 \
   "${SCRIPT_DIR}/init-tls.sh" "${test_root}" ignored localhost
 
 certificate="${test_root}/tls/server.crt"
@@ -26,6 +33,30 @@ test "$(stat -c '%a' "${private_key}")" = "600"
 
 first_certificate="$(sha256sum "${certificate}")"
 first_key="$(sha256sum "${private_key}")"
+first_certificate_digest="$(
+  LEZI_TLS_USE_HOST_OPENSSL=1 \
+    "${SCRIPT_DIR}/tls-certificate-sha256.sh" "${test_root}" ignored
+)"
+test "${first_certificate_digest}" = "$(printf '%s' "${first_certificate}" | awk '{print toupper($1)}')"
+LEZI_TLS_USE_HOST_OPENSSL=1 \
+  "${SCRIPT_DIR}/tls-certificate-sha256.sh" \
+  "${test_root}" ignored "${first_certificate_digest}" >/dev/null
+first_spki="$(
+  LEZI_TLS_USE_HOST_OPENSSL=1 \
+    "${SCRIPT_DIR}/tls-spki.sh" "${test_root}" ignored
+)"
+if [[ ! "${first_spki}" =~ ^[0-9A-F]{64}$ ]]; then
+  echo "error: TLS SPKI helper did not return 64 uppercase hex characters" >&2
+  exit 1
+fi
+LEZI_TLS_USE_HOST_OPENSSL=1 \
+  "${SCRIPT_DIR}/tls-spki.sh" "${test_root}" ignored "${first_spki}" >/dev/null
+wrong_spki="$(printf '0%.0s' {1..64})"
+if LEZI_TLS_USE_HOST_OPENSSL=1 \
+    "${SCRIPT_DIR}/tls-spki.sh" "${test_root}" ignored "${wrong_spki}"; then
+  echo "error: TLS SPKI helper accepted a mismatched expected fingerprint" >&2
+  exit 1
+fi
 LEZI_TLS_USE_HOST_OPENSSL=1 \
   "${SCRIPT_DIR}/init-tls.sh" "${test_root}" ignored localhost
 test "$(sha256sum "${certificate}")" = "${first_certificate}"
@@ -49,7 +80,14 @@ if [[ -n "${LEZI_TLS_TEST_IMAGE:-}" ]]; then
     "${LEZI_TLS_TEST_IMAGE}" \
     -ec 'chown 10001:10001 /fixture/container-data && chmod 700 /fixture/container-data'
 
-  "${SCRIPT_DIR}/init-tls.sh" "${container_data}" "${LEZI_TLS_TEST_IMAGE}" localhost
+  if "${SCRIPT_DIR}/init-tls.sh" \
+      "${container_data}" "${LEZI_TLS_TEST_IMAGE}" localhost; then
+    echo "error: uid-10001 empty data root generated TLS identity without explicit bootstrap" >&2
+    exit 1
+  fi
+
+  LEZI_ALLOW_TLS_BOOTSTRAP=1 \
+    "${SCRIPT_DIR}/init-tls.sh" "${container_data}" "${LEZI_TLS_TEST_IMAGE}" localhost
   if [[ -f "${container_data}/tls/server.crt" ]]; then
     echo "error: host unexpectedly sees the uid-10001 TLS identity" >&2
     exit 1
@@ -73,6 +111,13 @@ if [[ -n "${LEZI_TLS_TEST_IMAGE:-}" ]]; then
 
   first_container_identity="$(container_hashes)"
   first_container_key="$(container_key_hash)"
+  first_container_certificate_digest="$(
+    "${SCRIPT_DIR}/tls-certificate-sha256.sh" \
+      "${container_data}" "${LEZI_TLS_TEST_IMAGE}"
+  )"
+  "${SCRIPT_DIR}/tls-certificate-sha256.sh" \
+    "${container_data}" "${LEZI_TLS_TEST_IMAGE}" \
+    "${first_container_certificate_digest}" >/dev/null
   "${SCRIPT_DIR}/init-tls.sh" "${container_data}" "${LEZI_TLS_TEST_IMAGE}" localhost
   test "$(container_hashes)" = "${first_container_identity}"
 

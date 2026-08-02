@@ -16,6 +16,12 @@ HEALTH_URL="${LEZI_HEALTH_URL:-https://127.0.0.1:8765/health}"
 READY_URL="${LEZI_READY_URL:-https://127.0.0.1:8765/ready}"
 EXPECTED_VERSION="${LEZI_SYNC_VERSION:-}"
 TLS_HOST="${LEZI_TLS_HOST:-192.168.50.4}"
+ALLOW_TLS_BOOTSTRAP="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
+
+if [[ "${ALLOW_TLS_BOOTSTRAP}" != "0" && "${ALLOW_TLS_BOOTSTRAP}" != "1" ]]; then
+  echo "error: LEZI_ALLOW_TLS_BOOTSTRAP must be 0 or 1" >&2
+  exit 1
+fi
 
 if [[ -f MANIFEST.json ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -98,7 +104,35 @@ else
 fi
 
 echo "==> initialize or validate persistent TLS identity"
+tls_certificate_sha256_before="$(
+  "${DIR}/tls-certificate-sha256.sh" "${data_path}" "${image}" 2>/dev/null || true
+)"
+tls_spki_before="$(
+  "${DIR}/tls-spki.sh" "${data_path}" "${image}" 2>/dev/null || true
+)"
 "${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
+tls_certificate_sha256_expected="$(
+  "${DIR}/tls-certificate-sha256.sh" "${data_path}" "${image}"
+)"
+tls_spki_expected="$("${DIR}/tls-spki.sh" "${data_path}" "${image}")"
+if [[ -n "${tls_certificate_sha256_before}" || -n "${tls_spki_before}" ]]; then
+  if [[ -z "${tls_certificate_sha256_before}" || -z "${tls_spki_before}" ]]; then
+    echo "error: could not establish both TLS certificate and SPKI identity before deploy" >&2
+    exit 1
+  fi
+  "${DIR}/tls-spki.sh" "${data_path}" "${image}" "${tls_spki_before}" >/dev/null
+  "${DIR}/tls-certificate-sha256.sh" \
+    "${data_path}" "${image}" "${tls_certificate_sha256_before}" >/dev/null
+  echo "==> pre-replace TLS certificate preserved: ${tls_certificate_sha256_expected}"
+  echo "==> pre-replace TLS SPKI preserved: ${tls_spki_expected}"
+else
+  if [[ "${ALLOW_TLS_BOOTSTRAP}" != "1" ]]; then
+    echo "error: ordinary CD could not establish the pre-existing TLS identity" >&2
+    exit 1
+  fi
+  echo "==> bootstrapped TLS certificate: ${tls_certificate_sha256_expected}"
+  echo "==> bootstrapped TLS SPKI: ${tls_spki_expected}"
+fi
 tls_certificate="${data_path}/tls/server.crt"
 
 # Self-hosted app update: copy release APK + metadata into the data bind mount
@@ -230,6 +264,12 @@ if [[ -n "${EXPECTED_VERSION}" ]]; then
     cat /tmp/lezi-health.out >&2 || true
   fi
 fi
+
+"${DIR}/tls-spki.sh" "${data_path}" "${image}" "${tls_spki_expected}" >/dev/null
+"${DIR}/tls-certificate-sha256.sh" \
+  "${data_path}" "${image}" "${tls_certificate_sha256_expected}" >/dev/null
+echo "==> post-replace TLS certificate preserved: ${tls_certificate_sha256_expected}"
+echo "==> post-replace TLS SPKI preserved: ${tls_spki_expected}"
 
 docker ps --filter "name=^/${CONTAINER_NAME}$" --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 echo "==> deploy ok"

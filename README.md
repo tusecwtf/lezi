@@ -110,7 +110,8 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 
 证书生成、替换、过期、错配、TOFU 变化和证书重连测试禁止使用真实家庭 NAS、现网容器或其
 数据 bind；必须在开发者自行部署的隔离 `lezi-sync` 服务上进行，使用 `mktemp` 临时数据根和
-非生产端口。真实家庭 NAS 只做证书元数据、SAN、公开指纹与部署前后 SPKI 的只读核验。
+非生产端口。真实家庭 NAS 只做证书元数据、SAN、公开指纹与部署前后完整证书 SHA-256、SPKI
+的只读核验。
 
 常用环境变量：
 
@@ -140,7 +141,11 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 变化会硬阻断并要求重新信任/登录，旧凭证不会发送到候选地址。须用 NAS 防火墙禁止公网访问
 8765。旧 Owner 可把本机完整护理副本恢复到空 0.3.3 服务器；不支持两个已配置家庭合并。
 
-**首次空部署**（无现网容器）须自行设置 `LEZI_BOOTSTRAP_SECRET`（≥16 字符）后再 `push-and-deploy`，并在 App 建家时填同一口令。
+**首次空部署**（无现网容器、且已确认数据根全新无 TLS identity）须同时设置
+`LEZI_BOOTSTRAP_SECRET`（≥16 字符）、`LEZI_FORWARD_BOOTSTRAP_SECRET=1` 和
+`LEZI_ALLOW_TLS_BOOTSTRAP=1` 后再 `push-and-deploy`，并在 App 建家时填同一口令。
+普通 CD 必须让 `LEZI_ALLOW_TLS_BOOTSTRAP` 保持未设置；脚本会在停容器前及启动后核对完整
+证书文件 SHA-256 与 SPKI，任何变化都失败。
 
 仅打包不部署：`./deploy/package-nas.sh`。回滚：在 NAS 上进入旧版包目录再跑 `./remote-deploy.sh`。
 

@@ -167,14 +167,14 @@ echo "  dry_run=          ${LEZI_COPY_BACK_DRY_RUN}" >&2
 echo "  user_version_exp= ${EXPECTED_USER_VERSION}" >&2
 echo "  nas_backup=       ${LEZI_NAS_BACKUP_PATH:-"(dry-run may omit)"}" >&2
 echo "  transport=        rsync --delete via staging+rename (scp refused)" >&2
-echo "  next after copy:  export LEZI_BOOTSTRAP_SECRET=<migration new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1; push-and-deploy (no inherit)" >&2
+echo "  next after copy:  export LEZI_BOOTSTRAP_SECRET=<migration new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_TLS_BOOTSTRAP=1; push-and-deploy (no inherit; one-time TLS create)" >&2
 echo "  ticket 07 owns live cutover success claims" >&2
 
 if [[ "${LEZI_COPY_BACK_DRY_RUN}" == "1" ]]; then
   echo "copy-back dry-run ok (no network write)"
   echo "out=${OUT}"
   echo "nas=${NAS_SSH}:${LEZI_DATA_HOST_PATH}/"
-  echo "next: LEZI_COPY_BACK_DRY_RUN=0 + LEZI_NAS_BACKUP_PATH=… then rsync staging swap; then CD TLS with LEZI_BOOTSTRAP_SECRET + LEZI_FORWARD_BOOTSTRAP_SECRET=1"
+  echo "next: LEZI_COPY_BACK_DRY_RUN=0 + LEZI_NAS_BACKUP_PATH=… then rsync staging swap; then CD TLS with LEZI_BOOTSTRAP_SECRET + LEZI_FORWARD_BOOTSTRAP_SECRET=1 + LEZI_ALLOW_TLS_BOOTSTRAP=1"
   exit 0
 fi
 
@@ -366,7 +366,7 @@ echo "copy-back ok"
 echo "out=${OUT}"
 echo "nas=${NAS_SSH}:${LEZI_DATA_HOST_PATH}/"
 echo "previous_tree_remote=${PREV}"
-echo "next: export LEZI_BOOTSTRAP_SECRET=<migration-time new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 (NEVER inherit pre-cutover container env)"
+echo "next: export LEZI_BOOTSTRAP_SECRET=<migration-time new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_TLS_BOOTSTRAP=1 (NEVER inherit pre-cutover container env; one-time TLS create)"
 echo "then: cd tools/lezi-sync && ./deploy/push-and-deploy.sh  # forwards secret only with LEZI_FORWARD_BOOTSTRAP_SECRET=1"
-echo "then: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET after cutover; probe health/ready (see copy-back-tls-cutover-runbook.md)"
+echo "then: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET LEZI_ALLOW_TLS_BOOTSTRAP after cutover; probe health/ready (see copy-back-tls-cutover-runbook.md)"
 echo "note: this script does NOT claim live cutover success (ticket 07)"

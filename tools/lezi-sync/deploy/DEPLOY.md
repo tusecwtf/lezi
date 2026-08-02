@@ -30,6 +30,7 @@ Environment overrides:
 | `LEZI_SYNC_VERSION` | from `Cargo.toml` |
 | `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
 | `LEZI_TLS_HOST` | `192.168.50.4`; DNS name or IP included in the self-signed certificate SAN |
+| `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time opt-in to create TLS files only on an operator-verified fresh data root. Ordinary CD, rollback, and certificate tests on the family NAS must leave it unset. |
 | `LEZI_FORCE_PACKAGE=1` | rebuild package even if present |
 | `LEZI_SKIP_PACKAGE=1` | only scp+deploy existing `dist/lezi-sync-*-nas` |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
@@ -42,7 +43,7 @@ Environment overrides:
 
 1. **package-nas.sh** — `docker save` + render `docker-compose.yml` + **fail-closed app-update artifacts** + `MANIFEST.json` + `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`
 2. **push-and-deploy.sh** — scp package to `~/lezi-sync-releases/...` on NAS
-3. **remote-deploy.sh** (on NAS) — `docker load` → inherit secret → initialize/validate persistent TLS → **copy APK + metadata into data bind** → stop/rm old container → **zdocker compose up** → HTTPS `/health` + `/ready`
+3. **remote-deploy.sh** (on NAS) — `docker load` → inherit secret → validate persistent TLS and pin exact certificate SHA-256 + SPKI → **copy APK + metadata into data bind** → stop/rm old container → **zdocker compose up** → HTTPS `/health` + `/ready` → recheck both TLS digests
 
 ## Self-hosted app update (release APK)
 
@@ -139,14 +140,18 @@ LEZI_FORCE_PACKAGE=1 \
 ## TLS identity
 
 - Ordinary CD, rollback, container replacement, and restart are **not certificate-rotation paths**.
-  They must preserve `/data/tls/server.crt` and mode-`600` `/data/tls/server.key` byte-for-byte.
-- `init-tls.sh` may create that pair only for the first deployment to an operator-verified fresh data
-  root where both files are absent. If both files are absent from an established/configured family
+  They must preserve `/data/tls/server.crt` byte-for-byte and retain the same matching mode-`600`
+  `/data/tls/server.key` identity.
+- `init-tls.sh` may create that pair only when the operator explicitly sets
+  `LEZI_ALLOW_TLS_BOOTSTRAP=1` for the first deployment to a verified fresh data root where both
+  files are absent. Ordinary CD leaves the flag unset. If both files are absent from an established/configured family
   data root, treat that as an incident and stop; do not use CD to create a replacement identity.
 - Existing-file checks and validation must run from the helper-container uid `10001` view. The NAS
   SSH user not being able to traverse a mode-`700` bind does **not** mean the identity is absent.
 - A missing half, invalid/expired certificate, mismatched key, helper-container read failure, or
-  pre/post-CD SPKI mismatch fails closed before success is reported. Never delete, rename, chmod,
+  pre/post-CD exact certificate SHA-256 or SPKI mismatch fails closed before success is reported.
+  The certificate digest covers the exact `server.crt` bytes, so same-key reissuance is also rejected.
+  Never delete, rename, chmod,
   regenerate, or copy over TLS files to make deployment pass.
 - The private key is absent from the image, Git, package directory, logs, `MANIFEST.json`, and `SHA256SUMS`.
 - Deployment prints only the public SPKI SHA-256 fingerprint so it can be compared with the Android TOFU screen.
@@ -158,7 +163,8 @@ LEZI_FORCE_PACKAGE=1 \
 - Deploy a developer-owned isolated service instead. Use a `mktemp` data root, a non-production port,
   and credentials/family data created only for that test; destroy only that isolated fixture afterward.
 - On a family NAS, certificate work is read-only: inspect certificate metadata/SAN, compute the public
-  certificate and SPKI fingerprints, and compare the exact SPKI before and after ordinary CD.
+  certificate and SPKI fingerprints, and compare the exact certificate SHA-256 and SPKI before and
+  after ordinary CD.
 - Any intentional certificate rotation is a separately authorized maintenance operation with its own
   backup, rollback, client re-trust, and re-login plan. It is never folded into image CD or a test run.
 

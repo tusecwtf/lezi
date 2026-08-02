@@ -38,7 +38,7 @@ absent.
 TOFU-change, or reconnect-certificate tests against the family NAS, its live container, or its data
 bind. Run them on a developer-owned isolated `lezi-sync` instance with a `mktemp` data root and a
 non-production port. The family NAS permits read-only certificate/SAN/fingerprint checks and exact
-pre/post-CD SPKI comparison only.
+pre/post-CD certificate SHA-256 plus SPKI comparison only.
 
 ### Pipeline (locked decisions)
 
@@ -91,6 +91,7 @@ ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 | `NAS_REMOTE_DIR` | Unpack + deploy directory on NAS |
 | `LEZI_DATA_HOST_PATH` | Host bind for `/data` when packaging |
 | `LEZI_TLS_HOST` | Certificate SAN host (default `192.168.50.4`) |
+| `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time TLS generation on an operator-verified fresh data root only; ordinary CD/rollback/tests must leave unset |
 | `LEZI_FORCE_PACKAGE=1` | Rebuild package even if `dist/` exists |
 | `LEZI_SKIP_PACKAGE=1` | Deploy existing package only |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |

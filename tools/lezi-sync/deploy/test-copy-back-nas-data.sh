@@ -224,6 +224,10 @@ grep -q 'WARNING' "${pad}" || fail "forward path must print non-secret WARNING a
 # Runbook must require the opt-in flag with the migration secret
 grep -q 'LEZI_FORWARD_BOOTSTRAP_SECRET=1' "${runbook}" \
   || fail "runbook must export LEZI_FORWARD_BOOTSTRAP_SECRET=1 with migration secret"
+grep -q 'LEZI_ALLOW_TLS_BOOTSTRAP=1' "${runbook}" \
+  || fail "runbook must explicitly authorize one-time TLS generation"
+grep -q 'LEZI_ALLOW_TLS_BOOTSTRAP' "${pad}" \
+  || fail "push-and-deploy must gate TLS generation behind an explicit opt-in"
 pass=$((pass + 1))
 
 # Ticket 07 docker-assisted copy-back path (mode-700 parent / no passwordless chown)
