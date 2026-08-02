@@ -7,7 +7,7 @@
 | Trigger | Dev machine scripts (package → scp → SSH deploy) |
 | Compose engine on NAS | **zdocker** bundled `docker-compose` v2 (`/zspace/applications/services/zdocker/bin/docker-compose`) |
 | Bootstrap secret | **Inherit** from running `lezi-sync` container env |
-| TLS identity | Generate once under the persistent `/data/tls`; validate and reuse on every replace |
+| TLS identity | Ordinary CD never rotates it; generate once only on a verified fresh data root, then validate and reuse the exact pair on every replace |
 | System `docker compose` | Not required / not installed |
 
 ## One-shot (from repo root)
@@ -138,11 +138,29 @@ LEZI_FORCE_PACKAGE=1 \
 
 ## TLS identity
 
-- `init-tls.sh` creates `/data/tls/server.crt` plus mode-`600` `server.key` only when both are absent.
-- Container replacement and ordinary restart reuse those files and therefore the same SPKI.
-- A missing half, invalid/expired certificate, or mismatched key fails closed; deployment never silently rotates identity.
+- Ordinary CD, rollback, container replacement, and restart are **not certificate-rotation paths**.
+  They must preserve `/data/tls/server.crt` and mode-`600` `/data/tls/server.key` byte-for-byte.
+- `init-tls.sh` may create that pair only for the first deployment to an operator-verified fresh data
+  root where both files are absent. If both files are absent from an established/configured family
+  data root, treat that as an incident and stop; do not use CD to create a replacement identity.
+- Existing-file checks and validation must run from the helper-container uid `10001` view. The NAS
+  SSH user not being able to traverse a mode-`700` bind does **not** mean the identity is absent.
+- A missing half, invalid/expired certificate, mismatched key, helper-container read failure, or
+  pre/post-CD SPKI mismatch fails closed before success is reported. Never delete, rename, chmod,
+  regenerate, or copy over TLS files to make deployment pass.
 - The private key is absent from the image, Git, package directory, logs, `MANIFEST.json`, and `SHA256SUMS`.
 - Deployment prints only the public SPKI SHA-256 fingerprint so it can be compared with the Android TOFU screen.
+
+### Certificate tests
+
+- Do **not** run certificate creation, replacement, expiry, mismatch, TOFU-change, or reconnect-
+  certificate tests against a real family NAS, its live `lezi-sync` container, or its data bind.
+- Deploy a developer-owned isolated service instead. Use a `mktemp` data root, a non-production port,
+  and credentials/family data created only for that test; destroy only that isolated fixture afterward.
+- On a family NAS, certificate work is read-only: inspect certificate metadata/SAN, compute the public
+  certificate and SPKI fingerprints, and compare the exact SPKI before and after ordinary CD.
+- Any intentional certificate rotation is a separately authorized maintenance operation with its own
+  backup, rollback, client re-trust, and re-login plan. It is never folded into image CD or a test run.
 
 ## Rollback
 

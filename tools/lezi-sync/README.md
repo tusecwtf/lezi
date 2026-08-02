@@ -67,6 +67,11 @@ LEZI_SYNC_VERSION=0.3.3 ./build-image.sh
 | TLS identity | `/data/tls/` | 自签名证书和私钥随数据卷持久化；不进入镜像或 release manifest |
 | 引导密钥 | Compose 必填 | 缺失或空值时 Compose 拒绝启动（见下） |
 
+普通 NAS CD、回滚和容器重启不得替换已有 TLS identity；下面的 `init-tls.sh` 生成路径只用于
+经确认的全新空数据根。已有家庭的数据根若证书缺失、无效、错配或容器内不可读，应停止部署，
+不得借 CD 自动补证书。部署前后 SPKI 必须完全一致；完整约束见
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md) § TLS identity。
+
 ```bash
 cd tools/lezi-sync
 ./build-image.sh
@@ -215,6 +220,10 @@ LEZI_DATA_DIR="${tmp_data}" \
   LEZI_TLS_KEYFILE="${tmp_data}/tls/server.key" \
   cargo run --release
 ```
+
+证书生成、替换、过期、错配、TOFU 变化和证书重连测试必须沿用这类临时数据根和开发者自建
+服务，并使用非生产端口；禁止把 `tmp_data` 或测试配置改指向真实家庭 NAS、现网容器或其
+数据 bind。真实家庭 NAS 只允许只读检查证书/SAN/公开指纹和比较 CD 前后 SPKI。
 
 容器健康检查调用同一个 Rust 二进制：
 

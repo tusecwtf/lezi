@@ -26,6 +26,20 @@ Authoritative runbook: `tools/lezi-sync/deploy/DEPLOY.md`. Product overview: roo
 
 **Do not** build the server on the NAS (`cargo` / `docker build`). **Do not** install system `docker compose` on the NAS for this product path. **Do not** commit bootstrap secrets, real family data, image tarballs under `dist/`, or NAS `.env` files.
 
+**TLS safety invariant:** ordinary NAS CD, rollback, container replacement, and restart must never
+replace an existing `/data/tls/server.crt` + `/data/tls/server.key` identity. Validate and reuse the
+complete pair from the container uid `10001` view. A missing half, invalid/expired certificate,
+mismatched key, helper-container read failure, or pre/post-deploy SPKI mismatch must abort; never
+delete, rename, chmod, regenerate, or copy over TLS files to make CD pass. Generating a certificate is
+allowed only for the first deployment to a separately verified fresh data root where both files are
+absent.
+
+**Certificate-test isolation:** never run certificate creation, replacement, expiry, mismatch,
+TOFU-change, or reconnect-certificate tests against the family NAS, its live container, or its data
+bind. Run them on a developer-owned isolated `lezi-sync` instance with a `mktemp` data root and a
+non-production port. The family NAS permits read-only certificate/SAN/fingerprint checks and exact
+pre/post-CD SPKI comparison only.
+
 ### Pipeline (locked decisions)
 
 1. **Dev machine**: Rust gates → `./build-image.sh` → `linux/amd64` image `lezi-sync:<Cargo.toml version>`.
@@ -91,7 +105,7 @@ ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 **2. Propose CD — wait for confirmation before deploy.**
 Explain that the next step will build a `linux/amd64` image, package (or reuse `dist/`), scp to the NAS, and **stop/rm + replace** container `lezi-sync` (compose project `lezi`). The data bind is kept; a live family may briefly lose sync during replace.
 
-Also state the **protocol cutover risk**: a measured family NAS ran **plaintext HTTP on 8765** (no `/data/tls`, no host `8766`). Deploying the current tree via `remote-deploy.sh` is expected to move the public surface to **HTTPS on 8765**, keep readiness on **container-internal** HTTP `8766` (not published on the host), and create a persistent TLS identity under the data bind. Clients must switch endpoint scheme and may need TOFU/SPKI confirmation. **Do not** run `./deploy/push-and-deploy.sh` until the user confirms.
+Also state the **protocol cutover risk**: a measured family NAS ran **plaintext HTTP on 8765** (no `/data/tls`, no host `8766`). Only a separately confirmed first TLS cutover on a verified fresh/no-TLS data root may create the one persistent identity. Every later `remote-deploy.sh` run must reuse that exact identity while keeping readiness on **container-internal** HTTP `8766` (not published on the host). Clients must switch endpoint scheme and may need TOFU/SPKI confirmation only for the first cutover or an independently authorized certificate-rotation maintenance window. **Do not** run `./deploy/push-and-deploy.sh` until the user confirms.
 
 Default control plane (override only via env):
 
@@ -112,6 +126,11 @@ After confirmation:
 ./build-image.sh
 ./deploy/push-and-deploy.sh
 ```
+
+Before ordinary CD, record the live certificate fingerprint and SPKI with read-only commands. After
+CD, recompute both and require exact equality before declaring success. If the live identity cannot be
+read through `docker exec` as uid `10001`, stop before container replacement; do not infer that it is
+absent from the SSH user's inability to traverse the mode-`700` bind.
 
 Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.apk` must match `tools/lezi-sync/deploy/app-update.json` `sha256` (or set `LEZI_RELEASE_APK` / `LEZI_APP_UPDATE_JSON`). Use `LEZI_SKIP_PACKAGE=1` only when an existing `dist/lezi-sync-<ver>-nas` already embeds the **current** server image; if server code changed, rebuild the image and force a new package (`LEZI_FORCE_PACKAGE=1`). Never invent `LEZI_BOOTSTRAP_SECRET` (inherit from the live container). Never print bootstrap secrets from `docker inspect`/logs in reports—redact them. Never commit secrets, NAS `.env`, or `dist/` tarballs.
 

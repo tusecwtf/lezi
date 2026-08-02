@@ -79,6 +79,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | 发布触发 | 本机一键：`package` → `scp` → SSH `remote-deploy` |
 | Bootstrap | 从现网 `lezi-sync` 容器 env **继承**；secret **不进 git** |
 | 数据卷 | 宿主 bind（默认路径见下），stop/rm 容器不删数据 |
+| TLS 身份 | 普通 CD/回滚/重启必须复用数据卷内原证书与私钥；仅经确认的全新空数据根可首次生成 |
 
 ```bash
 cd tools/lezi-sync
@@ -101,6 +102,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/health
 curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 ```
+
+**现网证书是发布硬边界：**普通 CD 不承担证书轮换，不得覆盖、删除、改名或重新生成已有
+`/data/tls/server.crt` 与 `/data/tls/server.key`。部署前后必须只读计算 SPKI 并要求完全一致；
+证书缺半、无效/过期、私钥不匹配、容器内不可读或指纹变化都应停止发布，而不是自动修复。
+只有已单独确认的全新空数据根、且两个文件都不存在时，才允许首次生成 TLS 身份。
+
+证书生成、替换、过期、错配、TOFU 变化和证书重连测试禁止使用真实家庭 NAS、现网容器或其
+数据 bind；必须在开发者自行部署的隔离 `lezi-sync` 服务上进行，使用 `mktemp` 临时数据根和
+非生产端口。真实家庭 NAS 只做证书元数据、SAN、公开指纹与部署前后 SPKI 的只读核验。
 
 常用环境变量：
 
