@@ -459,7 +459,10 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
     assert_eq!(ready_status, StatusCode::OK);
-    assert_eq!(ready_body, json!({"ok": true, "version": VERSION}));
+    assert_eq!(
+        ready_body,
+        json!({"ok": true, "status": "ready", "version": VERSION}),
+    );
     assert!(rig.directory.path().join("lezi.db").is_file());
     assert!(rig.directory.path().join("media").is_dir());
     assert!(rig.directory.path().join("server.secret").is_file());

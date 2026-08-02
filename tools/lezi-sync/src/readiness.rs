@@ -74,7 +74,11 @@ fn response(version: &str, healthy: bool) -> (StatusCode, Json<Value>) {
     if healthy {
         (
             StatusCode::OK,
-            Json(json!({"ok": true, "version": version})),
+            Json(json!({
+                "ok": true,
+                "status": "ready",
+                "version": version,
+            })),
         )
     } else {
         (
