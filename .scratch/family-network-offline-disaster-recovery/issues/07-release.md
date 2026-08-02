@@ -31,17 +31,23 @@
 
 - 2026-08-02 部署前实际服务已是 HTTPS 8765 / 0.3.2；本轮没有发生明文协议切换。
 - 构建并打包 `linux/amd64` `lezi-sync:0.3.3`；镜像 manifest ID
-  `sha256:8765d57f13b87f80265e3b701d9e8528da718e165694353a0846f36a5f2df9e9`，
-  tar SHA-256 `8b3e5ec85d87b01422c4cff8a9009c2a214fdbda65251f9da887136d08ab20a9`，
-  包内校验全部通过。
+  `sha256:1a2c57dfc58655028aa3017e51e463f9c2384807da68339b540d36ec85fc95b9`，
+  tar SHA-256 `37a8c0577c3e72e749ce36dc72fae749c8b49933044f0c6cc485732e7f7fde7d`，
+  包固定提交 `da64fd84` 且包内校验全部通过。
 - 上传到 `/tmp/lezi-sync-releases/lezi-sync-0.3.3-nas`，通过 zdocker Compose v2.33.0
   stop/remove 并替换 `lezi-sync`；根密钥从 live 容器继承且未打印，数据 bind 保留为
   `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data`。
-- LAN `https://192.168.50.4:8765/health`、`/ready` 返回 0.3.3；setup-status 为
-  `configured`，容器为 healthy，内部 `lezi-sync healthcheck` 通过。
-- 新持久 TLS 身份 SAN 包含 `192.168.50.4`；SPKI 指纹
-  `C7:8F:A0:1A:FD:DE:C7:8D:78:1E:CB:37:EB:CB:A4:2F:FF:DF:97:A4:EB:1F:5A:FB:F2:00:EF:58:DC:7F:75:75`。
-  NAS `/data/app-release.apk` SHA-256 与 release 元数据
+- LAN `https://192.168.50.4:8765/health` 返回 0.3.3，`/ready` 返回
+  `{"ok":true,"status":"ready","version":"0.3.3"}`；setup-status 为 `configured`，
+  容器为 healthy，内部 `lezi-sync healthcheck` 通过。
+- readiness 联调发现服务端成功响应缺少 Android 已约定的 `status=ready`；`db57ba66` 以
+  public-seam 回归修复。首次 hotfix CD 又暴露 mode-700 数据 bind 下宿主 `-f` 误判不存在、
+  进而轮换 TLS 身份的部署缺陷；旧 C7 私钥未留在数据 bind 中，不能由手机保存的 SPKI 指纹
+  还原。`da64fd84` 改为从 uid 10001 helper 容器检查证书/私钥，覆盖完整身份复用与部分身份
+  fail-closed。随后重复 CD 明确输出 `reusing persistent TLS identity`，部署前后 SPKI 均为
+  `BD:07:D8:64:5E:D3:B7:AD:EA:D1:62:EC:A4:54:37:3A:EE:40:07:B0:A3:5A:A7:C6:2C:AF:7D:8A:C0:CB:32:15`；
+  SAN 仍包含 `192.168.50.4`。
+- NAS `/data/app-release.apk` SHA-256 与 release 元数据
   `95887649f251a191d6e38f06a6413e9a2ca9ba8bc4bb60131751fa7e53b2bce2` 一致。
 - 只读 API 35 AVD 安装最终 Release APK，冷启动正常；候选地址探测识别 configured 家庭，
   UI 展示的 TOFU 指纹与 NAS 一致。离线模式经 Composer 写入尿尿记录，杀进程重启后
