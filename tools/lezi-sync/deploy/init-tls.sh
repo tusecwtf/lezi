@@ -62,6 +62,16 @@ run_file_tool() {
   fi
 }
 
+file_exists() {
+  local host_path="$1"
+  local container_path="$2"
+  if [[ "${host_openssl}" == "1" ]]; then
+    [[ -f "${host_path}" ]]
+  else
+    run_file_tool test -f "${container_path}"
+  fi
+}
+
 validate_identity() {
   run_openssl x509 -in "${certificate_arg}" -checkend 86400 -noout >/dev/null
   run_openssl pkey -in "${private_key_arg}" -check -noout >/dev/null
@@ -93,8 +103,8 @@ print_spki_fingerprint() {
 
 certificate_exists=0
 private_key_exists=0
-[[ -f "${certificate}" ]] && certificate_exists=1
-[[ -f "${private_key}" ]] && private_key_exists=1
+file_exists "${certificate}" "${certificate_arg}" && certificate_exists=1
+file_exists "${private_key}" "${private_key_arg}" && private_key_exists=1
 if [[ "${certificate_exists}" -ne "${private_key_exists}" ]]; then
   echo "error: partial TLS identity found under ${tls_directory}; refusing automatic replacement" >&2
   exit 1
