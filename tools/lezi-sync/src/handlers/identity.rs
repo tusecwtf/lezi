@@ -378,15 +378,22 @@ pub(crate) async fn create_member_login_grant(
             MEMBER_LOGIN_GRANT_TTL_SECONDS,
         )
         .map_err(map_member_login_grant_error)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "grant": grant,
-            "family_name": created.family_name,
-            "member_display_name": created.member_display_name,
-            "expires_at": created.expires_at,
-        })),
-    ))
+    let mut response = json!({
+        "grant": grant,
+        "family_name": created.family_name,
+        "member_display_name": created.member_display_name,
+        "expires_at": created.expires_at,
+    });
+    if let Some(landing_url) = &state.lan_apk_landing_url {
+        response
+            .as_object_mut()
+            .expect("member login grant response is an object")
+            .insert(
+                "landing_url".to_owned(),
+                Value::String(landing_url.to_string()),
+            );
+    }
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 pub(crate) async fn claim_member_login_grant(

@@ -9,6 +9,7 @@ import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import com.lezi.babylog.sync.availability.AvailabilityProbeReason
 import com.lezi.babylog.sync.availability.FamilyServerAvailability
+import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
@@ -187,7 +188,7 @@ data class ClientAppVersion(
 
     companion object {
         /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
-        val FALLBACK = ClientAppVersion(versionCode = 11, versionName = "0.3.4")
+        val FALLBACK = ClientAppVersion(versionCode = 12, versionName = "0.3.5")
     }
 }
 
@@ -407,7 +408,7 @@ interface SyncPort {
     ): Result<Unit> = Result.failure(SyncNotEnabledException())
     suspend fun rejectMemberLogin(requestId: String): Result<Unit> =
         Result.failure(SyncNotEnabledException())
-    suspend fun createMemberLoginQrPayload(membershipId: String): Result<MemberLoginQrPayload> =
+    suspend fun createMemberLoginQrCode(membershipId: String): Result<MemberLoginQrCode> =
         Result.failure(SyncNotEnabledException())
     suspend fun claimMemberLoginQr(
         payload: MemberLoginQrPayload,

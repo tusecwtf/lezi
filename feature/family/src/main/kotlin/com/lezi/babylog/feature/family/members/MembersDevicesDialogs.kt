@@ -42,8 +42,8 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
 import com.lezi.babylog.feature.family.components.canConfirmFamilyDeletion
-import com.lezi.babylog.sync.qr.MemberLoginQrPayload
-import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
+import com.lezi.babylog.sync.qr.MemberLoginQrCode
+import com.lezi.babylog.sync.qr.MemberLoginQrContentCodec
 @Composable
 internal fun RenameFamilyDialog(
     familyName: String,
@@ -140,15 +140,38 @@ internal fun EditMyDisplayNameDialog(
 }
 
 
+internal data class MemberLoginQrSharingCopy(
+    val description: String,
+    val instructions: String,
+)
+
+internal fun memberLoginQrSharingCopy(code: MemberLoginQrCode): MemberLoginQrSharingCopy =
+    if (code.landingUrl == null) {
+        MemberLoginQrSharingCopy(
+            description =
+                "成员登录二维码，已授权${code.payload.memberDisplayName}在十分钟内登录一台新设备",
+            instructions =
+                "十分钟内有效，只可成功登录一次。二维码包含家庭服务器信任配置，请仅当面分享。",
+        )
+    } else {
+        MemberLoginQrSharingCopy(
+            description =
+                "成员登录二维码，已授权${code.payload.memberDisplayName}在十分钟内登录；未安装乐记可用系统相机下载",
+            instructions =
+                "十分钟内有效，只可成功登录一次。未安装乐记时，可用系统相机扫描并下载；安装后请用乐记重新扫描此二维码。超时请让管理员重新生成。二维码包含家庭服务器信任配置，请仅当面分享。",
+        )
+    }
+
 @Composable
 internal fun MemberLoginQrCodeDialog(
-    payload: MemberLoginQrPayload,
+    code: MemberLoginQrCode,
     onDismiss: () -> Unit,
 ) {
     SecureWindowWhileVisible()
-    val qrBitmap = remember(payload) {
+    val copy = memberLoginQrSharingCopy(code)
+    val qrBitmap = remember(code) {
         BarcodeEncoder().encodeBitmap(
-            MemberLoginQrPayloadCodec.encode(payload),
+            MemberLoginQrContentCodec.encode(code),
             BarcodeFormat.QR_CODE,
             640,
             640,
@@ -159,18 +182,18 @@ internal fun MemberLoginQrCodeDialog(
         title = { Text("成员登录二维码") },
         text = {
             Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Image(
                     bitmap = qrBitmap,
-                    contentDescription =
-                        "成员登录二维码，已授权${payload.memberDisplayName}在十分钟内登录一台新设备",
+                    contentDescription = copy.description,
                     modifier = Modifier.size(240.dp),
                 )
-                Text("已授权：${payload.memberDisplayName}", style = LeziTypography.BodyStrong)
+                Text("已授权：${code.payload.memberDisplayName}", style = LeziTypography.BodyStrong)
                 Text(
-                    "十分钟内有效，只可成功登录一次。二维码包含家庭服务器信任配置，请仅当面分享。",
+                    copy.instructions,
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -348,4 +371,3 @@ internal fun DeleteFamilyDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
-

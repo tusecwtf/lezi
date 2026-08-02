@@ -23,6 +23,7 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import org.junit.Rule
@@ -194,7 +195,13 @@ class MemberApprovalWaitingDeviceTest {
         compose.setContent {
             LeziTheme {
                 if (showQr.value) {
-                    MemberLoginQrCodeDialog(payload = payload, onDismiss = {})
+                    MemberLoginQrCodeDialog(
+                        code = MemberLoginQrCode(
+                            payload = payload,
+                            landingUrl = "http://family.example.com:8767/join",
+                        ),
+                        onDismiss = {},
+                    )
                 } else {
                     FamilyMembersListSheet(
                         ui = MembersDevicesUi(
@@ -225,8 +232,9 @@ class MemberApprovalWaitingDeviceTest {
 
         compose.onNodeWithText("成员登录二维码").assertIsDisplayed()
         compose.onNodeWithContentDescription(
-            "成员登录二维码，已授权妈妈在十分钟内登录一台新设备",
+            "成员登录二维码，已授权妈妈在十分钟内登录；未安装乐记可用系统相机下载",
         ).assertIsDisplayed()
+        compose.onNodeWithText("安装后请用乐记重新扫描", substring = true).assertIsDisplayed()
         compose.onNodeWithText(payload.grant).assertDoesNotExist()
     }
 

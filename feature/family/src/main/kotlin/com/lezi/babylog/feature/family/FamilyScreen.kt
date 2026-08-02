@@ -79,7 +79,7 @@ import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
-import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
+import com.lezi.babylog.sync.qr.MemberLoginQrContentCodec
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
 import com.lezi.babylog.sync.session.requireDeviceName
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
@@ -260,7 +260,7 @@ fun FamilyRoute(
     fun applyScannedMemberLogin(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
-        val memberLogin = runCatching { MemberLoginQrPayloadCodec.decode(payload) }.getOrNull()
+        val memberLogin = runCatching { MemberLoginQrContentCodec.decode(payload).payload }.getOrNull()
         if (memberLogin != null) {
             if (System.currentTimeMillis() / 1_000 >= memberLogin.expiresAtEpochSeconds) {
                 showMessage("这个二维码已失效，请让管理员重新生成")
@@ -599,7 +599,7 @@ fun FamilyRoute(
             onDismiss = { dialog = null },
         )
         is FamilyDialog.MemberLoginQrCode -> MemberLoginQrCodeDialog(
-            payload = active.payload,
+            code = active.code,
             onDismiss = { dialog = FamilyDialog.MembersList },
         )
         is FamilyDialog.ReviewPendingMember -> if (overview.enabled && overview.role == FamilyRole.Owner) {

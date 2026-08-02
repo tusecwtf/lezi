@@ -4,7 +4,7 @@
 # Probes **actual** protocol. Client-facing success requires LAN HTTPS
 # health+ready (APK TOFU path). Container-internal readiness is optional
 # corroboration via `docker exec lezi-sync lezi-sync healthcheck` (8766 is
-# NOT published on the host — compose only maps 8765).
+# NOT published on the host; compose maps client HTTPS 8765 and invite-install HTTP 8767 only).
 #
 # Does **not** print LEZI_BOOTSTRAP_SECRET / docker inspect env.
 # Does **not** claim APK smoke success (record that separately in apk-smoke.md).
@@ -15,7 +15,7 @@
 #   LEZI_CONTAINER_NAME           default lezi-sync
 #   LEZI_TLS_CACERT               optional path to data-bind tls/server.crt
 #   LEZI_EVIDENCE_DIR             default <repo>/.scratch/nas-v3-offline-migrate/evidence/07
-#   LEZI_EXPECTED_VERSION         default 0.3.1 — required in /health JSON
+#   LEZI_EXPECTED_VERSION         default Cargo.toml package version — required in /health JSON
 #   LEZI_PROBE_OWNER_LOGIN=1      optional: POST /v1/owner/login + pull
 #   LEZI_BOOTSTRAP_SECRET         migration password for optional owner login only
 #   LEZI_CLIENT_VERSION_CODE      default 6 (x-lezi-client-version-code for pull)
@@ -26,6 +26,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+DEFAULT_EXPECTED_VERSION="$(
+  sed -n 's/^version = "\([^"]*\)"/\1/p' "${ROOT}/tools/lezi-sync/Cargo.toml" | head -1
+)"
+if [[ -z "${DEFAULT_EXPECTED_VERSION}" ]]; then
+  echo "error: could not determine lezi-sync version from Cargo.toml" >&2
+  exit 1
+fi
 NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
 LEZI_LAN_HOST="${LEZI_LAN_HOST:-192.168.50.4}"
@@ -33,7 +40,7 @@ LEZI_CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 LEZI_EVIDENCE_DIR="${LEZI_EVIDENCE_DIR:-${ROOT}/.scratch/nas-v3-offline-migrate/evidence/07}"
 LEZI_PROBE_WRITE_EVIDENCE="${LEZI_PROBE_WRITE_EVIDENCE:-1}"
 LEZI_PROBE_OWNER_LOGIN="${LEZI_PROBE_OWNER_LOGIN:-0}"
-LEZI_EXPECTED_VERSION="${LEZI_EXPECTED_VERSION:-0.3.1}"
+LEZI_EXPECTED_VERSION="${LEZI_EXPECTED_VERSION:-${DEFAULT_EXPECTED_VERSION}}"
 LEZI_CLIENT_VERSION_CODE="${LEZI_CLIENT_VERSION_CODE:-6}"
 
 LAN_HTTPS_HEALTH="https://${LEZI_LAN_HOST}:8765/health"

@@ -2388,6 +2388,23 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun ownerCreatesOneQrCodeFromTheTrustedEndpointAndServerLandingUrl() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.awaitStartupRecovery()
+        rig.backend.nextMemberLoginGrant = rig.backend.nextMemberLoginGrant.copy(
+            landingUrl = "http://192.168.1.20:8767/join",
+        )
+
+        val code = rig.port.createMemberLoginQrCode("membership-member").getOrThrow()
+
+        assertThat(code.landingUrl).isEqualTo("http://192.168.1.20:8767/join")
+        assertThat(code.payload.endpoint.origin).isEqualTo("https://192.168.1.20:8787")
+        assertThat(code.payload.grant).isEqualTo(rig.backend.nextMemberLoginGrant.grant)
+        assertThat(rig.backend.memberLoginGrantTargets.single().third)
+            .isEqualTo("membership-member")
+    }
+
+    @Test
     fun queuedNetworkChangeCannotSkipFreshCreateFullPull() = runTest {
         val configured = SyncSession(
             serverHost = "192.168.1.20",

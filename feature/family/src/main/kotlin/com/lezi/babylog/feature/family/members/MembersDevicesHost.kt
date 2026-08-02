@@ -11,7 +11,7 @@ import com.lezi.babylog.feature.family.components.validateFamilyNameInput
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import com.lezi.babylog.sync.SyncPort
@@ -242,10 +242,10 @@ class MembersDevicesHost private constructor(
 
     fun createMemberLoginQr(
         membershipId: String,
-        onResult: (Result<MemberLoginQrPayload>) -> Unit,
+        onResult: (Result<MemberLoginQrCode>) -> Unit,
     ) {
         viewModelScope.launch {
-            onResult(sync.createMemberLoginQrPayload(membershipId))
+            onResult(sync.createMemberLoginQrCode(membershipId))
         }
     }
 

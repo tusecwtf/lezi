@@ -14,7 +14,7 @@
 
 ```bash
 # Optional: rebuild image first
-cd tools/lezi-sync && LEZI_SYNC_VERSION=0.3.3 ./build-image.sh
+cd tools/lezi-sync && LEZI_SYNC_VERSION=0.3.5 ./build-image.sh
 
 # Package + scp + remote deploy
 ./deploy/push-and-deploy.sh
@@ -29,7 +29,8 @@ Environment overrides:
 | `NAS_REMOTE_DIR` | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas`（该机 `HOME=/home/` 不可写） |
 | `LEZI_SYNC_VERSION` | from `Cargo.toml` |
 | `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
-| `LEZI_TLS_HOST` | `192.168.50.4`; DNS name or IP included in the self-signed certificate SAN |
+| `LEZI_TLS_HOST` | `192.168.50.4`; IPv4 address or DNS name resolving to IPv4, included in the self-signed certificate SAN |
+| `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | `http://<LEZI_TLS_HOST>:8767`; invite-install origin, restricted to the same IPv4/DNS host and port 8767; IPv6 is not supported by this NAS publish path |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time opt-in to create TLS files only on an operator-verified fresh data root. Ordinary CD, rollback, and certificate tests on the family NAS must leave it unset. |
 | `LEZI_FORCE_PACKAGE=1` | rebuild package even if present |
 | `LEZI_SKIP_PACKAGE=1` | only scp+deploy existing `dist/lezi-sync-*-nas` |
@@ -43,7 +44,7 @@ Environment overrides:
 
 1. **package-nas.sh** — `docker save` + render `docker-compose.yml` + **fail-closed app-update artifacts** + `MANIFEST.json` + `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`
 2. **push-and-deploy.sh** — scp package to `~/lezi-sync-releases/...` on NAS
-3. **remote-deploy.sh** (on NAS) — `docker load` → inherit secret → validate persistent TLS and pin exact certificate SHA-256 + SPKI → **copy APK + metadata into data bind** → stop/rm old container → **zdocker compose up** → HTTPS `/health` + `/ready` → recheck both TLS digests
+3. **remote-deploy.sh** (on NAS) — `docker load` → inherit secret → validate persistent TLS and pin exact certificate SHA-256 + SPKI → **copy APK + metadata into data bind** → stop/rm old container → **zdocker compose up** (HTTPS 8765 + LAN invite-install HTTP 8767) → HTTPS `/health` + `/ready` → recheck both TLS digests
 
 ## Self-hosted app update (release APK)
 
@@ -59,8 +60,8 @@ Metadata contract (`app-update.json`, snake_case):
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 10,
-  "version_name": "0.3.3",
+  "version_code": 12,
+  "version_name": "0.3.5",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of the APK file>",
   "release_notes": "可选"
@@ -78,11 +79,17 @@ Metadata contract (`app-update.json`, snake_case):
   app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
 - On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`).
-- Authenticated clients only (Bearer device session): `GET /v1/app-update` (JSON) and
+- Joined clients use authenticated `GET /v1/app-update` (JSON) and
   `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
-  server-side). No anonymous / public CDN URL for the family APK.
+  server-side). Separately, the LAN-only invite-install listener anonymously serves the same
+  verified APK at `http://<LEZI_TLS_HOST>:8767/download/lezi.apk`; it exposes no family API.
 - Product channel is **self-hosted sideload** (Android `PackageInstaller`), **not** Google Play
   In-App Updates. See [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.
+
+Invite-install smoke after deploy is separate from readiness: `curl -fsS
+http://<LEZI_TLS_HOST>:8767/join` must return the branded page, and
+`curl -fsS -o /tmp/lezi-invite.apk http://<LEZI_TLS_HOST>:8767/download/lezi.apk` must return the
+same SHA-256 as metadata. Never use 8767 as a health probe, and never publish it to the internet.
 
 Optional path overrides on the server process: `LEZI_APP_UPDATE_METADATA_PATH`, `LEZI_APP_UPDATE_APK_PATH`.
 

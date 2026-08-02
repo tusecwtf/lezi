@@ -28,5 +28,6 @@ pub(crate) mod app_update;
 pub(crate) mod disaster_restore;
 pub(crate) mod health;
 pub(crate) mod identity;
+pub(crate) mod lan_apk;
 pub(crate) mod media;
 pub(crate) mod sync;

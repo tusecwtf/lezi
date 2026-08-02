@@ -40,12 +40,31 @@ pub(crate) async fn get_app_update_apk(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let _principal = authenticate(&state, &headers)?;
-    let metadata = load_app_update_metadata(&state.app_update_metadata_path)?;
+    let verified =
+        load_verified_app_update(&state.app_update_metadata_path, &state.app_update_apk_path)?;
+    let mut response = Response::new(Body::from(verified.bytes));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.android.package-archive"),
+    );
+    Ok(response)
+}
+
+pub(crate) struct VerifiedAppUpdate {
+    pub(crate) metadata: Value,
+    pub(crate) bytes: Vec<u8>,
+}
+
+pub(crate) fn load_verified_app_update(
+    metadata_path: &Path,
+    apk_path: &Path,
+) -> Result<VerifiedAppUpdate, ApiError> {
+    let metadata = load_app_update_metadata(metadata_path)?;
     let expected_sha256 = metadata
         .get("sha256")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("App update metadata is missing sha256"))?;
-    let bytes = match fs::read(&state.app_update_apk_path) {
+    let bytes = match fs::read(apk_path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(ApiError::not_found("App update package is not available"));
@@ -62,19 +81,14 @@ pub(crate) async fn get_app_update_apk(
         tracing::error!(
             expected = %expected_sha256,
             actual = %actual_sha256,
-            path = %state.app_update_apk_path.display(),
+            path = %apk_path.display(),
             "app update APK sha256 does not match metadata"
         );
         return Err(ApiError::internal(
             "App update package integrity check failed",
         ));
     }
-    let mut response = Response::new(Body::from(bytes));
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/vnd.android.package-archive"),
-    );
-    Ok(response)
+    Ok(VerifiedAppUpdate { metadata, bytes })
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

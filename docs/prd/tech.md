@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.4` |
-| versionCode | `11`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
+| versionName | `0.3.5` |
+| versionCode | `12`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
 | 本地数据契约 | `v1`（最低可迁移 `v1`；永久基线为 0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
@@ -252,9 +252,9 @@ CancellationException / Error → 先停服再原样重抛，不得吞成产品�
 |----|------|
 | release R8 | `isMinifyEnabled = true` + `isShrinkResources = true` |
 | 系统备份 | `android:allowBackup="false"`；`backup_rules` / `data_extraction_rules` 对齐排除 |
-| 明文 HTTP | 0.3 基线允许；下一版 release 生产禁用，只允许不载入真实凭证的 loopback dev/test |
+| 明文 HTTP | 家庭 API、登录、同步与应用内更新在 release 中禁用明文；唯一产品例外是 ADR-0015 的家庭 LAN 邀请安装页，且不得映射公网 |
 | FileProvider | 仅 `cache/export`；不暴露 `files/` / database；升级 APK **不**经 FileProvider 长期暴露 |
-| 升级暂存 | 仅应用私有 `cache/app-update`（若需落盘）；成功/失败/取消后清理；**禁止**公共 Download / 共享目录 |
+| 升级暂存 | 已安装 App 的更新仅用私有 `cache/app-update`；邀请安装页是浏览器首装分发，可进入系统 Download，但不属于应用内更新暂存合同 |
 | 日志 | 不打印根密码、access/refresh、grant、Authorization 或敏感 body；用户可见错误过滤技术细节 |
 
 ---
@@ -276,7 +276,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 门槛 | 头缺失或 `< minSupported` 时权威 sync 写/拉（pull / bundle / media 等）返回 `code=client_update_required`；**仍放行**更新元数据与 APK 下载 |
 | 诚实客户端闸 | `X-Lezi-Client-Version-Code` / `minSupported` 是对**诚实官方 App** 的兼容闸：阻止半兼容旧客户端脏写，**不是**防篡改安全根。头可被非官方客户端伪造；**真协议硬闸**仍靠 setup-status **capabilities**、wire schema/payload 校验与已验证会话。服务端不对「伪造高 version 头」做强绑定证明（权威叙述；同步合同见 [sync-trusted-endpoint.md §7.4](./sync-trusted-endpoint.md)） |
 | 强制壳兜底 | `client_update_required` 后：元数据成功且 local &lt; min → `ForcedAppUpdateState.WithPackage`（可安装）；元数据失败或与门槛分歧 → **`PackageUnknown` 强制壳**（说明 +「重试检查更新」），`SyncStatus` 保持 Idle，**不得**呈现为泛同步/NAS 故障或「假正常」无强制层。已有强制态时，手动 `checkAppUpdate` 与同步 CUR 恢复共用 fail-closed：非 Forced 元数据不得拆壳/刷 optional 横幅；`checkAppUpdate` **Result** 在壳保留时返回 `ForcedUpdate`/`ForcedPackageUnknown`（不得 bare UpToDate/Optional）；失败非 CUR 同步 **不** piggyback 拆壳；仅新的合法 Forced 可替换 `WithPackage`；权威同步成功后的 piggyback 才可清壳；未加入家庭才清 surface |
-| 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；随包部署到数据卷由 lezi-sync 提供，不另开匿名静态站 |
+| 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；鉴权 `/v1/app-update*` 不设匿名旁路，同一已验证 APK 可由 §4.3 的隔离邀请安装页提供首装 |
 | 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`（`ForcedAppUpdateState?`）、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
 | 安装约束 | 装前解析 APK 归档：`packageName` == 本机 applicationId == 元数据；`versionCode` == 元数据且 &gt; 本机；签名证书与已装乐记一致；再 PackageInstaller 同签名原地替换；仅 release `applicationId = com.lezi.babylog`；本轮不承诺 debug 后缀包自更新 |
 | 无残留 | 流程结束后应用私有目录无 APK；**不**承诺清除系统 PackageInstaller 内部缓存 |
@@ -286,8 +286,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 11,
-  "version_name": "0.3.4",
+  "version_code": 12,
+  "version_name": "0.3.5",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
@@ -301,6 +301,26 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 立即安装（同一装前身份门），元数据暂缺时仅「重试检查更新」。详细同步门槛与错误语义见
 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md)；部署 runbook 见
 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)。
+
+---
+
+## 4.3 邀请安装页（首次安装分发）
+
+尚未安装乐记的受邀 Android 设备可用系统相机扫描同一个成员登录二维码，在家庭 LAN 内进入
+由 lezi-sync 提供的邀请安装页。该能力不是应用内更新，也不完成家庭登录：安装结束后用户必须
+打开乐记并重新扫描管理员仍在展示的二维码；十分钟 grant 已过期时由管理员重新生成。
+
+| 项 | 合同 |
+|----|------|
+| QR envelope | 内层继续使用严格 member-login JSON v1；外层为 `http://<same-IPv4-or-IPv4-DNS-host>:8767/join#v1.<base64url>`。本版 NAS 分发监听为 IPv4；新版读取 URL 与旧 raw JSON，旧版不理解 URL 时改用系统相机下载新版 |
+| 发现 | 管理员鉴权创建 grant 的响应可附加 `landing_url`；缺失时 App 继续生成旧 raw JSON QR，存在但不合法时拒绝展示 |
+| 服务端面 | 可选独立 HTTP Router 只开放 `GET /join` 与 `GET /download/lezi.apk`；不得开放 `/v1/*`、`/health`、`/ready` 或数据目录 |
+| APK | LAN 内匿名下载；复用 `app-update.json` 与运行时 SHA-256 校验，缺包、空包或哈希不符 fail closed |
+| 页面 | 不显示家庭名、成员称呼或 grant，不加载第三方资源；正常页面立即清除地址栏 fragment，并设置 no-store、no-referrer、CSP 与禁止嵌入 |
+| 风险 | 用户已明确接受 HTTP 中间人可替换页面/APK，或注入脚本读取 fragment 并盗用未过期 grant；8767 只允许可信家庭 LAN，禁止公网转发 |
+
+该例外不改变生产 HTTPS、TOFU/SPKI、设备会话或既有鉴权 app-update 合同，架构边界见
+[ADR-0015](../adr/0015-isolate-lan-invite-install-distribution.md)。
 
 ---
 

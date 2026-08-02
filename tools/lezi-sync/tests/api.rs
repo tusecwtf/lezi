@@ -12,7 +12,7 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use lezi_sync::{build_app, build_apps, RateLimitConfig, ServerConfig, VERSION};
+use lezi_sync::{build_app, build_apps, build_server_apps, RateLimitConfig, ServerConfig, VERSION};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -507,6 +507,258 @@ async fn internal_router_exposes_only_health_and_readiness() {
     assert_eq!(
         get_json(&public, "/v1/setup-status", None).await.0,
         StatusCode::OK,
+    );
+}
+
+#[test]
+fn lan_apk_download_origin_rejects_everything_except_bare_http_port_8767() {
+    let directory = TempDir::new().unwrap();
+    for origin in [
+        "https://192.168.50.4:8767",
+        "http://user@192.168.50.4:8767",
+        "http://192.168.50.4",
+        "http://192.168.50.4:8765",
+        "http://192.168.50.4:8767/",
+        "http://192.168.50.4:8767/join",
+        "http://192.168.50.4:8767?source=qr",
+        "http://192.168.50.4:8767#invite",
+        "http://:8767",
+        "http://[2001:db8::1]:8767",
+        "192.168.50.4:8767",
+    ] {
+        let mut config = ServerConfig::new(directory.path());
+        config.lan_apk_download_origin = Some(origin.to_owned());
+        assert!(
+            build_app(config).is_err(),
+            "accepted illegal origin {origin}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn lan_install_router_is_optional_and_exposes_no_sync_or_health_surface() {
+    let directory = TempDir::new().unwrap();
+    let mut config = ServerConfig::new(directory.path());
+    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    let apps = build_server_apps(config).unwrap();
+    let lan = apps
+        .lan_apk_download
+        .expect("configured LAN APK origin must build the third router");
+
+    for path in ["/v1/setup-status", "/v1/app-update", "/health", "/ready"] {
+        assert_eq!(
+            request(&lan, Method::GET, path, None, Body::empty(), None)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND,
+            "LAN install router leaked {path}",
+        );
+    }
+
+    let disabled = TempDir::new().unwrap();
+    assert!(build_server_apps(ServerConfig::new(disabled.path()))
+        .unwrap()
+        .lan_apk_download
+        .is_none());
+}
+
+#[tokio::test]
+async fn lan_install_page_uses_only_verified_release_metadata_and_clears_the_invite_fragment() {
+    let directory = TempDir::new().unwrap();
+    let apk_bytes = b"signed-release-apk-fixture";
+    let sha256 = hex::encode(Sha256::digest(apk_bytes));
+    fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        directory.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 12,
+            "version_name": "0.3.5 <测试>",
+            "min_supported_version_code": 6,
+            "sha256": sha256,
+            "release_notes": "邀请安装 & <script>不能执行</script>",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut config = ServerConfig::new(directory.path());
+    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
+
+    let response = request(&lan, Method::GET, "/join", None, Body::empty(), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["x-frame-options"], "DENY");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert!(response.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .contains("default-src 'none'"));
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("下载乐记"), "{html}");
+    assert!(html.contains("0.3.5 &lt;测试&gt;"), "{html}");
+    assert!(
+        html.contains("邀请安装 &amp; &lt;script&gt;不能执行&lt;/script&gt;"),
+        "{html}"
+    );
+    assert!(html.contains("href=\"/download/lezi.apk\""), "{html}");
+    let scrub = "history.replaceState(null, \"\", location.pathname + location.search);";
+    assert!(html.contains(scrub), "{html}");
+    assert!(html.find(scrub).unwrap() < html.find("<body>").unwrap());
+    assert!(!html.contains("src=\"http"), "{html}");
+    assert!(!html.contains("href=\"http"), "{html}");
+    assert!(!html.contains("<script>不能执行</script>"), "{html}");
+}
+
+#[tokio::test]
+async fn lan_install_page_honestly_disables_download_for_missing_or_unverified_apk() {
+    for apk_bytes in [None, Some(b"wrong-apk-bytes".as_slice())] {
+        let directory = TempDir::new().unwrap();
+        let expected_sha256 = hex::encode(Sha256::digest(b"expected-release-apk"));
+        fs::write(
+            directory.path().join("app-update.json"),
+            json!({
+                "package_name": "com.lezi.babylog",
+                "version_code": 12,
+                "version_name": "0.3.5",
+                "min_supported_version_code": 6,
+                "sha256": expected_sha256,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        if let Some(bytes) = apk_bytes {
+            fs::write(directory.path().join("app-release.apk"), bytes).unwrap();
+        }
+        let mut config = ServerConfig::new(directory.path());
+        config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+        let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
+
+        let response = request(&lan, Method::GET, "/join", None, Body::empty(), None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let html = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("乐记安装包暂不可用"), "{html}");
+        assert!(html.contains("请联系管理员"), "{html}");
+        assert!(!html.contains("href=\"/download/lezi.apk\""), "{html}");
+        assert!(
+            html.contains("history.replaceState(null, \"\", location.pathname + location.search);")
+        );
+
+        let download = request(
+            &lan,
+            Method::GET,
+            "/download/lezi.apk",
+            None,
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(download.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            download.headers()["content-type"],
+            "text/html; charset=utf-8"
+        );
+        let download_error = String::from_utf8(
+            download
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(download_error.contains("乐记安装包暂不可用"));
+        assert!(!download_error.contains("href=\"/download/lezi.apk\""));
+    }
+}
+
+#[tokio::test]
+async fn lan_apk_download_is_anonymous_integrity_checked_and_non_cacheable() {
+    let directory = TempDir::new().unwrap();
+    let apk_bytes = b"verified-lan-release-apk";
+    fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        directory.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 12,
+            "version_name": "0.3.5",
+            "min_supported_version_code": 6,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut config = ServerConfig::new(directory.path());
+    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
+
+    let response = request(
+        &lan,
+        Method::GET,
+        "/download/lezi.apk",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.android.package-archive"
+    );
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "attachment; filename=\"lezi.apk\""
+    );
+    assert_eq!(
+        response.headers()["content-length"],
+        apk_bytes.len().to_string()
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        apk_bytes.as_slice(),
+    );
+    assert_eq!(
+        request(
+            &lan,
+            Method::POST,
+            "/download/lezi.apk",
+            None,
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::METHOD_NOT_ALLOWED,
     );
 }
 
@@ -3227,6 +3479,57 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
         .0,
         StatusCode::NOT_FOUND,
     );
+}
+
+#[tokio::test]
+async fn member_login_grant_advertises_only_the_configured_lan_install_page() {
+    let rig = Rig::with_config(|config| {
+        config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    });
+    let owner = create_family(
+        &rig.app,
+        "member-grant-landing-owner",
+        "member-grant-landing-owner-request-01",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "member-grant-landing-member").await;
+
+    let (status, grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED, "{grant}");
+    assert_eq!(grant["landing_url"], "http://192.168.50.4:8767/join",);
+
+    let without_landing = Rig::new();
+    let owner = create_family(
+        &without_landing.app,
+        "member-grant-no-landing-owner",
+        "member-grant-no-landing-request-0001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(
+        &without_landing.app,
+        owner_token,
+        "member-grant-no-landing-member",
+    )
+    .await;
+    let (_, grant) = json_request(
+        &without_landing.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    assert!(grant.get("landing_url").is_none(), "{grant}");
 }
 
 #[tokio::test]

@@ -28,13 +28,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::DefaultBodyLimit;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use handlers::{app_update, disaster_restore, health, identity, media, sync};
+use handlers::{app_update, disaster_restore, health, identity, lan_apk, media, sync};
 use hmac::{Hmac, Mac};
 use members::{
     add_family_member, approve_member_rename_request, cancel_my_member_rename_request,
@@ -114,6 +114,8 @@ pub struct ServerConfig {
     /// Deploy-readable release APK (`app-release.apk` by default).
     /// When unset, defaults to `{data_dir}/app-release.apk`.
     pub app_update_apk_path: Option<PathBuf>,
+    /// Optional LAN-only HTTP origin that serves the first-install APK page.
+    pub lan_apk_download_origin: Option<String>,
     clock: Clock,
 }
 
@@ -138,6 +140,7 @@ impl ServerConfig {
             max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
             app_update_metadata_path: None,
             app_update_apk_path: None,
+            lan_apk_download_origin: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -177,6 +180,11 @@ impl ServerConfig {
         config.app_update_apk_path = std::env::var_os("LEZI_APP_UPDATE_APK_PATH")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
+        config.lan_apk_download_origin = match std::env::var("LEZI_LAN_APK_DOWNLOAD_ORIGIN") {
+            Ok(value) if !value.is_empty() => Some(value),
+            Ok(_) | Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(format!("LEZI_LAN_APK_DOWNLOAD_ORIGIN: {error}")),
+        };
         let window = parse_env(
             "LEZI_RATE_LIMIT_WINDOW_SECONDS",
             DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
@@ -221,8 +229,33 @@ impl ServerConfig {
         if self.max_pending_member_requests == 0 {
             return Err("LEZI_MAX_PENDING_MEMBER_REQUESTS must be greater than zero".to_owned());
         }
+        if let Some(origin) = &self.lan_apk_download_origin {
+            validate_lan_apk_download_origin(origin)?;
+        }
         Ok(())
     }
+}
+
+fn validate_lan_apk_download_origin(origin: &str) -> Result<(), String> {
+    let uri: Uri = origin.parse().map_err(|_| {
+        "LEZI_LAN_APK_DOWNLOAD_ORIGIN must be an absolute http origin on port 8767".to_owned()
+    })?;
+    let authority = uri.authority().ok_or_else(|| {
+        "LEZI_LAN_APK_DOWNLOAD_ORIGIN must be an absolute http origin on port 8767".to_owned()
+    })?;
+    if uri.scheme_str() != Some("http")
+        || authority.host().is_empty()
+        || authority.host().contains(':')
+        || authority.as_str().contains('@')
+        || authority.port_u16() != Some(8767)
+        || origin != format!("http://{authority}")
+    {
+        return Err(
+            "LEZI_LAN_APK_DOWNLOAD_ORIGIN must be an absolute http origin on port 8767 without userinfo, path, query, or fragment"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -246,6 +279,7 @@ struct AppState {
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
     app_update_metadata_path: PathBuf,
     app_update_apk_path: PathBuf,
+    lan_apk_landing_url: Option<Arc<str>>,
 }
 
 impl AppState {
@@ -380,11 +414,21 @@ impl AppState {
     }
 }
 
-pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
-    build_apps(config).map(|(public, _internal)| public)
+pub struct ServerApps {
+    pub public: Router,
+    pub internal: Router,
+    pub lan_apk_download: Option<Router>,
 }
 
 pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
+    build_server_apps(config).map(|apps| (apps.public, apps.internal))
+}
+
+pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
+    build_server_apps(config).map(|apps| apps.public)
+}
+
+pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     config.validate().map_err(ApiError::internal)?;
     let root_auth_rate_limit = config.create_rate_limit.clone();
     let database_path = config.data_dir.join("lezi.db");
@@ -424,6 +468,9 @@ pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
     let app_update_apk_path = config
         .app_update_apk_path
         .unwrap_or_else(|| config.data_dir.join("app-release.apk"));
+    let lan_apk_landing_url = config
+        .lan_apk_download_origin
+        .map(|origin| Arc::from(format!("{origin}/join").into_boxed_str()));
     let state = AppState {
         store,
         data_root: config.data_dir,
@@ -445,6 +492,7 @@ pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
         readiness_cache: Arc::new(Mutex::new(None)),
         app_update_metadata_path,
         app_update_apk_path,
+        lan_apk_landing_url,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     let state = Arc::new(state);
@@ -572,12 +620,23 @@ pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
+    let lan_apk_download = state.lan_apk_landing_url.is_some().then(|| {
+        Router::new()
+            .route("/join", get(lan_apk::join))
+            .route("/download/lezi.apk", get(lan_apk::download))
+            .layer(TraceLayer::new_for_http())
+            .with_state(state.clone())
+    });
     let internal = Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(readiness))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    Ok((public, internal))
+    Ok(ServerApps {
+        public,
+        internal,
+        lan_apk_download,
+    })
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {

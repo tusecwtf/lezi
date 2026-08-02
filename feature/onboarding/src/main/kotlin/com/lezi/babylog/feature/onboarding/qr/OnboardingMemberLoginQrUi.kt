@@ -3,8 +3,8 @@ package com.lezi.babylog.feature.onboarding.qr
 import androidx.compose.runtime.Composable
 import com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface
 import com.lezi.babylog.domain.family.MemberLoginQrDialogModel
+import com.lezi.babylog.sync.qr.MemberLoginQrContentCodec
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
-import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 
 /** Outcome of mapping camera text before launching controller verify. */
 internal sealed class OnboardingMemberLoginScanOutcome {
@@ -23,7 +23,7 @@ internal fun parseOnboardingMemberLoginQrScan(
 ): OnboardingMemberLoginScanOutcome {
     val payload = raw.trim()
     if (payload.isEmpty()) return OnboardingMemberLoginScanOutcome.Empty
-    val memberLogin = runCatching { MemberLoginQrPayloadCodec.decode(payload) }.getOrNull()
+    val memberLogin = runCatching { MemberLoginQrContentCodec.decode(payload).payload }.getOrNull()
         ?: return OnboardingMemberLoginScanOutcome.Rejected("这不是可用的成员登录二维码")
     if (nowEpochSeconds >= memberLogin.expiresAtEpochSeconds) {
         return OnboardingMemberLoginScanOutcome.Rejected("这个二维码已失效，请让管理员重新生成")

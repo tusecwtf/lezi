@@ -7,7 +7,7 @@ RUN cargo build --locked --release
 
 FROM debian:bookworm-slim
 
-ARG LEZI_SYNC_VERSION=0.3.3
+ARG LEZI_SYNC_VERSION=0.3.5
 
 LABEL org.opencontainers.image.title="lezi-sync" \
       org.opencontainers.image.description="Rust home-LAN sync server for Lezi" \
@@ -36,7 +36,7 @@ COPY --from=builder /build/target/release/lezi-sync /usr/local/bin/lezi-sync
 
 USER 10001:10001
 
-EXPOSE 8765
+EXPOSE 8765 8767
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \

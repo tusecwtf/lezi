@@ -169,6 +169,8 @@ probe 的地址草稿离开即丢弃，不能覆盖上一次可信 endpoint、�
 - QR 只由管理员 App 在「家庭成员与设备」为一个目标 membership 生成；服务器只签发单次
   grant，不生成或显示 QR 图像。
 - 同一个二维码同时携带 endpoint、固定信任材料和一次性设备登录 grant；没有第二张配置码。
+- 服务器启用邀请安装页时，管理员 App 把原邀请载荷包装为系统相机可识别的 LAN URL；浏览器
+  只提供 APK 首装，安装后仍须回到乐记重新扫描同一码。未启用时继续生成旧 raw JSON QR。
 - grant 十分钟过期、单次使用，且只能绑定目标 membership；根密码永不进入 QR。
 - 普通成员扫描后仍可确认或编辑设备称呼，然后一次完成信任配置与设备登录。
 - 管理员登录不提供 QR；服务端部署页面也不需要显示 QR。
@@ -281,7 +283,7 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 | 放行 | 同一有效会话下 `GET /v1/app-update` 与 `GET /v1/app-update/apk` **不**走门槛拒绝，避免升级死锁 |
 | 缺元数据 | 未部署 `app-update.json` 时同步** fail-open**（不砖掉家庭）；元数据/APK 路由对已鉴权调用诚实 404 |
 | 客户端强制壳 | 权威路径已返回 `client_update_required` 时：拉到元数据且 local &lt; min → 可安装强制全屏；拉元数据失败或分类非强制 → 仍发布 **PackageUnknown** 强制壳（重试检查更新），`SyncStatus` 保持 Idle，文案区分于泛同步故障。强制壳上的「重试检查更新」走同一 `checkAppUpdate`：已有 `PackageUnknown`/`WithPackage` 时非 Forced 元数据不得拆壳或展示 optional；Result 通道与 `availableForcedAppUpdate` 同为 force-honest（`ForcedPackageUnknown` / 保留的 `ForcedUpdate`），不得 bare UpToDate/Optional 文案；失败同步（网络/5xx）不得 piggyback 拆壳；仅新的合法 Forced 可替换已验证包；权威同步成功后的 piggyback 才可清过期壳 |
-| 资格 | 仅已加入且会话有效；无匿名/未信任 endpoint 的 APK 通道 |
+| 资格 | 本节应用内更新仅限已加入且会话有效；ADR-0015 的 LAN 邀请首装是隔离的匿名分发面，不得用于同步或既有设备更新 |
 | 发现 | 前台握手/同步顺带 best-effort 检查；菜单关于区手动检查；可选更新可横幅提示（会话内稍后抑制） |
 
 比较语义只用整数 versionCode；versionName 仅展示。`versionCode` 与 lezi-sync Cargo 版本号
@@ -321,14 +323,17 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 - `/v1/setup-status`：可信 HTTPS 后的协议/capability 与 `empty|configured`；
 - owner setup/login/takeover：根密码验证与 Owner 设备 session；
 - member request/status/approve/reject：无权限申请与管理员裁决；
-- one-time grant：只签发管理员 App 可编码的目标 membership 单次授权；
+- one-time grant：只签发管理员 App 可编码的目标 membership 单次授权；启用 LAN 首装时可附加
+  非敏感 `landing_url`，仍由 App 生成 QR；
 - access refresh/logout/revoke：轮换、重放检测与独立设备撤销；
 - membership/device rename/delete：唯一性、权限和硬删除；
 - authenticated session summary：从 credential 返回 canonical family/membership/device/role；
 - bundle push/pull/media：沿用原子同步和服务端 ACL；并在请求头 versionCode 低于 minSupported 时
   以 `client_update_required` 拒绝；
 - authenticated app-update：`GET /v1/app-update` 返回部署元数据 JSON；`GET /v1/app-update/apk`
-  在 sha256 与元数据一致时提供 release APK；均需设备会话，不设匿名旁路。
+  在 sha256 与元数据一致时提供 release APK；均需设备会话，不设匿名旁路；
+- invite install：独立 LAN HTTP Router 只能提供无家庭信息的 `/join` 与经同一 SHA-256 校验的
+  `/download/lezi.apk`，不能暴露任何 `/v1/*`、健康、ready、数据库、媒体或凭证接口。
 
 所有身份判断只从已验证 credential 与服务端状态推导，不能信任请求体自报 family、membership、
 device 或 role。服务端不得记录根密码、access/refresh token、grant 或敏感请求体。
@@ -352,7 +357,7 @@ Outbox 或 media。
   且不落盘；中段用高熵、限时、可撤销恢复凭证。`/data` staging/journal 校验引用、大小与
   SHA-256 后一次激活，24 小时过期；request ID 幂等，重启与 commit 回包丢失后可查询续传。
 - staging 提交前不能加入或普通同步。commit 成功后客户端在 sync mutex 内切换 endpoint/session、
-  替换成员目录并退休旧 Outbox/回执。现有 configured 数据根升级 0.3.3 不进入恢复路径。
+  替换成员目录并退休旧 Outbox/回执。现有 configured 数据根升级 0.3.5 不进入恢复路径。
 - 普通 NAS CD、回滚与容器重启必须保留已有 TLS 证书/私钥并在部署前后得到相同 SPKI；证书
   缺失、无效、错配或不可读时失败关闭。只有经确认的全新空数据根可首次生成证书；有意轮换
   属于独立授权维护。证书变化相关测试只允许使用自建隔离服务和临时数据根，真实家庭 NAS
@@ -379,7 +384,7 @@ Outbox 或 media。
     （系统安装器缓存不在承诺范围）。
 12. NAS 断开或 roster 请求永久挂起时，Room 首屏与全部本地护理写入仍完成；恢复健康后待发布
     内容自动收敛。候选地址失败可证明旧配置未变，不同 family ID 被阻断。
-13. 隔离空 0.3.3 服务可完成 Owner 设备灾难恢复、重启续传与幂等 commit；非空服务、普通成员、
+13. 隔离空 0.3.5 服务可完成 Owner 设备灾难恢复、重启续传与幂等 commit；非空服务、普通成员、
     manifest/media 篡改和过期批次都 fail closed，且不在现有家庭 NAS 执行破坏性恢复测试。
 14. 普通 NAS CD 前后 TLS SPKI 完全一致；缺失/无效/错配/不可读身份使部署失败。证书生成、
     轮换与 TOFU 变化测试只在自建隔离服务执行，不触碰真实家庭 NAS 或其数据 bind。

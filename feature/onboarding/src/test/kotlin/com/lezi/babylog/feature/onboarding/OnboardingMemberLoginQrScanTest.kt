@@ -75,4 +75,19 @@ class OnboardingMemberLoginQrScanTest {
         assertEquals("妈妈", ready.payload.memberDisplayName)
         assertEquals("https://nas.home", ready.payload.endpoint.origin)
     }
+
+    @Test
+    fun landingPageQrIsReadyForTheSameControllerVerifyFlow() {
+        val outcome = parseOnboardingMemberLoginQrScan(
+            "http://nas.home:8767/join#v1." +
+                "eyJ2IjoxLCJ0eXBlIjoibWVtYmVyX2xvZ2luIiwiZW5kcG9pbnQiOiJodHRwczovL25hcy5ob21lIiwidHJ1c3QiOiJzeXN0ZW1fcGtpIiwiZ3JhbnQiOiJncmFudC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwiZmFtaWx5X25hbWUiOiLkuZDkuZDkuIDlrrYiLCJtZW1iZXJfZGlzcGxheV9uYW1lIjoi5aaI5aaIIiwiZXhwaXJlc19hdCI6MTc1MzQxOTAwMH0",
+            nowEpochSeconds = 1_753_418_999,
+        )
+
+        assertTrue(outcome is OnboardingMemberLoginScanOutcome.Ready)
+        assertEquals(
+            "妈妈",
+            (outcome as OnboardingMemberLoginScanOutcome.Ready).payload.memberDisplayName,
+        )
+    }
 }

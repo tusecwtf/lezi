@@ -80,6 +80,7 @@ import com.lezi.babylog.sync.engine.ReplicaSyncEngine
 import com.lezi.babylog.sync.engine.ReplicaSyncOutcome
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
@@ -977,9 +978,9 @@ class RealSyncPort @Inject constructor(
     override suspend fun rejectMemberLogin(requestId: String): Result<Unit> =
         executeFamily(FamilySessionCommand.RejectMemberLogin(requestId)).map { Unit }
 
-    override suspend fun createMemberLoginQrPayload(
+    override suspend fun createMemberLoginQrCode(
         membershipId: String,
-    ): Result<MemberLoginQrPayload> = executeFamily(
+    ): Result<MemberLoginQrCode> = executeFamily(
         FamilySessionCommand.CreateMemberLoginGrant(membershipId),
     ).mapCatching { outcome ->
         val grant = (outcome as FamilySessionOutcome.MemberLoginGrantCreated).grant
@@ -990,12 +991,15 @@ class RealSyncPort @Inject constructor(
         require(endpoint.matchesOrigin(session.baseUrl)) {
             "当前家庭会话与可信服务器地址不一致"
         }
-        MemberLoginQrPayload(
-            endpoint = endpoint,
-            grant = grant.grant,
-            familyName = grant.familyName,
-            memberDisplayName = grant.memberDisplayName,
-            expiresAtEpochSeconds = grant.expiresAtEpochSeconds,
+        MemberLoginQrCode(
+            payload = MemberLoginQrPayload(
+                endpoint = endpoint,
+                grant = grant.grant,
+                familyName = grant.familyName,
+                memberDisplayName = grant.memberDisplayName,
+                expiresAtEpochSeconds = grant.expiresAtEpochSeconds,
+            ),
+            landingUrl = grant.landingUrl,
         )
     }
 

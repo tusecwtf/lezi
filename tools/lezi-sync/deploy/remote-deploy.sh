@@ -16,6 +16,7 @@ HEALTH_URL="${LEZI_HEALTH_URL:-https://127.0.0.1:8765/health}"
 READY_URL="${LEZI_READY_URL:-https://127.0.0.1:8765/ready}"
 EXPECTED_VERSION="${LEZI_SYNC_VERSION:-}"
 TLS_HOST="${LEZI_TLS_HOST:-192.168.50.4}"
+LAN_APK_DOWNLOAD_ORIGIN="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-}"
 ALLOW_TLS_BOOTSTRAP="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
 
 if [[ "${ALLOW_TLS_BOOTSTRAP}" != "0" && "${ALLOW_TLS_BOOTSTRAP}" != "1" ]]; then
@@ -32,6 +33,16 @@ if [[ -f MANIFEST.json ]]; then
   fi
   manifest_tls_host="$(sed -n 's/.*"tls_host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
   [[ -n "${manifest_tls_host}" ]] && TLS_HOST="${manifest_tls_host}"
+  manifest_lan_apk_download_origin="$(sed -n 's/.*"lan_apk_download_origin"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
+  [[ -n "${manifest_lan_apk_download_origin}" ]] \
+    && LAN_APK_DOWNLOAD_ORIGIN="${manifest_lan_apk_download_origin}"
+fi
+if [[ -z "${LAN_APK_DOWNLOAD_ORIGIN}" ]]; then
+  lan_apk_download_host="${TLS_HOST}"
+  if [[ "${lan_apk_download_host}" == *:* ]]; then
+    lan_apk_download_host="[${lan_apk_download_host}]"
+  fi
+  LAN_APK_DOWNLOAD_ORIGIN="http://${lan_apk_download_host}:8767"
 fi
 
 tar_file="$(ls -1 lezi-sync-*-linux-amd64.tar 2>/dev/null | head -1 || true)"
@@ -50,6 +61,7 @@ echo "==> remote deploy in ${DIR}"
 echo "    tar:     ${tar_file}"
 echo "    image:   ${image}"
 echo "    project: ${COMPOSE_PROJECT}"
+echo "    apk LAN: ${LAN_APK_DOWNLOAD_ORIGIN}"
 
 echo "==> docker load"
 docker load -i "${tar_file}"
@@ -201,6 +213,7 @@ else
     -e LEZI_HOST=0.0.0.0 \
     -e LEZI_PORT=8765 \
     -e LEZI_INTERNAL_PORT=8766 \
+    -e "LEZI_LAN_APK_DOWNLOAD_ORIGIN=${LAN_APK_DOWNLOAD_ORIGIN}" \
     -e LEZI_TLS_CERTFILE=/data/tls/server.crt \
     -e LEZI_TLS_KEYFILE=/data/tls/server.key \
     -e LEZI_MAX_MEDIA_BYTES=10485760 \
@@ -213,6 +226,7 @@ else
     -e "LEZI_BOOTSTRAP_SECRET=${secret}" \
     -v "${data_path}:/data" \
     -p 0.0.0.0:8765:8765 \
+    -p 0.0.0.0:8767:8767 \
     "${image}"
 fi
 

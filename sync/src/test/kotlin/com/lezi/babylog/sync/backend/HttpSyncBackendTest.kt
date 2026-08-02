@@ -366,7 +366,7 @@ class HttpSyncBackendTest {
                 server.accept().use { socket ->
                     captured += readRequest(socket)
                     val body = if (index == 0) {
-                        """{"grant":"grant-0000000000000000000000000000000000000","family_name":"乐乐一家","member_display_name":"妈妈","expires_at":1753419000}"""
+                        """{"grant":"grant-0000000000000000000000000000000000000","family_name":"乐乐一家","member_display_name":"妈妈","expires_at":1753419000,"landing_url":"http://127.0.0.1:8767/join"}"""
                     } else {
                         """{"family_id":"family","membership_id":"membership-member","device_id":"device-new","session_id":"session-new","role":"member","access_token":"member-access","token":"member-access","access_expires_at":1753419300,"refresh_token":"member-refresh","generation":"generation-a","family_name":"乐乐一家"}"""
                     }.toByteArray(Charsets.UTF_8)
@@ -405,6 +405,7 @@ class HttpSyncBackendTest {
 
             assertThat(grant.memberDisplayName).isEqualTo("妈妈")
             assertThat(grant.familyName).isEqualTo("乐乐一家")
+            assertThat(grant.landingUrl).isEqualTo("http://127.0.0.1:8767/join")
             assertThat(joined.membershipId).isEqualTo("membership-member")
             assertThat(captured[0].lineSequence().first())
                 .startsWith("POST /v1/member/login-grants ")
@@ -417,6 +418,52 @@ class HttpSyncBackendTest {
             assertThat(captured[1].substringAfter("\n\n")).isEqualTo(
                 """{"grant":"${grant.grant}","device_name":"Pixel Tablet"}""",
             )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun memberLoginQrGrantWithoutLandingUrlKeepsLegacyQrCompatibility() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-member-grant-legacy-test-server") {
+            server.accept().use { socket ->
+                readRequest(socket)
+                val body =
+                    """{"grant":"grant-0000000000000000000000000000000000000","family_name":"乐乐一家","member_display_name":"妈妈","expires_at":1753419000}"""
+                        .toByteArray(Charsets.UTF_8)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                        ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+        val baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}"
+        val backend = HttpSyncBackend(
+            SyncHttpConnectionFactory { requested ->
+                URL(baseUrl + requested.file).openConnection() as HttpURLConnection
+            },
+        )
+        val endpoint = TrustedEndpointProfile.systemPki(
+            baseUrl.replace("http://", "https://"),
+        )
+
+        try {
+            val grant = backend.createMemberLoginGrant(
+                testSession(server).copy(serverScheme = "https"),
+                endpoint,
+                "membership-member",
+            )
+
+            assertThat(grant.landingUrl).isNull()
         } finally {
             server.close()
             responder.join(2_000)

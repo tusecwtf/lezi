@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 #[test]
 fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart() {
@@ -50,6 +51,62 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
     assert_eq!(std::fs::read(certificate).unwrap(), certificate_before);
 }
 
+#[test]
+fn configured_lan_apk_listener_serves_plain_http_and_shuts_down_with_the_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let certificate = directory.path().join("server.crt");
+    let private_key = directory.path().join("server.key");
+    generate_certificate(&certificate, &private_key);
+    let apk_bytes = b"tls-black-box-release-apk";
+    std::fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    std::fs::write(
+        directory.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 12,
+            "version_name": "0.3.5",
+            "min_supported_version_code": 6,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let public_port = free_port();
+    let internal_port = free_port();
+    let lan_port = 8767;
+    drop(
+        TcpListener::bind(("127.0.0.1", lan_port))
+            .expect("the fixed LAN APK port 8767 must be free for this black-box test"),
+    );
+    let mut server = spawn_server_with_lan(
+        directory.path(),
+        &certificate,
+        &private_key,
+        public_port,
+        internal_port,
+        Some("http://127.0.0.1:8767"),
+    );
+
+    let _ = wait_for_https(&certificate, public_port);
+    let join = wait_for_plain_http(lan_port, "/join");
+    assert!(join.starts_with("HTTP/1.1 200"), "{join}");
+    assert!(join.contains("下载乐记"), "{join}");
+    assert!(!plain_http_succeeds(public_port));
+
+    unsafe {
+        libc::kill(server.id() as libc::pid_t, libc::SIGTERM);
+    }
+    for _ in 0..50 {
+        if server.try_wait().unwrap().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    server.kill().unwrap();
+    server.wait().unwrap();
+    panic!("server did not shut down after SIGTERM");
+}
+
 fn generate_certificate(certificate: &Path, private_key: &Path) {
     let status = Command::new("openssl")
         .args([
@@ -84,7 +141,26 @@ fn spawn_server(
     public_port: u16,
     internal_port: u16,
 ) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_lezi-sync"))
+    spawn_server_with_lan(
+        data_root,
+        certificate,
+        private_key,
+        public_port,
+        internal_port,
+        None,
+    )
+}
+
+fn spawn_server_with_lan(
+    data_root: &Path,
+    certificate: &Path,
+    private_key: &Path,
+    public_port: u16,
+    internal_port: u16,
+    lan_origin: Option<&str>,
+) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lezi-sync"));
+    command
         .env("LEZI_DATA_DIR", data_root)
         .env("LEZI_BOOTSTRAP_SECRET", "tls-test-bootstrap-secret")
         .env("LEZI_HOST", "127.0.0.1")
@@ -92,10 +168,13 @@ fn spawn_server(
         .env("LEZI_INTERNAL_PORT", internal_port.to_string())
         .env("LEZI_TLS_CERTFILE", certificate)
         .env("LEZI_TLS_KEYFILE", private_key)
+        .env_remove("LEZI_LAN_APK_DOWNLOAD_ORIGIN")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::null());
+    if let Some(origin) = lan_origin {
+        command.env("LEZI_LAN_APK_DOWNLOAD_ORIGIN", origin);
+    }
+    command.spawn().unwrap()
 }
 
 fn wait_for_https(certificate: &Path, port: u16) -> Value {
@@ -125,6 +204,29 @@ fn internal_ready(port: u16) -> bool {
     stream
         .read(&mut response)
         .is_ok_and(|read| response[..read].starts_with(b"HTTP/1.1 200"))
+}
+
+fn wait_for_plain_http(port: u16, path: &str) -> String {
+    for _ in 0..40 {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            stream
+                .write_all(
+                    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                        .as_bytes(),
+                )
+                .unwrap();
+            let mut response = String::new();
+            if stream.read_to_string(&mut response).is_ok() && response.starts_with("HTTP/1.1 200")
+            {
+                return response;
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("LAN APK HTTP server did not become ready");
 }
 
 fn plain_http_succeeds(port: u16) -> bool {

@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
-use lezi_sync::{build_apps, ServerConfig};
+use lezi_sync::{build_server_apps, ServerApps, ServerConfig};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_PUBLIC_PORT: u16 = 8765;
 const DEFAULT_INTERNAL_PORT: u16 = 8766;
+const LAN_APK_DOWNLOAD_PORT: u16 = 8767;
 
 #[tokio::main]
 async fn main() {
@@ -59,7 +60,11 @@ async fn main() {
     });
     let internal_port = env_port("LEZI_INTERNAL_PORT", DEFAULT_INTERNAL_PORT);
     let internal_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), internal_port);
-    let (public_app, internal_app) = build_apps(config).unwrap_or_else(|error| {
+    let ServerApps {
+        public: public_app,
+        internal: internal_app,
+        lan_apk_download,
+    } = build_server_apps(config).unwrap_or_else(|error| {
         eprintln!("startup error: {error:?}");
         std::process::exit(1);
     });
@@ -69,12 +74,28 @@ async fn main() {
             eprintln!("cannot bind internal health endpoint {internal_address}: {error}");
             std::process::exit(1);
         });
+    let lan_apk_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), LAN_APK_DOWNLOAD_PORT);
+    let lan_apk_listener = if lan_apk_download.is_some() {
+        Some(
+            TcpListener::bind(lan_apk_address)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("cannot bind LAN APK download endpoint {lan_apk_address}: {error}");
+                    std::process::exit(1);
+                }),
+        )
+    } else {
+        None
+    };
 
     let tls_handle = Handle::new();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tokio::spawn(wait_for_shutdown(shutdown_tx, tls_handle.clone()));
     tracing::info!(%address, "lezi-sync HTTPS server listening");
     tracing::info!(%internal_address, "lezi-sync internal health endpoint listening");
+    if lan_apk_listener.is_some() {
+        tracing::info!(%lan_apk_address, "lezi-sync LAN APK download endpoint listening");
+    }
 
     let public_server = axum_server::bind_rustls(address, tls)
         .handle(tls_handle)
@@ -83,14 +104,32 @@ async fn main() {
         internal_listener,
         internal_app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_requested(shutdown_rx));
-    let (public_result, internal_result) = tokio::join!(public_server, internal_server);
+    .with_graceful_shutdown(shutdown_requested(shutdown_rx.clone()));
+    let lan_apk_server = async move {
+        match (lan_apk_listener, lan_apk_download) {
+            (Some(listener), Some(app)) => {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(shutdown_requested(shutdown_rx))
+                .await
+            }
+            _ => Ok(()),
+        }
+    };
+    let (public_result, internal_result, lan_apk_result) =
+        tokio::join!(public_server, internal_server, lan_apk_server);
     public_result.unwrap_or_else(|error| {
         eprintln!("HTTPS server error: {error}");
         std::process::exit(1);
     });
     internal_result.unwrap_or_else(|error| {
         eprintln!("internal health server error: {error}");
+        std::process::exit(1);
+    });
+    lan_apk_result.unwrap_or_else(|error| {
+        eprintln!("LAN APK download server error: {error}");
         std::process::exit(1);
     });
 }

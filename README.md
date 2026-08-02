@@ -1,7 +1,7 @@
 # 乐记（lezi）
 
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.4`
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.5`
 
 产品规格：[`docs/prd/`](docs/prd/) · 领域术语：[`CONTEXT.md`](CONTEXT.md) · 文档索引：[`docs/README.md`](docs/README.md) · 安全：[`SECURITY.md`](SECURITY.md)
 许可：[MIT](LICENSE) · 贡献 / PR：[`CONTRIBUTING.md`](CONTRIBUTING.md)
@@ -121,12 +121,13 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 | `NAS_SSH_PORT` | `10000` |
 | `NAS_REMOTE_DIR` | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
 | `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
-| `LEZI_TLS_HOST` | `192.168.50.4`；首次证书 SAN 使用的 NAS DNS 名或 IP |
+| `LEZI_TLS_HOST` | `192.168.50.4`；首次证书 SAN 使用的 NAS IPv4 或解析到 IPv4 的 DNS 名 |
 | `LEZI_FORCE_PACKAGE=1` | 强制重打包 |
 | `LEZI_SKIP_PACKAGE=1` | 仅 scp+部署已有 `dist/` 包 |
 | `LEZI_BOOTSTRAP_SECRET` | 仅无现网容器可继承时手动提供 |
 | `LEZI_RELEASE_APK` | 打进 NAS 包的 signed release APK（默认 `app/build/outputs/apk/release/app-release.apk`） |
 | `LEZI_APP_UPDATE_JSON` | 更新元数据（默认 `tools/lezi-sync/deploy/app-update.json`；sha256 须与 APK 一致） |
+| `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 邀请首装页的 LAN HTTP origin；NAS 默认 `http://<LEZI_TLS_HOST>:8767`，本版仅支持 IPv4/DNS，禁止公网发布 |
 
 **自托管应用内更新**：`package-nas.sh` **fail-closed** — 缺少 release APK 或 `app-update.json`
 不合法（含 sha256 不匹配）则打包失败。成功包含 `app-update/app-release.apk` 与元数据；部署后
@@ -136,10 +137,15 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 [`docs/prd/tech.md`](docs/prd/tech.md) §4.2 与
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)。
 
+**邀请首装**：启用 `LEZI_LAN_APK_DOWNLOAD_ORIGIN` 后，同一成员登录 QR 可被系统相机打开到
+独立 8767 安装页；页面匿名提供同一个已校验 Release APK，安装后仍须回到乐记重扫二维码。
+8767 不提供家庭 API，并且只允许可信家庭 LAN；明文链路的页面/APK 替换与 grant 盗用风险见
+[ADR-0015](docs/adr/0015-isolate-lan-invite-install-distribution.md)。
+
 **手机访问**：首次连接或已加入后的「家庭网络设置」填写
 `https://<NAS-LAN-IP>:8765`。首次会显示部署脚本打印的 SPKI 指纹，确认后固定；后续公钥
 变化会硬阻断并要求重新信任/登录，旧凭证不会发送到候选地址。须用 NAS 防火墙禁止公网访问
-8765。旧 Owner 可把本机完整护理副本恢复到空 0.3.3 服务器；不支持两个已配置家庭合并。
+8765/8767。旧 Owner 可把本机完整护理副本恢复到空 0.3.5 服务器；不支持两个已配置家庭合并。
 
 **首次空部署**（无现网容器、且已确认数据根全新无 TLS identity）须同时设置
 `LEZI_BOOTSTRAP_SECRET`（≥16 字符）、`LEZI_FORWARD_BOOTSTRAP_SECRET=1` 和

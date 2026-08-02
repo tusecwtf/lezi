@@ -38,19 +38,26 @@ cat >"${package_dir}/MANIFEST.json" <<'EOF'
 {
   "version": "0.3.3",
   "image": "lezi-sync:0.3.3",
-  "tls_host": "localhost"
+  "tls_host": "localhost",
+  "lan_apk_download_origin": "http://localhost:8767"
 }
 EOF
 cat >"${package_dir}/docker-compose.yml" <<EOF
 services:
   lezi-sync:
+    environment:
+      LEZI_LAN_APK_DOWNLOAD_ORIGIN: "http://localhost:8767"
     volumes:
       - ${data_root}:/data
+    ports:
+      - "0.0.0.0:8765:8765"
+      - "0.0.0.0:8767:8767"
 EOF
 
 cat >"${test_root}/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${LEZI_TEST_DOCKER_LOG:?}"
 case "${1:-}" in
   inspect)
     if [[ " $* " == *" --format "* ]]; then
@@ -70,6 +77,7 @@ EOF
 cat >"${test_root}/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >>"${LEZI_TEST_CURL_LOG:?}"
 if [[ "${LEZI_TEST_DISABLE_TLS_DRIFT:-0}" != "1" \
     && ! -f "${LEZI_TEST_TLS_DRIFT_MARKER:?}" ]]; then
   cp "${LEZI_TEST_REPLACEMENT_CERT:?}" "${LEZI_TEST_LIVE_CERT:?}"
@@ -86,7 +94,11 @@ chmod +x "${package_dir}/remote-deploy.sh" "${package_dir}/init-tls.sh" \
   "${test_root}/bin/docker" "${test_root}/bin/curl"
 
 deploy_log="${test_root}/deploy.log"
+docker_log="${test_root}/docker.log"
+curl_log="${test_root}/curl.log"
 if PATH="${test_root}/bin:${PATH}" \
+    LEZI_TEST_DOCKER_LOG="${docker_log}" \
+    LEZI_TEST_CURL_LOG="${curl_log}" \
     LEZI_TLS_USE_HOST_OPENSSL=1 \
     LEZI_TEST_LIVE_CERT="${data_root}/tls/server.crt" \
     LEZI_TEST_REPLACEMENT_CERT="${replacement_root}/tls/server.crt" \
@@ -109,6 +121,8 @@ cp "${initial_root}/tls/server.key" "${data_root}/tls/server.key"
 rm -f "${test_root}/tls-drifted"
 same_key_log="${test_root}/same-key-deploy.log"
 if PATH="${test_root}/bin:${PATH}" \
+    LEZI_TEST_DOCKER_LOG="${docker_log}" \
+    LEZI_TEST_CURL_LOG="${curl_log}" \
     LEZI_TLS_USE_HOST_OPENSSL=1 \
     LEZI_TEST_LIVE_CERT="${data_root}/tls/server.crt" \
     LEZI_TEST_REPLACEMENT_CERT="${test_root}/same-key-data/tls/server.crt" \
@@ -128,7 +142,11 @@ fi
 cp "${initial_root}/tls/server.crt" "${data_root}/tls/server.crt"
 cp "${initial_root}/tls/server.key" "${data_root}/tls/server.key"
 stable_log="${test_root}/stable-deploy.log"
+: >"${docker_log}"
+: >"${curl_log}"
 if ! PATH="${test_root}/bin:${PATH}" \
+    LEZI_TEST_DOCKER_LOG="${docker_log}" \
+    LEZI_TEST_CURL_LOG="${curl_log}" \
     LEZI_TLS_USE_HOST_OPENSSL=1 \
     LEZI_TEST_DISABLE_TLS_DRIFT=1 \
     LEZI_TEST_LIVE_CERT="${data_root}/tls/server.crt" \
@@ -148,6 +166,26 @@ fi
 if ! grep -q 'post-replace TLS certificate preserved' "${stable_log}"; then
   echo "error: stable deployment did not report exact certificate preservation" >&2
   cat "${stable_log}" >&2
+  exit 1
+fi
+if ! grep -Fq -- '-e LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://localhost:8767' "${docker_log}"; then
+  echo "error: docker-run fallback omitted the LAN APK download origin" >&2
+  cat "${docker_log}" >&2
+  exit 1
+fi
+if ! grep -Fq -- '-p 0.0.0.0:8767:8767' "${docker_log}"; then
+  echo "error: docker-run fallback did not publish LAN APK download port 8767" >&2
+  cat "${docker_log}" >&2
+  exit 1
+fi
+if grep -Fq -- '-p 0.0.0.0:8766:8766' "${docker_log}"; then
+  echo "error: docker-run fallback published internal readiness port 8766" >&2
+  cat "${docker_log}" >&2
+  exit 1
+fi
+if grep -q '8767' "${curl_log}"; then
+  echo "error: remote deployment treated LAN APK port 8767 as readiness" >&2
+  cat "${curl_log}" >&2
   exit 1
 fi
 

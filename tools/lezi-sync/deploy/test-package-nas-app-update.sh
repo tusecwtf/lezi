@@ -18,7 +18,11 @@ apk_analyzer="${test_root}/apkanalyzer"
 cat >"${apk_analyzer}" <<'EOF'
 #!/usr/bin/env bash
 cat <<MANIFEST
-<manifest package="com.lezi.babylog">
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:versionCode="${LEZI_FAKE_VERSION_CODE:-8}"
+    android:versionName="${LEZI_FAKE_VERSION_NAME:-0.3.1}"
+    package="${LEZI_FAKE_PACKAGE_NAME:-com.lezi.babylog}">
   <application>
     <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_LOCAL_DATA_CONTRACT:-1}" />
     <meta-data android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_MINIMUM_LOCAL_DATA_CONTRACT:-1}" />
@@ -27,6 +31,22 @@ cat <<MANIFEST
 MANIFEST
 EOF
 chmod +x "${apk_analyzer}"
+
+apk_signer="${test_root}/apksigner"
+cat >"${apk_signer}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "verify" || "${2:-}" != "--verbose" || "$#" -ne 3 ]]; then
+  echo "unexpected apksigner invocation: $*" >&2
+  exit 64
+fi
+if [[ "${LEZI_FAKE_APK_SIGNATURE_INVALID:-0}" == "1" ]]; then
+  echo "DOES NOT VERIFY" >&2
+  exit 1
+fi
+echo "Verifies"
+EOF
+chmod +x "${apk_signer}"
 
 write_meta() {
   local dest="$1"
@@ -52,10 +72,82 @@ write_meta "${bad_sha_json}" "${wrong_sha}" "wrong hash"
 run_check() {
   LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
     LEZI_APK_ANALYZER="${apk_analyzer}" \
+    LEZI_APK_SIGNER="${LEZI_TEST_APK_SIGNER:-${apk_signer}}" \
     LEZI_RELEASE_APK="$1" \
     LEZI_APP_UPDATE_JSON="$2" \
     "${SCRIPT_DIR}/package-nas.sh"
 }
+
+# A configured-but-missing verifier must stop both check-only and full package paths.
+missing_signer_log="${test_root}/missing-signer.log"
+if LEZI_TEST_APK_SIGNER="${test_root}/missing-apksigner" \
+    run_check "${apk_path}" "${good_json}" >"${missing_signer_log}" 2>&1; then
+  echo "error: package gate ran without an available apksigner" >&2
+  cat "${missing_signer_log}" >&2
+  exit 1
+fi
+if ! grep -q 'apksigner is required' "${missing_signer_log}"; then
+  echo "error: missing-apksigner failure did not identify the required tool" >&2
+  cat "${missing_signer_log}" >&2
+  exit 1
+fi
+
+# The package gate must independently reject an APK with an invalid signature.
+bad_signature_log="${test_root}/bad-signature.log"
+if LEZI_FAKE_APK_SIGNATURE_INVALID=1 \
+    run_check "${apk_path}" "${good_json}" >"${bad_signature_log}" 2>&1; then
+  echo "error: APK with an invalid signature was accepted" >&2
+  cat "${bad_signature_log}" >&2
+  exit 1
+fi
+if ! grep -q 'release APK signature verification failed' "${bad_signature_log}"; then
+  echo "error: invalid-signature failure did not identify signature verification" >&2
+  cat "${bad_signature_log}" >&2
+  exit 1
+fi
+
+# APK identity, not only metadata prose, owns the install target. A different
+# applicationId must never be staged under com.lezi.babylog metadata.
+bad_package_log="${test_root}/bad-package.log"
+if LEZI_FAKE_PACKAGE_NAME=com.example.impostor \
+    run_check "${apk_path}" "${good_json}" >"${bad_package_log}" 2>&1; then
+  echo "error: APK package/applicationId mismatch was accepted" >&2
+  cat "${bad_package_log}" >&2
+  exit 1
+fi
+if ! grep -q 'APK package/applicationId does not match app-update.json' "${bad_package_log}"; then
+  echo "error: package mismatch did not identify APK versus app-update.json" >&2
+  cat "${bad_package_log}" >&2
+  exit 1
+fi
+
+# A metadata version_code cannot bless a differently versioned APK.
+bad_version_code_log="${test_root}/bad-version-code.log"
+if LEZI_FAKE_VERSION_CODE=9 \
+    run_check "${apk_path}" "${good_json}" >"${bad_version_code_log}" 2>&1; then
+  echo "error: APK versionCode mismatch was accepted" >&2
+  cat "${bad_version_code_log}" >&2
+  exit 1
+fi
+if ! grep -q 'APK versionCode does not match app-update.json' "${bad_version_code_log}"; then
+  echo "error: versionCode mismatch did not identify APK versus app-update.json" >&2
+  cat "${bad_version_code_log}" >&2
+  exit 1
+fi
+
+# Human-facing release metadata must describe the exact APK versionName too.
+bad_version_name_log="${test_root}/bad-version-name.log"
+if LEZI_FAKE_VERSION_NAME=0.3.2 \
+    run_check "${apk_path}" "${good_json}" >"${bad_version_name_log}" 2>&1; then
+  echo "error: APK versionName mismatch was accepted" >&2
+  cat "${bad_version_name_log}" >&2
+  exit 1
+fi
+if ! grep -q 'APK versionName does not match app-update.json' "${bad_version_name_log}"; then
+  echo "error: versionName mismatch did not identify APK versus app-update.json" >&2
+  cat "${bad_version_name_log}" >&2
+  exit 1
+fi
 
 # Manifest contract outside the tracked ledger → fail closed before staging.
 bad_contract_log="${test_root}/bad-contract.log"

@@ -24,6 +24,54 @@ if [[ ! "${tls_host}" =~ ^[A-Za-z0-9.:-]+$ ]] || [[ "${#tls_host}" -gt 253 ]]; t
   echo "error: LEZI_TLS_HOST must be a plain DNS name or IP address" >&2
   exit 1
 fi
+lan_apk_download_host="${tls_host}"
+if [[ "${lan_apk_download_host}" == *:* ]]; then
+  lan_apk_download_host="[${lan_apk_download_host}]"
+fi
+lan_apk_download_origin="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-http://${lan_apk_download_host}:8767}"
+if ! python3 - "${tls_host}" "${lan_apk_download_origin}" <<'PY'
+import ipaddress
+import sys
+import urllib.parse
+
+tls_host, origin = sys.argv[1:]
+if origin != origin.strip() or any(ord(char) < 0x20 or ord(char) == 0x7f for char in origin):
+    raise SystemExit(1)
+try:
+    parsed = urllib.parse.urlsplit(origin)
+    port = parsed.port
+except ValueError:
+    raise SystemExit(1)
+if (
+    parsed.scheme != "http"
+    or not parsed.hostname
+    or ":" in parsed.hostname
+    or ":" in tls_host.strip("[]")
+    or parsed.username is not None
+    or parsed.password is not None
+    or port != 8767
+    or parsed.path
+    or parsed.query
+    or parsed.fragment
+    or "?" in origin
+    or "#" in origin
+):
+    raise SystemExit(1)
+
+def normalized_host(value):
+    value = value.strip("[]")
+    try:
+        return ("ip", ipaddress.ip_address(value))
+    except ValueError:
+        return ("dns", value.lower())
+
+if normalized_host(parsed.hostname) != normalized_host(tls_host):
+    raise SystemExit(1)
+PY
+then
+  echo "error: LEZI_LAN_APK_DOWNLOAD_ORIGIN must be http://<IPv4-or-DNS LEZI_TLS_HOST>:8767 with no userinfo, path, query, or fragment" >&2
+  exit 1
+fi
 out_root="${LEZI_NAS_PACKAGE_DIR:-${REPO_ROOT}/dist/lezi-sync-${version}-nas}"
 platform="${LEZI_SYNC_PLATFORM:-linux-amd64}"
 tar_name="lezi-sync-${version}-${platform}.tar"
@@ -43,11 +91,28 @@ if [[ -z "${apk_analyzer}" ]]; then
     apk_analyzer="$(command -v apkanalyzer || true)"
   fi
 fi
+apk_signer="${LEZI_APK_SIGNER:-}"
+if [[ -z "${apk_signer}" ]]; then
+  signer_sdk_dir="$(sed -n 's/^sdk.dir=//p' "${REPO_ROOT}/local.properties" 2>/dev/null | head -1)"
+  if [[ -z "${signer_sdk_dir}" || ! -d "${signer_sdk_dir}/build-tools" ]]; then
+    signer_sdk_dir="${ANDROID_SDK_ROOT:-}"
+  fi
+  if [[ -n "${signer_sdk_dir}" && -d "${signer_sdk_dir}/build-tools" ]]; then
+    apk_signer="$(
+      find "${signer_sdk_dir}/build-tools" -mindepth 2 -maxdepth 2 \
+        -type f -name apksigner -perm -u+x -print 2>/dev/null \
+        | sort -V \
+        | tail -1 \
+        || true
+    )"
+  fi
+fi
 
 echo "==> package lezi-sync ${version}"
 echo "    image:   ${image}"
 echo "    data:    ${data_host_path}"
 echo "    tls host:${tls_host}"
+echo "    apk LAN: ${lan_apk_download_origin}"
 echo "    apk:     ${release_apk}"
 echo "    update:  ${app_update_json}"
 echo "    output:  ${out_root}"
@@ -78,12 +143,20 @@ require_app_update_inputs() {
     echo "error: apkanalyzer is required to verify APK local-data contract metadata" >&2
     exit 1
   fi
+  if [[ -z "${apk_signer}" || ! -x "${apk_signer}" ]]; then
+    echo "error: apksigner is required to verify the release APK signature" >&2
+    exit 1
+  fi
 }
 
 validate_and_stage_app_update() {
   local dest_dir="$1"
   mkdir -p "${dest_dir}"
-  local manifest_file contract_values
+  if ! "${apk_signer}" verify --verbose "${release_apk}"; then
+    echo "error: release APK signature verification failed: ${release_apk}" >&2
+    exit 1
+  fi
+  local manifest_file contract_values apk_identity apk_package apk_version_code apk_version_name
   manifest_file="$(mktemp "${TMPDIR:-/tmp}/lezi-apk-manifest.XXXXXX")"
   if ! "${apk_analyzer}" manifest print "${release_apk}" >"${manifest_file}"; then
     rm -f -- "${manifest_file}"
@@ -151,6 +224,40 @@ PY
     rm -f -- "${manifest_file}"
     exit 1
   fi
+  if ! apk_identity="$(
+    python3 - "${manifest_file}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+manifest_path = sys.argv[1]
+try:
+    root = ET.parse(manifest_path).getroot()
+except (ET.ParseError, OSError) as error:
+    raise SystemExit(f"unable to parse APK manifest XML: {error}")
+package_name = root.attrib.get("package")
+if not package_name:
+    raise SystemExit("APK manifest package/applicationId is missing")
+version_code = root.attrib.get(
+    "{http://schemas.android.com/apk/res/android}versionCode"
+)
+if not version_code or not version_code.isdigit():
+    raise SystemExit("APK manifest versionCode is missing or invalid")
+version_name = root.attrib.get(
+    "{http://schemas.android.com/apk/res/android}versionName"
+)
+if not version_name:
+    raise SystemExit("APK manifest versionName is missing")
+print(package_name)
+print(int(version_code))
+print(version_name)
+PY
+  )"; then
+    rm -f -- "${manifest_file}"
+    exit 1
+  fi
+  apk_package="$(printf '%s\n' "${apk_identity}" | sed -n '1p')"
+  apk_version_code="$(printf '%s\n' "${apk_identity}" | sed -n '2p')"
+  apk_version_name="$(printf '%s\n' "${apk_identity}" | sed -n '3p')"
   rm -f -- "${manifest_file}"
   local apk_sha
   apk_sha="$(sha256sum "${release_apk}" | awk '{print $1}')"
@@ -211,6 +318,24 @@ PY
   version_name="$(printf '%s\n' "${meta_sha}" | sed -n '4p')"
   min_supported="$(printf '%s\n' "${meta_sha}" | sed -n '5p')"
   meta_sha="$(printf '%s\n' "${meta_sha}" | sed -n '1p')"
+  if [[ "${apk_package}" != "${package_name}" ]]; then
+    echo "error: APK package/applicationId does not match app-update.json" >&2
+    echo "  metadata: ${package_name}" >&2
+    echo "  apk:      ${apk_package}" >&2
+    exit 1
+  fi
+  if [[ "${apk_version_code}" != "${version_code}" ]]; then
+    echo "error: APK versionCode does not match app-update.json" >&2
+    echo "  metadata: ${version_code}" >&2
+    echo "  apk:      ${apk_version_code}" >&2
+    exit 1
+  fi
+  if [[ "${apk_version_name}" != "${version_name}" ]]; then
+    echo "error: APK versionName does not match app-update.json" >&2
+    echo "  metadata: ${version_name}" >&2
+    echo "  apk:      ${apk_version_name}" >&2
+    exit 1
+  fi
   if [[ "${meta_sha}" != "${apk_sha}" ]]; then
     echo "error: app-update.json sha256 does not match release APK" >&2
     echo "  metadata: ${meta_sha}" >&2
@@ -278,6 +403,7 @@ echo "==> render docker-compose.yml"
 sed \
   -e "s|__LEZI_SYNC_VERSION__|${version}|g" \
   -e "s|__LEZI_DATA_HOST_PATH__|${data_host_path}|g" \
+  -e "s|__LEZI_LAN_APK_DOWNLOAD_ORIGIN__|${lan_apk_download_origin}|g" \
   "${SCRIPT_DIR}/docker-compose.nas.yml.tpl" \
   > "${out_root}/docker-compose.yml"
 
@@ -309,6 +435,7 @@ cat > "${out_root}/MANIFEST.json" <<EOF
   "tar": "${tar_name}",
   "data_host_path": "${data_host_path}",
   "tls_host": "${tls_host}",
+  "lan_apk_download_origin": "${lan_apk_download_origin}",
   "git_sha": "${git_sha}",
   "created_at": "${created_at}",
   "compose_engine": "zdocker-bundled-docker-compose-v2",

@@ -6,20 +6,23 @@ Docker 容器和一个持久化目录。
 
 ## 源码布局（crate-private）
 
-公开 crate 入口仍是 `build_app` / `build_apps`、`ServerConfig` 与 HTTP 合同；路由组装与
-`AppState` 留在 `src/lib.rs`。Route handlers 按职责落在 crate-private 模块，**不**扩大
+公开 crate 入口仍由 `build_app` / `build_apps` 保持兼容；主进程通过
+`build_server_apps` / `ServerApps` 取得 HTTPS、内部 readiness 和可选 LAN 首装 Router。
+`ServerConfig` 统一验证三个面的配置；路由组装与 `AppState` 留在 `src/lib.rs`。
+Route handlers 按职责落在 crate-private 模块，**不**扩大
 公开 API surface：
 
 | 路径 | 职责 |
 |---|---|
-| `src/lib.rs` | `AppState`、共享鉴权/引导、`build_apps` 路由表（按 `handlers::<domain>::…` 组装，无 barrel 转发清单） |
-| `src/handlers/{health,app_update,identity,sync,media}.rs` | `/health`、app-update、建家/登录/会话、pull、media/bundle；`media` 另含 media-root 启动清理 |
+| `src/lib.rs` | `AppState`、共享鉴权/引导、`build_server_apps` 三路 Router 组装（按 `handlers::<domain>::…` 组装，无 barrel 转发清单） |
+| `src/handlers/{health,app_update,lan_apk,identity,sync,media}.rs` | `/health`、已加入更新、隔离邀请首装、建家/登录/会话、pull、media/bundle；`media` 另含 media-root 启动清理 |
 | `src/members.rs` | 家庭成员与设备管理路由（既有内聚，不回并） |
 | `src/readiness.rs` | `/ready` 与 readiness 缓存 |
 | `src/store/{mod,schema,identity/*,pull,media,bundles}.rs` | SQLite 持久化；单一 `Store` 事务 façade；identity 再按 session/login/membership_admin/anonymize 分区；bundle 行与 LWW 加载器在 `bundles` |
 | `src/offline_migrate/` | 离线 v3→current 维护工具（非 live HTTP API；不并入 runtime store） |
 
-公开 HTTP 合同（路径、方法、鉴权、状态码、JSON）不变；本 README 不宣称 live NAS 已验证。
+HTTPS `/v1/*` 合同只对成员登录 grant 增加可选 `landing_url`；新的 8767 HTTP
+只有 `/join` 和 `/download/lezi.apk`。本 README 不宣称 live NAS 已验证。
 
 ## 数据目录合同
 
@@ -54,11 +57,11 @@ SSH 自动部署（打包 + scp + 极空间 **zdocker 自带 compose**，secret 
 
 ```bash
 # 可选：先构建镜像
-LEZI_SYNC_VERSION=0.3.3 ./build-image.sh
+LEZI_SYNC_VERSION=0.3.5 ./build-image.sh
 ./deploy/push-and-deploy.sh
 ```
 
-默认镜像为 `lezi-sync:0.3.3`。**默认安全基线：**
+默认镜像为 `lezi-sync:0.3.5`。**默认安全基线：**
 
 | 项 | 默认 | 说明 |
 |---|---|---|
@@ -86,7 +89,7 @@ export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
 
 # 仅首次、已确认全新空数据根：显式授权生成；以后不设置该变量，只验证并复用。
 LEZI_ALLOW_TLS_BOOTSTRAP=1 \
-  ./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.3 nas.example.lan
+  ./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.5 nas.example.lan
 
 docker compose up -d
 docker compose ps
@@ -99,14 +102,18 @@ curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:876
 默认只绑定宿主 loopback。手机要直连时，显式发布 LAN/全接口（仍勿映射公网）：
 
 ```bash
-# 仅示例：发布到所有宿主接口的 8765
+# 仅示例：192.168.50.4 是这台宿主的 LAN IP。
 LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
+  LEZI_LAN_APK_DOWNLOAD_PUBLISH=0.0.0.0:8767 \
+  LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://192.168.50.4:8767 \
   LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
   LEZI_BOOTSTRAP_SECRET=... \
   docker compose up -d
 ```
 
-8765 本身只提供 TLS；不要在其前方增加会把明文重新发布到 LAN 的反向代理。
+8765 本身只提供 TLS；不要在其前方增加会把家庭 API 明文发布到 LAN 的反向代理。
+8767 是另一个有意使用明文 HTTP 的邀请首装面；`ORIGIN` 必须写扫码手机可达的同一宿主 LAN IP，
+不能写 `127.0.0.1`。
 
 ### NAS 无法 chown 时的 root profile（非默认）
 
@@ -137,9 +144,9 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 如果 NAS 不适合本机编译，可在开发机导出镜像：
 
 ```bash
-docker save lezi-sync:0.3.3 | gzip > lezi-sync-0.3.3.tar.gz
+docker save lezi-sync:0.3.5 | gzip > lezi-sync-0.3.5.tar.gz
 # 把 tar.gz 复制到 NAS 后：
-gzip -dc lezi-sync-0.3.3.tar.gz | docker load
+gzip -dc lezi-sync-0.3.5.tar.gz | docker load
 ```
 
 构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
@@ -152,8 +159,8 @@ gzip -dc lezi-sync-0.3.3.tar.gz | docker load
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg LEZI_SYNC_VERSION=0.3.3 \
-  -t your-registry/lezi-sync:0.3.3 \
+  --build-arg LEZI_SYNC_VERSION=0.3.5 \
+  -t your-registry/lezi-sync:0.3.5 \
   --push .
 ```
 
@@ -170,7 +177,9 @@ docker buildx build \
 | `LEZI_INTERNAL_PORT` | `8766` | 仅监听 `127.0.0.1` 的容器内 HTTP readiness 端口，不发布到宿主 |
 | `LEZI_TLS_CERTFILE` | 必填 | PEM certificate；NAS 包固定为 `/data/tls/server.crt` |
 | `LEZI_TLS_KEYFILE` | 必填 | PEM private key；NAS 包固定为 `/data/tls/server.key` |
-| `LEZI_SYNC_VERSION` | `0.3.3` | `/health` 返回的版本 |
+| `LEZI_SYNC_VERSION` | `0.3.5` | `/health` 返回的版本 |
+| `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 未设置 | 可选 `http://<同一 IPv4 或解析到 IPv4 的 DNS 主机>:8767`；设置后成员登录 QR 包装为邀请安装页 URL，本版不支持 IPv6 分发 |
+| `LEZI_LAN_APK_DOWNLOAD_PUBLISH` | `127.0.0.1:8767` | local compose 宿主侧发布地址；NAS 包固定 LAN `0.0.0.0:8767` |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
 | `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | 唯一 Owner 根密码；create、Owner 登录/接管要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
@@ -181,8 +190,11 @@ docker buildx build \
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
 
-公开端口只监听 HTTPS。容器内另有仅 loopback 可见的 readiness HTTP 端口供
-`HEALTHCHECK` 使用；它不映射到宿主。不要把 8765 映射到公网。
+8765 只监听 HTTPS。容器内另有仅 loopback 可见的 readiness HTTP 8766
+供 `HEALTHCHECK` 使用，不映射到宿主。可选 LAN HTTP 8767 只提供 `/join` 和
+`/download/lezi.apk`，不提供 `/v1`、health 或 ready。NAS 打包默认按
+`LEZI_TLS_HOST` 启用该 origin；直接 `cargo run` 不设置时则不监听 8767。明文分发可被同网段中间人
+替换页面/APK 并窃取 QR fragment；这是 ADR-0015 记录的显式风险接受。不要把 8765/8767 映射到公网。
 
 ### 生产 Owner 根密码（fail-closed）
 

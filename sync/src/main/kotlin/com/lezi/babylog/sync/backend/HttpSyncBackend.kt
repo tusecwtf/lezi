@@ -539,6 +539,11 @@ class HttpSyncBackend internal constructor(
             ),
             expiresAtEpochSeconds = json.requiredLong("expires_at", "member login grant")
                 .also { require(it > 0) { "member login grant 响应 expires_at 无效" } },
+            landingUrl = if ("landing_url" in json) {
+                json.requiredString("landing_url", "member login grant")
+            } else {
+                null
+            },
         )
     }
 

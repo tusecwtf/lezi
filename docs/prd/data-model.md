@@ -6,7 +6,7 @@
 > [ADR-0012](../adr/0012-preserve-android-local-data-across-in-place-upgrades.md)。
 > 主 PRD：[`README.md`](./README.md)
 >
-> **当前身份与网络合同（0.3.1）：** 历史的一设备一 membership、`left_at`、长期
+> **当前身份与网络合同（0.3.5）：** 历史的一设备一 membership、`left_at`、长期
 > credential、网络名称/明文传输的 0.3 实现说明已由
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 和
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
@@ -607,7 +607,8 @@ interface SyncPort {
   suspend fun ownerLogin(deviceName: String, rootPassword: String, takeover: Boolean): Result<OwnerLoginResult>
   suspend fun requestMemberLogin(displayName: String, deviceName: String): Result<PendingMemberLogin>
   suspend fun checkMemberLogin(): Result<MemberLoginCheckResult>
-  suspend fun createMemberLoginQrPayload(membershipId: String): Result<MemberLoginQrPayload>
+  /** 返回严格 v1 payload 与可选的隔离 LAN 邀请安装页地址 */
+  suspend fun createMemberLoginQrCode(membershipId: String): Result<MemberLoginQrCode>
   suspend fun claimMemberLoginQr(payload: MemberLoginQrPayload, deviceName: String): Result<SyncSession>
   suspend fun renameFamily(familyName: String): Result<Unit>
   suspend fun deleteFamily(familyName: String, rootPassword: String): Result<Unit>

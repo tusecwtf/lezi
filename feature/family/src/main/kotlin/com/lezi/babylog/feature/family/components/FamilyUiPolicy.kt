@@ -11,7 +11,7 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.session.LOCAL_DEVICE_DISPLAY_NAME
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
-import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrCode as SyncMemberLoginQrCode
 import java.text.Normalizer
 import java.util.Locale
 
@@ -91,7 +91,7 @@ internal sealed interface FamilyDialog {
     data object OwnerTakeoverConfirm : FamilyDialog
     data object MembersList : FamilyDialog
     data class ReviewPendingMember(val request: PendingMemberLoginRequest) : FamilyDialog
-    data class MemberLoginQrCode(val payload: MemberLoginQrPayload) : FamilyDialog
+    data class MemberLoginQrCode(val code: SyncMemberLoginQrCode) : FamilyDialog
     data object EditMyDisplayName : FamilyDialog
     data object AddFamilyMember : FamilyDialog
     data class RenameFamilyMember(

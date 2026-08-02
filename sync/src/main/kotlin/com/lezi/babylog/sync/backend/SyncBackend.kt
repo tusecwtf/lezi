@@ -126,6 +126,7 @@ data class MemberLoginGrant(
     val familyName: String?,
     val memberDisplayName: String,
     val expiresAtEpochSeconds: Long,
+    val landingUrl: String? = null,
 ) {
     override fun toString(): String =
         "MemberLoginGrant(familyName=$familyName, memberDisplayName=$memberDisplayName, " +

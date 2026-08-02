@@ -18,6 +18,7 @@ services:
       LEZI_HOST: "0.0.0.0"
       LEZI_PORT: "8765"
       LEZI_INTERNAL_PORT: "8766"
+      LEZI_LAN_APK_DOWNLOAD_ORIGIN: "__LEZI_LAN_APK_DOWNLOAD_ORIGIN__"
       LEZI_TLS_CERTFILE: /data/tls/server.crt
       LEZI_TLS_KEYFILE: /data/tls/server.key
       LEZI_MAX_MEDIA_BYTES: "10485760"
@@ -32,6 +33,7 @@ services:
       - __LEZI_DATA_HOST_PATH__:/data
     ports:
       - "0.0.0.0:8765:8765"
+      - "0.0.0.0:8767:8767"
     cap_drop:
       - ALL
     security_opt:

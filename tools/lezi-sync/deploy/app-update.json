@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 11,
-  "version_name": "0.3.4",
+  "version_code": 12,
+  "version_name": "0.3.5",
   "min_supported_version_code": 6,
-  "sha256": "f93c6cc01ae2f9a362d8371a11214765e906b7e6652a947aa59769b023151db1",
-  "release_notes": "0.3.4 家庭成员重复加入、离线取消与账户页可用性优化"
+  "sha256": "0ce89ca4fc95f0fb137b219c58ad535535164e29fb41f4fa06cb23496afff71e",
+  "release_notes": "0.3.5 管理员邀请二维码支持未安装设备在家庭局域网下载乐记"
 }
