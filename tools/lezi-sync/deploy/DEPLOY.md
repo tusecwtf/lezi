@@ -14,7 +14,7 @@
 
 ```bash
 # Optional: rebuild image first
-cd tools/lezi-sync && LEZI_SYNC_VERSION=0.3.2 ./build-image.sh
+cd tools/lezi-sync && LEZI_SYNC_VERSION=0.3.3 ./build-image.sh
 
 # Package + scp + remote deploy
 ./deploy/push-and-deploy.sh
@@ -58,8 +58,8 @@ Metadata contract (`app-update.json`, snake_case):
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 8,
-  "version_name": "0.3.2",
+  "version_code": 10,
+  "version_name": "0.3.3",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of the APK file>",
   "release_notes": "可选"

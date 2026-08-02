@@ -7,6 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
+| [`family-network-offline-disaster-recovery`](./family-network-offline-disaster-recovery/) | **acceptance — awaiting NAS CD** — 0.3.3 本地实现、隔离恢复与 APK 门禁已通过 |
 | [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | **complete** — 32 executable done + 18 wontfix；closeout release 0.3.2 separate |
 
 `local-data-upgrade-protection` 已完成实现与本机验收，保留到下一次严格清理。

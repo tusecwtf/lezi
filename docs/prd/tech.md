@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.2` |
-| versionCode | `9`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
+| versionName | `0.3.3` |
+| versionCode | `10`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
 | 本地数据契约 | `v1`（最低可迁移 `v1`；永久基线为 0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
@@ -137,14 +137,29 @@ seam）。**不得**为迎合文档而静默删改 Gradle 边；亦不得在文�
 UI 事件
   → domain UseCase
   → Room（立刻成功 → UI 刷新）
-  → 标记 syncDirty；同步触发将 baby / record / media 快照入 Outbox
-  → 仅当：前台 && trusted HTTPS endpoint && 有效 device session
+  → 标记 syncDirty；LocalWrite 只通知协调器“有待发布内容”
+  → 仅当：前台 && availability 健康租约 && trusted HTTPS endpoint && 有效 device session
         → push；回前台/下拉 → pull + 媒体字节
 ```
 
 实现继续无后台同步、无推送拉同步。系统 PKI 或 TOFU/SPKI 验证 HTTPS endpoint，每台设备
 持有独立 opaque session；未登录、断网或等待审批时仍先落 Room
 并保留待同步状态。记录/汇总/成长下拉刷新是唯一显式立即同步动作。
+
+`FamilyServerAvailability` 是协调器私有网络门闩和家庭网络设置的结果态，不替代浅层
+`SyncStatus`。匿名客户端在可信 TLS 下并行检查 `/health`、`/ready` 与 setup capability，
+8 秒总超时，不带家庭 token/数据；成功租约 30 秒。失败退避为 30 秒/2 分钟/10 分钟，
+LocalWrite 事件只合并 pending，不突破退避。回前台、网络恢复和下拉刷新可立即探测；后台
+停止 probe/sync。Android 不要求公网 `NET_CAPABILITY_VALIDATED`，避免家庭 LAN 被误判离线。
+
+家庭成员最小目录（membership ID、称呼、role、本人标记）存入设备级 DataStore；时间轴直接
+组合 Room、session 与该缓存，不在首个发射前调用远端 roster。完整设备/申请不进缓存；成功
+成员刷新替换目录，退出设备/成员/家庭或远端删除身份时清除。
+
+候选 endpoint 与现有会话分属两个隔离上下文。候选只匿名 probe；地址或证书改变后必须新登录/
+审批，且 configured 返回的 family ID 与旧家庭相同才在 sync mutex 内一次切换。灾难恢复凭证
+存安全凭证域，根密码不持久化；server `/data` staging/journal 在完整校验后调用 `Store` façade
+单事务激活，SQLite schema/user_version 不改变。
 
 计时器：
 
@@ -271,8 +286,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 8,
-  "version_name": "0.3.2",
+  "version_code": 10,
+  "version_name": "0.3.3",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
