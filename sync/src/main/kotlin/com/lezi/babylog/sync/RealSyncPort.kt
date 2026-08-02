@@ -227,6 +227,7 @@ class RealSyncPort @Inject constructor(
         requestSync = ::requestSync,
         recoverReclaimedSession = ::recoverReclaimedSessionLocked,
         beforeOperation = ::recoverPendingLocalClearLocked,
+        launchBestEffort = { work -> processScope.launch { work() } },
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)

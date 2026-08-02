@@ -133,6 +133,28 @@ class CareLogTest {
     }
 
     @Test
+    fun familyScaffoldIsIdempotentAfterALocalBabyAndPreservesItsFacts() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "本机宝宝", birthdayEpochDay = 1))
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.PEE,
+            timestamp = 1_000,
+            payloadJson = """{"pee_amount":2}""",
+        )
+        val babyBefore = care.listBabies().single()
+        val recordBefore = care.getRecord(recordId)
+
+        care.ensureFamilyScaffold()
+
+        assertThat(care.listBabies()).containsExactly(babyBefore)
+        assertThat(care.getRecord(recordId)).isEqualTo(recordBefore)
+        assertThat(fakes.families.listAll()).hasSize(1)
+        assertThat(fakes.memberships.listForFamily(fakes.families.listAll().single().id)).hasSize(1)
+    }
+
+    @Test
     fun addBaby_rejectsDuplicateNickname() = runTest {
         val care = Fakes().careLog()
         care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))

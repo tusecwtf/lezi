@@ -158,6 +158,7 @@ internal class FamilySessionCoordinator(
     private val requestSync: (SyncTrigger) -> Unit,
     private val recoverReclaimedSession: suspend (SyncSession) -> InitialFamilyDataRecovery,
     private val beforeOperation: suspend () -> Unit = {},
+    private val launchBestEffort: ((suspend () -> Unit) -> Unit) = {},
 ) {
     suspend fun execute(command: FamilySessionCommand): Result<FamilySessionOutcome> =
         resultOf {
@@ -371,11 +372,36 @@ internal class FamilySessionCoordinator(
         requireNotNull(preferences.pendingMemberLogin.first()) {
             "没有等待管理员确认的申请"
         }
-        requireRemoteAllowed(current.endpointConfig)
-        val secret = preferences.pendingMemberSecret()
-        require(secret.isNotBlank()) { "等待确认凭据已丢失，请重新申请" }
-        backend.cancelMemberLogin(current.endpointConfig.baseUrl, secret)
+        val secret = try {
+            preferences.pendingMemberSecret()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            ""
+        }
+
+        // Cancelling is first and foremost a local abandonment command. A family NAS may be
+        // offline, or the 24-hour request may already be gone; neither condition may leave this
+        // Device permanently blocked by its one durable pending slot. The server-side request is
+        // best-effort and harmless when orphaned: without the retired secret it cannot be claimed
+        // and expires on the existing 0.3.3 contract.
         preferences.clearPendingMemberLogin()
+        if (secret.isNotBlank()) {
+            try {
+                launchBestEffort {
+                    try {
+                        requireRemoteAllowed(current.endpointConfig)
+                        backend.cancelMemberLogin(current.endpointConfig.baseUrl, secret)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        // The local slot is retired; the 0.3.3 server request expires normally.
+                    }
+                }
+            } catch (_: Throwable) {
+                // Scheduling remote cleanup is best-effort; never resurrect the local slot.
+            }
+        }
         FamilySessionOutcome.Completed
     }
 

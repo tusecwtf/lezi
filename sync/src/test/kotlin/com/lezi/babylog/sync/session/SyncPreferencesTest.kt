@@ -6,14 +6,19 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.google.common.truth.Truth.assertThat
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Test
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.FamilyDevice
@@ -875,6 +880,85 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun pendingMemberSecretIoNeverBlocksTheCallingUiDispatcher() = runBlocking {
+        val file = File.createTempFile("lezi-member-secret-thread-", ".preferences_pb")
+            .also { it.delete() }
+        val uiDispatcher = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "account-ui-test")
+        }.asCoroutineDispatcher()
+        val dataDispatcher = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "data-store-test")
+        }.asCoroutineDispatcher()
+        val dataScope = CoroutineScope(dataDispatcher + SupervisorJob())
+        val secureStore = ThreadRecordingPendingSecretStore()
+        val preferences = preferences(
+            PreferenceDataStoreFactory.create(scope = dataScope) { file },
+            secureStore,
+        )
+        val receipt = MemberLoginReceipt(
+            requestId = "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            pendingSecret = "pending-secret-000000000000000000000003",
+            expiresAtEpochSeconds = 1_753_504_800,
+        )
+
+        try {
+            withContext(uiDispatcher) {
+                preferences.savePendingMemberLogin(receipt, "奶奶", "Pixel 10")
+                assertThat(preferences.pendingMemberSecret()).isEqualTo(receipt.pendingSecret)
+                preferences.clearPendingMemberLogin()
+            }
+
+            assertThat(secureStore.setThread.get()).doesNotContain("account-ui-test")
+            assertThat(secureStore.getThread.get()).doesNotContain("account-ui-test")
+            assertThat(secureStore.clearThread.get()).doesNotContain("account-ui-test")
+        } finally {
+            dataScope.cancel()
+            uiDispatcher.close()
+            dataDispatcher.close()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun pendingMemberLocalAbandonmentSurvivesSecureResidueCleanupFailure() = runTest {
+        val file = File.createTempFile("lezi-member-abandon-", ".preferences_pb")
+            .also { it.delete() }
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val secureStore = FailOnceClearPendingMemberSecretStore()
+        val preferences = preferences(
+            PreferenceDataStoreFactory.create(scope = scope) { file },
+            secureStore,
+        )
+        val first = MemberLoginReceipt(
+            requestId = "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            pendingSecret = "pending-secret-000000000000000000000004",
+            expiresAtEpochSeconds = 1_753_504_800,
+        )
+        val second = MemberLoginReceipt(
+            requestId = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            pendingSecret = "pending-secret-000000000000000000000005",
+            expiresAtEpochSeconds = 1_753_508_400,
+        )
+
+        try {
+            preferences.savePendingMemberLogin(first, "奶奶", "Pixel 10")
+            secureStore.failNextPendingClear = true
+
+            preferences.clearPendingMemberLogin()
+
+            assertThat(preferences.pendingMemberLogin.first()).isNull()
+            assertThat(secureStore.getPendingMemberSecret()).isEqualTo(first.pendingSecret)
+
+            preferences.savePendingMemberLogin(second, "奶奶", "Pixel 10 Pro")
+            assertThat(preferences.pendingMemberLogin.first()?.requestId).isEqualTo(second.requestId)
+            assertThat(preferences.pendingMemberSecret()).isEqualTo(second.pendingSecret)
+        } finally {
+            scope.cancel()
+            file.delete()
+        }
+    }
+
+    @Test
     fun disasterRestoreCheckpointSurvivesRestartWithoutWritingCredentialToDataStore() = runTest {
         val file = File.createTempFile("lezi-restore-checkpoint-", ".preferences_pb")
             .also { it.delete() }
@@ -980,4 +1064,55 @@ private class FailOnceSetTokenStore : SecureRefreshTokenStore {
     }
 
     override fun clearToken() = delegate.clearToken()
+}
+
+private class ThreadRecordingPendingSecretStore : SecureRefreshTokenStore {
+    private val delegate = InMemorySecureRefreshTokenStore()
+    val setThread = AtomicReference("")
+    val getThread = AtomicReference("")
+    val clearThread = AtomicReference("")
+
+    override fun getToken(): String = delegate.getToken()
+
+    override fun setToken(token: String) = delegate.setToken(token)
+
+    override fun clearToken() = delegate.clearToken()
+
+    override fun getPendingMemberSecret(): String {
+        getThread.set(Thread.currentThread().name)
+        return delegate.getPendingMemberSecret()
+    }
+
+    override fun setPendingMemberSecret(secret: String) {
+        setThread.set(Thread.currentThread().name)
+        delegate.setPendingMemberSecret(secret)
+    }
+
+    override fun clearPendingMemberSecret() {
+        clearThread.set(Thread.currentThread().name)
+        delegate.clearPendingMemberSecret()
+    }
+}
+
+private class FailOnceClearPendingMemberSecretStore : SecureRefreshTokenStore {
+    private val delegate = InMemorySecureRefreshTokenStore()
+    var failNextPendingClear = false
+
+    override fun getToken(): String = delegate.getToken()
+
+    override fun setToken(token: String) = delegate.setToken(token)
+
+    override fun clearToken() = delegate.clearToken()
+
+    override fun getPendingMemberSecret(): String = delegate.getPendingMemberSecret()
+
+    override fun setPendingMemberSecret(secret: String) = delegate.setPendingMemberSecret(secret)
+
+    override fun clearPendingMemberSecret() {
+        if (failNextPendingClear) {
+            failNextPendingClear = false
+            throw IllegalStateException("pending secret cleanup interrupted")
+        }
+        delegate.clearPendingMemberSecret()
+    }
 }

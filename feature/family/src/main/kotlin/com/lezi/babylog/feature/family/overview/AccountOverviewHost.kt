@@ -34,6 +34,7 @@ import kotlinx.coroutines.sync.withLock
  * Technical endpoint credentials stay off this product surface (wizard owns seed).
  */
 data class AccountOverviewUi(
+    val hydrated: Boolean = false,
     val identity: FamilyIdentityUi = FamilyIdentityUi(),
     val status: SyncStatus = SyncStatus.Disabled,
     val hasLocalBaby: Boolean = false,
@@ -91,6 +92,7 @@ class AccountOverviewHost @Inject constructor(
         val (babies, localOrphans) = babyLists
         val identity = careLog.localFamilyIdentity()
         AccountOverviewUi(
+            hydrated = true,
             identity = FamilyIdentityUi(
                 displayName = identity.displayName,
                 enabled = session.isJoined,

@@ -24,6 +24,7 @@ import java.io.Serializable
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeout
 import com.lezi.babylog.domain.CareLog
 
 /** The two UI entries that project the same family wizard. Entry never changes a request. */
@@ -42,6 +44,8 @@ enum class FamilyWizardMode { Create, Join }
 enum class FamilyWizardStep { Endpoint, Role, Identity }
 
 enum class FamilyWizardJoinRole { Owner, Member }
+
+private const val MEMBER_LOGIN_REQUEST_TIMEOUT_MILLIS = 20_000L
 
 /**
  * Process-retainable, non-sensitive wizard state. The bootstrap secret is intentionally absent and
@@ -941,11 +945,19 @@ class FamilyWizardController(
             return
         }
         val request = try {
-            gateway.requestMemberLogin(
-                config = config,
-                displayName = snapshot.displayName.trim(),
-                deviceName = snapshot.deviceName.trim(),
-            ).getOrThrow()
+            withTimeout(MEMBER_LOGIN_REQUEST_TIMEOUT_MILLIS) {
+                gateway.requestMemberLogin(
+                    config = config,
+                    displayName = snapshot.displayName.trim(),
+                    deviceName = snapshot.deviceName.trim(),
+                ).getOrThrow()
+            }
+        } catch (_: TimeoutCancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "申请加入超时，请检查家庭网络后重试",
+            )
+            return
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -993,7 +1005,9 @@ class FamilyWizardController(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
-            mutableState.value = current
+            mutableState.value = current.copy(
+                feedback = "取消失败，本机申请仍保留，请重试",
+            )
         } finally {
             submission.unlock()
         }
@@ -1004,6 +1018,11 @@ class FamilyWizardController(
         request: PendingMemberLogin,
     ) {
         val current = mutableState.value
+        if (current is FamilyWizardState.WaitingForMemberApproval &&
+            current.request.requestId == request.requestId
+        ) {
+            return
+        }
         if (current !is FamilyWizardState.Editing &&
             current !is FamilyWizardState.WaitingForMemberApproval
         ) {

@@ -8455,6 +8455,8 @@ internal class RecordingSyncBackend : SyncBackend {
         membershipId = "membership-member-approved",
     )
     var cancelMemberLoginCalls = 0
+    var cancelMemberLoginFailure: Throwable? = null
+    var beforeCancelMemberLoginReturn: suspend () -> Unit = {}
     var nextPendingMemberLogins: List<PendingMemberLoginRequest> = emptyList()
     val approvedMemberLoginRequestIds = mutableListOf<String>()
     val boundMemberLoginRequests = mutableListOf<Pair<String, String>>()
@@ -8714,6 +8716,8 @@ internal class RecordingSyncBackend : SyncBackend {
 
     override suspend fun cancelMemberLogin(baseUrl: String, pendingSecret: String) {
         cancelMemberLoginCalls++
+        beforeCancelMemberLoginReturn()
+        cancelMemberLoginFailure?.let { throw it }
     }
 
     override suspend fun cancelMemberLogin(
@@ -9298,6 +9302,10 @@ internal class MemorySyncPreferences(
     }
 
     override suspend fun pendingMemberSecret(): String = memberPendingSecret
+
+    fun dropPendingMemberSecretForTest() {
+        memberPendingSecret = ""
+    }
 
     override suspend fun clearPendingMemberLogin() {
         pendingMemberState.value = null

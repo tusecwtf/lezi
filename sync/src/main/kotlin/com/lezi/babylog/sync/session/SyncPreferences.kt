@@ -9,9 +9,12 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.booleanOrNull
@@ -241,7 +244,10 @@ class DataStoreSyncPreferences @Inject constructor(
     }
     override val pendingMemberLogin: Flow<PendingMemberLogin?> = dataStore.data.map { prefs ->
         val requestId = prefs[Keys.PENDING_MEMBER_REQUEST_ID].orEmpty()
-        if (requestId.isBlank() || secureTokenStore.getPendingMemberSecret().isBlank()) {
+        if (requestId.isBlank() || secureStoreIo {
+                getPendingMemberSecret()
+            }.isBlank()
+        ) {
             return@map null
         }
         PendingMemberLogin(
@@ -295,7 +301,7 @@ class DataStoreSyncPreferences @Inject constructor(
         dataStore.edit { it[Keys.LAST_SERVER_HEALTHY_AT] = atMillis }
     }
 
-    private fun mapSession(prefs: Preferences): SyncSession {
+    private suspend fun mapSession(prefs: Preferences): SyncSession {
         val rawScheme = prefs[Keys.SERVER_SCHEME].orEmpty()
         val schemeIsValid = rawScheme.lowercase() == "https"
         val host = if (schemeIsValid) {
@@ -318,7 +324,7 @@ class DataStoreSyncPreferences @Inject constructor(
             refreshToken = if (credentialClearPending || replicaResetPending) {
                 ""
             } else {
-                secureTokenStore.getToken()
+                secureStoreIo { getToken() }
             },
             accessExpiresAtEpochSeconds =
                 if (credentialClearPending || replicaResetPending) 0 else processAccessExpiry.get(),
@@ -365,8 +371,10 @@ class DataStoreSyncPreferences @Inject constructor(
             }
         }
         if (shouldClearSession) {
-            secureTokenStore.clearPendingMemberSecret()
-            secureTokenStore.clearDisasterRestoreToken()
+            secureStoreIo {
+                clearPendingMemberSecret()
+                clearDisasterRestoreToken()
+            }
         }
         finishPendingFamilyCredentialClear()
     }
@@ -469,14 +477,14 @@ class DataStoreSyncPreferences @Inject constructor(
                 writePendingReplicaReset(prefs, pendingReplicaResetPrevious)
             }
         }
-        secureTokenStore.setToken(session.refreshToken)
+        secureStoreIo { setToken(session.refreshToken) }
         processAccessToken.set(session.accessToken)
         processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
         dataStore.edit { prefs ->
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
             prefs.remove(Keys.REAUTH_REQUIRED)
         }
-        secureTokenStore.clearPendingMemberSecret()
+        secureStoreIo { clearPendingMemberSecret() }
     }
 
     override suspend fun pendingReplicaResetPrevious(): SyncSession? {
@@ -599,7 +607,7 @@ class DataStoreSyncPreferences @Inject constructor(
     ) {
         require(receipt.requestId.isNotBlank()) { "pending request id is required" }
         require(receipt.pendingSecret.isNotBlank()) { "pending member secret is required" }
-        secureTokenStore.setPendingMemberSecret(receipt.pendingSecret)
+        secureStoreIo { setPendingMemberSecret(receipt.pendingSecret) }
         dataStore.edit { prefs ->
             prefs[Keys.PENDING_MEMBER_REQUEST_ID] = receipt.requestId
             prefs[Keys.PENDING_MEMBER_DISPLAY_NAME] = displayName
@@ -608,11 +616,20 @@ class DataStoreSyncPreferences @Inject constructor(
         }
     }
 
-    override suspend fun pendingMemberSecret(): String = secureTokenStore.getPendingMemberSecret()
+    override suspend fun pendingMemberSecret(): String = secureStoreIo {
+        getPendingMemberSecret()
+    }
 
     override suspend fun clearPendingMemberLogin() {
         dataStore.edit(::clearPendingMemberValues)
-        secureTokenStore.clearPendingMemberSecret()
+        try {
+            secureStoreIo { clearPendingMemberSecret() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // DataStore metadata is the durable pending-slot authority. Once it is gone, stale
+            // encrypted residue is unreachable and the next request safely overwrites it.
+        }
     }
 
     override suspend fun saveDisasterRestoreCheckpoint(
@@ -620,7 +637,7 @@ class DataStoreSyncPreferences @Inject constructor(
         recoveryToken: String,
     ) {
         require(recoveryToken.isNotBlank()) { "disaster restore token is required" }
-        secureTokenStore.setDisasterRestoreToken(recoveryToken)
+        secureStoreIo { setDisasterRestoreToken(recoveryToken) }
         dataStore.edit { prefs ->
             prefs[Keys.RESTORE_BATCH_ID] = checkpoint.batchId
             prefs[Keys.RESTORE_ENDPOINT_ORIGIN] = checkpoint.endpoint.origin
@@ -666,11 +683,11 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun disasterRestoreToken(): String =
-        secureTokenStore.getDisasterRestoreToken()
+        secureStoreIo { getDisasterRestoreToken() }
 
     override suspend fun clearDisasterRestoreCheckpoint() {
         dataStore.edit(::clearDisasterRestoreValues)
-        secureTokenStore.clearDisasterRestoreToken()
+        secureStoreIo { clearDisasterRestoreToken() }
     }
 
     override suspend fun clearCreateRequestId() {
@@ -690,7 +707,7 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs.remove(Keys.LAST_SERVER_HEALTHY_AT)
         }
         finishPendingFamilyCredentialClear()
-        secureTokenStore.clearPendingMemberSecret()
+        secureStoreIo { clearPendingMemberSecret() }
         clearDisasterRestoreCheckpoint()
     }
 
@@ -754,13 +771,21 @@ class DataStoreSyncPreferences @Inject constructor(
         // DataStore marker (and suppress token projection) until its synchronous
         // clear succeeds, so process death can only expose the terminal unjoined
         // state and a later foreground operation can finish idempotently.
-        secureTokenStore.clearToken()
+        secureStoreIo { clearToken() }
         processAccessToken.set("")
         processAccessExpiry.set(0)
         dataStore.edit { prefs ->
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
         }
     }
+
+    /**
+     * Android Keystore and EncryptedSharedPreferences expose synchronous APIs. Keep their lazy
+     * initialization and commit/get work off UI callers while DataStore remains the durable
+     * ordering authority around each separate credential domain.
+     */
+    private suspend fun <T> secureStoreIo(block: SecureRefreshTokenStore.() -> T): T =
+        withContext(Dispatchers.IO) { secureTokenStore.block() }
 
     private fun markCredentialsTerminal(
         prefs: androidx.datastore.preferences.core.MutablePreferences,

@@ -24,13 +24,10 @@ import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
 import com.lezi.babylog.feature.family.components.FamilyPrimarySurface
 import com.lezi.babylog.feature.family.components.buildFamilyOverviewCard
 import com.lezi.babylog.feature.family.components.familyMembersForDisplay
-import com.lezi.babylog.feature.family.components.formatLastSuccessAt
-import com.lezi.babylog.feature.family.components.unjoinedFamilyCardSubtitle
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.session.FamilyRole
@@ -50,11 +47,6 @@ internal fun FamilySharingContent(
     endpointConfigured: Boolean,
     onOpenMembers: () -> Unit,
     onConnectFamily: () -> Unit,
-    onScanMemberLoginQr: () -> Unit,
-    onOpenNetworkSettings: () -> Unit = {},
-    onLogoutCurrentDevice: () -> Unit = {},
-    onLeaveFamily: () -> Unit = {},
-    onDeleteFamily: () -> Unit = {},
     onOpenOptionalAppUpdate: (AppUpdateMetadata) -> Unit = {},
     onDismissOptionalAppUpdate: (versionCode: Int) -> Unit = {},
 ) {
@@ -79,9 +71,10 @@ internal fun FamilySharingContent(
         memberCount = visibleMembers.size,
         membersLoaded = members.membersLoaded,
         status = overview.status,
+        lastSuccessAt = overview.lastSuccessAt,
+        waitingForApproval = overview.pendingMemberLogin != null,
     )
 
-    SectionHeading(title = "我们家")
     LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
         if (overview.enabled) {
             Row(
@@ -135,58 +128,44 @@ internal fun FamilySharingContent(
                 card.familyNameLabel,
                 style = LeziTypography.TitleSm,
             )
-            Spacer(Modifier.height(LeziSpacing.Xs))
-            Text(
-                unjoinedFamilyCardSubtitle(),
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Spacer(Modifier.height(LeziSpacing.Sm))
         }
 
         FamilySyncStatusEntry(
-            statusLabel = if (overview.pendingMemberLogin != null) {
-                "等待管理员确认"
-            } else {
-                card.syncStatusLabel
-            },
+            statusLabel = card.syncStatusLabel,
             isError = overview.status == com.lezi.babylog.core.model.SyncStatus.Error,
         )
-        if (overview.enabled) {
-            Text(
-                formatLastSuccessAt(overview.lastSuccessAt),
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        val optionalUpdate = overview.optionalAppUpdate
-        if (overview.enabled && optionalUpdate != null) {
-            Spacer(Modifier.height(LeziSpacing.Sm))
-            OptionalAppUpdateBanner(
-                versionName = optionalUpdate.versionName,
-                onOpen = { onOpenOptionalAppUpdate(optionalUpdate) },
-                onDismiss = { onDismissOptionalAppUpdate(optionalUpdate.versionCode) },
-            )
-        }
     }
 
-    // Unauthenticated: the wizard and current member-login QR are the only entry points.
+    val optionalUpdate = overview.optionalAppUpdate
+    if (overview.enabled && optionalUpdate != null) {
+        OptionalAppUpdateBanner(
+            versionName = optionalUpdate.versionName,
+            onOpen = { onOpenOptionalAppUpdate(optionalUpdate) },
+            onDismiss = { onDismissOptionalAppUpdate(optionalUpdate.versionCode) },
+        )
+    }
+
+    // Unauthenticated: enter the probe-driven family wizard from one primary action.
     if (primary.showCreateJoin) {
         LeziPrimaryButton(
             if (overview.pendingMemberLogin != null) "查看加入申请" else FamilyPrimaryCta.CONNECT,
             onClick = onConnectFamily,
             modifier = Modifier.fillMaxWidth(),
         )
-        if (overview.pendingMemberLogin == null) {
-            LeziSecondaryButton(
-                "扫描成员登录二维码",
-                onClick = onScanMemberLoginQr,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
     }
+}
+
+/** Account-level operations stay after the independent baby zone. */
+@Composable
+internal fun FamilyAccountActions(
+    overview: AccountOverviewUi,
+    onOpenNetworkSettings: () -> Unit = {},
+    onLogoutCurrentDevice: () -> Unit = {},
+    onLeaveFamily: () -> Unit = {},
+    onDeleteFamily: () -> Unit = {},
+) {
     if (overview.enabled) {
-        Spacer(Modifier.height(LeziSpacing.Sm))
         LeziSecondaryButton(
             "家庭网络设置",
             onClick = onOpenNetworkSettings,
@@ -272,28 +251,20 @@ internal fun FamilySyncStatusEntry(
     isError: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val baseModifier = modifier
-        .fillMaxWidth()
-        .heightIn(min = LeziSpacing.Touch)
     Text(
         statusLabel,
-        style = LeziTypography.BodyStrong,
+        style = LeziTypography.Meta,
         color = if (isError) {
             MaterialTheme.colorScheme.error
         } else {
-            MaterialTheme.colorScheme.onSurface
+            MaterialTheme.colorScheme.onSurfaceVariant
         },
-        modifier = baseModifier
-            .padding(vertical = LeziSpacing.Xs)
-            .semantics {
-                contentDescription = "同步状态：$statusLabel"
-                traversalIndex = 1f
-            },
+        modifier = modifier.fillMaxWidth(),
     )
 }
 
 /**
- * Non-blocking optional-update affordance on the account family card.
+ * Non-blocking optional-update affordance next to, but outside, the account family card.
  * Style matches existing menu/account panel language (no second design system).
  */
 @Composable

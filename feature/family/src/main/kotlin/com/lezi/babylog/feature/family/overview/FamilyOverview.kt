@@ -57,11 +57,6 @@ internal fun FamilyOverview(
     val canManage = canManageFamilyBabies(ui.role)
     val nickCounts = ui.babies.groupingBy { it.nickname.trim() }.eachCount()
     Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-        com.lezi.babylog.designsystem.PageHero(
-            eyebrow = "",
-            title = "账户",
-        )
-
         LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
             Row(
                 Modifier.fillMaxWidth(),

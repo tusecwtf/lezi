@@ -213,6 +213,7 @@ internal fun FamilyJoinRoleDialog(
     busy: Boolean,
     onOwner: () -> Unit,
     onMember: () -> Unit,
+    onScanMemberLoginQr: () -> Unit,
     onBackToEndpoint: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -232,6 +233,15 @@ internal fun FamilyJoinRoleDialog(
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("我是家庭成员") }
+                OutlinedButton(
+                    onClick = onScanMemberLoginQr,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
+                    Spacer(Modifier.size(LeziSpacing.Xs))
+                    Text("扫描成员登录二维码")
+                }
             }
         },
         confirmButton = {},
@@ -654,4 +664,3 @@ internal fun MemberLoginQrConfirmDialog(
         onDismiss = onDismiss,
     )
 }
-

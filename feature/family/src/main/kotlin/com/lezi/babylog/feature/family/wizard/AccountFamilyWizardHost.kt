@@ -14,6 +14,7 @@ import com.lezi.babylog.sync.session.DEFAULT_SERVER_PORT
 import com.lezi.babylog.sync.session.DEFAULT_SERVER_SCHEME
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.PendingMemberLogin
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
@@ -23,6 +24,15 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+internal fun memberApprovalRequestForDisplay(
+    state: FamilyWizardState,
+    overviewRequest: PendingMemberLogin?,
+): PendingMemberLogin? =
+    (state as? FamilyWizardState.WaitingForMemberApproval)?.request ?: overviewRequest
+
+internal fun memberApprovalCancelSucceeded(state: FamilyWizardState): Boolean =
+    state is FamilyWizardState.Editing
 
 /**
  * Technical endpoint fields for wizard draft seed only.
@@ -127,8 +137,13 @@ class AccountFamilyWizardHost @Inject constructor(
         viewModelScope.launch { familyWizard.checkMemberApproval() }
     }
 
-    fun cancelMemberApproval() {
-        viewModelScope.launch { familyWizard.cancelMemberApproval() }
+    fun cancelMemberApproval(onCancelled: () -> Unit = {}) {
+        viewModelScope.launch {
+            familyWizard.cancelMemberApproval()
+            if (memberApprovalCancelSucceeded(familyWizardState.value)) {
+                onCancelled()
+            }
+        }
     }
 
     fun verifyMemberLoginQr(payload: MemberLoginQrPayload) {

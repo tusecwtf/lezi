@@ -225,12 +225,15 @@ internal fun familySyncError(error: Throwable, fallback: String): String =
 internal fun overviewSyncStatusLabel(
     status: SyncStatus,
     isJoined: Boolean,
+    lastSuccessAt: Long? = null,
+    waitingForApproval: Boolean = false,
 ): String = when {
+    waitingForApproval -> "等待管理员确认"
     status == SyncStatus.ReauthRequired -> "登录已失效，请重新登录或申请"
     // Offline-mode and other unjoined states: local Room is usable; family path is on account.
-    !isJoined || status == SyncStatus.Disabled -> "本机可记，连上家庭后再同步"
+    !isJoined || status == SyncStatus.Disabled -> "本机可先记；连接家庭服务器后同步给家人"
     status == SyncStatus.Syncing -> "正在同步…"
-    status == SyncStatus.Idle -> "家人记录已对齐"
+    status == SyncStatus.Idle -> formatLastSuccessAt(lastSuccessAt)
     status == SyncStatus.Error -> "同步遇到问题"
     else -> "同步遇到问题"
 }
@@ -325,6 +328,8 @@ internal fun buildFamilyOverviewCard(
     memberCount: Int,
     membersLoaded: Boolean,
     status: SyncStatus,
+    lastSuccessAt: Long? = null,
+    waitingForApproval: Boolean = false,
 ): FamilyOverviewCard {
     val primary = familyPrimarySurface(isJoined, role, endpointConfigured)
     return FamilyOverviewCard(
@@ -343,7 +348,12 @@ internal fun buildFamilyOverviewCard(
         } else {
             ""
         },
-        syncStatusLabel = overviewSyncStatusLabel(status, isJoined),
+        syncStatusLabel = overviewSyncStatusLabel(
+            status = status,
+            isJoined = isJoined,
+            lastSuccessAt = lastSuccessAt,
+            waitingForApproval = waitingForApproval,
+        ),
         showCreateJoin = primary.showCreateJoin,
         showMembersEntry = isJoined,
         showRenameFamily = isJoined && role == FamilyRole.Owner,

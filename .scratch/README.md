@@ -7,6 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
+| [`family-account-sync-usability-0.3.4`](./family-account-sync-usability-0.3.4/) | **complete** — Android-only 0.3.4；本机宝宝后加入/重试、离线放弃、0.3.3 升级与账户概览已验收 |
 | [`family-network-offline-disaster-recovery`](./family-network-offline-disaster-recovery/) | **acceptance — awaiting joined-device smoke** — 0.3.3 已部署 NAS；真实已加入设备补传验收待完成 |
 | [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | **complete** — 32 executable done + 18 wontfix；closeout release 0.3.2 separate |
 

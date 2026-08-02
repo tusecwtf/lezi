@@ -928,6 +928,113 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun offlineCancelAbandonsLocalPendingAndAllowsASecondMemberRequest() = runTest {
+        val initial = SyncSession(
+            serverHost = "family.home",
+            serverPort = 8765,
+            serverScheme = "https",
+        )
+        val preferences = MemorySyncPreferences(initial)
+        val backend = RecordingSyncBackend().apply {
+            cancelMemberLoginFailure = IllegalStateException("offline")
+        }
+        preferences.savePendingMemberLogin(
+            backend.nextMemberLoginReceipt,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+        )
+        val coordinator = coordinator(preferences = preferences, backend = backend)
+
+        val cancelled = coordinator.execute(FamilySessionCommand.CancelMemberLogin)
+
+        assertThat(cancelled.isSuccess).isTrue()
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+        assertThat(preferences.pendingMemberSecret()).isEmpty()
+
+        backend.cancelMemberLoginFailure = null
+        backend.nextMemberLoginReceipt = backend.nextMemberLoginReceipt.copy(
+            requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            pendingSecret = "pending-secret-000000000000000000000002",
+        )
+        val repeated = coordinator.execute(
+            FamilySessionCommand.RequestMemberLogin("爸爸", "Pixel 9"),
+        )
+
+        assertThat(repeated.isSuccess).isTrue()
+        assertThat(backend.memberLoginRequests).hasSize(1)
+        assertThat(preferences.pendingMemberLogin.first()?.requestId)
+            .isEqualTo("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    }
+
+    @Test
+    fun localCancelCompletesBeforeRemoteCleanupReturns() = runTest {
+        val preferences = MemorySyncPreferences(
+            SyncSession(
+                serverHost = "family.home",
+                serverPort = 8765,
+                serverScheme = "https",
+            ),
+        )
+        val remoteStarted = CompletableDeferred<Unit>()
+        val releaseRemote = CompletableDeferred<Unit>()
+        val backend = RecordingSyncBackend().apply {
+            beforeCancelMemberLoginReturn = {
+                remoteStarted.complete(Unit)
+                releaseRemote.await()
+            }
+        }
+        preferences.savePendingMemberLogin(
+            backend.nextMemberLoginReceipt,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+        )
+        val coordinator = coordinator(
+            preferences = preferences,
+            backend = backend,
+            launchBestEffort = { work -> backgroundScope.async { work() } },
+        )
+
+        val cancellation = async {
+            coordinator.execute(FamilySessionCommand.CancelMemberLogin)
+        }
+        remoteStarted.await()
+        runCurrent()
+
+        try {
+            assertThat(cancellation.isCompleted).isTrue()
+            assertThat(cancellation.await().isSuccess).isTrue()
+            assertThat(preferences.pendingMemberLogin.first()).isNull()
+        } finally {
+            releaseRemote.complete(Unit)
+        }
+    }
+
+    @Test
+    fun missingPendingSecretCanStillBeAbandonedLocally() = runTest {
+        val preferences = MemorySyncPreferences(
+            SyncSession(
+                serverHost = "family.home",
+                serverPort = 8765,
+                serverScheme = "https",
+            ),
+        )
+        val backend = RecordingSyncBackend()
+        preferences.savePendingMemberLogin(
+            backend.nextMemberLoginReceipt,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+        )
+        preferences.dropPendingMemberSecretForTest()
+
+        val result = coordinator(preferences = preferences, backend = backend)
+            .execute(FamilySessionCommand.CancelMemberLogin)
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+        assertThat(backend.cancelMemberLoginCalls).isEqualTo(0)
+    }
+
+    @Test
     fun approvedMemberClaimGatesTheNewSessionUntilReplicaResetAndNeverClaimsTwice() = runTest {
         val initial = SyncSession(
             serverHost = "family.home",
@@ -1247,6 +1354,7 @@ private fun coordinator(
     recoverReclaimedSession: suspend (SyncSession) -> InitialFamilyDataRecovery = {
         InitialFamilyDataRecovery.NotRequired
     },
+    launchBestEffort: ((suspend () -> Unit) -> Unit) = {},
 ): FamilySessionCoordinator = FamilySessionCoordinator(
     backend = backend,
     preferences = preferences,
@@ -1258,6 +1366,7 @@ private fun coordinator(
     onSessionObserved = onSessionObserved,
     requestSync = requestSync,
     recoverReclaimedSession = recoverReclaimedSession,
+    launchBestEffort = launchBestEffort,
 )
 
 private class RecordingFamilySessionReplica(

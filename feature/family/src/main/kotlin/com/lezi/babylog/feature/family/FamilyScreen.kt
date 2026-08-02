@@ -2,8 +2,6 @@ package com.lezi.babylog.feature.family
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -57,8 +55,10 @@ import com.lezi.babylog.feature.family.members.RemoveMemberConfirmDialog
 import com.lezi.babylog.feature.family.members.RenameFamilyDialog
 import com.lezi.babylog.feature.family.members.RevokeFamilyDeviceDialog
 import com.lezi.babylog.feature.family.overview.AccountOverviewHost
-import com.lezi.babylog.feature.family.overview.FamilyOverview
-import com.lezi.babylog.feature.family.overview.FamilySharingContent
+import com.lezi.babylog.feature.family.overview.AccountBabyActions
+import com.lezi.babylog.feature.family.overview.AccountBottomActions
+import com.lezi.babylog.feature.family.overview.AccountFamilySectionActions
+import com.lezi.babylog.feature.family.overview.AccountPageContent
 import com.lezi.babylog.feature.family.overview.OverviewAppUpdateDialogs
 import com.lezi.babylog.feature.family.wizard.AccountFamilyWizardHost
 import com.lezi.babylog.feature.family.wizard.CreateFamilyDialog
@@ -68,6 +68,7 @@ import com.lezi.babylog.feature.family.wizard.FamilyVerifiedEndpointDialog
 import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
 import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
 import com.lezi.babylog.feature.family.wizard.MemberLoginRequestDialog
+import com.lezi.babylog.feature.family.wizard.memberApprovalRequestForDisplay
 import com.lezi.babylog.feature.family.wizard.OwnerLoginDialog
 import com.lezi.babylog.feature.family.wizard.OwnerTakeoverConfirmationDialog
 import com.lezi.babylog.feature.family.networksettings.FamilyNetworkSettingsHost
@@ -172,7 +173,10 @@ fun FamilyRoute(
     var joinDraft by rememberSaveable(stateSaver = FamilyEndpointDraftSaver) {
         mutableStateOf(draftFromEndpointSeed())
     }
-    val pendingMemberLogin = overview.pendingMemberLogin
+    val pendingMemberLogin = memberApprovalRequestForDisplay(
+        familyWizardState,
+        overview.pendingMemberLogin,
+    )
     val familyWizardBusy = familyWizardState.isBusy
     val wizardSessionActive = isWizardSessionDialog(dialog)
     LaunchedEffect(
@@ -421,41 +425,42 @@ fun FamilyRoute(
     }
 
     PageScaffoldBackground {
-        Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(LeziSpacing.Page),
-            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-        ) {
-            FamilyOverview(
-                ui = overview,
-                onAddBaby = onAddBaby,
-                onSetCurrent = overviewHost::setCurrent,
-                onEditBaby = { dialog = FamilyDialog.EditBaby(it) },
-                onMergeBaby = { dialog = FamilyDialog.MergeBaby(it) },
-                onDeleteBaby = { dialog = FamilyDialog.DeleteBaby(it) },
-            )
-            FamilySharingContent(
-                overview = overview,
-                members = members,
-                primary = primary,
-                endpointConfigured = endpointConfigured,
-                onOpenMembers = {
+        AccountPageContent(
+            overview = overview,
+            members = members,
+            primary = primary,
+            endpointConfigured = endpointConfigured,
+            babyActions = AccountBabyActions(
+                add = onAddBaby,
+                setCurrent = overviewHost::setCurrent,
+                edit = { dialog = FamilyDialog.EditBaby(it) },
+                merge = { dialog = FamilyDialog.MergeBaby(it) },
+                delete = { dialog = FamilyDialog.DeleteBaby(it) },
+            ),
+            familyActions = AccountFamilySectionActions(
+                openMembers = {
                     membersHost.refreshMembers(showErrors = true)
-                        dialog = FamilyDialog.MembersList
+                    dialog = FamilyDialog.MembersList
                 },
-                onConnectFamily = ::openEndpointConnection,
-                onScanMemberLoginQr = ::scanWithPermission,
-                onOpenNetworkSettings = { showNetworkSettings = true },
-                onLogoutCurrentDevice = { dialog = FamilyDialog.ConfirmDeviceLogout },
-                onLeaveFamily = { dialog = FamilyDialog.ConfirmLeave },
-                onDeleteFamily = {
+                connect = ::openEndpointConnection,
+                openOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
+                dismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
+            ),
+            bottomActions = AccountBottomActions(
+                openNetworkSettings = { showNetworkSettings = true },
+                logoutCurrentDevice = { dialog = FamilyDialog.ConfirmDeviceLogout },
+                leaveFamily = { dialog = FamilyDialog.ConfirmLeave },
+                deleteFamily = {
                     resetDeleteFamilyConfirmation()
                     membersHost.refreshMembers(showErrors = true)
                     dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
                 },
-                onOpenOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
-                onDismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
-            )
-        }
+            ),
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(LeziSpacing.Page),
+        )
     }
 
     OverviewAppUpdateDialogs(
@@ -667,8 +672,7 @@ fun FamilyRoute(
                     wizardHost.checkMemberApproval()
                 },
                 onCancel = {
-                    wizardHost.cancelMemberApproval()
-                    finalWizardDismiss()
+                    wizardHost.cancelMemberApproval(::finalWizardDismiss)
                 },
                 onKeepOffline = ::finalWizardDismiss,
             )
@@ -710,6 +714,7 @@ fun FamilyRoute(
                     joinRoleName = FamilyWizardJoinRole.Member.name
                     showWizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
                 },
+                onScanMemberLoginQr = ::scanWithPermission,
                 onBackToEndpoint = {
                     showWizard(FamilyWizardMode.Join, FamilyWizardStep.Endpoint)
                 },

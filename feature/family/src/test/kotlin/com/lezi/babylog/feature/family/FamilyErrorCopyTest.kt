@@ -202,6 +202,8 @@ class FamilyErrorCopyTest {
         val label = overviewSyncStatusLabel(
             status = com.lezi.babylog.core.model.SyncStatus.Disabled,
             isJoined = false,
+            lastSuccessAt = null,
+            waitingForApproval = false,
         )
         assertTrue(label.contains("本机"))
         assertFalse(label.contains("必须"))
@@ -218,9 +220,33 @@ class FamilyErrorCopyTest {
             memberCount = 0,
             membersLoaded = false,
             status = com.lezi.babylog.core.model.SyncStatus.Disabled,
+            lastSuccessAt = null,
+            waitingForApproval = false,
         )
         assertTrue(card.showCreateJoin)
         assertEquals(label, card.syncStatusLabel)
+    }
+
+    @Test
+    fun overviewSyncSummaryNeverClaimsAlignmentBeforeTheFirstSuccessfulSync() {
+        assertEquals(
+            "尚无成功同步",
+            overviewSyncStatusLabel(
+                status = SyncStatus.Idle,
+                isJoined = true,
+                lastSuccessAt = null,
+                waitingForApproval = false,
+            ),
+        )
+        assertEquals(
+            "等待管理员确认",
+            overviewSyncStatusLabel(
+                status = SyncStatus.Idle,
+                isJoined = false,
+                lastSuccessAt = null,
+                waitingForApproval = true,
+            ),
+        )
     }
 
     @Test
@@ -228,6 +254,8 @@ class FamilyErrorCopyTest {
         val overview = overviewSyncStatusLabel(
             status = SyncStatus.ReauthRequired,
             isJoined = false,
+            lastSuccessAt = null,
+            waitingForApproval = false,
         )
         assertTrue(overview.contains("重新登录或申请"))
         assertFalse(overview.contains("设备已删除"))

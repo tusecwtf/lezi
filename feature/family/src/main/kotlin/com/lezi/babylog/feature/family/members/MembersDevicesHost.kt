@@ -68,6 +68,7 @@ internal data class FamilyMembersState(
  */
 internal class MembersDevicesActions(
     private val sync: SyncPort,
+    private val onLoading: (FamilyMembersState) -> Unit = {},
 ) {
     private val memberRefreshMutex = Mutex()
 
@@ -93,6 +94,7 @@ internal class MembersDevicesActions(
             pendingRequests = prior?.pendingRequests.orEmpty(),
             pendingRenameRequests = prior?.pendingRenameRequests.orEmpty(),
         )
+        onLoading(loading)
         val result = sync.listFamilyMembers()
         val pendingResult = if (session.role == FamilyRole.Owner) {
             sync.listPendingMemberLogins()
@@ -138,18 +140,34 @@ internal class MembersDevicesActions(
 }
 
 @HiltViewModel
-class MembersDevicesHost @Inject constructor(
+class MembersDevicesHost private constructor(
     private val sync: SyncPort,
-    private val careLog: CareLog,
+    private val localIdentityProvider: suspend () -> LocalFamilyIdentity,
+    private val updateLocalDisplayName: suspend (String) -> Unit,
 ) : ViewModel() {
-    private val actions = MembersDevicesActions(sync)
+    @Inject
+    constructor(sync: SyncPort, careLog: CareLog) : this(
+        sync = sync,
+        localIdentityProvider = careLog::localFamilyIdentity,
+        updateLocalDisplayName = careLog::updateLocalDisplayName,
+    )
+
+    internal constructor(sync: SyncPort, localIdentity: LocalFamilyIdentity) : this(
+        sync = sync,
+        localIdentityProvider = { localIdentity },
+        updateLocalDisplayName = {},
+    )
+
     private val familyMembers = MutableStateFlow(FamilyMembersState())
+    private val actions = MembersDevicesActions(sync) { loading ->
+        familyMembers.value = loading
+    }
 
     val ui: StateFlow<MembersDevicesUi> = combine(
         sync.session(),
         familyMembers,
     ) { session, memberState ->
-        val identity = careLog.localFamilyIdentity()
+        val identity = localIdentityProvider()
         val familyId = session.familyId.ifBlank { identity.familyId.toString() }
         val base = MembersDevicesUi(
             identity = FamilyIdentityUi(
@@ -357,7 +375,7 @@ class MembersDevicesHost @Inject constructor(
             val result = sync.updateMyDisplayName(displayName.trim())
             val outcome = result.getOrNull()
             if (outcome is DisplayNameUpdateResult.Updated) {
-                careLog.updateLocalDisplayName(outcome.displayName)
+                updateLocalDisplayName(outcome.displayName)
             }
             if (outcome != null) {
                 familyMembers.value =

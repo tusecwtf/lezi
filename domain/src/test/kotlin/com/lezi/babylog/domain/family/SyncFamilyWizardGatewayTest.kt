@@ -5,6 +5,7 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.OwnerLoginResult
+import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.session.SyncSession
@@ -70,6 +71,24 @@ class SyncFamilyWizardGatewayTest {
         assertThat(sync.lastOwnerRootPassword).isEqualTo("root-password-secret")
         assertThat(sync.lastOwnerTakeover).isTrue()
     }
+
+    @Test
+    fun memberRequestKeepsExistingLocalScaffoldAndCallsSyncExactlyOnce() = runTest {
+        val events = mutableListOf<String>()
+        val local = RecordingFamilyWizardLocalStore(events)
+        val sync = RecordingCreateSyncPort(events)
+        val gateway = SyncFamilyWizardGateway(local, sync)
+
+        val result = gateway.requestMemberLogin(
+            config = configuredEndpoint(),
+            displayName = "爸爸",
+            deviceName = "Pixel",
+        )
+
+        assertThat(result.getOrThrow()).isEqualTo(sync.pendingMemberLogin)
+        assertThat(events).containsExactly("scaffold", "member-request").inOrder()
+        assertThat(sync.memberRequestCalls).isEqualTo(1)
+    }
 }
 
 private class RecordingFamilyWizardLocalStore(
@@ -93,6 +112,13 @@ private class RecordingCreateSyncPort(
     var createCalls = 0
     var lastOwnerRootPassword: String? = null
     var lastOwnerTakeover = false
+    var memberRequestCalls = 0
+    val pendingMemberLogin = PendingMemberLogin(
+        requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        displayName = "爸爸",
+        deviceName = "Pixel",
+        expiresAtEpochSeconds = 1_753_504_800,
+    )
 
     override suspend fun createFamily(
         displayName: String,
@@ -133,6 +159,17 @@ private class RecordingCreateSyncPort(
                 ),
                 dataRecovery = InitialFamilyDataRecovery.Complete,
             ),
+        )
+    }
+
+    override suspend fun requestMemberLogin(
+        displayName: String,
+        deviceName: String,
+    ): Result<PendingMemberLogin> {
+        events += "member-request"
+        memberRequestCalls += 1
+        return Result.success(
+            pendingMemberLogin.copy(displayName = displayName, deviceName = deviceName),
         )
     }
 }

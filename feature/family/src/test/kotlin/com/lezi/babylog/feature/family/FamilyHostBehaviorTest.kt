@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.family
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.domain.family.FamilyWizardController
+import com.lezi.babylog.domain.LocalFamilyIdentity
 import com.lezi.babylog.domain.family.FamilyWizardEntry
 import com.lezi.babylog.domain.family.FamilyWizardGateway
 import com.lezi.babylog.domain.family.FamilyWizardState
@@ -25,15 +26,81 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TestWatcher
+import org.junit.runner.Description
 
 /**
  * Behavior contracts for ticket-24 hosts (not reflection-only surface lists).
  * Uses [SyncPort] fakes for roster refresh / approval and wizard QR thin-delegate path.
  */
 class FamilyHostBehaviorTest {
+    @get:Rule
+    val mainDispatcherRule = FamilyMainDispatcherRule()
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun membersHostPublishesLoadingBeforeTheRosterRequestCompletes() =
+        runTest(mainDispatcherRule.testDispatcher) {
+            val requestStarted = CompletableDeferred<Unit>()
+            val releaseRequest = CompletableDeferred<Unit>()
+            val member = FamilyMember("管理员", FamilyRole.Owner, true, "m-owner")
+            val sync = object : SyncPort by NoOpSyncPort() {
+                private val sessionState = MutableStateFlow(
+                    SyncSession(
+                        familyId = "fam-1",
+                        role = FamilyRole.Owner,
+                        serverHost = "192.168.50.4",
+                        membershipId = "m-owner",
+                        accessToken = "tok",
+                        refreshToken = "ref",
+                    ),
+                )
+                override fun session(): Flow<SyncSession> = sessionState
+                override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
+                    requestStarted.complete(Unit)
+                    releaseRequest.await()
+                    return Result.success(listOf(member))
+                }
+                override suspend fun listPendingMemberLogins():
+                    Result<List<PendingMemberLoginRequest>> = Result.success(emptyList())
+                override suspend fun listPendingMemberRenameRequests():
+                    Result<List<PendingMemberRenameRequest>> = Result.success(emptyList())
+            }
+            val host = com.lezi.babylog.feature.family.members.MembersDevicesHost(
+                sync = sync,
+                localIdentity = LocalFamilyIdentity("device-1", "管理员", 1),
+            )
+            val collectionJob = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                host.ui.collect()
+            }
+            host.refreshMembers(showErrors = true)
+            requestStarted.await()
+            runCurrent()
+            assertThat(host.ui.value.membersLoading).isTrue()
+            assertThat(host.ui.value.membersLoaded).isFalse()
+
+            releaseRequest.complete(Unit)
+            advanceUntilIdle()
+            assertThat(host.ui.value.membersLoading).isFalse()
+            assertThat(host.ui.value.membersLoaded).isTrue()
+            assertThat(host.ui.value.members).containsExactly(member)
+            collectionJob.cancel()
+        }
+
     @Test
     fun membersRosterRefreshLoadsMembersAndPendingForOwner() = runTest {
         val member = FamilyMember("管理员", FamilyRole.Owner, true, "m-owner")
@@ -138,5 +205,18 @@ class FamilyHostBehaviorTest {
         advanceUntilIdle()
         assertThat(gateway.verifyCalls).isEqualTo(1)
         assertThat(controller.state.value).isNotInstanceOf(FamilyWizardState.Editing::class.java)
+    }
+}
+
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+class FamilyMainDispatcherRule(
+    val testDispatcher: TestDispatcher = StandardTestDispatcher(),
+) : TestWatcher() {
+    override fun starting(description: Description) {
+        Dispatchers.setMain(testDispatcher)
+    }
+
+    override fun finished(description: Description) {
+        Dispatchers.resetMain()
     }
 }

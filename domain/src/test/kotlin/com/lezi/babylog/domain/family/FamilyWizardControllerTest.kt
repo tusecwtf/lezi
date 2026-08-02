@@ -19,7 +19,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
@@ -476,6 +478,29 @@ class FamilyWizardControllerTest {
     }
 
     @Test
+    fun memberRequestTimeoutReturnsToARetryableStateInsteadOfStayingBusy() = runTest {
+        val gateway = RecordingFamilyWizardGateway().apply {
+            memberRequestStarted = CompletableDeferred()
+            memberRequestRelease = CompletableDeferred()
+        }
+        val controller = FamilyWizardController(gateway)
+        val input = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+
+        val submit = launch { controller.submit(input) }
+        gateway.memberRequestStarted?.await()
+        assertThat(controller.state.value).isInstanceOf(FamilyWizardState.Submitting::class.java)
+
+        advanceTimeBy(20_001)
+        runCurrent()
+
+        val failure = controller.state.value as FamilyWizardState.RetryableFailure
+        assertThat(failure.message).contains("超时")
+        submit.join()
+    }
+
+    @Test
     fun approvedMemberPublishesCommittedSessionAndRetriesOnlyDataRecovery() = runTest {
         val gateway = RecordingFamilyWizardGateway()
         val controller = FamilyWizardController(gateway)
@@ -559,6 +584,26 @@ class FamilyWizardControllerTest {
         cancelled.cancelMemberApproval()
         assertThat(cancelled.state.value).isInstanceOf(FamilyWizardState.Editing::class.java)
         assertThat(cancelledGateway.cancelMemberCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun failedLocalAbandonmentKeepsTheWaitingRequestAndShowsFeedback() = runTest {
+        val gateway = RecordingFamilyWizardGateway().apply {
+            cancelMemberResult = Result.failure(IllegalStateException("secure clear failed"))
+        }
+        val controller = FamilyWizardController(gateway)
+        val input = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        controller.submit(input)
+        val original = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+
+        controller.cancelMemberApproval()
+
+        val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+        assertThat(waiting.request).isEqualTo(original.request)
+        assertThat(waiting.feedback).contains("取消失败")
+        assertThat(gateway.cancelMemberCalls).isEqualTo(1)
     }
 
     @Test
@@ -1014,6 +1059,7 @@ private class RecordingFamilyWizardGateway(
     )
     var memberRequestCalls = 0
     var cancelMemberCalls = 0
+    var cancelMemberResult: Result<Unit> = Result.success(Unit)
     var memberLoginQrClaimCalls = 0
     var lastMemberLoginQrDeviceName: String? = null
     val events = mutableListOf<String>()
@@ -1029,6 +1075,8 @@ private class RecordingFamilyWizardGateway(
     var memberLoginQrVerifyRelease: CompletableDeferred<Unit>? = null
     var memberLoginQrClaimStarted: CompletableDeferred<Unit>? = null
     var memberLoginQrClaimRelease: CompletableDeferred<Unit>? = null
+    var memberRequestStarted: CompletableDeferred<Unit>? = null
+    var memberRequestRelease: CompletableDeferred<Unit>? = null
     val rememberedEndpoints = mutableListOf<TrustedEndpointProfile>()
     var verifiedEndpoint: TrustedEndpointProfile? =
         TrustedEndpointProfile.systemPki("https://nas.home")
@@ -1100,6 +1148,8 @@ private class RecordingFamilyWizardGateway(
     ): Result<PendingMemberLogin> {
         events += "member-request"
         memberRequestCalls++
+        memberRequestStarted?.complete(Unit)
+        memberRequestRelease?.await()
         return Result.success(
             pendingRequest.copy(displayName = displayName, deviceName = deviceName),
         )
@@ -1109,7 +1159,7 @@ private class RecordingFamilyWizardGateway(
 
     override suspend fun cancelMemberLogin(): Result<Unit> {
         cancelMemberCalls++
-        return Result.success(Unit)
+        return cancelMemberResult
     }
 
     override suspend fun verifyMemberLoginEndpoint(

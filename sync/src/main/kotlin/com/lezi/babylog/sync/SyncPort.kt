@@ -187,7 +187,7 @@ data class ClientAppVersion(
 
     companion object {
         /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
-        val FALLBACK = ClientAppVersion(versionCode = 10, versionName = "0.3.3")
+        val FALLBACK = ClientAppVersion(versionCode = 11, versionName = "0.3.4")
     }
 }
 

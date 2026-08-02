@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 10,
-  "version_name": "0.3.3",
+  "version_code": 11,
+  "version_name": "0.3.4",
   "min_supported_version_code": 6,
-  "sha256": "95887649f251a191d6e38f06a6413e9a2ca9ba8bc4bb60131751fa7e53b2bce2",
-  "release_notes": "0.3.3 家庭网络设置、离线可用与 Owner 空服务器灾难恢复"
+  "sha256": "f93c6cc01ae2f9a362d8371a11214765e906b7e6652a947aa59769b023151db1",
+  "release_notes": "0.3.4 家庭成员重复加入、离线取消与账户页可用性优化"
 }

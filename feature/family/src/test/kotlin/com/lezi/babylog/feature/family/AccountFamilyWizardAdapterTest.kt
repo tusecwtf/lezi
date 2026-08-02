@@ -12,10 +12,42 @@ import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.PendingMemberLogin
+import com.lezi.babylog.domain.family.FamilyWizardState
+import com.lezi.babylog.feature.family.wizard.memberApprovalCancelSucceeded
+import com.lezi.babylog.feature.family.wizard.memberApprovalRequestForDisplay
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class AccountFamilyWizardAdapterTest {
+    @Test
+    fun waitingStateRequestWinsOverTheLaggingOverviewProjection() {
+        val snapshot = accountFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Join,
+            step = FamilyWizardStep.Identity,
+            draft = FamilyEndpointDraft.fromConfig(FamilyEndpointConfig(host = "nas.home")),
+            displayName = "奶奶",
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        val overviewRequest = PendingMemberLogin(
+            requestId = "stale",
+            displayName = "旧称呼",
+            deviceName = "旧设备",
+            expiresAtEpochSeconds = 10,
+        )
+        val stateRequest = PendingMemberLogin(
+            requestId = "current",
+            displayName = "奶奶",
+            deviceName = "新手机",
+            expiresAtEpochSeconds = 20,
+        )
+        val waiting = FamilyWizardState.WaitingForMemberApproval(snapshot, stateRequest)
+
+        assertEquals(stateRequest, memberApprovalRequestForDisplay(waiting, overviewRequest))
+        assertEquals(false, memberApprovalCancelSucceeded(waiting))
+        assertEquals(true, memberApprovalCancelSucceeded(FamilyWizardState.Editing(snapshot)))
+    }
+
     @Test
     fun accountProjectsTheSharedActionsAndSnapshot() {
         val draft = FamilyEndpointDraft.fromConfig(
