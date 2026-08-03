@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 12,
-  "version_name": "0.3.5",
+  "version_code": 13,
+  "version_name": "0.3.6",
   "min_supported_version_code": 6,
-  "sha256": "ffeb09d49345b7899c0c8450ca2b688e8da4db3bf7eaef1ca54bdad2b8bf2f76",
-  "release_notes": "0.3.5 新增管理员邀请二维码局域网首装，并提升同步、计时、清空本机数据与记录布局可靠性"
+  "sha256": "63b0354c1083d4a761a0bc8207b794e0d7d5ad1132a8f689f3f71929a8ae3ebe",
+  "release_notes": "0.3.6 将家庭发布改为先对账再生成临时计划，并在升级时安全转交旧待发布记录"
 }

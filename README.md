@@ -1,7 +1,7 @@
 # 乐记（lezi）
 
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.5`
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.6`
 
 产品规格：[`docs/prd/`](docs/prd/) · 领域术语：[`CONTEXT.md`](CONTEXT.md) · 文档索引：[`docs/README.md`](docs/README.md) · 安全：[`SECURITY.md`](SECURITY.md)
 许可：[MIT](LICENSE) · 贡献 / PR：[`CONTRIBUTING.md`](CONTRIBUTING.md)
@@ -145,7 +145,7 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 **手机访问**：首次连接或已加入后的「家庭网络设置」填写
 `https://<NAS-LAN-IP>:8765`。首次会显示部署脚本打印的 SPKI 指纹，确认后固定；后续公钥
 变化会硬阻断并要求重新信任/登录，旧凭证不会发送到候选地址。须用 NAS 防火墙禁止公网访问
-8765/8767。旧 Owner 可把本机完整护理副本恢复到空 0.3.5 服务器；不支持两个已配置家庭合并。
+8765/8767。旧 Owner 可把本机完整护理副本恢复到空 0.3.6 服务器；不支持两个已配置家庭合并。
 
 **首次空部署**（无现网容器、且已确认数据根全新无 TLS identity）须同时设置
 `LEZI_BOOTSTRAP_SECRET`（≥16 字符）、`LEZI_FORWARD_BOOTSTRAP_SECRET=1` 和

@@ -32,9 +32,9 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.5` |
-| versionCode | `12`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
-| 本地数据契约 | 当前 `v2` / Room v25（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| versionName | `0.3.6` |
+| versionCode | `13`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
+| 本地数据契约 | 当前 `v3` / Room v26（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
 ---
@@ -296,8 +296,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 12,
-  "version_name": "0.3.5",
+  "version_code": 13,
+  "version_name": "0.3.6",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
