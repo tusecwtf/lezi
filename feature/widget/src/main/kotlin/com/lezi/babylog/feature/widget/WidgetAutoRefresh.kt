@@ -1,6 +1,8 @@
 package com.lezi.babylog.feature.widget
 
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.localdata.LocalDataClearInProgressException
+import com.lezi.babylog.domain.localdata.LocalDataEpochInvalidatedException
 import java.time.Duration
 import java.time.LocalDate
 import java.time.ZoneId
@@ -38,7 +40,15 @@ internal class WidgetRefreshCoordinator(
             val recordFlows = babyIds.map { babyId -> recordChanges(babyId, date) }
             merge(flowOf(Unit), *recordFlows.toTypedArray())
         }.conflate().collect {
-            refreshAll()
+            try {
+                refreshAll()
+            } catch (_: LocalDataClearInProgressException) {
+                // Destructive clear won this event. Keep the process observer alive;
+                // the clear path redraws unconfigured state and later facts retry.
+            } catch (_: LocalDataEpochInvalidatedException) {
+                // Data changed generation after summary load. Drop this stale event
+                // and continue observing instead of reviving pre-clear content.
+            }
         }
     }
 }

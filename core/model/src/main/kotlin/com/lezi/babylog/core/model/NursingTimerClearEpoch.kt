@@ -79,9 +79,8 @@ fun shouldCasRemoveNursingTimerJson(
  * Session-scoped FGS stop decision for local-clear finalization.
  *
  * Only when the process witness [activeSession] exactly equals [capturedSession]
- * may cleanup issue `stopService`. Unknown (`null`) active is treated as
- * "do not stop" so a post-commit newer timer still in STARTING before
- * `markActive` is not ABA-stopped by an older cleanup.
+ * may cleanup request a token-scoped stop. Callers pass their latest
+ * STARTING-or-RUNNING witness; unknown (`null`) remains fail-closed.
  */
 fun shouldStopCapturedNursingTimerSession(
     activeSession: String?,

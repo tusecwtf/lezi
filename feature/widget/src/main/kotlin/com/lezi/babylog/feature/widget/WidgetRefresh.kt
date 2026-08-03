@@ -2,7 +2,15 @@ package com.lezi.babylog.feature.widget
 
 import android.content.Context
 import androidx.glance.appwidget.GlanceAppWidgetManager
+import com.lezi.babylog.domain.localdata.LocalDataClearInProgressException
+import com.lezi.babylog.domain.localdata.LocalDataEpochInvalidatedException
+import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
+import com.lezi.babylog.domain.localdata.WidgetCleanupPort
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.hilt.components.SingletonComponent
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -23,7 +31,11 @@ internal class WidgetRefreshEngine(
         )
     }
 
-    suspend fun refresh(widgetId: Int): WidgetDisplayModel {
+    suspend fun refresh(
+        widgetId: Int,
+        localDataMutationEpoch: LocalDataMutationEpoch,
+    ): WidgetDisplayModel {
+        val expectedGeneration = localDataMutationEpoch.currentGeneration()
         val configuration = store.configuration(widgetId)
             ?: return unconfiguredWidgetDisplayModel(widgetId)
         return try {
@@ -40,8 +52,19 @@ internal class WidgetRefreshEngine(
                 updatedAtEpochMillis = now(),
                 lastLabelIsCanonical = true,
             )
-            store.saveSnapshot(snapshot)
+            localDataMutationEpoch.withMutationInGeneration(expectedGeneration) {
+                store.saveSnapshot(snapshot)
+            }
             configuredWidgetDisplayModel(configuration, snapshot)
+        } catch (_: WidgetTargetBabyUnavailableException) {
+            localDataMutationEpoch.withMutationInGeneration(expectedGeneration) {
+                store.remove(widgetId)
+            }
+            unconfiguredWidgetDisplayModel(widgetId)
+        } catch (clear: LocalDataClearInProgressException) {
+            throw clear
+        } catch (invalidated: LocalDataEpochInvalidatedException) {
+            throw invalidated
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Exception) {
@@ -54,11 +77,21 @@ internal class WidgetRefreshEngine(
     }
 }
 
+internal class WidgetStateCleaner(
+    private val store: WidgetStateStore,
+) {
+    fun clearAll(): List<Int> = store.configurations()
+        .map(WidgetConfiguration::widgetId)
+        .sorted()
+        .also { store.clearAll() }
+}
+
 @Singleton
 class CareWidgetRefreshController @Inject constructor(
     @ApplicationContext private val context: Context,
     private val store: WidgetStateStore,
     summarySource: WidgetSummarySource,
+    private val localDataMutationEpoch: LocalDataMutationEpoch,
 ) {
     private val engine = WidgetRefreshEngine(store, summarySource)
     private val configuredBabyIds = MutableStateFlow(readConfiguredBabyIds())
@@ -70,15 +103,19 @@ class CareWidgetRefreshController @Inject constructor(
     fun configurations(): List<WidgetConfiguration> = store.configurations()
 
     suspend fun configure(configuration: WidgetConfiguration): WidgetDisplayModel {
-        store.saveConfiguration(configuration)
+        val expectedGeneration = localDataMutationEpoch.currentGeneration()
+        localDataMutationEpoch.withMutationInGeneration(expectedGeneration) {
+            store.saveConfiguration(configuration)
+        }
         publishConfiguredBabyIds()
-        val display = engine.refresh(configuration.widgetId)
+        val display = engine.refresh(configuration.widgetId, localDataMutationEpoch)
         update(configuration.widgetId)
         return display
     }
 
     suspend fun refreshWidget(widgetId: Int): WidgetDisplayModel {
-        val display = engine.refresh(widgetId)
+        val display = engine.refresh(widgetId, localDataMutationEpoch)
+        if (!display.isConfigured) publishConfiguredBabyIds()
         update(widgetId)
         return display
     }
@@ -88,14 +125,30 @@ class CareWidgetRefreshController @Inject constructor(
             refreshWidget(configuration.widgetId)
         }
 
+    /** Rebuild cached summaries, then force every launcher instance to redraw. */
+    suspend fun rehydrateAllWidgetInstances() {
+        refreshAll()
+        CareWidgetUpdater.requestUpdate(context)
+    }
+
     suspend fun refreshBaby(babyId: Long): List<WidgetDisplayModel> =
         store.configurations()
             .filter { it.babyId == babyId }
             .map { configuration -> refreshWidget(configuration.widgetId) }
 
     suspend fun remove(widgetId: Int) {
-        store.remove(widgetId)
+        val expectedGeneration = localDataMutationEpoch.currentGeneration()
+        localDataMutationEpoch.withMutationInGeneration(expectedGeneration) {
+            store.remove(widgetId)
+        }
         publishConfiguredBabyIds()
+    }
+
+    /** Clear persisted family content before redrawing every launcher instance unconfigured. */
+    suspend fun clearAllWidgetState() {
+        WidgetStateCleaner(store).clearAll()
+        publishConfiguredBabyIds()
+        CareWidgetUpdater.requestUpdate(context)
     }
 
     private fun publishConfiguredBabyIds() {
@@ -116,6 +169,22 @@ class CareWidgetRefreshController @Inject constructor(
             // Configuration and record writes must remain successful if redraw fails.
         }
     }
+}
+
+@Singleton
+class AndroidWidgetCleanupPort @Inject constructor(
+    private val controller: CareWidgetRefreshController,
+) : WidgetCleanupPort {
+    override suspend fun clearAllWidgetState() = controller.clearAllWidgetState()
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+internal abstract class WidgetCleanupModule {
+    @Binds
+    abstract fun bindWidgetCleanupPort(
+        implementation: AndroidWidgetCleanupPort,
+    ): WidgetCleanupPort
 }
 
 /**

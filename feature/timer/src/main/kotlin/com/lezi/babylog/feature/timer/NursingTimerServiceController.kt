@@ -23,6 +23,13 @@ class NursingTimerServiceController @Inject constructor(
     @ApplicationContext private val app: Context,
 ) {
     internal suspend fun startAndConfirm(state: TimerState): TimerServiceStartResult {
+        val sessionToken = state.completionClientUuid?.takeIf { it.isNotBlank() }
+            ?: return TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
+        NursingTimerServiceRuntime.markStarting(sessionToken)
+        if (NursingTimerServiceRuntime.isStopRequested(sessionToken)) {
+            NursingTimerServiceRuntime.clear(sessionToken)
+            return TimerServiceStartResult.Failed(TimerServiceFailure.RUNTIME)
+        }
         val result = withTimeoutOrNull(START_CONFIRM_TIMEOUT_MS) {
             suspendCancellableCoroutine { continuation ->
                 val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
@@ -30,6 +37,7 @@ class NursingTimerServiceController @Inject constructor(
                         val result = if (resultCode == NursingTimerService.RESULT_STARTED) {
                             TimerServiceStartResult.Started
                         } else {
+                            NursingTimerServiceRuntime.clear(sessionToken)
                             val failure = resultData
                                 ?.getString(NursingTimerService.EXTRA_START_FAILURE)
                                 ?.let { raw ->
@@ -51,13 +59,14 @@ class NursingTimerServiceController @Inject constructor(
                     putExtra(NursingTimerService.EXTRA_SNAPSHOT_ELAPSED, snapshotElapsed)
                     putExtra(
                         NursingTimerService.EXTRA_SESSION_TOKEN,
-                        state.completionClientUuid,
+                        sessionToken,
                     )
                     putExtra(NursingTimerService.EXTRA_START_RECEIVER, receiver)
                 }
                 try {
                     ContextCompat.startForegroundService(app, intent)
                 } catch (failure: RuntimeException) {
+                    NursingTimerServiceRuntime.clear(sessionToken)
                     if (continuation.isActive) {
                         continuation.resume(
                             TimerServiceStartResult.Failed(failure.toTimerServiceFailure()),
@@ -67,7 +76,7 @@ class NursingTimerServiceController @Inject constructor(
             }
         }
         if (result != null) return result
-        stop()
+        NursingTimerServiceRuntime.requestStop(sessionToken)
         return TimerServiceStartResult.Failed(TimerServiceFailure.TIMEOUT)
     }
 
@@ -86,36 +95,23 @@ class NursingTimerServiceController @Inject constructor(
     /**
      * Session-scoped stop for local-clear finalization.
      *
-     * Only stops when the process witness matches [sessionToken]. Unknown active
-     * (null, including STARTING-before-markActive) is a no-op so a post-commit
-     * newer session is not ABA-stopped. Rethrows stop failures unless a newer
-     * session is already proven active; clears the durable runtime marker only
-     * after the captured session is no longer claimed.
+     * Only stops when the latest STARTING/RUNNING witness matches [sessionToken].
+     * A token-scoped pending stop covers STARTING-before-service-create; a newer
+     * session wins the ABA check and is never stopped by an older clear epoch.
      */
     internal fun stopCapturedSession(sessionToken: String) {
         if (
             !shouldStopCapturedNursingTimerSession(
-                activeSession = NursingTimerServiceRuntime.activeSession(),
+                activeSession = NursingTimerServiceRuntime.currentSession(),
                 capturedSession = sessionToken,
             )
         ) {
             return
         }
-        try {
-            requestNursingTimerServiceStop(app)
-        } catch (failure: RuntimeException) {
-            val activeAfter = NursingTimerServiceRuntime.activeSession()
-            if (activeAfter == sessionToken) throw failure
-            // Newer session (or already cleared): do not rethrow.
-            return
-        }
-        NursingTimerServiceRuntime.clear(sessionToken)
-        // Belt-and-suspenders if the service process path left the notification.
-        if (NursingTimerServiceRuntime.activeSession() != sessionToken) {
+        if (!NursingTimerServiceRuntime.requestStop(sessionToken)) return
+        // Belt-and-suspenders when an active instance consumed the token synchronously.
+        if (NursingTimerServiceRuntime.currentSession() != sessionToken) {
             cancelNursingTimerNotification(app)
-        }
-        check(NursingTimerServiceRuntime.activeSession() != sessionToken) {
-            "Nursing timer session $sessionToken is still marked active after stop"
         }
     }
 

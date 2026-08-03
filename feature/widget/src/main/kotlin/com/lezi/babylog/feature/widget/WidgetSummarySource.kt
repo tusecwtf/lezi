@@ -12,11 +12,17 @@ fun interface WidgetSummarySource {
     suspend fun load(babyId: Long): WidgetSummaryData
 }
 
+/** The configured baby no longer belongs to the active local family surface. */
+internal class WidgetTargetBabyUnavailableException : IllegalStateException()
+
 @Singleton
 class CareLogWidgetSummarySource @Inject constructor(
     private val careLog: CareLog,
 ) : WidgetSummarySource {
     override suspend fun load(babyId: Long): WidgetSummaryData {
+        if (careLog.listBabies().none { it.id == babyId }) {
+            throw WidgetTargetBabyUnavailableException()
+        }
         val summary = careLog.recentCareSummary(babyId)
         return WidgetSummaryData(
             babyName = summary.babyName,

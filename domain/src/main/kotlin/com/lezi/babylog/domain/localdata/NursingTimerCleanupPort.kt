@@ -12,11 +12,9 @@ fun interface NursingTimerCleanupPort {
      * Idempotently stop the nursing timer FGS when its active session **exactly**
      * matches [sessionToken].
      *
-     * No-op when [sessionToken] is null/blank, when a different session is
-     * active, or when the process witness is unknown (`null`) — the latter
-     * covers STARTING-before-markActive so a post-commit newer timer is not
-     * ABA-stopped. Throws when the captured session still appears active after
-     * a stop attempt so committed cleanup can be retried.
+     * No-op when [sessionToken] is null/blank or a different STARTING/RUNNING
+     * session owns the process witness. The Android adapter retains a
+     * token-scoped pending stop until a captured STARTING service materializes.
      */
     fun stopCapturedSession(sessionToken: String?)
 }

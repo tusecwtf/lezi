@@ -3,19 +3,82 @@ package com.lezi.babylog.feature.timer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
+internal fun interface NursingTimerRuntimeStopper {
+    fun stopIfOwned(session: String): Boolean
+}
+
 internal object NursingTimerServiceRuntime {
     @Volatile
     private var activeSession: String? = null
+    @Volatile
+    private var startingSession: String? = null
+    private val monitor = Any()
+    private val stopRequests = mutableSetOf<String>()
+    private var stopper: NursingTimerRuntimeStopper? = null
 
-    fun markActive(session: String) {
+    fun markStarting(session: String) = synchronized(monitor) {
+        startingSession = session
+    }
+
+    fun markActive(session: String) = synchronized(monitor) {
+        if (startingSession == session) startingSession = null
         activeSession = session
     }
 
-    fun clear(session: String? = null) {
-        if (session == null || activeSession == session) activeSession = null
+    fun clear(session: String? = null) = synchronized(monitor) {
+        if (session == null) {
+            activeSession = null
+            startingSession = null
+            stopRequests.clear()
+        } else {
+            if (activeSession == session) activeSession = null
+            if (startingSession == session) startingSession = null
+            stopRequests.remove(session)
+        }
     }
 
     fun activeSession(): String? = activeSession
+
+    /** Latest requested session owns stop decisions even before foreground ack. */
+    fun currentSession(): String? = startingSession ?: activeSession
+
+    fun isStopRequested(session: String): Boolean = synchronized(monitor) {
+        session in stopRequests
+    }
+
+    /** Token-scoped stop: a newer STARTING session cannot be killed by an old clear. */
+    fun requestStop(session: String): Boolean {
+        val (currentStopper, wasStarting) = synchronized(monitor) {
+            if (currentSession() != session) return false
+            stopRequests += session
+            stopper to (startingSession == session)
+        }
+        val stoppedByOwner = currentStopper?.stopIfOwned(session) == true
+        if (!wasStarting && !stoppedByOwner) {
+            synchronized(monitor) {
+                // A RUNNING witness without a live matching owner is stale. Drop only the
+                // captured token after re-checking: a same-token STARTING race must retain
+                // its pending stop so onStartCommand can consume it, and a newer token wins.
+                if (startingSession != session && activeSession == session) {
+                    activeSession = null
+                    stopRequests.remove(session)
+                }
+            }
+        }
+        return true
+    }
+
+    fun registerStopper(value: NursingTimerRuntimeStopper) {
+        val pending = synchronized(monitor) {
+            stopper = value
+            currentSession()?.takeIf { it in stopRequests }
+        }
+        pending?.let(value::stopIfOwned)
+    }
+
+    fun unregisterStopper(value: NursingTimerRuntimeStopper) = synchronized(monitor) {
+        if (stopper === value) stopper = null
+    }
 }
 
 internal sealed interface TimerServiceStartResult {
@@ -207,6 +270,33 @@ internal suspend fun settleNonRunningTimerTransition(
     // Publish succeeded — stop once outside the publish failure path so a stop Exception
     // cannot be misclassified as a persist fault or overwrite disk PAUSED with FAILED.
     stopService()
+}
+
+/**
+ * Post-fact clear differs from an ordinary pause: the service and in-memory
+ * session must end even when DataStore fails, while the caller keeps a durable
+ * retry flag until [clearDurable] eventually succeeds.
+ */
+internal suspend fun clearCommittedTimerSnapshot(
+    clearDurable: suspend () -> Unit,
+    stopService: () -> Unit,
+    publishMemoryEmpty: () -> Unit,
+): Boolean {
+    val cleared = try {
+        clearDurable()
+        true
+    } catch (cancelled: CancellationException) {
+        false
+    } catch (error: Error) {
+        stopService()
+        publishMemoryEmpty()
+        throw error
+    } catch (_: Exception) {
+        false
+    }
+    stopService()
+    publishMemoryEmpty()
+    return cleared
 }
 
 /** Init / restore outcome after reading durable timer JSON (or failing to). */

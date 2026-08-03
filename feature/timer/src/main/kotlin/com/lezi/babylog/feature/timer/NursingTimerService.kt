@@ -21,10 +21,16 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-class NursingTimerService : Service() {
+class NursingTimerService : Service(), NursingTimerRuntimeStopper {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var tickerJob: Job? = null
     private var activeSessionToken: String? = null
+    private var requestedSessionToken: String? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        NursingTimerServiceRuntime.registerStopper(this)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -36,6 +42,18 @@ class NursingTimerService : Service() {
         val receiver = intent.timerStartResultReceiver()
         val sessionToken = intent.getStringExtra(EXTRA_SESSION_TOKEN)?.takeIf { it.isNotBlank() }
         if (sessionToken == null) {
+            stopSelf(startId)
+            sendStartResult(
+                receiver,
+                RESULT_FAILED,
+                Bundle().apply { putString(EXTRA_START_FAILURE, TimerServiceFailure.RUNTIME.name) },
+            )
+            return START_NOT_STICKY
+        }
+        requestedSessionToken = sessionToken
+        NursingTimerServiceRuntime.markStarting(sessionToken)
+        if (NursingTimerServiceRuntime.isStopRequested(sessionToken)) {
+            NursingTimerServiceRuntime.clear(sessionToken)
             stopSelf(startId)
             sendStartResult(
                 receiver,
@@ -107,11 +125,22 @@ class NursingTimerService : Service() {
         // Drop the ongoing FGS notification on every teardown path (stopService,
         // failStartup already removes it; cleanup relies on this for local clear).
         stopForeground(STOP_FOREGROUND_REMOVE)
-        NursingTimerServiceRuntime.clear(activeSessionToken)
+        NursingTimerServiceRuntime.unregisterStopper(this)
+        requestedSessionToken?.let(NursingTimerServiceRuntime::clear)
+        activeSessionToken?.let(NursingTimerServiceRuntime::clear)
+        requestedSessionToken = null
         activeSessionToken = null
         tickerJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    override fun stopIfOwned(session: String): Boolean {
+        if (requestedSessionToken != session && activeSessionToken != session) return false
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        NursingTimerServiceRuntime.clear(session)
+        stopSelf()
+        return true
     }
 
     private fun ensureChannel() {
@@ -168,6 +197,7 @@ class NursingTimerService : Service() {
         failure: TimerServiceFailure,
     ) {
         NursingTimerServiceRuntime.clear(sessionToken)
+        if (requestedSessionToken == sessionToken) requestedSessionToken = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf(startId)
         sendStartResult(

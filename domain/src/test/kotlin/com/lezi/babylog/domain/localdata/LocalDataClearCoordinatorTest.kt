@@ -55,6 +55,7 @@ class LocalDataClearCoordinatorTest {
         assertThat(rig.timer.stoppedSessionTokens)
             .containsExactly("session-old", "session-old")
             .inOrder()
+        assertThat(rig.widgets.calls).isEqualTo(2)
         assertThat(rig.pending.pending).isNull()
     }
 
@@ -404,6 +405,25 @@ class LocalDataClearCoordinatorTest {
     }
 
     @Test
+    fun widgetCleanupFailureRetainsDurableClearAndRecoveryRetriesIt() = runTest {
+        val rig = ClearCoordinatorRig(familyServerRetained = true)
+        rig.widgets.failuresRemaining = 1
+
+        val failure = runCatching {
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat(rig.widgets.calls).isEqualTo(1)
+        assertThat(rig.pending.pending).isNotNull()
+
+        rig.newCoordinator().recoverPendingReminderCleanup()
+
+        assertThat(rig.widgets.calls).isEqualTo(2)
+        assertThat(rig.pending.pending).isNull()
+    }
+
+    @Test
     fun failedPriorRecoveryFinishesItsStoredScopeWithoutRunningTheNewScope() = runTest {
         val rig = ClearCoordinatorRig()
         rig.pending.pending = PendingReminderCleanup(
@@ -493,6 +513,7 @@ private class ClearCoordinatorRig(
     val reminders = RecordingClearReminderPort()
     val timer = RecordingNursingTimerCleanupPort()
     val systemCalendar = RecordingSystemCalendarPort()
+    val widgets = RecordingWidgetCleanupPort()
     val sync = RecordingClearSyncPort(familyServerRetained)
     val coordinator: LocalDataClearCoordinator = newCoordinator()
 
@@ -504,9 +525,24 @@ private class ClearCoordinatorRig(
             reminderCleanup = reminders,
             nursingTimerCleanup = timer,
             systemCalendar = systemCalendar,
+            widgetCleanup = widgets,
             pendingReminderCleanupStore = pending,
             mutationGuard = CalendarReminderMutationGuard(),
+            localDataMutationEpoch = LocalDataMutationEpoch(),
         )
+}
+
+private class RecordingWidgetCleanupPort : WidgetCleanupPort {
+    var calls = 0
+    var failuresRemaining = 0
+
+    override suspend fun clearAllWidgetState() {
+        calls += 1
+        if (failuresRemaining > 0) {
+            failuresRemaining -= 1
+            error("widget cleanup failed")
+        }
+    }
 }
 
 private class RecordingLocalDataClearPersistence(

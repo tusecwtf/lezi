@@ -8,6 +8,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import com.lezi.babylog.core.model.RecordMediaFiles
+import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
 import kotlinx.coroutines.withContext
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.timeline.*
@@ -18,6 +19,7 @@ import com.lezi.babylog.feature.log.layout.*
 @Singleton
 class RecordPhotoStore @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val localDataMutationEpoch: LocalDataMutationEpoch,
 ) {
     /**
      * @param onPathCommitted see [BoundedRecordPhotoImporter.import] — used so Composer can
@@ -26,34 +28,38 @@ class RecordPhotoStore @Inject constructor(
     suspend fun import(
         uris: List<Uri>,
         onPathCommitted: ((String) -> Unit)? = null,
-    ): List<String> = withContext(Dispatchers.IO) {
-        val directory = File(
-            context.filesDir,
-            RecordMediaFiles.DIRECTORY,
-        ).apply { mkdirs() }
-        BoundedRecordPhotoImporter(
-            directory = directory,
-            sniff = ::inspectImportedPhoto,
-        ).import(
-            inputs = uris.map { uri ->
-                RecordPhotoImportSource(
-                    declaredMime = context.contentResolver.getType(uri),
-                    openStream = {
-                        requireNotNull(context.contentResolver.openInputStream(uri)) {
-                            "无法读取所选图片"
-                        }
-                    },
-                )
-            },
-            onPathCommitted = onPathCommitted,
-        )
+    ): List<String> = localDataMutationEpoch.withMutation {
+        withContext(Dispatchers.IO) {
+            val directory = File(
+                context.filesDir,
+                RecordMediaFiles.DIRECTORY,
+            ).apply { mkdirs() }
+            BoundedRecordPhotoImporter(
+                directory = directory,
+                sniff = ::inspectImportedPhoto,
+            ).import(
+                inputs = uris.map { uri ->
+                    RecordPhotoImportSource(
+                        declaredMime = context.contentResolver.getType(uri),
+                        openStream = {
+                            requireNotNull(context.contentResolver.openInputStream(uri)) {
+                                "无法读取所选图片"
+                            }
+                        },
+                    )
+                },
+                onPathCommitted = onPathCommitted,
+            )
+        }
     }
 
-    suspend fun delete(paths: Collection<String>) = withContext(Dispatchers.IO) {
-        RecordMediaFiles.deleteUnderAllowedRoot(
-            filesDir = context.filesDir,
-            paths = paths,
-        )
+    suspend fun delete(paths: Collection<String>) = localDataMutationEpoch.withMutation {
+        withContext(Dispatchers.IO) {
+            RecordMediaFiles.deleteUnderAllowedRoot(
+                filesDir = context.filesDir,
+                paths = paths,
+            )
+        }
     }
 
     private fun inspectImportedPhoto(file: File): RecordPhotoFileInspection? {

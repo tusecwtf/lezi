@@ -160,16 +160,20 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
     private val reminderCleanup: ReminderCleanupPort,
     private val nursingTimerCleanup: NursingTimerCleanupPort,
     private val systemCalendar: SystemCalendarPort,
+    private val widgetCleanup: WidgetCleanupPort,
     private val pendingReminderCleanupStore: PendingReminderCleanupStore,
     private val mutationGuard: CalendarReminderMutationGuard,
+    private val localDataMutationEpoch: LocalDataMutationEpoch,
 ) : LocalDataClearCoordinator {
     override suspend fun clear(scope: LocalDataClearScope) {
         var capturedSettings: LocalClearSettingsSnapshot? = null
         val workflow = object : LocalClearWorkflow {
             override suspend fun <T> withLocalExclusion(block: suspend () -> T): T =
-                mutationGuard.withLock {
-                    capturedSettings = settings.capture()
-                    block()
+                localDataMutationEpoch.withClearEpoch {
+                    mutationGuard.withLock {
+                        capturedSettings = settings.capture()
+                        block()
+                    }
                 }
 
             override suspend fun clearRoom() {
@@ -196,20 +200,22 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
     }
 
     override suspend fun recoverPendingReminderCleanup(): LocalDataClearScope? =
-        mutationGuard.withLock {
-            val finish = withContext(NonCancellable) {
-                finishPendingLocalClear(initialFailure = null)
+        localDataMutationEpoch.withClearEpoch {
+            mutationGuard.withLock {
+                val finish = withContext(NonCancellable) {
+                    finishPendingLocalClear(initialFailure = null)
+                }
+                try {
+                    currentCoroutineContext().ensureActive()
+                } catch (cancellation: CancellationException) {
+                    finish.failure
+                        ?.takeUnless { it === cancellation }
+                        ?.let(cancellation::addSuppressed)
+                    throw cancellation
+                }
+                throwClearFailure(finish.failure)
+                finish.recoveredScope
             }
-            try {
-                currentCoroutineContext().ensureActive()
-            } catch (cancellation: CancellationException) {
-                finish.failure
-                    ?.takeUnless { it === cancellation }
-                    ?.let(cancellation::addSuppressed)
-                throw cancellation
-            }
-            throwClearFailure(finish.failure)
-            finish.recoveredScope
         }
 
     private suspend fun finishPendingLocalClear(
@@ -262,6 +268,10 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             loaded.carePlanIds.forEach { carePlanId ->
                 attempt { reminderCleanup.cancelCarePlan(carePlanId) }
             }
+            // Launcher bindings and cached summaries are part of both clear
+            // scopes. Treat widget cleanup like the other durable side effects:
+            // any failure keeps the pending row for process-recreation retry.
+            attempt { widgetCleanup.clearAllWidgetState() }
             if (!operationFailed) {
                 attempt { pendingReminderCleanupStore.delete(scope) }
             }

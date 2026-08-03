@@ -35,6 +35,16 @@ class NursingTimerCleanupSessionTest {
     }
 
     @Test
+    fun stopRequestClearsStaleActiveWitnessWithoutServiceOwner() {
+        NursingTimerServiceRuntime.markActive("session-old")
+
+        assertThat(NursingTimerServiceRuntime.requestStop("session-old")).isTrue()
+
+        assertThat(NursingTimerServiceRuntime.activeSession()).isNull()
+        assertThat(NursingTimerServiceRuntime.isStopRequested("session-old")).isFalse()
+    }
+
+    @Test
     fun stopPolicyLeavesNewerAndUnknownActiveAlone() {
         assertThat(
             shouldStopCapturedNursingTimerSession(
@@ -66,5 +76,21 @@ class NursingTimerCleanupSessionTest {
                 capturedSession = "session-old",
             ),
         ).isTrue()
+    }
+
+    @Test
+    fun startingSessionIsOwnedBeforeForegroundAckAndNewerStartWinsAbaCheck() {
+        NursingTimerServiceRuntime.markStarting("session-old")
+        assertThat(NursingTimerServiceRuntime.currentSession()).isEqualTo("session-old")
+        assertThat(NursingTimerServiceRuntime.requestStop("session-old")).isTrue()
+        assertThat(NursingTimerServiceRuntime.isStopRequested("session-old")).isTrue()
+
+        NursingTimerServiceRuntime.markStarting("session-new")
+        assertThat(NursingTimerServiceRuntime.currentSession()).isEqualTo("session-new")
+        assertThat(NursingTimerServiceRuntime.requestStop("session-old")).isFalse()
+
+        NursingTimerServiceRuntime.markActive("session-new")
+        assertThat(NursingTimerServiceRuntime.activeSession()).isEqualTo("session-new")
+        assertThat(NursingTimerServiceRuntime.currentSession()).isEqualTo("session-new")
     }
 }

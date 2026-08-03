@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.widget
 
+import android.annotation.SuppressLint
 import android.content.Context
 import com.lezi.babylog.core.model.RecordType
 import dagger.Binds
@@ -31,6 +32,7 @@ interface WidgetStateStore {
     fun snapshot(widgetId: Int): WidgetSummarySnapshot?
     fun saveSnapshot(snapshot: WidgetSummarySnapshot)
     fun remove(widgetId: Int)
+    fun clearAll()
 }
 
 @Singleton
@@ -86,6 +88,13 @@ class SharedPreferencesWidgetStateStore @Inject constructor(
             .remove(configurationKey(widgetId))
             .remove(snapshotKey(widgetId))
             .apply()
+    }
+
+    @SuppressLint("ApplySharedPref")
+    override fun clearAll() {
+        check(preferences.edit().clear().commit()) {
+            "无法持久清除桌面小组件状态"
+        }
     }
 
     private fun configurationKey(widgetId: Int): String = "configuration.$widgetId"

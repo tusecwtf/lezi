@@ -51,6 +51,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -471,8 +472,14 @@ private fun decodeBitmapFactoryAvatar(context: Context, uri: Uri): Bitmap {
 @Singleton
 class BabyAvatarFileStore @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val localDataMutationEpoch: LocalDataMutationEpoch,
 ) {
-    suspend fun write(clientUuid: String, jpegBytes: ByteArray): String {
+    suspend fun write(clientUuid: String, jpegBytes: ByteArray): String =
+        localDataMutationEpoch.withMutation {
+            writeInsideEpoch(clientUuid, jpegBytes)
+        }
+
+    private suspend fun writeInsideEpoch(clientUuid: String, jpegBytes: ByteArray): String {
         require(jpegBytes.isNotEmpty())
         val directory = File(context.filesDir, AVATAR_DIRECTORY)
         val safeId = clientUuid.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64)
@@ -510,8 +517,8 @@ class BabyAvatarFileStore @Inject constructor(
         }
     }
 
-    suspend fun delete(relativePath: String?) {
-        if (relativePath.isNullOrBlank()) return
+    suspend fun delete(relativePath: String?) = localDataMutationEpoch.withMutation {
+        if (relativePath.isNullOrBlank()) return@withMutation
         withContext(Dispatchers.IO) {
             resolveStoredAvatar(relativePath)?.let { storedAvatar ->
                 check(!storedAvatar.exists() || storedAvatar.delete()) {
@@ -521,7 +528,7 @@ class BabyAvatarFileStore @Inject constructor(
         }
     }
 
-    suspend fun deleteAll() {
+    suspend fun deleteAll() = localDataMutationEpoch.withMutation {
         withContext(Dispatchers.IO) {
             val directory = File(context.filesDir, AVATAR_DIRECTORY).canonicalFile
             val root = context.filesDir.canonicalFile

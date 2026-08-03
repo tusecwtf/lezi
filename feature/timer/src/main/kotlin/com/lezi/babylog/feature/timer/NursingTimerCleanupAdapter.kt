@@ -13,9 +13,8 @@ import javax.inject.Singleton
 /**
  * Android adapter: session-scoped FGS stop used by local-clear finalization.
  *
- * Stop only the captured epoch. A newer timer session started after Room commit
- * (including STARTING before [NursingTimerServiceRuntime.markActive]) must keep
- * running and keep its notification.
+ * Stop only the captured epoch. STARTING is witnessed before foreground ack, so
+ * a captured start is stopped while a newer post-commit session keeps running.
  */
 @Singleton
 class NursingTimerCleanupAdapter @Inject constructor(
