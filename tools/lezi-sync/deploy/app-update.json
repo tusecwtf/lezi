@@ -3,6 +3,6 @@
   "version_code": 12,
   "version_name": "0.3.5",
   "min_supported_version_code": 6,
-  "sha256": "2d6ae83a3f66e5c579853fdd84d12c36fd02b1dfc825f2556c6c23baceb906e5",
+  "sha256": "ffeb09d49345b7899c0c8450ca2b688e8da4db3bf7eaef1ca54bdad2b8bf2f76",
   "release_notes": "0.3.5 新增管理员邀请二维码局域网首装，并提升同步、计时、清空本机数据与记录布局可靠性"
 }
