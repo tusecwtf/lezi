@@ -531,15 +531,20 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// Rotates one device session in an IMMEDIATE transaction. A token already
-    /// present in rotation history is a replay and revokes only that Device.
-    pub fn refresh_session(
+    /// Rotates one device session in an IMMEDIATE transaction. A durable
+    /// request id may replay only the exact currently derived handoff (whether
+    /// the caller retained the old or already saved the new refresh token).
+    /// Every other token in rotation history revokes only that Device.
+    pub fn refresh_session<F>(
         &self,
         now: i64,
         presented_refresh_token: &str,
-        new_access_token: &str,
-        new_refresh_token: &str,
-    ) -> Result<CreatedDeviceSession, StoreError> {
+        refresh_request_id: Option<&str>,
+        derive_tokens: F,
+    ) -> Result<CreatedDeviceSession, StoreError>
+    where
+        F: Fn(&str, &str) -> (String, String),
+    {
         let presented_hash = crate::hash_secret(presented_refresh_token);
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -547,7 +552,10 @@ impl Store {
             .query_row(
                 "
             SELECT families.id, families.name, memberships.membership_id,
-                   memberships.role, devices.device_id, device_sessions.session_id
+                   memberships.role, devices.device_id, device_sessions.session_id,
+                   device_sessions.access_expires_at,
+                   device_sessions.access_token_hash,
+                   device_sessions.refresh_token_hash
             FROM device_sessions
             JOIN devices ON devices.device_id = device_sessions.device_id
             JOIN memberships ON memberships.membership_id = devices.membership_id
@@ -566,12 +574,53 @@ impl Store {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((family_id, family_name, membership_id, _role, device_id, session_id)) = current
+        if let Some((
+            family_id,
+            family_name,
+            membership_id,
+            _role,
+            device_id,
+            session_id,
+            current_access_expires_at,
+            current_access_hash,
+            current_refresh_hash,
+        )) = current
         {
+            let (new_access_token, new_refresh_token) = derive_tokens(&family_id, &device_id);
+            let new_access_hash = crate::hash_secret(&new_access_token);
+            let new_refresh_hash = crate::hash_secret(&new_refresh_token);
+
+            // The client may have durably replaced its refresh token and then
+            // crashed before clearing the equally durable rotation id. In that
+            // state it presents the current token with the same id. Exact
+            // derived-hash equality proves this is the already completed
+            // handoff, so return it without a second history row, generation
+            // increment, expiry extension, or replay revocation.
+            if refresh_request_id.is_some()
+                && presented_hash == new_refresh_hash
+                && current_access_hash == new_access_hash
+                && current_refresh_hash == new_refresh_hash
+            {
+                transaction.commit()?;
+                return Ok(CreatedDeviceSession {
+                    family_id,
+                    membership_id,
+                    device_id,
+                    session_id,
+                    access_token: new_access_token,
+                    access_expires_at: current_access_expires_at,
+                    refresh_token: new_refresh_token,
+                    family_name,
+                });
+            }
+
             let access_expires_at = now + ACCESS_TOKEN_TTL_SECONDS;
             transaction.execute(
                 "
@@ -590,9 +639,9 @@ impl Store {
             WHERE session_id = ?4
             ",
                 params![
-                    crate::hash_secret(new_access_token),
+                    new_access_hash,
                     access_expires_at,
-                    crate::hash_secret(new_refresh_token),
+                    new_refresh_hash,
                     session_id,
                 ],
             )?;
@@ -606,9 +655,9 @@ impl Store {
                 membership_id,
                 device_id,
                 session_id,
-                access_token: new_access_token.to_owned(),
+                access_token: new_access_token,
                 access_expires_at,
-                refresh_token: new_refresh_token.to_owned(),
+                refresh_token: new_refresh_token,
                 family_name,
             });
         }
@@ -645,6 +694,74 @@ impl Store {
         }
         if terminal_reason.as_deref() == Some("family_deleted") {
             return Err(StoreError::FamilyDeleted);
+        }
+
+        // A durable client rotation id makes one crash-window retry
+        // reconstructible without storing another secret or widening replay
+        // grace. It is idempotent only while its deterministically derived
+        // hashes are still the exact active session lineage.
+        if refresh_request_id.is_some() {
+            let replay = transaction
+                .query_row(
+                    "
+                    SELECT families.id, families.name, memberships.membership_id,
+                           devices.device_id, device_sessions.session_id,
+                           device_sessions.access_expires_at,
+                           device_sessions.access_token_hash,
+                           device_sessions.refresh_token_hash
+                    FROM refresh_token_history
+                    JOIN device_sessions
+                      ON device_sessions.session_id = refresh_token_history.session_id
+                    JOIN devices ON devices.device_id = device_sessions.device_id
+                    JOIN memberships ON memberships.membership_id = devices.membership_id
+                    JOIN families ON families.id = memberships.family_id
+                    WHERE refresh_token_history.token_hash = ?1
+                      AND device_sessions.revoked_at IS NULL
+                      AND devices.status = 'active'
+                      AND memberships.left_at IS NULL
+                    ",
+                    params![presented_hash],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((
+                family_id,
+                family_name,
+                membership_id,
+                device_id,
+                session_id,
+                access_expires_at,
+                current_access_hash,
+                current_refresh_hash,
+            )) = replay
+            {
+                let (access_token, refresh_token) = derive_tokens(&family_id, &device_id);
+                if crate::hash_secret(&access_token) == current_access_hash
+                    && crate::hash_secret(&refresh_token) == current_refresh_hash
+                {
+                    return Ok(CreatedDeviceSession {
+                        family_id,
+                        membership_id,
+                        device_id,
+                        session_id,
+                        access_token,
+                        access_expires_at,
+                        refresh_token,
+                        family_name,
+                    });
+                }
+            }
         }
 
         let replayed_device = transaction

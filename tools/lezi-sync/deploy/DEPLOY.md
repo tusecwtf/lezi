@@ -10,6 +10,15 @@
 | TLS identity | Ordinary CD never rotates it; generate once only on a verified fresh data root, then validate and reuse the exact pair on every replace |
 | System `docker compose` | Not required / not installed |
 
+## 0.3.5 deployment note
+
+`0.3.5` narrows atomic-media locking so request-body validation and upload streaming no longer hold
+the per-family mutex; a stalled upload therefore cannot indefinitely block pull or commit for the
+same family. The sync wire remains compatible with supported Android clients (`min_supported_version_code = 6`).
+This release also publishes the isolated LAN invite-install listener on HTTP 8767; HTTPS sync stays
+on 8765 and container-only readiness stays on 8766. Ordinary CD must reuse the existing TLS identity
+and inherit the live bootstrap secret exactly as described below.
+
 ## One-shot (from repo root)
 
 ```bash

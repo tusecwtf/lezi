@@ -37,12 +37,12 @@ impl Store {
         "UPDATE member_login_requests SET status = 'expired' WHERE family_id = ?1 AND status IN ('pending', 'approved') AND expires_at <= ?2",
         params![family_id, now],
     )?;
-        let pending_count = transaction.query_row(
-        "SELECT COUNT(*) FROM member_login_requests WHERE family_id = ?1 AND status = 'pending' AND expires_at > ?2",
+        let open_request_count = transaction.query_row(
+        "SELECT COUNT(*) FROM member_login_requests WHERE family_id = ?1 AND status IN ('pending', 'approved') AND expires_at > ?2",
         params![family_id, now],
         |row| row.get::<_, i64>(0),
     )?;
-        if pending_count >= i64::try_from(max_pending).unwrap_or(i64::MAX) {
+        if open_request_count >= i64::try_from(max_pending).unwrap_or(i64::MAX) {
             return Err(StoreError::MemberRequestLimit);
         }
         let request_id = Uuid::new_v4().to_string();
@@ -70,6 +70,7 @@ impl Store {
             request_id,
             display_name: display_name.to_owned(),
             device_name: device_name.to_owned(),
+            status: "pending".to_owned(),
             created_at: now,
             expires_at,
         })
@@ -143,6 +144,8 @@ impl Store {
         }
     }
 
+    /// Legacy compatibility name for the Owner open-request store view.
+    /// The result contains only unexpired pending and approved-but-unclaimed rows.
     pub fn pending_member_login_requests(
         &self,
         family_id: &str,
@@ -157,9 +160,11 @@ impl Store {
         let rows = {
             let mut statement = transaction.prepare(
                 "
-            SELECT request_id, display_name, device_name, created_at, expires_at
+            SELECT request_id, display_name, device_name, status, created_at, expires_at
             FROM member_login_requests
-            WHERE family_id = ?1 AND status = 'pending' AND expires_at > ?2
+            WHERE family_id = ?1
+              AND status IN ('pending', 'approved')
+              AND expires_at > ?2
             ORDER BY created_at, request_id COLLATE BINARY
             ",
             )?;
@@ -169,8 +174,9 @@ impl Store {
                         request_id: row.get(0)?,
                         display_name: row.get(1)?,
                         device_name: row.get(2)?,
-                        created_at: row.get(3)?,
-                        expires_at: row.get(4)?,
+                        status: row.get(3)?,
+                        created_at: row.get(4)?,
+                        expires_at: row.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -329,7 +335,7 @@ impl Store {
         )
         .optional()?
         .ok_or(StoreError::MemberRequestNotFound)?;
-        if expires_at <= now && status == "pending" {
+        if expires_at <= now && matches!(status.as_str(), "pending" | "approved") {
             transaction.execute(
                 "UPDATE member_login_requests SET status = 'expired' WHERE request_id = ?1",
                 params![request_id],
@@ -341,7 +347,7 @@ impl Store {
             return Err(StoreError::MemberRequestExpired);
         }
         match status.as_str() {
-            "pending" => {
+            "pending" | "approved" => {
                 transaction.execute(
                 "UPDATE member_login_requests SET status = 'rejected', decided_at = ?1 WHERE request_id = ?2",
                 params![now, request_id],

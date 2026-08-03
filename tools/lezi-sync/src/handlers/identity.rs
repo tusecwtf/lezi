@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path as AxumPath, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -27,17 +27,24 @@ use crate::readiness::is_ready;
 use crate::store::{CreateFamilyInput, CreateMemberLoginRequestInput, StoreError};
 use crate::{
     authenticate, json_body, require_bootstrap_secret, require_owner, require_owner_root_password,
-    secure_session_token, sync_directory, ApiError, AppState, CAPABILITY_ATOMIC_BUNDLE,
-    CAPABILITY_DEVICE_SESSIONS, CAPABILITY_DISASTER_RESTORE, CAPABILITY_MEMBERSHIP_DEVICES,
-    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR, CAPABILITY_TRUSTED_HTTPS_ENDPOINT,
-    MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
+    run_blocking, secure_session_token, sync_directory, ApiError, AppState,
+    CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_DEVICE_SESSIONS, CAPABILITY_DISASTER_RESTORE,
+    CAPABILITY_MEMBERSHIP_DEVICES, CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    CAPABILITY_TRUSTED_HTTPS_ENDPOINT, MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
 };
+
+const REFRESH_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-lezi-refresh-request-id");
+const MEMBER_REQUEST_VIEW_HEADER: HeaderName =
+    HeaderName::from_static("x-lezi-member-request-view");
+const OPEN_MEMBER_REQUEST_VIEW: &str = "open-v1";
 
 pub(crate) async fn setup_status(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
     if !is_ready(&state).await {
         return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
     }
-    let family_state = if state.store.family_ids()?.is_empty() {
+    let store = state.store.clone();
+    let family_ids = run_blocking(move || Ok(store.family_ids()?)).await?;
+    let family_state = if family_ids.is_empty() {
         "empty"
     } else {
         "configured"
@@ -65,10 +72,14 @@ pub(crate) async fn create_family(
 ) -> Result<impl IntoResponse, ApiError> {
     // Once configured, every create request has the same response regardless
     // of whether the caller guessed the administrator secret.
-    if state.bootstrap_secret.is_some() && !state.store.family_ids()?.is_empty() {
+    let store = state.store.clone();
+    let family_is_configured = run_blocking(move || Ok(!store.family_ids()?.is_empty())).await?;
+    if state.bootstrap_secret.is_some() && family_is_configured {
         return Err(ApiError::conflict("Family already exists"));
     }
-    if disaster_restore::has_active_batch(&state.data_root, state.now())? {
+    let data_root = state.data_root.clone();
+    let now = state.now();
+    if run_blocking(move || disaster_restore::has_active_batch(&data_root, now)).await? {
         return Err(ApiError::conflict(
             "Family creation is unavailable while disaster restore is active",
         ));
@@ -91,26 +102,33 @@ pub(crate) async fn create_family(
     // Do not preempt Store's strict create_request_id replay here: a retry after a lost
     // response must still receive its original credentials. Store atomically rejects any
     // different request once a family exists.
-    if disaster_restore::has_active_batch(&state.data_root, state.now())? {
-        return Err(ApiError::conflict(
-            "Family creation is unavailable while disaster restore is active",
-        ));
-    }
+    let store = state.store.clone();
+    let data_root = state.data_root.clone();
+    let now = state.now();
+    let owner_root_fingerprint = state.owner_root_fingerprint.as_deref().map(str::to_owned);
     let signing_state = state.clone();
-    let result = state.store.create_family(
-        CreateFamilyInput {
-            now: state.now(),
-            create_request_id: &request.create_request_id,
-            display_name: &display_name,
-            display_name_key: &display_name_key,
-            family_name: &family_name,
-            device_name: &device_name,
-            owner_root_fingerprint: state.owner_root_fingerprint.as_deref(),
-        },
-        move |request_hash, family_id, device_id| {
-            signing_state.owner_tokens(request_hash, family_id, device_id)
-        },
-    );
+    let result = run_blocking(move || {
+        if disaster_restore::has_active_batch(&data_root, now)? {
+            return Err(ApiError::conflict(
+                "Family creation is unavailable while disaster restore is active",
+            ));
+        }
+        Ok(store.create_family(
+            CreateFamilyInput {
+                now,
+                create_request_id: &request.create_request_id,
+                display_name: &display_name,
+                display_name_key: &display_name_key,
+                family_name: &family_name,
+                device_name: &device_name,
+                owner_root_fingerprint: owner_root_fingerprint.as_deref(),
+            },
+            move |request_hash, family_id, device_id| {
+                signing_state.owner_tokens(request_hash, family_id, device_id)
+            },
+        ))
+    })
+    .await?;
     let issued = match result {
         Ok(value) => value,
         Err(StoreError::FamilyAlreadyExists) => {
@@ -164,16 +182,22 @@ async fn issue_owner_device(
     require_owner_root_password(&state, &headers, source)?;
     let request = json_body(body)?;
     let (login_request_id, device_name) = request.validate()?;
+    let store = state.store.clone();
+    let now = state.now();
     let signing_state = state.clone();
-    let issued = match state.store.owner_login(
-        state.now(),
-        &login_request_id,
-        &device_name,
-        takeover,
-        move |request_hash, family_id, device_id| {
-            signing_state.owner_login_tokens(request_hash, family_id, device_id)
-        },
-    ) {
+    let result = run_blocking(move || {
+        Ok(store.owner_login(
+            now,
+            &login_request_id,
+            &device_name,
+            takeover,
+            move |request_hash, family_id, device_id| {
+                signing_state.owner_login_tokens(request_hash, family_id, device_id)
+            },
+        ))
+    })
+    .await?;
+    let issued = match result {
         Ok(value) => value,
         Err(StoreError::FamilyNotConfigured) => {
             return Err(ApiError::conflict("Owner login is unavailable"));
@@ -219,18 +243,25 @@ pub(crate) async fn create_member_login_request(
         ));
     }
     let pending_secret = secure_session_token();
-    let pending = state
-        .store
-        .create_member_login_request(CreateMemberLoginRequestInput {
-            now: state.now(),
-            ttl_seconds: state.member_request_ttl_seconds,
-            max_pending: state.max_pending_member_requests,
-            display_name: &display_name,
-            display_name_key: &display_name_key,
-            device_name: &device_name,
-            pending_secret: &pending_secret,
-        })
-        .map_err(map_member_request_error)?;
+    let store = state.store.clone();
+    let now = state.now();
+    let ttl_seconds = state.member_request_ttl_seconds;
+    let max_pending = state.max_pending_member_requests;
+    let blocking_pending_secret = pending_secret.clone();
+    let pending = run_blocking(move || {
+        store
+            .create_member_login_request(CreateMemberLoginRequestInput {
+                now,
+                ttl_seconds,
+                max_pending,
+                display_name: &display_name,
+                display_name_key: &display_name_key,
+                device_name: &device_name,
+                pending_secret: &blocking_pending_secret,
+            })
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -247,10 +278,15 @@ pub(crate) async fn member_login_request_status(
     body: Result<Json<PendingSecretRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let request = json_body(body)?;
-    let status = state
-        .store
-        .member_login_request_status(request.validate()?, state.now())
-        .map_err(map_member_request_error)?;
+    let pending_secret = request.validate()?.to_owned();
+    let store = state.store.clone();
+    let now = state.now();
+    let status = run_blocking(move || {
+        store
+            .member_login_request_status(&pending_secret, now)
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok(Json(json!({"status": status})))
 }
 
@@ -259,10 +295,15 @@ pub(crate) async fn cancel_member_login_request(
     body: Result<Json<PendingSecretRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let request = json_body(body)?;
-    let status = state
-        .store
-        .cancel_member_login_request(request.validate()?, state.now())
-        .map_err(map_member_request_error)?;
+    let pending_secret = request.validate()?.to_owned();
+    let store = state.store.clone();
+    let now = state.now();
+    let status = run_blocking(move || {
+        store
+            .cancel_member_login_request(&pending_secret, now)
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok(Json(json!({"ok": true, "status": status})))
 }
 
@@ -270,10 +311,22 @@ pub(crate) async fn list_member_login_requests(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = require_owner(&state, &headers)?;
-    let requests = state
-        .store
-        .pending_member_login_requests(&principal.family_id, state.now())?;
+    let principal = require_owner(&state, &headers).await?;
+    // Some pre-release APKs already used versionCode 12 without understanding an
+    // approved row. Require an explicit shape capability instead of guessing from
+    // versionCode; legacy clients retain the pending-only response they understand.
+    let include_approved = headers
+        .get(MEMBER_REQUEST_VIEW_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == OPEN_MEMBER_REQUEST_VIEW);
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let now = state.now();
+    let mut requests =
+        run_blocking(move || Ok(store.pending_member_login_requests(&family_id, now)?)).await?;
+    if !include_approved {
+        requests.retain(|request| request.status == "pending");
+    }
     Ok(Json(json!({"requests": requests})))
 }
 
@@ -283,16 +336,18 @@ pub(crate) async fn approve_new_member_login_request(
     headers: HeaderMap,
     body: Result<Json<EmptyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = require_owner(&state, &headers)?;
+    let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
-    state
-        .store
-        .approve_new_member_login_request(
-            &principal.family_id,
-            &request_id.to_string(),
-            state.now(),
-        )
-        .map_err(map_member_request_error)?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let request_id = request_id.to_string();
+    let now = state.now();
+    run_blocking(move || {
+        store
+            .approve_new_member_login_request(&family_id, &request_id, now)
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok(Json(json!({"ok": true, "status": "approved"})))
 }
 
@@ -302,17 +357,19 @@ pub(crate) async fn bind_existing_member_login_request(
     headers: HeaderMap,
     body: Result<Json<BindExistingMemberRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = require_owner(&state, &headers)?;
+    let principal = require_owner(&state, &headers).await?;
     let request = json_body(body)?;
-    state
-        .store
-        .bind_existing_member_login_request(
-            &principal.family_id,
-            &request_id.to_string(),
-            &request.validate()?,
-            state.now(),
-        )
-        .map_err(map_member_request_error)?;
+    let membership_id = request.validate()?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let request_id = request_id.to_string();
+    let now = state.now();
+    run_blocking(move || {
+        store
+            .bind_existing_member_login_request(&family_id, &request_id, &membership_id, now)
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok(Json(json!({"ok": true, "status": "approved"})))
 }
 
@@ -322,12 +379,18 @@ pub(crate) async fn reject_member_login_request(
     headers: HeaderMap,
     body: Result<Json<EmptyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = require_owner(&state, &headers)?;
+    let principal = require_owner(&state, &headers).await?;
     let _ = json_body(body)?;
-    state
-        .store
-        .reject_member_login_request(&principal.family_id, &request_id.to_string(), state.now())
-        .map_err(map_member_request_error)?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let request_id = request_id.to_string();
+    let now = state.now();
+    run_blocking(move || {
+        store
+            .reject_member_login_request(&family_id, &request_id, now)
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok(Json(json!({"ok": true, "status": "rejected"})))
 }
 
@@ -336,15 +399,18 @@ pub(crate) async fn claim_member_login_request(
     body: Result<Json<PendingSecretRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let request = json_body(body)?;
+    let pending_secret = request.validate()?.to_owned();
+    let store = state.store.clone();
+    let now = state.now();
     let signing_state = state.clone();
-    let issued = state
-        .store
-        .claim_member_login_request(
-            request.validate()?,
-            state.now(),
-            move |hash, family, device| signing_state.member_request_tokens(hash, family, device),
-        )
-        .map_err(map_member_request_error)?;
+    let issued = run_blocking(move || {
+        store
+            .claim_member_login_request(&pending_secret, now, move |hash, family, device| {
+                signing_state.member_request_tokens(hash, family, device)
+            })
+            .map_err(map_member_request_error)
+    })
+    .await?;
     Ok(Json(json!({
         "family_id": issued.family_id,
         "membership_id": issued.membership_id,
@@ -364,20 +430,26 @@ pub(crate) async fn create_member_login_grant(
     headers: HeaderMap,
     body: Result<Json<CreateMemberLoginGrantRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let principal = require_owner(&state, &headers)?;
+    let principal = require_owner(&state, &headers).await?;
     let request = json_body(body)?;
     let membership_id = request.validate()?;
     let grant = secure_session_token();
-    let created = state
-        .store
-        .create_member_login_grant(
-            &principal.family_id,
-            &membership_id,
-            &grant,
-            state.now(),
-            MEMBER_LOGIN_GRANT_TTL_SECONDS,
-        )
-        .map_err(map_member_login_grant_error)?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let blocking_grant = grant.clone();
+    let now = state.now();
+    let created = run_blocking(move || {
+        store
+            .create_member_login_grant(
+                &family_id,
+                &membership_id,
+                &blocking_grant,
+                now,
+                MEMBER_LOGIN_GRANT_TTL_SECONDS,
+            )
+            .map_err(map_member_login_grant_error)
+    })
+    .await?;
     let mut response = json!({
         "grant": grant,
         "family_name": created.family_name,
@@ -402,18 +474,18 @@ pub(crate) async fn claim_member_login_grant(
 ) -> Result<Json<Value>, ApiError> {
     let request = json_body(body)?;
     let (grant, device_name) = request.validate()?;
+    let grant = grant.to_owned();
+    let store = state.store.clone();
+    let now = state.now();
     let signing_state = state.clone();
-    let issued = state
-        .store
-        .claim_member_login_grant(
-            grant,
-            &device_name,
-            state.now(),
-            move |hash, family, device| {
+    let issued = run_blocking(move || {
+        store
+            .claim_member_login_grant(&grant, &device_name, now, move |hash, family, device| {
                 signing_state.member_login_grant_tokens(hash, family, device)
-            },
-        )
-        .map_err(map_member_login_grant_error)?;
+            })
+            .map_err(map_member_login_grant_error)
+    })
+    .await?;
     Ok(Json(json!({
         "family_id": issued.family_id,
         "membership_id": issued.membership_id,
@@ -465,18 +537,35 @@ fn map_member_request_error(error: StoreError) -> ApiError {
 
 pub(crate) async fn refresh_session(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Result<Json<RefreshSessionRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let request = json_body(body)?;
-    let refresh_token = request.validate()?;
-    let access_token = secure_session_token();
-    let next_refresh_token = secure_session_token();
-    let refreshed = match state.store.refresh_session(
-        state.now(),
-        refresh_token,
-        &access_token,
-        &next_refresh_token,
-    ) {
+    let refresh_token = request.validate()?.to_owned();
+    let refresh_request_id = parse_refresh_request_id(&headers)?;
+    let fallback_access = secure_session_token();
+    let fallback_refresh = secure_session_token();
+    let store = state.store.clone();
+    let signing_state = state.clone();
+    let now = state.now();
+    let refresh_result = run_blocking(move || {
+        let derivation_request_id = refresh_request_id.clone();
+        Ok(store.refresh_session(
+            now,
+            &refresh_token,
+            refresh_request_id.as_deref(),
+            move |family_id, device_id| {
+                derivation_request_id.as_deref().map_or_else(
+                    || (fallback_access.clone(), fallback_refresh.clone()),
+                    |request_id| {
+                        signing_state.refresh_request_tokens(request_id, family_id, device_id)
+                    },
+                )
+            },
+        ))
+    })
+    .await?;
+    let refreshed = match refresh_result {
         Ok(value) => value,
         Err(StoreError::InvalidRefreshToken) => {
             return Err(ApiError::unauthorized_code(
@@ -510,9 +599,11 @@ pub(crate) async fn refresh_session(
         }
         Err(error) => return Err(error.into()),
     };
-    let role = state
-        .store
-        .authenticate(&refreshed.access_token, state.now())?
+    let store = state.store.clone();
+    let rotated_access = refreshed.access_token.clone();
+    let now = state.now();
+    let role = run_blocking(move || Ok(store.authenticate(&rotated_access, now)?))
+        .await?
         .ok_or_else(|| ApiError::internal("rotated session is not authenticatable"))?
         .role;
     Ok(Json(json!({
@@ -529,6 +620,26 @@ pub(crate) async fn refresh_session(
     })))
 }
 
+fn parse_refresh_request_id(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get(&REFRESH_REQUEST_ID_HEADER) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| ApiError::unprocessable("Refresh request id is invalid"))?
+        .trim();
+    if !(16..=128).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ApiError::unprocessable(
+            "Refresh request id must be 16-128 URL-safe characters",
+        ));
+    }
+    Ok(Some(value.to_owned()))
+}
+
 /// Owner-only rename of the shared family name.
 ///
 /// Body: `{"family_name": "…"}` — current wire requires a non-empty name so
@@ -538,12 +649,13 @@ pub(crate) async fn rename_family(
     headers: HeaderMap,
     body: Result<Json<RenameFamilyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = require_owner(&state, &headers)?;
+    let principal = require_owner(&state, &headers).await?;
     let request = json_body(body)?;
     let family_name = request.validate()?;
-    state
-        .store
-        .rename_family(&principal.family_id, &family_name)?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let blocking_family_name = family_name.clone();
+    run_blocking(move || Ok(store.rename_family(&family_id, &blocking_family_name)?)).await?;
     Ok(Json(json!({
         "ok": true,
         "family_name": family_name,
@@ -555,18 +667,19 @@ pub(crate) async fn leave(
     headers: HeaderMap,
     body: Result<Json<EmptyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
     let _ = json_body(body)?;
     if principal.role == "owner" {
         return Err(ApiError::forbidden(
             "Owner must delete the family instead of leaving",
         ));
     }
-    state.store.hard_delete_membership(
-        &principal.family_id,
-        &principal.membership_id,
-        state.now(),
-    )?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let membership_id = principal.membership_id;
+    let now = state.now();
+    run_blocking(move || Ok(store.hard_delete_membership(&family_id, &membership_id, now)?))
+        .await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -575,11 +688,13 @@ pub(crate) async fn logout_current_device(
     headers: HeaderMap,
     body: Result<Json<EmptyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
     let _ = json_body(body)?;
-    state
-        .store
-        .revoke_family_device(&principal.family_id, &principal.device_id, state.now())?;
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let device_id = principal.device_id;
+    let now = state.now();
+    run_blocking(move || Ok(store.revoke_family_device(&family_id, &device_id, now)?)).await?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -589,45 +704,50 @@ pub(crate) async fn delete_family(
     headers: HeaderMap,
     body: Result<Json<DeleteFamilyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = require_owner(&state, &headers)?;
+    let principal = require_owner(&state, &headers).await?;
     require_owner_root_password(&state, &headers, source)?;
     let confirmed_family_name = json_body(body)?.validate()?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let family_media = state.media_root.join(&principal.family_id);
-    match state
-        .store
-        .delete_family(&principal.family_id, &confirmed_family_name)
-    {
-        Ok(()) => {}
-        Err(StoreError::FamilyNameMismatch) => {
-            return Err(ApiError::conflict(
-                "Family name confirmation does not match",
-            ));
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        let family_media = blocking_state.media_root.join(&principal.family_id);
+        match blocking_state
+            .store
+            .delete_family(&principal.family_id, &confirmed_family_name)
+        {
+            Ok(()) => {}
+            Err(StoreError::FamilyNameMismatch) => {
+                return Err(ApiError::conflict(
+                    "Family name confirmation does not match",
+                ));
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => return Err(error.into()),
-    }
-    if family_media.exists() {
-        match fs::remove_dir_all(&family_media) {
-            Ok(()) => {
-                if let Err(error) = sync_directory(&state.media_root) {
+        if family_media.exists() {
+            match fs::remove_dir_all(&family_media) {
+                Ok(()) => {
+                    if let Err(error) = sync_directory(&blocking_state.media_root) {
+                        tracing::error!(
+                            family_id = %principal.family_id,
+                            path = %blocking_state.media_root.display(),
+                            %error,
+                            "family metadata was deleted; media-root sync will be retried by startup cleanup"
+                        );
+                    }
+                }
+                Err(error) => {
                     tracing::error!(
                         family_id = %principal.family_id,
-                        path = %state.media_root.display(),
+                        path = %family_media.display(),
                         %error,
-                        "family metadata was deleted; media-root sync will be retried by startup cleanup"
+                        "family metadata was deleted; orphan media cleanup will retry on startup"
                     );
                 }
             }
-            Err(error) => {
-                tracing::error!(
-                    family_id = %principal.family_id,
-                    path = %family_media.display(),
-                    %error,
-                    "family metadata was deleted; orphan media cleanup will retry on startup"
-                );
-            }
         }
-    }
+        Ok(())
+    })
+    .await?;
     Ok(Json(json!({"ok": true})))
 }

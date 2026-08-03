@@ -100,10 +100,13 @@ pub struct DisasterRestoreIdentityInput<'a> {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// Legacy compatibility name for an Owner-visible open request DTO.
+/// Rows are limited to `pending` and `approved`-but-unclaimed; inspect `status`.
 pub struct PendingMemberLoginRequest {
     pub request_id: String,
     pub display_name: String,
     pub device_name: String,
+    pub status: String,
     pub created_at: i64,
     pub expires_at: i64,
 }
@@ -240,6 +243,8 @@ pub enum StoreError {
     ForbiddenCustomItem,
     #[error("care plan change forbidden for this membership")]
     ForbiddenCarePlan,
+    #[error("record change forbidden for this membership")]
+    ForbiddenRecord,
     #[error("only the family owner may manage an anonymous shared fact")]
     ForbiddenAnonymousFact,
     #[error("deleted custom item cannot be resurrected")]

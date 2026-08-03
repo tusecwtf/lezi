@@ -28,8 +28,8 @@ use crate::model::{
 };
 use crate::store::{DisasterRestoreIdentityInput, StoreError};
 use crate::{
-    constant_time_eq, derive_token, json_body, require_owner_root_password, secure_directory,
-    secure_file, sync_directory, write_private_file, ApiError, AppState,
+    constant_time_eq, derive_token, json_body, require_owner_root_password, run_blocking,
+    secure_directory, secure_file, sync_directory, write_private_file, ApiError, AppState,
 };
 
 const RESTORE_PROTOCOL_VERSION: u16 = 1;
@@ -104,13 +104,16 @@ pub(crate) async fn start(
     headers: HeaderMap,
     body: Result<Json<StartRestoreRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    if !state.store.family_ids()?.is_empty() {
+    let store = state.store.clone();
+    if run_blocking(move || Ok(!store.family_ids()?.is_empty())).await? {
         return Err(ApiError::conflict(
             "Disaster restore requires an empty family server",
         ));
     }
     require_owner_root_password(&state, &headers, source)?;
-    cleanup_expired(&state.data_root, state.now())?;
+    let data_root = state.data_root.clone();
+    let now = state.now();
+    run_blocking(move || cleanup_expired(&data_root, now)).await?;
     let request = json_body(body)?;
     validate_request_id(&request.request_id)?;
     let family_id = Uuid::parse_str(request.family_id.trim())
@@ -123,59 +126,69 @@ pub(crate) async fn start(
 
     let provisioning_lock = state.family_lock(crate::PROVISIONING_LOCK_KEY).await;
     let _provisioning_guard = provisioning_lock.lock().await;
-    if !state.store.family_ids()?.is_empty() {
-        return Err(ApiError::conflict(
-            "Disaster restore requires an empty family server",
-        ));
-    }
-    fs::create_dir_all(restore_root(&state.data_root))?;
-    secure_directory(&restore_root(&state.data_root))?;
-    if let Some(journal) = find_by_start_request(&state.data_root, &request.request_id)? {
-        if journal.family_id != family_id
-            || journal.family_name != family_name
-            || journal.owner_display_name != owner_display_name
-            || journal.device_name != device_name
-        {
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        if !blocking_state.store.family_ids()?.is_empty() {
             return Err(ApiError::conflict(
-                "restore request_id conflicts with stored batch",
+                "Disaster restore requires an empty family server",
             ));
         }
-        return Ok(start_response(&state, &journal, StatusCode::OK));
-    }
+        fs::create_dir_all(restore_root(&blocking_state.data_root))?;
+        secure_directory(&restore_root(&blocking_state.data_root))?;
+        if let Some(journal) =
+            find_by_start_request(&blocking_state.data_root, &request.request_id)?
+        {
+            if journal.family_id != family_id
+                || journal.family_name != family_name
+                || journal.owner_display_name != owner_display_name
+                || journal.device_name != device_name
+            {
+                return Err(ApiError::conflict(
+                    "restore request_id conflicts with stored batch",
+                ));
+            }
+            return Ok(start_response(&blocking_state, &journal, StatusCode::OK));
+        }
 
-    if has_active_batch(&state.data_root, state.now())? {
-        return Err(ApiError::conflict(
-            "Another disaster restore batch is already active",
-        ));
-    }
-    let batch_id = Uuid::new_v4().to_string();
-    let recovery_token = recovery_token(&state, &request.request_id, &batch_id);
-    let batch_dir = batch_dir(&state.data_root, &batch_id)?;
-    fs::create_dir_all(batch_dir.join("media"))?;
-    secure_directory(&batch_dir)?;
-    secure_directory(&batch_dir.join("media"))?;
-    let journal = RestoreJournal {
-        protocol_version: RESTORE_PROTOCOL_VERSION,
-        batch_id,
-        start_request_id: request.request_id,
-        family_id,
-        family_name,
-        owner_display_name,
-        device_name,
-        owner_membership_id: Uuid::new_v4().to_string(),
-        device_id: Uuid::new_v4().to_string(),
-        session_id: Uuid::new_v4().to_string(),
-        access_expires_at: state.now() + ACCESS_TOKEN_TTL_SECONDS,
-        recovery_token_hash: crate::hash_secret(&recovery_token),
-        created_at: state.now(),
-        expires_at: state.now() + RESTORE_TTL_SECONDS,
-        status: "started".to_owned(),
-        manifest_request_id: None,
-        manifest_hash: None,
-        commit_request_id: None,
-    };
-    save_journal(&state.data_root, &journal)?;
-    Ok(start_response(&state, &journal, StatusCode::CREATED))
+        if has_active_batch(&blocking_state.data_root, blocking_state.now())? {
+            return Err(ApiError::conflict(
+                "Another disaster restore batch is already active",
+            ));
+        }
+        let batch_id = Uuid::new_v4().to_string();
+        let recovery_token = recovery_token(&blocking_state, &request.request_id, &batch_id);
+        let batch_dir = batch_dir(&blocking_state.data_root, &batch_id)?;
+        fs::create_dir_all(batch_dir.join("media"))?;
+        secure_directory(&batch_dir)?;
+        secure_directory(&batch_dir.join("media"))?;
+        let journal = RestoreJournal {
+            protocol_version: RESTORE_PROTOCOL_VERSION,
+            batch_id,
+            start_request_id: request.request_id,
+            family_id,
+            family_name,
+            owner_display_name,
+            device_name,
+            owner_membership_id: Uuid::new_v4().to_string(),
+            device_id: Uuid::new_v4().to_string(),
+            session_id: Uuid::new_v4().to_string(),
+            access_expires_at: blocking_state.now() + ACCESS_TOKEN_TTL_SECONDS,
+            recovery_token_hash: crate::hash_secret(&recovery_token),
+            created_at: blocking_state.now(),
+            expires_at: blocking_state.now() + RESTORE_TTL_SECONDS,
+            status: "started".to_owned(),
+            manifest_request_id: None,
+            manifest_hash: None,
+            commit_request_id: None,
+        };
+        save_journal(&blocking_state.data_root, &journal)?;
+        Ok(start_response(
+            &blocking_state,
+            &journal,
+            StatusCode::CREATED,
+        ))
+    })
+    .await
 }
 
 pub(crate) async fn put_manifest(
@@ -186,29 +199,36 @@ pub(crate) async fn put_manifest(
 ) -> Result<Json<Value>, ApiError> {
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
-    let mut journal = load_authorized(&state, &batch_id, &headers)?;
-    require_open(&journal)?;
-    let request = json_body(body)?;
-    validate_request_id(&request.request_id)?;
-    let manifest = validate_manifest(request, state.max_media_bytes)?;
-    let encoded = serde_json::to_vec(&manifest).map_err(restore_json_error)?;
-    let hash = hex::encode(Sha256::digest(&encoded));
-    if let Some(stored_hash) = journal.manifest_hash.as_deref() {
-        if journal.manifest_request_id.as_deref() != Some(manifest.request_id.as_str())
-            || stored_hash != hash
-        {
-            return Err(ApiError::conflict(
-                "manifest request_id or content conflicts with stored batch",
-            ));
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        let mut journal = load_authorized(&blocking_state, &batch_id, &headers)?;
+        require_open(&journal)?;
+        let request = json_body(body)?;
+        validate_request_id(&request.request_id)?;
+        let manifest = validate_manifest(request, blocking_state.max_media_bytes)?;
+        let encoded = serde_json::to_vec(&manifest).map_err(restore_json_error)?;
+        let hash = hex::encode(Sha256::digest(&encoded));
+        if let Some(stored_hash) = journal.manifest_hash.as_deref() {
+            if journal.manifest_request_id.as_deref() != Some(manifest.request_id.as_str())
+                || stored_hash != hash
+            {
+                return Err(ApiError::conflict(
+                    "manifest request_id or content conflicts with stored batch",
+                ));
+            }
+            return Ok(Json(batch_status(&blocking_state, &journal)?));
         }
-        return Ok(Json(batch_status(&state, &journal)?));
-    }
-    write_private_file(&manifest_path(&state.data_root, &batch_id)?, &encoded)?;
-    journal.status = "manifest_received".to_owned();
-    journal.manifest_request_id = Some(manifest.request_id.clone());
-    journal.manifest_hash = Some(hash);
-    save_journal(&state.data_root, &journal)?;
-    Ok(Json(batch_status(&state, &journal)?))
+        write_private_file(
+            &manifest_path(&blocking_state.data_root, &batch_id)?,
+            &encoded,
+        )?;
+        journal.status = "manifest_received".to_owned();
+        journal.manifest_request_id = Some(manifest.request_id.clone());
+        journal.manifest_hash = Some(hash);
+        save_journal(&blocking_state.data_root, &journal)?;
+        Ok(Json(batch_status(&blocking_state, &journal)?))
+    })
+    .await
 }
 
 pub(crate) async fn put_media(
@@ -219,25 +239,29 @@ pub(crate) async fn put_media(
 ) -> Result<Json<Value>, ApiError> {
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
-    let journal = load_authorized(&state, &batch_id, &headers)?;
-    require_open(&journal)?;
-    let media_uuid = Uuid::parse_str(client_uuid.trim())
-        .map_err(|_| ApiError::unprocessable("media client_uuid must be a UUID"))?
-        .to_string();
-    let manifest = load_verified_manifest(&state.data_root, &journal)?;
-    let spec = manifest
-        .media
-        .iter()
-        .find(|spec| spec.client_uuid == media_uuid)
-        .ok_or_else(|| ApiError::not_found("media is not listed in restore manifest"))?;
-    if bytes.len() != spec.byte_size || hex::encode(Sha256::digest(&bytes)) != spec.sha256 {
-        return Err(ApiError::unprocessable(
-            "restore media size or sha256 does not match manifest",
-        ));
-    }
-    let path = staged_media_path(&state.data_root, &batch_id, &media_uuid)?;
-    write_private_file(&path, &bytes)?;
-    Ok(Json(batch_status(&state, &journal)?))
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        let journal = load_authorized(&blocking_state, &batch_id, &headers)?;
+        require_open(&journal)?;
+        let media_uuid = Uuid::parse_str(client_uuid.trim())
+            .map_err(|_| ApiError::unprocessable("media client_uuid must be a UUID"))?
+            .to_string();
+        let manifest = load_verified_manifest(&blocking_state.data_root, &journal)?;
+        let spec = manifest
+            .media
+            .iter()
+            .find(|spec| spec.client_uuid == media_uuid)
+            .ok_or_else(|| ApiError::not_found("media is not listed in restore manifest"))?;
+        if bytes.len() != spec.byte_size || hex::encode(Sha256::digest(&bytes)) != spec.sha256 {
+            return Err(ApiError::unprocessable(
+                "restore media size or sha256 does not match manifest",
+            ));
+        }
+        let path = staged_media_path(&blocking_state.data_root, &batch_id, &media_uuid)?;
+        write_private_file(&path, &bytes)?;
+        Ok(Json(batch_status(&blocking_state, &journal)?))
+    })
+    .await
 }
 
 pub(crate) async fn status(
@@ -247,8 +271,12 @@ pub(crate) async fn status(
 ) -> Result<Json<Value>, ApiError> {
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
-    let journal = load_authorized(&state, &batch_id, &headers)?;
-    Ok(Json(batch_status(&state, &journal)?))
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        let journal = load_authorized(&blocking_state, &batch_id, &headers)?;
+        Ok(Json(batch_status(&blocking_state, &journal)?))
+    })
+    .await
 }
 
 pub(crate) async fn cancel(
@@ -258,19 +286,23 @@ pub(crate) async fn cancel(
 ) -> Result<Json<Value>, ApiError> {
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
-    let mut journal = load_authorized(&state, &batch_id, &headers)?;
-    if journal.status == "committed" {
-        return Err(ApiError::conflict(
-            "committed restore batch cannot be cancelled",
-        ));
-    }
-    journal.status = "cancelled".to_owned();
-    save_journal(&state.data_root, &journal)?;
-    let media_dir = batch_dir(&state.data_root, &batch_id)?.join("media");
-    if media_dir.exists() {
-        fs::remove_dir_all(&media_dir)?;
-    }
-    Ok(Json(batch_status(&state, &journal)?))
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        let mut journal = load_authorized(&blocking_state, &batch_id, &headers)?;
+        if journal.status == "committed" {
+            return Err(ApiError::conflict(
+                "committed restore batch cannot be cancelled",
+            ));
+        }
+        journal.status = "cancelled".to_owned();
+        save_journal(&blocking_state.data_root, &journal)?;
+        let media_dir = batch_dir(&blocking_state.data_root, &batch_id)?.join("media");
+        if media_dir.exists() {
+            fs::remove_dir_all(&media_dir)?;
+        }
+        Ok(Json(batch_status(&blocking_state, &journal)?))
+    })
+    .await
 }
 
 pub(crate) async fn commit(
@@ -282,71 +314,85 @@ pub(crate) async fn commit(
 ) -> Result<Json<Value>, ApiError> {
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
-    let mut journal = load_authorized(&state, &batch_id, &headers)?;
-    require_owner_root_password(&state, &headers, source)?;
-    let request = json_body(body)?;
-    validate_request_id(&request.request_id)?;
-    if journal.status == "committed" {
-        if journal.commit_request_id.as_deref() != Some(request.request_id.as_str()) {
+    let blocking_state = state.clone();
+    run_blocking(move || {
+        let mut journal = load_authorized(&blocking_state, &batch_id, &headers)?;
+        require_owner_root_password(&blocking_state, &headers, source)?;
+        let request = json_body(body)?;
+        validate_request_id(&request.request_id)?;
+        if journal.status == "committed" {
+            if journal.commit_request_id.as_deref() != Some(request.request_id.as_str()) {
+                return Err(ApiError::conflict(
+                    "commit request_id conflicts with stored batch",
+                ));
+            }
+            return Ok(Json(commit_response(&blocking_state, &journal)));
+        }
+        require_open(&journal)?;
+        if journal
+            .commit_request_id
+            .as_deref()
+            .is_some_and(|stored| stored != request.request_id)
+        {
             return Err(ApiError::conflict(
                 "commit request_id conflicts with stored batch",
             ));
         }
-        return Ok(Json(commit_response(&state, &journal)));
-    }
-    require_open(&journal)?;
-    if journal
-        .commit_request_id
-        .as_deref()
-        .is_some_and(|stored| stored != request.request_id)
-    {
-        return Err(ApiError::conflict(
-            "commit request_id conflicts with stored batch",
-        ));
-    }
-    let manifest = load_verified_manifest(&state.data_root, &journal)?;
-    ensure_all_media_ready(&state.data_root, &journal, &manifest)?;
-    install_media_before_activation(&state, &journal, &manifest)?;
+        let manifest = load_verified_manifest(&blocking_state.data_root, &journal)?;
+        ensure_all_media_ready(&blocking_state.data_root, &journal, &manifest)?;
+        install_media_before_activation(&blocking_state, &journal, &manifest)?;
 
-    let access_token = restore_access_token(&state, &journal);
-    let refresh_token = restore_refresh_token(&state, &journal);
-    let result = state.store.activate_disaster_restore(
-        DisasterRestoreIdentityInput {
-            now: state.now(),
-            family_id: &journal.family_id,
-            family_name: &journal.family_name,
-            owner_membership_id: &journal.owner_membership_id,
-            owner_display_name: &journal.owner_display_name,
-            owner_display_name_key: &normalized_display_name_key(&journal.owner_display_name),
-            device_id: &journal.device_id,
-            device_name: &journal.device_name,
-            session_id: &journal.session_id,
-            access_token: &access_token,
-            access_expires_at: journal.access_expires_at,
-            refresh_token: &refresh_token,
-            owner_root_fingerprint: state.owner_root_fingerprint.as_deref(),
-        },
-        manifest.entities,
-    );
-    match result {
-        Ok(_) => {}
-        Err(StoreError::FamilyAlreadyExists)
-            if state.store.family_ids()? == BTreeSet::from([journal.family_id.clone()]) =>
-        {
-            // SQLite activation committed before a lost response/journal write. All response
-            // credentials are deterministic and can be safely replayed.
+        // The batch may have been open for almost its full 24-hour upload window.
+        // Persist the commit-time session expiry and idempotency key before SQLite
+        // activation so a crash after activation can replay exactly the credential
+        // tuple already stored in `device_sessions`.
+        if journal.commit_request_id.is_none() {
+            journal.access_expires_at = blocking_state.now() + ACCESS_TOKEN_TTL_SECONDS;
+            journal.commit_request_id = Some(request.request_id.clone());
+            save_journal(&blocking_state.data_root, &journal)?;
         }
-        Err(StoreError::FamilyAlreadyExists) => {
-            return Err(ApiError::conflict(
-                "Disaster restore requires an empty family server",
-            ));
+
+        let access_token = restore_access_token(&blocking_state, &journal);
+        let refresh_token = restore_refresh_token(&blocking_state, &journal);
+        let result = blocking_state.store.activate_disaster_restore(
+            DisasterRestoreIdentityInput {
+                now: blocking_state.now(),
+                family_id: &journal.family_id,
+                family_name: &journal.family_name,
+                owner_membership_id: &journal.owner_membership_id,
+                owner_display_name: &journal.owner_display_name,
+                owner_display_name_key: &normalized_display_name_key(&journal.owner_display_name),
+                device_id: &journal.device_id,
+                device_name: &journal.device_name,
+                session_id: &journal.session_id,
+                access_token: &access_token,
+                access_expires_at: journal.access_expires_at,
+                refresh_token: &refresh_token,
+                owner_root_fingerprint: blocking_state.owner_root_fingerprint.as_deref(),
+            },
+            manifest.entities,
+        );
+        match result {
+            Ok(_) => {}
+            Err(StoreError::FamilyAlreadyExists)
+                if blocking_state.store.family_ids()?
+                    == BTreeSet::from([journal.family_id.clone()]) =>
+            {
+                // SQLite activation committed before a lost response/journal write. All response
+                // credentials are deterministic and can be safely replayed.
+            }
+            Err(StoreError::FamilyAlreadyExists) => {
+                return Err(ApiError::conflict(
+                    "Disaster restore requires an empty family server",
+                ));
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) => return Err(error.into()),
-    }
-    journal.status = "committed".to_owned();
-    journal.commit_request_id = Some(request.request_id);
-    save_journal(&state.data_root, &journal)?;
-    Ok(Json(commit_response(&state, &journal)))
+        journal.status = "committed".to_owned();
+        save_journal(&blocking_state.data_root, &journal)?;
+        Ok(Json(commit_response(&blocking_state, &journal)))
+    })
+    .await
 }
 
 pub(crate) fn has_active_batch(data_root: &Path, now: i64) -> Result<bool, ApiError> {

@@ -257,6 +257,40 @@ fn load_existing_entities(
     Ok(existing)
 }
 
+fn load_family_custom_items(
+    transaction: &Transaction<'_>,
+    family_id: &str,
+) -> Result<HashMap<EntityKey, ExistingEntity>, StoreError> {
+    let mut statement = transaction.prepare(
+        "
+        SELECT client_uuid, updated_at, deleted_at, payload_json
+        FROM entities
+        WHERE family_id = ?1 AND entity_type = 'custom_item'
+        ",
+    )?;
+    let rows = statement.query_map(params![family_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut existing = HashMap::new();
+    for row in rows {
+        let (client_uuid, updated_at, deleted_at, payload_json) = row?;
+        existing.insert(
+            ("custom_item".to_owned(), client_uuid),
+            ExistingEntity {
+                updated_at,
+                deleted_at,
+                payload: parse_payload(&payload_json)?,
+            },
+        );
+    }
+    Ok(existing)
+}
+
 /// Rewrite or drop `sync_bundles` rows that still reference a departed membership.
 ///
 /// Called from membership hard-delete inside the same SQLite transaction. Staging
@@ -391,6 +425,8 @@ fn stamp_and_authorize_custom_items(
 }
 
 /// Record authorship belongs to the authenticated principal, never to client claims.
+/// Once published, only that membership (across all of its devices) or the
+/// family owner may edit, tombstone, or restore the record.
 fn canonicalize_record_authors(
     role: &str,
     membership_id: &str,
@@ -409,6 +445,9 @@ fn canonicalize_record_authors(
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty());
             if let Some(value) = value {
+                if role != "owner" && value != membership_id {
+                    return Err(StoreError::ForbiddenRecord);
+                }
                 entity.payload.insert(
                     "created_by_membership_id".to_owned(),
                     Value::String(value.to_owned()),
@@ -919,6 +958,11 @@ fn validate_push(
             live_custom_item_ids.remove(&entity.client_uuid);
         }
     }
+    if live_custom_item_ids.len() > 10 {
+        return Err(StoreError::UnresolvedReference(
+            "family supports at most 10 live custom items".to_owned(),
+        ));
+    }
     let referential_custom_item_ids = existing
         .keys()
         .filter(|(entity_type, _)| entity_type == "custom_item")
@@ -1119,6 +1163,16 @@ fn validate_push(
                     "log media record_client_uuid does not exist".to_owned(),
                 ));
             }
+            if role != "owner" {
+                let creator = effective_records[record_id]
+                    .get("created_by_membership_id")
+                    .and_then(Value::as_str)
+                    .filter(|creator| !creator.is_empty())
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                if creator != membership_id {
+                    return Err(StoreError::ForbiddenRecord);
+                }
+            }
             let record_baby_id = effective_records[record_id]["baby_client_uuid"]
                 .as_str()
                 .ok_or(StoreError::InvalidStoredPayload)?;
@@ -1251,6 +1305,50 @@ fn media_association(payload: &Map<String, Value>) -> Result<MediaAssociation, S
 }
 
 impl Store {
+    /// Remove abandoned, unpublished bundle manifests before applying the
+    /// per-family open-staging cap. Committed bundles are durable history and
+    /// are never selected by this lifecycle.
+    pub fn expire_open_staging_bundles(
+        &self,
+        family_id: &str,
+        created_at_or_before: i64,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let bundle_ids = {
+            let mut statement = transaction.prepare(
+                "
+                SELECT bundle_id
+                FROM sync_bundles
+                WHERE family_id = ?1
+                  AND status = 'staging'
+                  AND created_at <= ?2
+                ORDER BY bundle_id COLLATE BINARY
+                ",
+            )?;
+            let rows = statement
+                .query_map(params![family_id, created_at_or_before], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if !bundle_ids.is_empty() {
+            transaction.execute(
+                "
+                DELETE FROM sync_bundles
+                WHERE family_id = ?1
+                  AND status = 'staging'
+                  AND created_at <= ?2
+                ",
+                params![family_id, created_at_or_before],
+            )?;
+        }
+        transaction.commit()?;
+        self.secure_database_files()?;
+        Ok(bundle_ids)
+    }
+
     /// Stage (or refresh) an atomic bundle: root + media metadata only.
     /// Nothing is visible to pull until [Self::commit_bundle].
     ///
@@ -1288,6 +1386,7 @@ impl Store {
         package.extend(media);
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        existing.extend(load_family_custom_items(&transaction, family_id)?);
         stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // CarePlan collision authorization must inspect the caller's creator
         // claim before equal-LWW canonicalization replaces it with the published
@@ -1640,6 +1739,7 @@ impl Store {
         let original_count = package.len();
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        existing.extend(load_family_custom_items(&transaction, family_id)?);
         stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // A competing CarePlan can publish after this bundle was staged. Inspect
         // the complete staged package before LWW removes an equal/stale root so a

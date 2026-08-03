@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::DefaultBodyLimit;
@@ -51,6 +51,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use store::{Principal, Store, StoreError};
 use tokio::sync::Mutex;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
@@ -61,6 +62,8 @@ pub const DEFAULT_MEMBER_REQUEST_RATE_LIMIT: u32 = 10;
 pub const DEFAULT_MEMBER_REQUEST_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_PENDING_MEMBER_REQUESTS: usize = 32;
 pub const MEMBER_LOGIN_GRANT_TTL_SECONDS: i64 = 10 * 60;
+pub(crate) const OPEN_STAGING_BUNDLE_TTL_SECONDS: i64 = 24 * 60 * 60;
+const HTTP_REQUEST_TIMEOUT_SECONDS: u64 = 5 * 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 /// Advertised on `/health` so clients can refuse metadata-first fallbacks.
 pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
@@ -279,6 +282,7 @@ struct AppState {
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
     app_update_metadata_path: PathBuf,
     app_update_apk_path: PathBuf,
+    app_update_cache: Arc<app_update::AppUpdateCache>,
     lan_apk_landing_url: Option<Arc<str>>,
 }
 
@@ -367,14 +371,42 @@ impl AppState {
         )
     }
 
-    fn recovery_detail(&self, family_id: &str, code: &str) -> Result<Value, ApiError> {
-        Ok(json!({
-            "code": code,
-            "action": "full_resync",
-            "reset_cursor": 0,
-            "server_cursor": self.store.current_revision(family_id)?,
-            "server_generation": self.generation,
-        }))
+    fn refresh_request_tokens(
+        &self,
+        request_id: &str,
+        family_id: &str,
+        device_id: &str,
+    ) -> (String, String) {
+        (
+            derive_token(
+                &self.signing_secret,
+                &format!("refresh-request-access:{request_id}:{family_id}:{device_id}"),
+            ),
+            derive_token(
+                &self.signing_secret,
+                &format!("refresh-request-refresh:{request_id}:{family_id}:{device_id}"),
+            ),
+        )
+    }
+
+    async fn recovery_detail(
+        self: &Arc<Self>,
+        family_id: &str,
+        code: &'static str,
+    ) -> Result<Value, ApiError> {
+        let store = self.store.clone();
+        let family_id = family_id.to_owned();
+        let generation = self.generation.clone();
+        run_blocking(move || {
+            Ok(json!({
+                "code": code,
+                "action": "full_resync",
+                "reset_cursor": 0,
+                "server_cursor": store.current_revision(&family_id)?,
+                "server_generation": generation,
+            }))
+        })
+        .await
     }
 
     fn media_path(&self, family_id: &str, client_uuid: Uuid) -> Result<PathBuf, ApiError> {
@@ -468,6 +500,17 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     let app_update_apk_path = config
         .app_update_apk_path
         .unwrap_or_else(|| config.data_dir.join("app-release.apk"));
+    let app_update_cache = Arc::new(app_update::AppUpdateCache::default());
+    if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {
+        if let Err(error) =
+            app_update_cache.load_verified(&app_update_metadata_path, &app_update_apk_path)
+        {
+            // App-update publication is optional and remains fail-open for
+            // ordinary sync. Prewarming must not make the whole family server
+            // unavailable when deploy artifacts are incomplete or invalid.
+            tracing::warn!(detail = %error.detail, "failed to prewarm app update package cache");
+        }
+    }
     let lan_apk_landing_url = config
         .lan_apk_download_origin
         .map(|origin| Arc::from(format!("{origin}/join").into_boxed_str()));
@@ -492,6 +535,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         readiness_cache: Arc::new(Mutex::new(None)),
         app_update_metadata_path,
         app_update_apk_path,
+        app_update_cache,
         lan_apk_landing_url,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
@@ -618,6 +662,10 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         )
         .route("/v1/bundles/{bundle_id}/commit", post(media::commit_bundle))
         .layer(DefaultBodyLimit::max(body_limit))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECONDS),
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
     let lan_apk_download = state.lan_apk_landing_url.is_some().then(|| {
@@ -639,7 +687,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     })
 }
 
-fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
+async fn authenticate(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Principal, ApiError> {
     let raw = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -648,30 +696,36 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiE
     if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
         return Err(ApiError::unauthorized());
     }
-    let principal = match state.store.authenticate(token, state.now())? {
-        Some(principal) => principal,
-        None => match state.store.revoked_access_reason(token)?.as_deref() {
-            Some("device_removed") => {
-                return Err(ApiError::unauthorized_code(
-                    "device_removed",
-                    "This device was removed from the family",
-                ));
-            }
-            Some("membership_deleted") => {
-                return Err(ApiError::unauthorized_code(
-                    "membership_deleted",
-                    "This family membership was deleted",
-                ));
-            }
-            Some("family_deleted") => {
-                return Err(ApiError::unauthorized_code(
-                    "family_deleted",
-                    "This family was deleted",
-                ));
-            }
-            _ => return Err(ApiError::unauthorized()),
-        },
-    };
+    let token = token.to_owned();
+    let store = state.store.clone();
+    let now = state.now();
+    let principal = run_blocking(move || {
+        Ok(match store.authenticate(&token, now)? {
+            Some(principal) => principal,
+            None => match store.revoked_access_reason(&token)?.as_deref() {
+                Some("device_removed") => {
+                    return Err(ApiError::unauthorized_code(
+                        "device_removed",
+                        "This device was removed from the family",
+                    ));
+                }
+                Some("membership_deleted") => {
+                    return Err(ApiError::unauthorized_code(
+                        "membership_deleted",
+                        "This family membership was deleted",
+                    ));
+                }
+                Some("family_deleted") => {
+                    return Err(ApiError::unauthorized_code(
+                        "family_deleted",
+                        "This family was deleted",
+                    ));
+                }
+                _ => return Err(ApiError::unauthorized()),
+            },
+        })
+    })
+    .await?;
     if principal.device_id.is_empty() {
         return Err(ApiError::unauthorized());
     }
@@ -682,16 +736,25 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiE
 ///
 /// Fail-open when deploy metadata is missing so an unfinished app-update channel does not
 /// brick an otherwise healthy family server. App-update metadata/APK routes never call this.
-fn require_supported_client(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let min_supported =
-        match handlers::app_update::load_app_update_metadata(&state.app_update_metadata_path) {
-            Ok(metadata) => metadata
-                .get("min_supported_version_code")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            // No deploy package / unreadable metadata → do not gate sync.
-            Err(_) => return Ok(()),
-        };
+async fn require_supported_client(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    let blocking_state = state.clone();
+    let min_supported = match run_blocking(move || {
+        blocking_state
+            .app_update_cache
+            .load_metadata(&blocking_state.app_update_metadata_path)
+    })
+    .await
+    {
+        Ok(metadata) => metadata
+            .get("min_supported_version_code")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        // No deploy package / unreadable metadata → do not gate sync.
+        Err(_) => return Ok(()),
+    };
     let client_version = match parse_client_version_code(headers) {
         Some(value) => value,
         None => {
@@ -722,6 +785,21 @@ fn parse_client_version_code(headers: &HeaderMap) -> Option<u64> {
         return None;
     }
     raw.parse::<u64>().ok().filter(|value| *value > 0)
+}
+
+/// Execute synchronous SQLite/filesystem work away from Tokio's async worker
+/// threads while preserving the handler's ordinary [`ApiError`] mapping.
+pub(crate) async fn run_blocking<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "blocking server task failed to join");
+            ApiError::internal("Internal server error")
+        })?
 }
 
 fn require_bootstrap_secret(
@@ -793,8 +871,8 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn require_owner(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
-    let principal = authenticate(state, headers)?;
+async fn require_owner(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Principal, ApiError> {
+    let principal = authenticate(state, headers).await?;
     if principal.role != "owner" {
         return Err(ApiError::forbidden("Owner role required"));
     }
@@ -1102,6 +1180,10 @@ impl ApiError {
 
     fn payload_too_large(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, detail)
+    }
+
+    fn request_timeout(detail: impl Into<Value>) -> Self {
+        Self::new(StatusCode::REQUEST_TIMEOUT, detail)
     }
 
     pub(crate) fn internal(detail: impl Into<Value>) -> Self {

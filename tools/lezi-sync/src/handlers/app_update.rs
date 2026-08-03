@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue};
@@ -11,7 +12,92 @@ use axum::Json;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::{authenticate, ApiError, AppState};
+use crate::{authenticate, run_blocking, ApiError, AppState};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    modified: SystemTime,
+    len: u64,
+}
+
+#[derive(Clone)]
+struct CachedMetadata {
+    stamp: FileStamp,
+    value: Value,
+}
+
+#[derive(Clone)]
+struct CachedRelease {
+    metadata_stamp: FileStamp,
+    apk_stamp: FileStamp,
+    value: VerifiedAppUpdate,
+}
+
+/// Per-process deploy artifact cache. Files are revalidated by mtime+length so
+/// an atomic package replacement becomes visible without restarting the NAS
+/// service, while steady-state requests avoid full JSON reads and APK hashing.
+#[derive(Default)]
+pub(crate) struct AppUpdateCache {
+    metadata: Mutex<Option<CachedMetadata>>,
+    release: Mutex<Option<CachedRelease>>,
+}
+
+impl AppUpdateCache {
+    pub(crate) fn load_metadata(&self, path: &Path) -> Result<Value, ApiError> {
+        let stamp = metadata_stamp(path)?;
+        if let Some(cached) = self
+            .metadata
+            .lock()
+            .map_err(|_| ApiError::internal("App update metadata cache is unavailable"))?
+            .as_ref()
+            .filter(|cached| cached.stamp == stamp)
+        {
+            return Ok(cached.value.clone());
+        }
+        let value = load_app_update_metadata(path)?;
+        *self
+            .metadata
+            .lock()
+            .map_err(|_| ApiError::internal("App update metadata cache is unavailable"))? =
+            Some(CachedMetadata {
+                stamp,
+                value: value.clone(),
+            });
+        Ok(value)
+    }
+
+    pub(crate) fn load_verified(
+        &self,
+        metadata_path: &Path,
+        apk_path: &Path,
+    ) -> Result<VerifiedAppUpdate, ApiError> {
+        let metadata_stamp = metadata_stamp(metadata_path)?;
+        let apk_stamp = apk_stamp(apk_path)?;
+        if let Some(cached) = self
+            .release
+            .lock()
+            .map_err(|_| ApiError::internal("App update package cache is unavailable"))?
+            .as_ref()
+            .filter(|cached| {
+                cached.metadata_stamp == metadata_stamp && cached.apk_stamp == apk_stamp
+            })
+        {
+            return Ok(cached.value.clone());
+        }
+        let metadata = self.load_metadata(metadata_path)?;
+        let value = load_verified_app_update_from_metadata(metadata, apk_path)?;
+        *self
+            .release
+            .lock()
+            .map_err(|_| ApiError::internal("App update package cache is unavailable"))? =
+            Some(CachedRelease {
+                metadata_stamp,
+                apk_stamp,
+                value: value.clone(),
+            });
+        Ok(value)
+    }
+}
 
 /// Authenticated app-update metadata for already-joined family devices.
 /// Loads deploy-readable JSON from [AppState::app_update_metadata_path]
@@ -25,10 +111,15 @@ pub(crate) async fn get_app_update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let _principal = authenticate(&state, &headers)?;
-    Ok(Json(load_app_update_metadata(
-        &state.app_update_metadata_path,
-    )?))
+    let _principal = authenticate(&state, &headers).await?;
+    let blocking_state = state.clone();
+    let metadata = run_blocking(move || {
+        blocking_state
+            .app_update_cache
+            .load_metadata(&blocking_state.app_update_metadata_path)
+    })
+    .await?;
+    Ok(Json(metadata))
 }
 
 /// Authenticated release APK download for already-joined family devices.
@@ -39,9 +130,15 @@ pub(crate) async fn get_app_update_apk(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let _principal = authenticate(&state, &headers)?;
-    let verified =
-        load_verified_app_update(&state.app_update_metadata_path, &state.app_update_apk_path)?;
+    let _principal = authenticate(&state, &headers).await?;
+    let blocking_state = state.clone();
+    let verified = run_blocking(move || {
+        blocking_state.app_update_cache.load_verified(
+            &blocking_state.app_update_metadata_path,
+            &blocking_state.app_update_apk_path,
+        )
+    })
+    .await?;
     let mut response = Response::new(Body::from(verified.bytes));
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -50,16 +147,16 @@ pub(crate) async fn get_app_update_apk(
     Ok(response)
 }
 
+#[derive(Clone)]
 pub(crate) struct VerifiedAppUpdate {
     pub(crate) metadata: Value,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: Bytes,
 }
 
-pub(crate) fn load_verified_app_update(
-    metadata_path: &Path,
+fn load_verified_app_update_from_metadata(
+    metadata: Value,
     apk_path: &Path,
 ) -> Result<VerifiedAppUpdate, ApiError> {
-    let metadata = load_app_update_metadata(metadata_path)?;
     let expected_sha256 = metadata
         .get("sha256")
         .and_then(Value::as_str)
@@ -88,7 +185,52 @@ pub(crate) fn load_verified_app_update(
             "App update package integrity check failed",
         ));
     }
-    Ok(VerifiedAppUpdate { metadata, bytes })
+    Ok(VerifiedAppUpdate {
+        metadata,
+        bytes: Bytes::from(bytes),
+    })
+}
+
+fn metadata_stamp(path: &Path) -> Result<FileStamp, ApiError> {
+    let metadata = match fs::metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found("App update metadata is not available"));
+        }
+        Err(error) => {
+            tracing::error!(path = %path.display(), %error, "failed to stat app update metadata");
+            return Err(ApiError::internal("Failed to read app update metadata"));
+        }
+    };
+    let modified = metadata.modified().map_err(|error| {
+        tracing::error!(path = %path.display(), %error, "failed to read app update metadata mtime");
+        ApiError::internal("Failed to read app update metadata")
+    })?;
+    Ok(FileStamp {
+        modified,
+        len: metadata.len(),
+    })
+}
+
+fn apk_stamp(path: &Path) -> Result<FileStamp, ApiError> {
+    let metadata = match fs::metadata(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found("App update package is not available"));
+        }
+        Err(error) => {
+            tracing::error!(path = %path.display(), %error, "failed to stat app update package");
+            return Err(ApiError::internal("Failed to read app update package"));
+        }
+    };
+    let modified = metadata.modified().map_err(|error| {
+        tracing::error!(path = %path.display(), %error, "failed to read app update package mtime");
+        ApiError::internal("Failed to read app update package")
+    })?;
+    Ok(FileStamp {
+        modified,
+        len: metadata.len(),
+    })
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

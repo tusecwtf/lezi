@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
@@ -436,6 +437,102 @@ async fn approve_new_member_named(
     .await;
     assert_eq!(status, StatusCode::OK, "{member}");
     member
+}
+
+#[tokio::test]
+async fn owner_can_reject_an_approved_unclaimed_request_and_release_its_name() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "approved-release-owner-device",
+        "approved-release-owner-request-00001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let (request_status, pending) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({"display_name": "外婆", "device_name": "旧手机"}),
+    )
+    .await;
+    assert_eq!(request_status, StatusCode::CREATED, "{pending}");
+    let request_id = pending["request_id"].as_str().unwrap();
+    let (approve_status, approved) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/member/requests/{request_id}/approve-new"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approved}");
+
+    // A previously installed APK may already report versionCode 12 while still using
+    // the legacy pending-only model. It must not receive approved rows unless it opts
+    // into the open-request response shape explicitly.
+    let (legacy_status, legacy) =
+        get_json(&rig.app, "/v1/member/requests", Some(owner_token)).await;
+    assert_eq!(legacy_status, StatusCode::OK, "{legacy}");
+    assert_eq!(legacy["requests"], json!([]));
+
+    let (list_status, listed) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/member/requests",
+        Some(owner_token),
+        json!({}),
+        &[("x-lezi-member-request-view", "open-v1")],
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK, "{listed}");
+    let visible = listed["requests"].as_array().unwrap();
+    assert_eq!(visible.len(), 1, "{listed}");
+    assert_eq!(visible[0]["request_id"], request_id);
+    assert_eq!(visible[0]["status"], "approved");
+
+    let (reject_status, rejected) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/member/requests/{request_id}/reject"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(reject_status, StatusCode::OK, "{rejected}");
+
+    let (list_status, listed) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/member/requests",
+        Some(owner_token),
+        json!({}),
+        &[("x-lezi-member-request-view", "open-v1")],
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["requests"], json!([]));
+
+    let (replacement_status, replacement) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({"display_name": "外婆", "device_name": "新手机"}),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::CREATED, "{replacement}");
+    let replacement_id = replacement["request_id"].as_str().unwrap();
+    let (replacement_approve_status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/member/requests/{replacement_id}/approve-new"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(replacement_approve_status, StatusCode::OK, "{body}");
 }
 
 fn token_hash(token: &str) -> String {
@@ -1218,6 +1315,93 @@ async fn disaster_restore_expires_after_twenty_four_hours_and_startup_cleans_sta
 }
 
 #[tokio::test]
+async fn disaster_restore_commit_mints_access_expiry_from_commit_time() {
+    let root = "correct-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let family_id = Uuid::new_v4().to_string();
+    let baby_id = Uuid::new_v4().to_string();
+    let (start_status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-late-commit-start-request-0001",
+            "family_id": family_id,
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::CREATED, "{started}");
+    let batch_id = started["batch_id"].as_str().unwrap();
+    let recovery_token = started["recovery_token"].as_str().unwrap();
+    let (manifest_status, manifest) = json_request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/disaster-restore/batches/{batch_id}/manifest"),
+        Some(recovery_token),
+        json!({
+            "request_id": "restore-late-commit-manifest-request-01",
+            "entities": [{
+                "type": "baby",
+                "client_uuid": baby_id,
+                "updated_at": 1000,
+                "payload": baby_payload("宝宝", None),
+            }],
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(manifest_status, StatusCode::OK, "{manifest}");
+
+    rig.now.fetch_add(24 * 60 * 60 - 60, Ordering::SeqCst);
+    let commit_time = rig.now.load(Ordering::SeqCst);
+    let (commit_status, committed) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/disaster-restore/batches/{batch_id}/commit"),
+        Some(recovery_token),
+        json!({"request_id": "restore-late-commit-commit-request-0001"}),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["access_expires_at"], commit_time + 15 * 60);
+
+    // Simulate power loss after SQLite activation but before the final journal
+    // status replacement reached disk. The journal already contains the
+    // request id and original commit-time expiry; retry must replay that exact
+    // credential tuple instead of minting a response that disagrees with DB.
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    journal["status"] = json!("manifest_received");
+    fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    rig.now.fetch_add(30, Ordering::SeqCst);
+
+    let (retry_status, retry) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/disaster-restore/batches/{batch_id}/commit"),
+        Some(recovery_token),
+        json!({"request_id": "restore-late-commit-commit-request-0001"}),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["access_token"], committed["access_token"]);
+    assert_eq!(retry["refresh_token"], committed["refresh_token"]);
+    assert_eq!(retry["access_expires_at"], committed["access_expires_at"]);
+}
+
+#[tokio::test]
 async fn disaster_restore_rejects_manifest_tampering_without_activating_a_family() {
     let root = "correct-root-password";
     let family_id = Uuid::new_v4().to_string();
@@ -1438,6 +1622,90 @@ async fn app_update_apk_requires_session_and_matches_metadata_sha256() {
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), apk_bytes.as_slice());
+}
+
+#[tokio::test]
+async fn app_update_cache_invalidates_when_deploy_files_change() {
+    let rig = Rig::new();
+    let initial_apk = b"first-release-apk";
+    let initial_metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 7,
+        "version_name": "0.3.1",
+        "min_supported_version_code": 6,
+        "sha256": hex::encode(Sha256::digest(initial_apk)),
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        initial_metadata.to_string(),
+    )
+    .unwrap();
+    fs::write(rig.directory.path().join("app-release.apk"), initial_apk).unwrap();
+
+    let owner = create_family(
+        &rig.app,
+        "app-update-cache-owner",
+        "app-update-cache-owner-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    assert_eq!(
+        get_json(&rig.app, "/v1/app-update", Some(token)).await.1["version_code"],
+        7,
+    );
+    let first_apk = request(
+        &rig.app,
+        Method::GET,
+        "/v1/app-update/apk",
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await
+    .into_body()
+    .collect()
+    .await
+    .unwrap()
+    .to_bytes();
+    assert_eq!(first_apk.as_ref(), initial_apk);
+
+    // Length changes make the deploy-file stamp differ even on filesystems
+    // whose mtime resolution cannot distinguish two writes in one test tick.
+    let replacement_apk = b"second-release-apk-with-a-different-length";
+    let replacement_metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 8,
+        "version_name": "0.3.2",
+        "min_supported_version_code": 7,
+        "sha256": hex::encode(Sha256::digest(replacement_apk)),
+        "release_notes": "cache invalidation",
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        replacement_metadata.to_string(),
+    )
+    .unwrap();
+    fs::write(
+        rig.directory.path().join("app-release.apk"),
+        replacement_apk,
+    )
+    .unwrap();
+
+    let (_, metadata) = get_json(&rig.app, "/v1/app-update", Some(token)).await;
+    assert_eq!(metadata["version_code"], 8);
+    assert_eq!(metadata["version_name"], "0.3.2");
+    let replacement = request(
+        &rig.app,
+        Method::GET,
+        "/v1/app-update/apk",
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(replacement.status(), StatusCode::OK);
+    let replacement = replacement.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(replacement.as_ref(), replacement_apk);
 }
 
 #[tokio::test]
@@ -2327,6 +2595,212 @@ async fn refresh_rotates_once_and_replay_revokes_only_the_presenting_device() {
 }
 
 #[tokio::test]
+async fn refresh_request_id_replays_the_exact_rotation_after_client_crash() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "refresh-crash-owner-phone",
+        "refresh-crash-owner-request-000001",
+    )
+    .await;
+    let old_refresh = owner["refresh_token"].as_str().unwrap();
+    let rotation_id = "refresh-rotation-request-000000001";
+
+    let first = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+
+    // Simulate process death before the client durably saves either returned
+    // token: it retries the old on-disk refresh with the same durable request id.
+    let replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
+    assert_eq!(replay.1["access_token"], first.1["access_token"]);
+    assert_eq!(replay.1["refresh_token"], first.1["refresh_token"]);
+    assert_eq!(replay.1["access_expires_at"], first.1["access_expires_at"]);
+
+    let recovered_access = replay.1["access_token"].as_str().unwrap();
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(recovered_access))
+            .await
+            .0,
+        StatusCode::OK,
+    );
+}
+
+#[tokio::test]
+async fn current_refresh_token_with_uncleared_request_id_does_not_rotate_twice() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "refresh-handoff-owner-phone",
+        "refresh-handoff-owner-request-000001",
+    )
+    .await;
+    let old_refresh = owner["refresh_token"].as_str().unwrap();
+    let rotation_id = "refresh-handoff-rotation-request-001";
+    let first = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+
+    // The client durably saved the new refresh token, then died before it
+    // cleared its durable rotation id. Restart retries the current token with
+    // the same id and must receive the same handoff without another rotation.
+    let persisted_refresh = first.1["refresh_token"].as_str().unwrap();
+    rig.now.fetch_add(30, Ordering::SeqCst);
+    let replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": persisted_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
+    assert_eq!(replay.1["access_token"], first.1["access_token"]);
+    assert_eq!(replay.1["refresh_token"], first.1["refresh_token"]);
+    assert_eq!(replay.1["access_expires_at"], first.1["access_expires_at"]);
+
+    let replay_again = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": persisted_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(replay_again.0, StatusCode::OK, "{}", replay_again.1);
+    assert_eq!(replay_again.1["access_token"], first.1["access_token"]);
+    assert_eq!(replay_again.1["refresh_token"], first.1["refresh_token"]);
+    assert_eq!(
+        replay_again.1["access_expires_at"],
+        first.1["access_expires_at"]
+    );
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            first.1["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_with_the_same_request_id_return_one_rotation() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "refresh-concurrent-owner-phone",
+        "refresh-concurrent-owner-request-001",
+    )
+    .await;
+    let old_refresh = owner["refresh_token"].as_str().unwrap();
+    let rotation_id = "refresh-concurrent-rotation-000001";
+    let left_headers = [("x-lezi-refresh-request-id", rotation_id)];
+    let right_headers = [("x-lezi-refresh-request-id", rotation_id)];
+
+    let (left, right) = tokio::join!(
+        raw_json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/session/refresh",
+            None,
+            json!({"refresh_token": old_refresh}),
+            &left_headers,
+        ),
+        raw_json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/session/refresh",
+            None,
+            json!({"refresh_token": old_refresh}),
+            &right_headers,
+        ),
+    );
+    assert_eq!(left.0, StatusCode::OK, "{}", left.1);
+    assert_eq!(right.0, StatusCode::OK, "{}", right.1);
+    assert_eq!(left.1["access_token"], right.1["access_token"]);
+    assert_eq!(left.1["refresh_token"], right.1["refresh_token"]);
+    assert_eq!(left.1["access_expires_at"], right.1["access_expires_at"]);
+}
+
+#[tokio::test]
+async fn replayed_refresh_with_a_different_request_id_still_revokes_the_device() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "refresh-mismatch-owner-phone",
+        "refresh-mismatch-owner-request-00001",
+    )
+    .await;
+    let old_refresh = owner["refresh_token"].as_str().unwrap();
+    let first = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[(
+            "x-lezi-refresh-request-id",
+            "refresh-rotation-request-aaaaaaaa01",
+        )],
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+
+    let replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[(
+            "x-lezi-refresh-request-id",
+            "refresh-rotation-request-bbbbbbbb02",
+        )],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::UNAUTHORIZED, "{}", replay.1);
+    assert_eq!(replay.1["code"], "refresh_replay");
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            first.1["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+}
+
+#[tokio::test]
 async fn refresh_has_no_time_or_inactivity_expiry_but_invalid_values_fail_closed() {
     let rig = Rig::new();
     let owner = create_family(
@@ -2732,6 +3206,7 @@ async fn member_request_has_no_family_authority_and_owner_approval_claims_once()
             "request_id": request_id,
             "display_name": "爸爸",
             "device_name": "爸爸的手机",
+            "status": "pending",
             "created_at": rig.now.load(Ordering::SeqCst),
             "expires_at": rig.now.load(Ordering::SeqCst) + 24 * 60 * 60,
         }]})
@@ -6282,6 +6757,109 @@ async fn full_pull_includes_deleted_baby_dependency_before_retained_record() {
 }
 
 #[tokio::test]
+async fn incremental_fulfillment_candidate_pull_reemits_live_plan_record_and_media_dependencies() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "fc-cogroup-owner-device",
+        "fc-cogroup-owner-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let plan_media_id = Uuid::new_v4().to_string();
+    let record_media_id = Uuid::new_v4().to_string();
+
+    let (plan_status, plan_body) = publish_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire(
+            "care_plan",
+            &plan_id,
+            2,
+            care_plan_payload(&baby_id, "formula"),
+            None,
+        ),
+        vec![(
+            entity_wire(
+                "media",
+                &plan_media_id,
+                2,
+                json!({
+                    "kind": "log",
+                    "care_plan_client_uuid": plan_id,
+                    "mime": "image/jpeg",
+                    "byte_size": 3,
+                }),
+                None,
+            ),
+            b"img".to_vec(),
+        )],
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
+    let (record_status, record_body) = publish_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
+        vec![(
+            entity_wire(
+                "media",
+                &record_media_id,
+                3,
+                log_media_payload(&record_id),
+                None,
+            ),
+            b"img".to_vec(),
+        )],
+    )
+    .await;
+    assert_eq!(record_status, StatusCode::OK, "{record_body}");
+
+    let (_, before_candidate) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let cursor = before_candidate["cursor"].as_i64().unwrap();
+    let candidate_id = Uuid::new_v4().to_string();
+    let (candidate_status, candidate_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "fulfillment_candidate",
+            &candidate_id,
+            4,
+            json!({
+                "care_plan_client_uuid": plan_id,
+                "record_client_uuid": record_id,
+                "actual_timestamp": 1_700_000_000_000i64,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(candidate_status, StatusCode::OK, "{candidate_body}");
+
+    let (pull_status, pulled) =
+        get_json(&rig.app, &format!("/v1/pull?cursor={cursor}"), Some(token)).await;
+    assert_eq!(pull_status, StatusCode::OK, "{pulled}");
+    let entities = pulled["entities"].as_array().unwrap();
+    let keys = entities
+        .iter()
+        .map(|entity| {
+            (
+                entity["type"].as_str().unwrap().to_owned(),
+                entity["client_uuid"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(keys.contains(&("care_plan".to_owned(), plan_id)));
+    assert!(keys.contains(&("record".to_owned(), record_id)));
+    assert!(keys.contains(&("media".to_owned(), plan_media_id)));
+    assert!(keys.contains(&("media".to_owned(), record_media_id)));
+    assert!(keys.contains(&("fulfillment_candidate".to_owned(), candidate_id)));
+}
+
+#[tokio::test]
 async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
     let rig = Rig::new();
     let owner = create_family(
@@ -7973,6 +8551,158 @@ async fn ordinary_entity_and_media_publication_routes_are_retired_fail_closed() 
 }
 
 #[tokio::test]
+async fn expired_open_staging_bundles_are_collected_before_enforcing_the_family_cap() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "staging-gc-owner-device",
+        "staging-gc-owner-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let refresh_token = owner["refresh_token"].as_str().unwrap().to_owned();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let first_bundle_id = Uuid::new_v4().to_string();
+
+    for index in 0..64 {
+        let bundle_id = if index == 0 {
+            first_bundle_id.clone()
+        } else {
+            Uuid::new_v4().to_string()
+        };
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "record",
+                    &Uuid::new_v4().to_string(),
+                    2 + index,
+                    record_payload(&baby_id),
+                    None,
+                ),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "stage {index}: {body}");
+    }
+
+    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
+    let (refresh_status, refreshed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": refresh_token}),
+    )
+    .await;
+    assert_eq!(refresh_status, StatusCode::OK, "{refreshed}");
+    let token = refreshed["access_token"].as_str().unwrap();
+    let (replacement_status, replacement) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": Uuid::new_v4(),
+            "generation": "generation-a",
+            "root": entity_wire(
+                "record",
+                &Uuid::new_v4().to_string(),
+                100,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::OK, "{replacement}");
+    let (expired_status, expired) = get_json(
+        &rig.app,
+        &format!("/v1/bundles/{first_bundle_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(expired_status, StatusCode::NOT_FOUND, "{expired}");
+}
+
+#[tokio::test]
+async fn stalled_bundle_body_does_not_hold_the_family_lock_against_pull() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "slow-upload-owner-device",
+        "slow-upload-owner-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let baby_id = seed_baby(&rig.app, &token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(&token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    let (body_polled_tx, body_polled_rx) = oneshot::channel();
+    let (release_body_tx, release_body_rx) = oneshot::channel();
+    let body_stream = futures_util::stream::once(async move {
+        let _ = body_polled_tx.send(());
+        let _ = release_body_rx.await;
+        Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"img"))
+    });
+    let upload_app = rig.app.clone();
+    let upload_token = token.clone();
+    let upload_path = format!("/v1/bundles/{bundle_id}/media/{media_id}");
+    let upload = tokio::spawn(async move {
+        request(
+            &upload_app,
+            Method::PUT,
+            &upload_path,
+            Some(&upload_token),
+            Body::from_stream(body_stream),
+            Some("image/jpeg"),
+        )
+        .await
+    });
+    body_polled_rx.await.unwrap();
+
+    let pull = tokio::time::timeout(
+        Duration::from_millis(500),
+        get_json(&rig.app, "/v1/pull?cursor=0", Some(&token)),
+    )
+    .await;
+    assert!(
+        pull.is_ok(),
+        "pull waited on an upload body that had not arrived"
+    );
+
+    release_body_tx.send(()).unwrap();
+    assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn every_current_entity_root_can_publish_only_through_atomic_bundles() {
     let rig = Rig::new();
     let owner = create_family(
@@ -8588,15 +9318,14 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
     let member = approve_new_member(&rig.app, owner_token, "bundle-author-member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
 
-    for (token, updated_at, deleted_at, note) in [
-        (owner_token, 2, None, "创建"),
-        (member_token, 3, None, "成员编辑"),
-        (member_token, 4, Some(4), "成员删除"),
-        (member_token, 5, None, "成员恢复"),
+    for (updated_at, deleted_at, note) in [
+        (2, None, "创建"),
+        (3, None, "管理员编辑"),
+        (4, Some(4), "管理员删除"),
+        (5, None, "管理员恢复"),
     ] {
         let bundle_id = Uuid::new_v4().to_string();
         let mut forged_payload = record_payload(&baby_id);
@@ -8606,7 +9335,7 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             &rig.app,
             Method::POST,
             "/v1/bundles",
-            Some(token),
+            Some(owner_token),
             json!({
                 "bundle_id": bundle_id,
                 "root": entity_wire(
@@ -8625,7 +9354,7 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             &rig.app,
             Method::POST,
             &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(token),
+            Some(owner_token),
             json!({}),
         )
         .await;
@@ -8642,7 +9371,7 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             &rig.app,
             Method::POST,
             &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(token),
+            Some(owner_token),
             json!({}),
         )
         .await;
@@ -8655,7 +9384,7 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             }])
         );
 
-        let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+        let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
         let record = pull["entities"]
             .as_array()
             .unwrap()
@@ -8677,6 +9406,136 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             .unwrap()
             .contains_key("created_by_device_id"));
     }
+}
+
+#[tokio::test]
+async fn member_record_manage_requires_the_effective_creator_or_owner() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "record-acl-owner-device",
+        "record-acl-owner-request-000000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "record-acl-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+
+    let (created, body) = publish_root_bundle(
+        &rig.app,
+        owner_token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+    )
+    .await;
+    assert_eq!(created, StatusCode::OK, "{body}");
+
+    for (updated_at, deleted_at, note) in [
+        (3, None, "foreign edit"),
+        (4, Some(4), "foreign delete"),
+        (5, None, "foreign restore"),
+    ] {
+        let mut payload = record_payload(&baby_id);
+        payload["note"] = json!(note);
+        payload["created_by_membership_id"] = member["membership_id"].clone();
+        let (status, body) = publish_root_bundle(
+            &rig.app,
+            member_token,
+            entity_wire("record", &record_id, updated_at, payload, deleted_at),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body,
+            json!({"detail": "Only the record creator or family owner may change this record"})
+        );
+    }
+
+    // The same creator check applies when the rejected foreign-record update
+    // carries log media in its atomic bundle.
+    let foreign_media_id = Uuid::new_v4().to_string();
+    let (status, body) = stage_bundle_with_media(
+        &rig.app,
+        member_token,
+        entity_wire("record", &record_id, 6, record_payload(&baby_id), None),
+        vec![entity_wire(
+            "media",
+            &foreign_media_id,
+            6,
+            log_media_payload(&record_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body,
+        json!({"detail": "Only the record creator or family owner may change this record"})
+    );
+}
+
+#[tokio::test]
+async fn second_device_on_the_same_membership_may_manage_its_record_and_log_media() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "record-acl-second-device-owner",
+        "record-acl-second-device-request-001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "record-acl-first-device").await;
+    let first_token = member["access_token"].as_str().unwrap();
+    let (grant_status, grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    assert_eq!(grant_status, StatusCode::CREATED, "{grant}");
+    let (claim_status, second) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants/claim",
+        None,
+        json!({
+            "grant": grant["grant"],
+            "device_name": "record-acl-second-device",
+        }),
+    )
+    .await;
+    assert_eq!(claim_status, StatusCode::OK, "{second}");
+    assert_eq!(second["membership_id"], member["membership_id"]);
+    let second_token = second["access_token"].as_str().unwrap();
+
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let (created, body) = publish_root_bundle(
+        &rig.app,
+        first_token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+    )
+    .await;
+    assert_eq!(created, StatusCode::OK, "{body}");
+
+    let media_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = stage_bundle_with_media(
+        &rig.app,
+        second_token,
+        entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
+        vec![entity_wire(
+            "media",
+            &media_id,
+            3,
+            log_media_payload(&record_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
 }
 
 #[tokio::test]

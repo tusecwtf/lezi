@@ -7,6 +7,65 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[test]
+fn family_rejects_an_eleventh_live_custom_item() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("lezi.db")).unwrap();
+    let family_id = family(&store);
+    let principal = owner_principal(&family_id);
+
+    for index in 0..10 {
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "custom_item",
+                Uuid::new_v4(),
+                index + 1,
+                json!({
+                    "name": format!("自定义{index}"),
+                    "icon_slot": index % 8,
+                    "created_by_membership_id": null
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+    }
+
+    let result = publish_root(
+        &store,
+        &principal,
+        entity(
+            "custom_item",
+            Uuid::new_v4(),
+            11,
+            json!({
+                "name": "第十一个",
+                "icon_slot": 0,
+                "created_by_membership_id": null
+            }),
+        ),
+        10,
+    );
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnresolvedReference(message))
+            if message == "family supports at most 10 live custom items"
+    ));
+    assert_eq!(
+        store
+            .pull(&family_id, 0)
+            .unwrap()
+            .entities
+            .iter()
+            .filter(|entity| entity.entity_type == "custom_item" && entity.deleted_at.is_none())
+            .count(),
+        10,
+    );
+}
+
+#[test]
 fn lww_and_reference_validation_share_one_transaction() {
     let directory = TempDir::new().unwrap();
     let store = Store::open(directory.path().join("lezi.db")).unwrap();

@@ -185,7 +185,7 @@ docker buildx build \
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
 | `LEZI_MEMBER_REQUEST_RATE_LIMIT` | `10` | 每个来源地址每窗口的成员申请上限 |
 | `LEZI_MEMBER_REQUEST_TTL_HOURS` | `24` | 成员申请有效期；当前协议固定为 24 |
-| `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多待处理成员申请数 |
+| `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多开放的 pending + approved-unclaimed 成员申请数 |
 | `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/成员申请限流窗口秒数 |
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
@@ -269,10 +269,10 @@ secret 的 request/status/cancel/claim 外，接口都要求
 | POST | `/v1/member/requests/status` | 仅用 pending secret 查询申请状态；公开 request ID 不可查询 |
 | POST | `/v1/member/requests/cancel` | 仅用 pending secret 取消申请 |
 | POST | `/v1/member/requests/claim` | 已获批申请用 pending secret 单次领取独立 member session |
-| GET | `/v1/member/requests` | 仅 Owner 列出当前家庭待确认设备；普通 Member 返回 403 |
+| GET | `/v1/member/requests` | 仅 Owner；默认保持旧客户端 pending-only 响应，显式发送 `X-Lezi-Member-Request-View: open-v1` 时列出未过期的 pending + approved-unclaimed 并返回 `status`；普通 Member 返回 403 |
 | POST | `/v1/member/requests/{id}/approve-new` | 仅 Owner 用唯一家庭称呼批准为新 membership |
 | POST | `/v1/member/requests/{id}/bind-existing` | 仅 Owner 显式把申请设备绑定到指定的既有普通 membership；不会按同名自动绑定 |
-| POST | `/v1/member/requests/{id}/reject` | 仅 Owner 拒绝申请，不创建身份或凭证 |
+| POST | `/v1/member/requests/{id}/reject` | 仅 Owner 拒绝 pending 申请，或撤销 approved-unclaimed 申请并释放称呼保留；不创建身份或凭证 |
 | POST | `/v1/member/login-grants` | 仅 Owner 为指定 active 普通 membership 创建十分钟、单次兑换的短期 grant；只存哈希 |
 | POST | `/v1/member/login-grants/claim` | 经已确认 HTTPS/SPKI 连接，用 grant 与设备称呼领取绑定目标 membership 的独立 DeviceSession |
 | GET | `/v1/family/members` | 当前家庭的 active 成员与设备安全视图；Owner 看全部设备，Member 只收到自己的设备明细 |
@@ -326,7 +326,7 @@ null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式�
 `status=updated`；普通 Member 返回 `202 status=pending`，审批前列表与历史作者仍使用旧
 称呼。Owner 的 approve 在同一事务内重新检查目标 membership 与唯一性；拒绝、撤回、
 七天过期都不会改称呼。Owner 也可先 `POST /v1/family/members` 创建零设备 member，随后
-沿用目标 membership 单次 QR 或显式绑定待确认设备。
+沿用目标 membership 单次 QR 或显式绑定开放的设备登录申请。
 
 `POST /v1/family/create` 要求非空 `family_name`、`display_name`、`device_name` 和
 `create_request_id`；名字均 trim，家庭名最长 64 Unicode 字符，成员/设备称呼最长

@@ -10,25 +10,30 @@ use axum::http::{HeaderName, HeaderValue};
 use axum::response::Response;
 use serde_json::Value;
 
-use super::app_update::load_verified_app_update;
-use crate::AppState;
+use crate::{run_blocking, AppState};
 
 const X_CONTENT_TYPE_OPTIONS: HeaderName = HeaderName::from_static("x-content-type-options");
 const X_FRAME_OPTIONS: HeaderName = HeaderName::from_static("x-frame-options");
 
 pub(crate) async fn join(State(state): State<Arc<AppState>>) -> Response {
-    let release =
-        match load_verified_app_update(&state.app_update_metadata_path, &state.app_update_apk_path)
-        {
-            Ok(release) => release,
-            Err(error) => {
-                tracing::warn!(detail = %error.detail, "LAN APK install page is unavailable");
-                return html_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    unavailable_page(),
-                );
-            }
-        };
+    let blocking_state = state.clone();
+    let release = match run_blocking(move || {
+        blocking_state.app_update_cache.load_verified(
+            &blocking_state.app_update_metadata_path,
+            &blocking_state.app_update_apk_path,
+        )
+    })
+    .await
+    {
+        Ok(release) => release,
+        Err(error) => {
+            tracing::warn!(detail = %error.detail, "LAN APK install page is unavailable");
+            return html_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                unavailable_page(),
+            );
+        }
+    };
     let version_name = release
         .metadata
         .get("version_name")
@@ -45,18 +50,24 @@ pub(crate) async fn join(State(state): State<Arc<AppState>>) -> Response {
 }
 
 pub(crate) async fn download(State(state): State<Arc<AppState>>) -> Response {
-    let release =
-        match load_verified_app_update(&state.app_update_metadata_path, &state.app_update_apk_path)
-        {
-            Ok(release) => release,
-            Err(error) => {
-                tracing::warn!(detail = %error.detail, "LAN APK download is unavailable");
-                return html_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    unavailable_page(),
-                );
-            }
-        };
+    let blocking_state = state.clone();
+    let release = match run_blocking(move || {
+        blocking_state.app_update_cache.load_verified(
+            &blocking_state.app_update_metadata_path,
+            &blocking_state.app_update_apk_path,
+        )
+    })
+    .await
+    {
+        Ok(release) => release,
+        Err(error) => {
+            tracing::warn!(detail = %error.detail, "LAN APK download is unavailable");
+            return html_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                unavailable_page(),
+            );
+        }
+    };
     let content_length = HeaderValue::from_str(&release.bytes.len().to_string())
         .expect("APK byte length is a legal HTTP header");
     let mut response = Response::new(Body::from(release.bytes));

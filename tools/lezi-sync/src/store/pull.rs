@@ -182,6 +182,36 @@ fn collect_pull_entity_with_dependencies(
                     group,
                 )?;
             }
+            "fulfillment_candidate" => {
+                // A client cannot apply a candidate until both frozen business
+                // parents exist locally. Re-emit the complete live parent
+                // closure even when those rows predate this pull cursor; the
+                // candidate may be the only newly revised entity on the page.
+                // Passing a sentinel cursor keeps the existing dependency-first
+                // traversal (including each parent's log media) while bypassing
+                // the ordinary `rev <= cursor` elision for this co-group only.
+                let dependency_cursor = -1;
+                append_pull_dependency(
+                    connection,
+                    family_id,
+                    dependency_cursor,
+                    "care_plan",
+                    required_payload_reference(&entity.payload, "care_plan_client_uuid")?,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
+                append_pull_dependency(
+                    connection,
+                    family_id,
+                    dependency_cursor,
+                    "record",
+                    required_payload_reference(&entity.payload, "record_client_uuid")?,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
+            }
             "media" => match entity.payload.get("kind").and_then(Value::as_str) {
                 Some("avatar") => append_pull_dependency(
                     connection,

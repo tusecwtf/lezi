@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -26,8 +27,9 @@ use uuid::Uuid;
 use crate::model::{BundleCommitRequest, BundleStageRequest};
 use crate::store::{CommittedPendingBundleMedia, Store, StoreError};
 use crate::{
-    authenticate, json_body, require_supported_client, secure_directory, secure_file,
+    authenticate, json_body, require_supported_client, run_blocking, secure_directory, secure_file,
     sync_directory, write_private_file, ApiError, AppState, MAX_ENTITY_FUTURE_SKEW_MILLIS,
+    OPEN_STAGING_BUNDLE_TTL_SECONDS,
 };
 
 /// HTTP route entrypoint — domain-path assembly from crate root.
@@ -42,25 +44,32 @@ pub(crate) async fn get_media(
     AxumPath(client_uuid): AxumPath<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    require_supported_client(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let metadata = state
-        .store
-        .media_metadata(&principal.family_id, &client_uuid.to_string())?
-        .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
-    if !state
-        .store
-        .is_media_published(&principal.family_id, &client_uuid.to_string())?
-    {
-        return Err(ApiError::not_found("Media bytes are not published"));
-    }
+    let store = state.store.clone();
+    let family_id = principal.family_id.clone();
+    let media_id = client_uuid.to_string();
+    let metadata = run_blocking(move || {
+        let metadata = store
+            .media_metadata(&family_id, &media_id)?
+            .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
+        if !store.is_media_published(&family_id, &media_id)? {
+            return Err(ApiError::not_found("Media bytes are not published"));
+        }
+        Ok(metadata)
+    })
+    .await?;
+    drop(_guard);
     let path = state.media_path(&principal.family_id, client_uuid)?;
-    if !media_file_is_ready(&path, metadata.byte_size, &client_uuid.to_string()) {
-        return Err(ApiError::not_found("Media bytes incomplete or invalid"));
-    }
-    let bytes = fs::read(path)?;
+    let bytes = run_blocking(move || {
+        if !media_file_is_ready(&path, metadata.byte_size, &client_uuid.to_string()) {
+            return Err(ApiError::not_found("Media bytes incomplete or invalid"));
+        }
+        Ok(fs::read(path)?)
+    })
+    .await?;
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
         CONTENT_TYPE,
@@ -74,28 +83,54 @@ pub(crate) async fn stage_bundle(
     headers: HeaderMap,
     body: Result<Json<BundleStageRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    require_supported_client(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
     let request = json_body(body)?.validate(state.max_media_bytes)?;
     if request.generation != state.generation {
         return Err(ApiError::conflict_value(
-            state.recovery_detail(&principal.family_id, "generation_changed")?,
+            state
+                .recovery_detail(&principal.family_id, "generation_changed")
+                .await?,
         ));
     }
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let status = match state.store.stage_bundle(
-        &principal,
-        &request.bundle_id,
-        request.root,
-        request.media,
-        state.now(),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            return Err(map_stage_bundle_store_error(error));
+    let blocking_state = state.clone();
+    let status = run_blocking(move || {
+        let expired = blocking_state.store.expire_open_staging_bundles(
+            &principal.family_id,
+            blocking_state
+                .now()
+                .saturating_sub(OPEN_STAGING_BUNDLE_TTL_SECONDS),
+        )?;
+        for bundle_id in expired {
+            let Ok(bundle_id) = Uuid::parse_str(&bundle_id) else {
+                tracing::error!(%bundle_id, "stored expired bundle UUID is invalid");
+                continue;
+            };
+            let path = blocking_state.bundle_stage_dir(&principal.family_id, &bundle_id)?;
+            if let Err(error) = fs::remove_dir_all(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "failed to remove expired staging bytes"
+                    );
+                }
+            }
         }
-    };
+        blocking_state
+            .store
+            .stage_bundle(
+                &principal,
+                &request.bundle_id,
+                request.root,
+                request.media,
+                blocking_state.now(),
+            )
+            .map_err(map_stage_bundle_store_error)
+    })
+    .await?;
     Ok(Json(status))
 }
 
@@ -104,13 +139,15 @@ pub(crate) async fn get_bundle(
     headers: HeaderMap,
     AxumPath(bundle_id): AxumPath<Uuid>,
 ) -> Result<Json<crate::store::BundleStageStatus>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    require_supported_client(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    state
-        .store
-        .bundle_status(&principal.family_id, &bundle_id.to_string())?
+    let store = state.store.clone();
+    let family_id = principal.family_id;
+    let bundle_id = bundle_id.to_string();
+    run_blocking(move || Ok(store.bundle_status(&family_id, &bundle_id)?))
+        .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("Bundle not found"))
 }
@@ -120,48 +157,8 @@ pub(crate) async fn put_bundle_media(
     AxumPath((bundle_id, client_uuid)): AxumPath<(Uuid, Uuid)>,
     request: Request,
 ) -> Result<Json<crate::store::BundleStageStatus>, ApiError> {
-    let principal = authenticate(&state, request.headers())?;
-    require_supported_client(&state, request.headers())?;
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let bundle = state
-        .store
-        .load_bundle(&principal.family_id, &bundle_id.to_string())?
-        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
-    if bundle.status != "staging" {
-        return Err(ApiError::conflict(
-            "committed bundle does not accept staged media",
-        ));
-    }
-    if bundle.staged_membership_id != principal.membership_id {
-        return Err(ApiError::conflict(
-            "bundle belongs to another family membership",
-        ));
-    }
-    if !bundle
-        .media
-        .iter()
-        .any(|entity| entity.client_uuid == client_uuid.to_string())
-    {
-        return Err(ApiError::unprocessable(
-            "media is not listed in the bundle manifest",
-        ));
-    }
-    let media_entity = bundle
-        .media
-        .iter()
-        .find(|entity| entity.client_uuid == client_uuid.to_string())
-        .expect("checked above");
-    if media_entity.deleted_at.is_some() {
-        return Err(ApiError::unprocessable(
-            "tombstone media does not accept bytes",
-        ));
-    }
-    if let Some(kind) = media_entity.payload.get("kind").and_then(|v| v.as_str()) {
-        if kind == "avatar" && principal.role != "owner" {
-            return Err(ApiError::forbidden("Only owner may change avatar"));
-        }
-    }
+    let principal = authenticate(&state, request.headers()).await?;
+    require_supported_client(&state, request.headers()).await?;
     if let Some(length) = request.headers().get(CONTENT_LENGTH) {
         let length = length
             .to_str()
@@ -173,17 +170,64 @@ pub(crate) async fn put_bundle_media(
         }
     }
 
-    let mut content = Vec::new();
-    let mut stream = request.into_body().into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
-        if content.len() + chunk.len() > state.max_media_bytes {
-            return Err(ApiError::payload_too_large("Media is too large"));
+    let max_media_bytes = state.max_media_bytes;
+    let content = tokio::time::timeout(Duration::from_secs(120), async move {
+        let mut content = Vec::new();
+        let mut stream = request.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
+            if content.len() + chunk.len() > max_media_bytes {
+                return Err(ApiError::payload_too_large("Media is too large"));
+            }
+            content.extend_from_slice(&chunk);
         }
-        content.extend_from_slice(&chunk);
-    }
+        Ok::<_, ApiError>(content)
+    })
+    .await
+    .map_err(|_| ApiError::request_timeout("Media upload body timed out"))??;
     if content.is_empty() {
         return Err(ApiError::unprocessable("Media body must not be empty"));
+    }
+
+    // Never hold the per-family serialization lock while awaiting an
+    // untrusted request body. Once bounded bytes are complete, re-read the
+    // current bundle manifest under the lock before touching disk or SQLite.
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let store = state.store.clone();
+    let family_id = principal.family_id.clone();
+    let bundle_key = bundle_id.to_string();
+    let bundle = run_blocking(move || Ok(store.load_bundle(&family_id, &bundle_key)?))
+        .await?
+        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
+    if bundle.status != "staging" {
+        return Err(ApiError::conflict(
+            "committed bundle does not accept staged media",
+        ));
+    }
+    if bundle.staged_membership_id != principal.membership_id {
+        return Err(ApiError::conflict(
+            "bundle belongs to another family membership",
+        ));
+    }
+    let media_entity = bundle
+        .media
+        .iter()
+        .find(|entity| entity.client_uuid == client_uuid.to_string())
+        .ok_or_else(|| ApiError::unprocessable("media is not listed in the bundle manifest"))?;
+    if media_entity.deleted_at.is_some() {
+        return Err(ApiError::unprocessable(
+            "tombstone media does not accept bytes",
+        ));
+    }
+    if media_entity
+        .payload
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .is_some_and(|kind| kind == "avatar")
+        && principal.role != "owner"
+    {
+        return Err(ApiError::forbidden("Only owner may change avatar"));
     }
     if let Some(declared) = media_entity
         .payload
@@ -198,46 +242,43 @@ pub(crate) async fn put_bundle_media(
         }
     }
 
-    let path = state.bundle_media_path(&principal.family_id, &bundle_id, &client_uuid)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        secure_directory(parent)?;
-    }
-    write_private_file(&path, &content)?;
-    let staged_sha256 = hex::encode(Sha256::digest(&content));
+    let blocking_state = state.clone();
+    let status = run_blocking(move || {
+        let path =
+            blocking_state.bundle_media_path(&principal.family_id, &bundle_id, &client_uuid)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+            secure_directory(parent)?;
+        }
+        write_private_file(&path, &content)?;
+        let staged_sha256 = hex::encode(Sha256::digest(&content));
 
-    let status = match state.store.mark_bundle_media_staged(
-        &principal,
-        &bundle_id.to_string(),
-        &client_uuid.to_string(),
-        content.len(),
-        &staged_sha256,
-        state.now(),
-    ) {
-        Ok(value) => value,
-        Err(StoreError::BundleMediaNotInManifest) => {
-            return Err(ApiError::unprocessable(
+        match blocking_state.store.mark_bundle_media_staged(
+            &principal,
+            &bundle_id.to_string(),
+            &client_uuid.to_string(),
+            content.len(),
+            &staged_sha256,
+            blocking_state.now(),
+        ) {
+            Ok(value) => Ok(value),
+            Err(StoreError::BundleMediaNotInManifest) => Err(ApiError::unprocessable(
                 "media is not listed in the bundle manifest",
-            ))
-        }
-        Err(StoreError::BundleMediaIncomplete) => {
-            return Err(ApiError::unprocessable(
+            )),
+            Err(StoreError::BundleMediaIncomplete) => Err(ApiError::unprocessable(
                 "Media body size does not match declared byte_size",
-            ))
-        }
-        Err(StoreError::BundleMediaUploadClosed) => {
-            return Err(ApiError::conflict(
+            )),
+            Err(StoreError::BundleMediaUploadClosed) => Err(ApiError::conflict(
                 "committed bundle does not accept staged media",
-            ))
-        }
-        Err(StoreError::BundleMembershipMismatch) => {
-            return Err(ApiError::conflict(
+            )),
+            Err(StoreError::BundleMembershipMismatch) => Err(ApiError::conflict(
                 "bundle belongs to another family membership",
-            ))
+            )),
+            Err(StoreError::BundleNotFound) => Err(ApiError::not_found("Bundle not found")),
+            Err(error) => Err(error.into()),
         }
-        Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
-        Err(error) => return Err(error.into()),
-    };
+    })
+    .await?;
     Ok(Json(status))
 }
 
@@ -247,129 +288,137 @@ pub(crate) async fn commit_bundle(
     AxumPath(bundle_id): AxumPath<Uuid>,
     body: Result<Json<BundleCommitRequest>, JsonRejection>,
 ) -> Result<Json<crate::store::BundleCommitResult>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    require_supported_client(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
     let request = json_body(body)?;
     request.validate()?;
     if request.generation != state.generation {
         return Err(ApiError::conflict_value(
-            state.recovery_detail(&principal.family_id, "generation_changed")?,
+            state
+                .recovery_detail(&principal.family_id, "generation_changed")
+                .await?,
         ));
     }
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let bundle = state
-        .store
-        .load_bundle(&principal.family_id, &bundle_id.to_string())?
-        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
+    let state = state.clone();
+    let result = run_blocking(move || {
+        let bundle = state
+            .store
+            .load_bundle(&principal.family_id, &bundle_id.to_string())?
+            .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
 
-    // Preflight authenticated ownership before inspecting or changing any
-    // final-path media. Store::commit_bundle repeats this check as the
-    // transactional authority; this early guard prevents rejected principals
-    // from leaving claimable filesystem state.
-    if bundle.staged_membership_id != principal.membership_id {
-        return Err(ApiError::conflict(
-            "bundle belongs to another family membership",
-        ));
-    }
+        // Preflight authenticated ownership before inspecting or changing any
+        // final-path media. Store::commit_bundle repeats this check as the
+        // transactional authority; this early guard prevents rejected principals
+        // from leaving claimable filesystem state.
+        if bundle.staged_membership_id != principal.membership_id {
+            return Err(ApiError::conflict(
+                "bundle belongs to another family membership",
+            ));
+        }
 
-    let mut media_ready = std::collections::BTreeMap::new();
-    let mut staged_publications = Vec::new();
-    for media_uuid in &bundle.required_media {
-        let media_id = Uuid::parse_str(media_uuid)
-            .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
-        let integrity = bundle
-            .media_integrity
-            .get(media_uuid)
-            .ok_or_else(|| ApiError::internal("stored bundle media integrity is missing"))?;
-        if bundle.status == "committed" {
-            let final_path = state.media_path(&principal.family_id, media_id)?;
+        let mut media_ready = std::collections::BTreeMap::new();
+        let mut staged_publications = Vec::new();
+        for media_uuid in &bundle.required_media {
+            let media_id = Uuid::parse_str(media_uuid)
+                .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
+            let integrity = bundle
+                .media_integrity
+                .get(media_uuid)
+                .ok_or_else(|| ApiError::internal("stored bundle media integrity is missing"))?;
+            if bundle.status == "committed" {
+                let final_path = state.media_path(&principal.family_id, media_id)?;
+                let digest = integrity
+                    .staged_sha256
+                    .as_deref()
+                    .and_then(|expected_sha256| {
+                        media_file_integrity_sha256(
+                            &final_path,
+                            integrity.declared_byte_size,
+                            Some(expected_sha256),
+                            media_uuid,
+                        )
+                    });
+                if digest.is_some() {
+                    sync_published_media_file(&final_path)?;
+                }
+                media_ready.insert(media_uuid.clone(), digest.is_some());
+                continue;
+            }
+            let staged_path =
+                state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
             let digest = integrity
                 .staged_sha256
                 .as_deref()
                 .and_then(|expected_sha256| {
                     media_file_integrity_sha256(
-                        &final_path,
+                        &staged_path,
                         integrity.declared_byte_size,
                         Some(expected_sha256),
                         media_uuid,
                     )
                 });
             if digest.is_some() {
-                sync_published_media_file(&final_path)?;
+                staged_publications.push((media_uuid.clone(), media_id, staged_path));
             }
             media_ready.insert(media_uuid.clone(), digest.is_some());
-            continue;
         }
-        let staged_path = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
-        let digest = integrity
-            .staged_sha256
-            .as_deref()
-            .and_then(|expected_sha256| {
-                media_file_integrity_sha256(
-                    &staged_path,
-                    integrity.declared_byte_size,
-                    Some(expected_sha256),
-                    media_uuid,
-                )
-            });
-        if digest.is_some() {
-            staged_publications.push((media_uuid.clone(), media_id, staged_path));
-        }
-        media_ready.insert(media_uuid.clone(), digest.is_some());
-    }
 
-    // Validate the complete staging manifest before the first final-path
-    // change. Incomplete/corrupt later entries must not leave earlier files
-    // pre-published. The Store still returns the canonical 422 below.
-    if bundle.status == "staging" && media_ready.values().all(|ready| *ready) {
-        for (media_uuid, media_id, staged_path) in staged_publications {
-            let final_path = state.media_path(&principal.family_id, media_id)?;
-            prepare_published_media_file(&staged_path, &final_path)?;
-            match state.store.mark_bundle_media_prepared(
-                &principal,
-                &bundle_id.to_string(),
-                &media_uuid,
-            ) {
-                Ok(()) => {}
-                Err(StoreError::BundleMembershipMismatch) => {
-                    return Err(ApiError::conflict(
-                        "bundle belongs to another family membership",
-                    ))
+        // Validate the complete staging manifest before the first final-path
+        // change. Incomplete/corrupt later entries must not leave earlier files
+        // pre-published. The Store still returns the canonical 422 below.
+        if bundle.status == "staging" && media_ready.values().all(|ready| *ready) {
+            for (media_uuid, media_id, staged_path) in staged_publications {
+                let final_path = state.media_path(&principal.family_id, media_id)?;
+                prepare_published_media_file(&staged_path, &final_path)?;
+                match state.store.mark_bundle_media_prepared(
+                    &principal,
+                    &bundle_id.to_string(),
+                    &media_uuid,
+                ) {
+                    Ok(()) => {}
+                    Err(StoreError::BundleMembershipMismatch) => {
+                        return Err(ApiError::conflict(
+                            "bundle belongs to another family membership",
+                        ))
+                    }
+                    Err(StoreError::BundleNotFound) => {
+                        return Err(ApiError::not_found("Bundle not found"))
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(StoreError::BundleNotFound) => {
-                    return Err(ApiError::not_found("Bundle not found"))
-                }
-                Err(error) => return Err(error.into()),
             }
         }
-    }
 
-    let max_updated_at = state
-        .now()
-        .saturating_mul(1_000)
-        .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
-    let (result, _package) = match state.store.commit_bundle(
-        &principal,
-        &bundle_id.to_string(),
-        &media_ready,
-        max_updated_at,
-        state.now(),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            return Err(map_commit_bundle_store_error(error));
-        }
-    };
-    cleanup_committed_pending_bundle_media_for_bundle(
-        &state.store,
-        &state.media_root,
-        &principal.family_id,
-        &bundle_id.to_string(),
-    )?;
-    // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
-    let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
+        let max_updated_at = state
+            .now()
+            .saturating_mul(1_000)
+            .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
+        let (result, _package) = match state.store.commit_bundle(
+            &principal,
+            &bundle_id.to_string(),
+            &media_ready,
+            max_updated_at,
+            state.now(),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return Err(map_commit_bundle_store_error(error));
+            }
+        };
+        cleanup_committed_pending_bundle_media_for_bundle(
+            &state.store,
+            &state.media_root,
+            &principal.family_id,
+            &bundle_id.to_string(),
+        )?;
+        // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
+        let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
 
+        Ok(result)
+    })
+    .await?;
     Ok(Json(result))
 }
 
@@ -838,6 +887,9 @@ fn map_bundle_policy_store_error(error: StoreError) -> Result<StoreError, ApiErr
         )),
         StoreError::ForbiddenCarePlan => Err(ApiError::forbidden(
             "Only the creator or family owner may change this care plan",
+        )),
+        StoreError::ForbiddenRecord => Err(ApiError::forbidden(
+            "Only the record creator or family owner may change this record",
         )),
         StoreError::ForbiddenAnonymousFact => Err(ApiError::forbidden(
             "Only the family owner may change an anonymous shared fact",

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::media::media_entity_is_pullable;
 use crate::store::StoreError;
-use crate::{authenticate, require_supported_client, ApiError, AppState};
+use crate::{authenticate, require_supported_client, run_blocking, ApiError, AppState};
 
 /// HTTP route entrypoint — `pub(crate)` so crate-root `build_apps` can bind via
 /// domain path (`handlers::sync::…`). See `handlers` module docs for the rule.
@@ -35,8 +35,8 @@ pub(crate) async fn pull_entities(
     headers: HeaderMap,
     query: Result<Query<PullQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    require_supported_client(&state, &headers)?;
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
     let query = query
         .map(|Query(value)| value)
         .map_err(|error| ApiError::unprocessable(error.body_text()))?;
@@ -45,47 +45,53 @@ pub(crate) async fn pull_entities(
     }
     if query.generation != state.generation {
         return Err(ApiError::conflict_value(
-            state.recovery_detail(&principal.family_id, "generation_changed")?,
+            state
+                .recovery_detail(&principal.family_id, "generation_changed")
+                .await?,
         ));
     }
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let page = match state.store.pull(&principal.family_id, query.cursor) {
-        Ok(result) => result,
-        Err(StoreError::CursorAhead(server_cursor)) => {
-            return Err(ApiError::conflict_value(json!({
-                "code": "cursor_ahead",
-                "action": "full_resync",
-                "reset_cursor": 0,
-                "server_cursor": server_cursor,
-                "server_generation": state.generation,
-            })))
-        }
-        Err(error) => return Err(error.into()),
-    };
-    // Incomplete media (metadata without bytes) is omitted so clients can advance
-    // the pull cursor without GET /media 404 loops. Successful PUT republishes.
-    let media_ids = page
-        .entities
-        .iter()
-        .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
-        .map(|entity| entity.client_uuid.clone())
-        .collect::<BTreeSet<_>>();
-    let published_media = state
-        .store
-        .published_media(&principal.family_id, &media_ids)?;
-    let entities = page
-        .entities
-        .into_iter()
-        .filter(|entity| {
+    let blocking_state = state.clone();
+    let family_id = principal.family_id.clone();
+    let cursor = query.cursor;
+    let mut page = run_blocking(move || {
+        let mut page = match blocking_state.store.pull(&family_id, cursor) {
+            Ok(result) => result,
+            Err(StoreError::CursorAhead(server_cursor)) => {
+                return Err(ApiError::conflict_value(json!({
+                    "code": "cursor_ahead",
+                    "action": "full_resync",
+                    "reset_cursor": 0,
+                    "server_cursor": server_cursor,
+                    "server_generation": blocking_state.generation,
+                })))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Incomplete media (metadata without bytes) is omitted so clients can advance
+        // the pull cursor without GET /media 404 loops. Successful PUT republishes.
+        let media_ids = page
+            .entities
+            .iter()
+            .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+            .map(|entity| entity.client_uuid.clone())
+            .collect::<BTreeSet<_>>();
+        let published_media = blocking_state
+            .store
+            .published_media(&family_id, &media_ids)?;
+        page.entities.retain(|entity| {
             media_entity_is_pullable(
-                state.as_ref(),
-                &principal.family_id,
+                blocking_state.as_ref(),
+                &family_id,
                 entity,
                 &published_media,
             )
-        })
-        .collect::<Vec<_>>();
+        });
+        Ok(page)
+    })
+    .await?;
+    let entities = std::mem::take(&mut page.entities);
     Ok(Json(json!({
         "entities": entities,
         "cursor": page.cursor,
