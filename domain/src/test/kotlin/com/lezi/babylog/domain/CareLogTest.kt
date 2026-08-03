@@ -52,6 +52,8 @@ import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.yield
@@ -214,6 +216,39 @@ class CareLogTest {
         care.moveCustomItem(first.id, delta = 1)
 
         assertThat(fakes.transactions.runCount - before).isEqualTo(2)
+    }
+
+    @Test
+    fun concurrentCustomItemRenamesToTheSameNameKeepOneUniqueDefinition() = runTest {
+        val fakes = Fakes()
+        fakes.transactions.serializeRuns = true
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        care.addCustomItem("抚触", iconSlot = 0)
+        care.addCustomItem("晒太阳", iconSlot = 1)
+        val items = care.observeCustomItems().first()
+        val first = items.first { it.name == "抚触" }
+        val second = items.first { it.name == "晒太阳" }
+
+        // Capture-before-yield makes the old read-check-write race deterministic:
+        // without the shared transaction both updates validate the same stale catalog.
+        fakes.customItems.afterListAllSnapshot = { yield() }
+        val firstRename = async(start = CoroutineStart.UNDISPATCHED) {
+            runCatching { care.updateCustomItem(first.copy(name = "睡前护理")) }
+        }
+        val secondRename = async(start = CoroutineStart.UNDISPATCHED) {
+            runCatching { care.updateCustomItem(second.copy(name = "睡前护理")) }
+        }
+        val outcomes = listOf(firstRename.await(), secondRename.await())
+
+        assertThat(outcomes.count { it.isSuccess }).isEqualTo(1)
+        assertThat(outcomes.single { it.isFailure }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(outcomes.single { it.isFailure }.exceptionOrNull()?.message)
+            .isEqualTo("自定义项目名称不可重复")
+        val finalItems = care.observeCustomItems().first()
+        assertThat(finalItems).hasSize(2)
+        assertThat(finalItems.count { it.name == "睡前护理" }).isEqualTo(1)
     }
 
     @Test
@@ -7277,13 +7312,22 @@ private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
 
 private class RecordingTransactionRunner :
     com.lezi.babylog.core.database.DatabaseTransactionRunner {
+    private val serializationMutex = Mutex()
     var runCount = 0
+    var serializeRuns = false
     var beforeNextRun: (suspend () -> Unit)? = null
     val onBegin = mutableListOf<() -> Unit>()
     val onCommit = mutableListOf<() -> Unit>()
     val onRollback = mutableListOf<() -> Unit>()
 
-    override suspend fun <T> run(block: suspend () -> T): T {
+    override suspend fun <T> run(block: suspend () -> T): T =
+        if (serializeRuns) {
+            serializationMutex.withLock { execute(block) }
+        } else {
+            execute(block)
+        }
+
+    private suspend fun <T> execute(block: suspend () -> T): T {
         runCount += 1
         onBegin.forEach { it() }
         beforeNextRun?.also { beforeNextRun = null }?.invoke()
@@ -7631,6 +7675,7 @@ private class FakeCustomItemDao : CustomItemDao {
     private var transactionSnapshot: List<CustomItemEntity>? = null
     private var updateCalls = 0
     private var failOnUpdateCall: Int? = null
+    var afterListAllSnapshot: suspend () -> Unit = {}
 
     fun beginTx() {
         transactionSnapshot = items.value
@@ -7653,8 +7698,11 @@ private class FakeCustomItemDao : CustomItemDao {
     override fun observeAll(): Flow<List<CustomItemEntity>> =
         items.map { list -> list.filter { it.deletedAt == null } }
 
-    override suspend fun listAll(): List<CustomItemEntity> =
-        items.value.filter { it.deletedAt == null }
+    override suspend fun listAll(): List<CustomItemEntity> {
+        val snapshot = items.value.filter { it.deletedAt == null }
+        afterListAllSnapshot()
+        return snapshot
+    }
 
     override suspend fun listAllIncludingDeleted(): List<CustomItemEntity> = items.value
 
