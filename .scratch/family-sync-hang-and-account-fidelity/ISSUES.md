@@ -34,19 +34,19 @@ Last consolidation: 2026-08-03 (rounds 1–3 multi-scope audit + **dedup**)
 | 16 | Media delete path safety | complete | — | done | `6b278242` |
 | 17 | Settings clear/custom durable busy | complete | — | done | `6b278242` |
 | 18 | Post-push full-resync + receipt CAS | complete | — | done | `6b278242` |
-| 19 | Server family lock not across upload | implemented | — | done | awaiting NAS CD smoke |
+| 19 | Server family lock not across upload | implemented | — | done | 0.3.5 deployed; awaiting write-path concurrency smoke |
 | 20 | Server restore access TTL + staging GC | complete | — | done | `6b278242` |
 | 21 | Claim `claimed` replay | complete | — | done | `6b278242` |
 | 22 | Refresh rotation crash-safe | implemented | — | done | awaiting live refresh recovery |
 | 23 | Force shell survives reauth (+ install busy/dismiss) | complete | — | done | `6b278242` |
 | 24 | Availability Checking stuck + demote + debounce | complete | — | done | `6b278242` |
-| 25 | Server FC pull co-group | implemented | — | done | awaiting NAS FC pull smoke |
+| 25 | Server FC pull co-group | implemented | — | done | 0.3.5 deployed; awaiting joined-device FC pull |
 | 26 | Single pending-waiting authority | complete | soft after 01 | done | `6b278242` |
 | 27 | Avatar display + prepareUpload OOM bounds | complete | — | done | `6b278242` |
 | 28 | Widget + alarm lifecycle | complete | — | done | `6b278242` |
 | **29** | Soft-deleted baby must not brick outbox push | complete | — | done | `6b278242` |
 | **30** | Apply: dirty must not skip strictly newer remote | complete | — | done | `6b278242` |
-| **31** | Server record manage ACL (ForbiddenRecord) | implemented | — | done | awaiting NAS ACL smoke |
+| **31** | Server record manage ACL (ForbiddenRecord) | implemented | — | done | 0.3.5 deployed; awaiting real Member ACL smoke |
 | **32** | Multi-device open sleep: family-global wake | complete | — | done | `6b278242` |
 | **33** | Owner reconnect: no ghost devices + sticky login id | implemented | — | done | awaiting real owner reconnect |
 | **34** | forgetEndpoint / re-TOFU clears credentials | complete | — | done | `6b278242` |
@@ -66,12 +66,44 @@ external acceptance gates that cannot be proven by repository tests alone:
 | Ticket | Residual acceptance |
 |--------|---------------------|
 | 02 | Isolated 0.3.3 join/create prompt-return plus later foreground convergence |
-| 19 | NAS CD plus concurrent stalled/large upload and pull/commit smoke |
+| 19 | On deployed 0.3.5, concurrent stalled/large upload and pull/commit smoke |
 | 22 | Real refresh rotation interrupted between server accept and client handoff |
-| 25 | Post-CD FC-only-page pull resolves the Android unresolved set |
-| 31 | Post-CD real Member foreign-record/media ACL and same-membership allowance |
+| 25 | On deployed 0.3.5, FC-only-page pull resolves the Android unresolved set |
+| 31 | On deployed 0.3.5, real Member foreign-record/media ACL and same-membership allowance |
 | 33 | Real Owner reconnect creates no ghost active Owner device |
 | 36 | Two-device custom cap, wipe/rejoin layout identity, and tombstone smoke |
+
+## NAS CD evidence (0.3.5 · 2026-08-03)
+
+- User-confirmed ordinary CD from fixed HEAD `149b7ae6`: explicitly rebuilt
+  `lezi-sync:0.3.5` for `linux/amd64`, then force-packaged and uploaded it to
+  `/tmp/lezi-sync-releases/lezi-sync-0.3.5-nas`. The image manifest ID is
+  `sha256:6aa558bc8d9f8add59a01203202ce0aa23b5f934e691de8be8bb6370e4168528`;
+  the loaded amd64 config ID is
+  `sha256:8a843134aa0f06239ae15b159f015ac5a8b83ca1ce4c59ed9ccf8e9fdc635bf9`.
+- Package `SHA256SUMS` passed locally and on NAS. The image tar SHA-256 is
+  `bac5a3b2bc52b4a2e67b2ab3c63c0211a969c44e4248a56910d7fe93f1e441bc`.
+  zdocker Compose v2.33.0 replaced only container `lezi-sync`; the data bind stayed
+  `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data`.
+- `LEZI_ALLOW_TLS_BOOTSTRAP`, local secret forwarding, and offline migration were
+  not used. The inherited secret matched the prior 0.3.3 release `.env` without
+  printing its value. The certificate/key pair remained valid and matching;
+  pre/post certificate SHA-256 stayed
+  `75023c71d8ca918a42fe4f058aab8faf85db3f02b9a69bfb6522951ce362da9e`,
+  and SPKI stayed
+  `bd07d8645ed3b7adead162eca454373aee4007b0a35aa7c62caf7d8ac0cb3215`.
+- Certificate-verified LAN HTTPS `/health` and `/ready` returned 0.3.5; container
+  internal readiness passed, and public setup-status remained `configured` with
+  the 0.3.5 capability set. The HTTP 8767 invite page returned its security
+  headers, while family/health routes on that listener returned 404.
+- Anonymous invite APK download returned 5,734,226 bytes with SHA-256
+  `ffeb09d49345b7899c0c8450ca2b688e8da4db3bf7eaef1ca54bdad2b8bf2f76`,
+  package `com.lezi.babylog`, versionCode 12 / versionName 0.3.5, and the expected
+  single-signer APK Signature v2/v3 identity.
+- The API 35 AVD already had signed 0.3.5 installed; cold launch preserved its
+  local baby and record. It was explicitly not joined to a family, so no login,
+  invitation grant, family write, or destructive recovery was fabricated. The
+  seven external checkboxes above therefore remain open.
 
 Issue files: `issues/01-*.md` …; **29–40** from consolidation + saturation. Former **08** file remains wizard/sync; network finally is **07**.
 

@@ -1,6 +1,6 @@
 # 07 — 0.3.3 发版与验收
 
-**Status:** in-progress — deployed; awaiting joined-device recovery smoke
+**Status:** in-progress — live advanced to 0.3.5; awaiting joined-device recovery smoke
 
 ## Acceptance criteria
 
@@ -54,3 +54,11 @@
   Room 首屏仍显示该记录与 `1次` 汇总。
 - AVD 没有已加入家庭会话；验收未读取根密码、旧 token 或创建成员申请。因此账户网络设置
   与 Health 恢复自动补传仍需一台真实已加入设备完成，现有家庭 NAS 未执行灾难恢复。
+
+## 0.3.5 follow-up CD
+
+- 2026-08-03 经再次确认，live server 从 0.3.3 普通升级至 0.3.5。构建、强制打包、
+  TLS/secret/data-bind 不变量、HTTPS health/ready、8767 邀请页与匿名 APK 下载证据记录在
+  [hang-fidelity tracker](../../family-sync-hang-and-account-fidelity/ISSUES.md#nas-cd-evidence-035--2026-08-03)。
+- API 35 AVD 的 signed 0.3.5 冷启动与本地数据保留通过，但仍没有 joined family session；
+  因此本票唯一未勾的账户网络设置、离线写入、自动补传和第二设备收敛 smoke 没有被误关。

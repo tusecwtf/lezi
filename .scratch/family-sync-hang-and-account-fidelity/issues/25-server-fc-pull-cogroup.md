@@ -14,7 +14,8 @@ converge.
       co-groups live parents or re-emits them.
 - [x] Rust/API tests prove client-style unresolved set empties.
 
-**Residual:** co-group semantics and API regressions are accepted; deployed-server
-acceptance remains:
+**Residual:** co-group semantics, API regressions, and the ordinary 0.3.5 NAS CD
+are accepted; joined-device convergence remains:
 
-- [ ] After NAS CD, run an FC-only-page pull and verify the Android unresolved set empties.
+- [ ] On deployed 0.3.5, run an FC-only-page pull and verify the Android
+      unresolved set empties.

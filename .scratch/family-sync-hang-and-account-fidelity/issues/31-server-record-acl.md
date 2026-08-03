@@ -11,7 +11,9 @@
 - [x] Record-attached log media requires creator or owner.
 - [x] API regression tests 403 ForbiddenRecord (or product-equivalent).
 
-**Residual:** ACL rules and API regressions are accepted; deployed-family acceptance remains:
+**Residual:** ACL rules, API regressions, and the ordinary 0.3.5 NAS CD are
+accepted; deployed-family identity acceptance remains:
 
-- [ ] After NAS CD, verify a real Member receives ForbiddenRecord for foreign record/media
-      mutation while the same membership’s second device remains allowed.
+- [ ] On deployed 0.3.5, verify a real Member receives ForbiddenRecord for
+      foreign record/media mutation while the same membership’s second device
+      remains allowed.

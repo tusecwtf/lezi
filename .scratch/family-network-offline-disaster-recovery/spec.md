@@ -1,6 +1,6 @@
 # 乐记 0.3.3：家庭网络设置、离线可用与灾难恢复
 
-Status: implemented and deployed — awaiting joined-device recovery smoke
+Status: implemented; live server advanced to 0.3.5 — awaiting joined-device recovery smoke
 
 ## Goal
 

@@ -18,7 +18,8 @@ cannot brick the family lock forever.
       documented lock scope with timeout).
 - [x] Deploy notes: server version bump; Android remains compatible.
 
-**Residual:** static implementation, Rust concurrency coverage, and deploy notes are
-accepted; production acceptance remains:
+**Residual:** static implementation, Rust concurrency coverage, deploy notes, and
+the ordinary 0.3.5 NAS CD are accepted; the production write-path smoke remains:
 
-- [ ] NAS CD followed by a concurrent stalled/large media upload and pull/commit smoke.
+- [ ] On deployed 0.3.5, run a concurrent stalled/large media upload and
+      pull/commit smoke with an authorized disposable bundle.
