@@ -139,12 +139,16 @@ UI 事件
   → Room（立刻成功 → UI 刷新）
   → 标记 syncDirty；LocalWrite 只通知协调器“有待发布内容”
   → 仅当：前台 && availability 健康租约 && trusted HTTPS endpoint && 有效 device session
-        → push；回前台/下拉 → pull + 媒体字节
+        → pull/reconcile → 从 Room 临时 plan → atomic bundle push；回前台/下拉同序执行
 ```
 
 实现继续无后台同步、无推送拉同步。系统 PKI 或 TOFU/SPKI 验证 HTTPS endpoint，每台设备
 持有独立 opaque session；未登录、断网或等待审批时仍先落 Room
 并保留待同步状态。记录/汇总/成长下拉刷新是唯一显式立即同步动作。
+
+Owner 与 Member 使用同一对账优先次序。跨进程只持久化 Room 实体、媒体与修订回执，不持久化
+待发送 payload 队列；进程终止后丢弃临时 plan，下次成功对账后由当前 `syncDirty`/回执重新生成。
+浅层待同步数量来自仍需发布的 Room 实体，而不是历史请求残留。
 
 `FamilyServerAvailability` 是协调器私有网络门闩和家庭网络设置的结果态，不替代浅层
 `SyncStatus`。匿名客户端在可信 TLS 下并行检查 `/health`、`/ready` 与 setup capability，

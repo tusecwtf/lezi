@@ -19,6 +19,7 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0013](./0013-offline-migrate-is-maintenance-window-cutover.md) | offline-migrate 是已授权维护窗中的离线切割工具 | accepted |
 | [0014](./0014-owner-device-restores-only-empty-family-servers.md) | 只允许旧 Owner 设备恢复空家庭服务器 | accepted |
 | [0015](./0015-isolate-lan-invite-install-distribution.md) | 隔离家庭 LAN 邀请首装分发与可信同步 | accepted |
+| [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | accepted |
 
 ## Numbering
 

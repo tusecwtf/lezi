@@ -341,11 +341,11 @@ Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和�
 | prepare 探测元数据 | `mime`、`width`、`height`、`byte_size` | `client_uuid` + 被发布修订的 `updated_at` + 源 `local_uri` + `deleted_at`（含双方均为 null） | 保持当前行；wire 仍可携带本次包的探测值 |
 | root commit receipt | 仅 `remote_uri` | 同上 | 不写 receipt；当前行的 tombstone / 复活 / 新路径 / 更高 `updated_at` 全部保留 |
 | `markSynced` | `sync_dirty = 0` | `client_uuid` + 被发布修订的 `updated_at` | 不清新修订的 dirty |
-| outbox 删除 | 删除本次入队行 id | 按 id；新修订若另有 outbox 行则保留 | 新修订待同步证据可重入 |
+| 临时 plan 消费 | 只移除本周期内存候选 | 不写持久队列；下一周期从 Room 重新生成 | 新修订仍由 `sync_dirty`/回执进入新 plan |
 
 长上传期间同一 MediaAsset 被 tombstone、复活、替换 `local_uri` 或产生更高 `updated_at`
 时，旧 prepare 快照不得覆盖任何新字段。commit 失败、取消或上传失败不写 receipt，并关闭
-已打开的媒体 source。未发生并发写时，探测元数据、receipt、`markSynced` 与 outbox 删除
+已打开的媒体 source。未发生并发写时，探测元数据、receipt 与 `markSynced`
 仍一次收敛。
 
 ### 3.8 SettingsLocal（**不同步**）
@@ -659,7 +659,7 @@ interface SyncPort {
 
   /**
    * 在同一 sync barrier 下清除选定的本地域与副本状态。
-   * LocalDataClearScope.AllLocalData 还会移除头像媒体与全部 outbox，避免后续加入推送陈旧残留。
+   * LocalDataClearScope.AllLocalData 还会移除头像媒体；发布 plan 不跨进程持久化。
    */
   suspend fun clearLocalData(scope: LocalDataClearScope, workflow: LocalClearWorkflow): Result<Unit>
 

@@ -46,7 +46,8 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   `rootUpdatedAt` CAS 确认本地根：Record/CarePlan 前进 `family_published_updated_at`
   并在内容 epoch 未变时把本地 `updated_at` 对齐到该修订；Baby 无独立回执列，等价水印
   是 CAS 前进本地 `updated_at` 并 `markSynced`。并发根编辑不得覆盖新内容、不得错误清
-  dirty，较新根须保留/重建 outbox；较旧回执不得倒退较新水印。不引入媒体-only wire。
+  dirty，较新根须在下一周期从 Room 重建临时发布候选；较旧回执不得倒退较新水印。不引入
+  媒体-only wire。发布规划的长期真相由 ADR-0016 约束。
 - 客户端只要求 `/health` 为 `ok` 且 capabilities 至少包含 `atomic_bundle` 与
   `record_membership_author`；允许服务端增加能力，展示用 `version` 不参与兼容门闩。
 - `membership_id` 是记录作者与 ACL 的唯一家庭身份。`device_id` 只用于当前建家、加入与
