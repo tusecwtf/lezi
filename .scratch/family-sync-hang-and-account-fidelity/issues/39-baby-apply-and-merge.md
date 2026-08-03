@@ -4,8 +4,8 @@
 
 **Blocked by:** Soft with 30 (apply wave).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Dirty baby nickname survives remote-newer apply or is conflict-surfaced with dirty retained.
-- [ ] Merge rebinds records/plans without rebinding published avatar association.
-- [ ] JVM tests for baby dirty mid-apply and merge avatar tombstone.
+- [x] Dirty baby nickname survives remote-newer apply or is conflict-surfaced with dirty retained.
+- [x] Merge rebinds records/plans without rebinding published avatar association.
+- [x] JVM tests for baby dirty mid-apply and merge avatar tombstone.

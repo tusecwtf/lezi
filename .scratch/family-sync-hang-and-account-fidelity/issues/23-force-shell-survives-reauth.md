@@ -8,11 +8,11 @@ interlock is honest (user can re-login without permanently bypassing force).
 
 **Blocked by:** None — can start immediately; pairs with 10 for reauth chrome.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] checkAppUpdate / discover under reauthRequired does not null forced state.
-- [ ] Force shell clears only on true leave/unconfigure or successful superseding
+- [x] checkAppUpdate / discover under reauthRequired does not null forced state.
+- [x] Force shell clears only on true leave/unconfigure or successful superseding
       force classification / install path product allows.
-- [ ] Optional install-start does not permanently suppress banner as “稍后” before
+- [x] Optional install-start does not permanently suppress banner as “稍后” before
       success (or explicit user dismiss).
-- [ ] Tests: CUR shell + reauth + retry check still shows force shell.
+- [x] Tests: CUR shell + reauth + retry check still shows force shell.

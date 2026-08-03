@@ -1,6 +1,6 @@
 # 04 · APK download outside sessionMutex
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -11,10 +11,10 @@ Status: ready-for-agent
 
 ## Fix
 
-- `downloadAppUpdateApk` 移出 `sessionMutex`:锁内仅取/刷新 token,出锁后执行下载;
+- [x] `downloadAppUpdateApk` 移出 `sessionMutex`:锁内仅取/刷新 token,出锁后执行下载;
   401 整流重试不适用于大文件流,下载失败按既有错误语义上报。
-- 其余操作维持现状;不改 `appUpdateInstallMutex` 语义。
+- [x] 其余操作维持现状;不改 `appUpdateInstallMutex` 语义。
 
 ## Validation
 
-- `./gradlew :sync:test`;既有 401 刷新测试保持绿。
+- [x] `./gradlew :sync:test`;既有 401 刷新与并发请求回归保持绿。

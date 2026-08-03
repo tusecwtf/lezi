@@ -7,9 +7,14 @@ converge.
 
 **Blocked by:** None — can start immediately; **lezi-sync release**.
 
-**Status:** ready-for-agent
+**Status:** implemented — awaiting live acceptance on `6b278242`
 
-- [ ] FC entities pull with plan+record co-group so client apply can resolve.
-- [ ] Regression: page with only FC after plan/record advanced revs still
+- [x] FC entities pull with plan+record co-group so client apply can resolve.
+- [x] Regression: page with only FC after plan/record advanced revs still
       co-groups live parents or re-emits them.
-- [ ] Rust/API tests prove client-style unresolved set empties.
+- [x] Rust/API tests prove client-style unresolved set empties.
+
+**Residual:** co-group semantics and API regressions are accepted; deployed-server
+acceptance remains:
+
+- [ ] After NAS CD, run an FC-only-page pull and verify the Android unresolved set empties.

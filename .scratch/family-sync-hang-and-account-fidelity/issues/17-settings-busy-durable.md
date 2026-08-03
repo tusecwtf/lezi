@@ -7,13 +7,13 @@ equivalent process-stable state), not only composition `remember`.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Clear-records: busy/step survive rotation; second confirm cannot start
+- [x] Clear-records: busy/step survive rotation; second confirm cannot start
       parallel clear while first runs.
-- [ ] Custom item add/update: busy-bound primary like delete.
-- [ ] Hide/reorder: serialized RMW so rapid taps do not clobber sortOrder/hide.
-- [ ] Forced about install path does not demote non-dismissible Forced UX to a
+- [x] Custom item add/update: busy-bound primary like delete.
+- [x] Hide/reorder: serialized RMW so rapid taps do not clobber sortOrder/hide.
+- [x] Forced about install path does not demote non-dismissible Forced UX to a
       soft Message that drops force chrome on failure (or root shell remains
       sole authority and about re-projects Forced).
-- [ ] Tests for clear busy durability and custom-item single-flight.
+- [x] Tests for clear busy durability and custom-item single-flight.

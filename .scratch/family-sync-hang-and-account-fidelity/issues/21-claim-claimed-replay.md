@@ -10,12 +10,12 @@ allows replay.
 **Blocked by:** None — can start immediately (coordinates with 01/02 on pending
 slot honesty).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Status `claimed` with local pending secret triggers claim/replay path, not
+- [x] Status `claimed` with local pending secret triggers claim/replay path, not
       immediate terminal clear + re-apply-only copy.
-- [ ] Only after durable session save (or true non-replayable conflict) is pending
+- [x] Only after durable session save (or true non-replayable conflict) is pending
       cleared as terminal.
-- [ ] Reconnect claim path matches the same recovery rule.
-- [ ] JVM tests: approved→claim server-ok / client die / next poll claimed →
+- [x] Reconnect claim path matches the same recovery rule.
+- [x] JVM tests: approved→claim server-ok / client die / next poll claimed →
       session recovered.

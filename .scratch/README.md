@@ -7,9 +7,9 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`family-sync-hang-and-account-fidelity`](./family-sync-hang-and-account-fidelity/) | **ready-for-agent** — 01–40 canonical（抗卡死 / 数据正确性 / 交互 / 部分 server）；frontier 与 soft serial 见 `ISSUES.md` |
+| [`family-sync-hang-and-account-fidelity`](./family-sync-hang-and-account-fidelity/) | **implementation-complete** — `6b278242`；7 项保留 live/NAS/多设备验收 |
 | [`family-network-offline-disaster-recovery`](./family-network-offline-disaster-recovery/) | **acceptance — awaiting joined-device smoke** — 0.3.3 已部署；票 07 真机补传待完成 |
-| [`codebase-audit-20260802-remediation`](./codebase-audit-20260802-remediation/) | 并行审计残差（若与 01–40 重叠以 hang tracker 为准） |
+| [`codebase-audit-20260802-remediation`](./codebase-audit-20260802-remediation/) | **complete** — implementation `6b278242`; ticket 07 regression `d160fe68` |
 
 产品权威仍在 [`docs/prd/`](../docs/prd/)、[`docs/adr/`](../docs/adr/)、
 [`CONTEXT.md`](../CONTEXT.md)。已关闭票的实现与证据在 git 历史中。

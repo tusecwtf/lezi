@@ -8,12 +8,12 @@ active rows pointing at missing files.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] `cleanupDiscardedLocalMedia` / unowned staged cleanup revalidate under path
+- [x] `cleanupDiscardedLocalMedia` / unowned staged cleanup revalidate under path
       gate before FS delete.
-- [ ] Avatar save/replace/delete feature path does not bypass ref-aware reclaim
+- [x] Avatar save/replace/delete feature path does not bypass ref-aware reclaim
       for MediaAsset-owned paths.
-- [ ] deleteBaby avatar tombstone remains single authority for baby removal.
-- [ ] Tests: concurrent attach vs discarded cleanup; avatar replace leaves no
+- [x] deleteBaby avatar tombstone remains single authority for baby removal.
+- [x] Tests: concurrent attach vs discarded cleanup; avatar replace leaves no
       active MediaAsset with missing file without a follow-up capture/tombstone.

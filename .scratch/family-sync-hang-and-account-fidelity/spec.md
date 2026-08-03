@@ -1,6 +1,10 @@
 # 家庭同步抗卡死、数据正确性与交互硬化
 
-Status: ready-for-agent
+Status: implementation-complete — live acceptance pending (`6b278242`)
+
+Acceptance boundary: all code/static/automated Must items are accepted. Tickets
+02, 19, 22, 25, 31, 33, and 36 retain one explicit isolation/NAS/live Owner/
+multi-device checkbox each; those external gates are the only remaining work.
 
 ## Goal
 

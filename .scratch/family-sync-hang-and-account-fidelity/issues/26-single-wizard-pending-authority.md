@@ -9,12 +9,12 @@ after onboarding unmount (or is explicitly owned by account/global retry).
 
 **Blocked by:** Soft-after 01 (abandon honesty); can start in parallel with care.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] pending == null always leaves waiting chrome (both entries).
-- [ ] Onboarding abandon is not optimistic-dismiss-only; matches success-gated
+- [x] pending == null always leaves waiting chrome (both entries).
+- [x] Onboarding abandon is not optimistic-dismiss-only; matches success-gated
       leave-waiting.
-- [ ] Member + RetryRequired after onboarding join has a recovery path without
+- [x] Member + RetryRequired after onboarding join has a recovery path without
       relying on destroyed onboarding Completed state.
-- [ ] Dual collector / dual controller harm is eliminated or documented with
+- [x] Dual collector / dual controller harm is eliminated or documented with
       forced reset on hide.

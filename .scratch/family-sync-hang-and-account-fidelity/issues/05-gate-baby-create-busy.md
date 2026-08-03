@@ -7,10 +7,10 @@ taps until success or a retryable error, and leave the user on a single new baby
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Onboarding create-baby primary is disabled/busy while create runs; second
+- [x] Onboarding create-baby primary is disabled/busy while create runs; second
       tap does not enqueue another `addBaby`.
-- [ ] Settings add-baby confirm is busy-bound the same way.
-- [ ] Failure restores a tappable retry without leaving a half-created second baby.
-- [ ] Unit or host tests cover double-tap → single create.
+- [x] Settings add-baby confirm is busy-bound the same way.
+- [x] Failure restores a tappable retry without leaving a half-created second baby.
+- [x] Unit or host tests cover double-tap → single create.

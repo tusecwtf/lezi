@@ -1,6 +1,6 @@
 # 07 · CustomItemCatalog update/move transactions
 
-Status: ready-for-agent
+Status: complete — implementation `6b278242`; regression accepted on `d160fe68`
 
 ## Findings
 
@@ -12,10 +12,10 @@ Status: ready-for-agent
 
 ## Fix
 
-- `updateCustomItem` 查重+写入、`moveCustomItem` 全部 sortOrder 更新分别包进
+- [x] `updateCustomItem` 查重+写入、`moveCustomItem` 全部 sortOrder 更新分别包进
   `transactionRunner.run`,风格对齐 `addCustomItem`。
 
 ## Validation
 
-- `./gradlew :domain:test`;回归:并发 update 同名 → 其一失败;move 中途失败不留半截
-  (可用内存/fake DAO 模拟)。
+- [x] `./gradlew :domain:test`;move 中途失败不留半截的 fake DAO 回归通过。
+- [x] `d160fe68` 补齐并通过并发 update 同名 → 其一失败的回归。

@@ -1,6 +1,6 @@
 # 01 · Server blocking I/O off tokio workers
 
-Status: ready-for-agent
+Status: complete — absorbed by hang-fidelity tracker on `6b278242`
 
 ## Findings
 
@@ -11,12 +11,12 @@ Status: ready-for-agent
 
 ## Fix
 
-1. handler 内所有 `state.store.*` 调用与媒体文件读写包 `tokio::task::spawn_blocking`
+- [x] handler 内所有 `state.store.*` 调用与媒体文件读写包 `tokio::task::spawn_blocking`
    (store 同步签名不变,handler 侧包一层;注意 `?` 错误透传)。
-2. `app_update.rs`:启动时缓存 APK 字节 + SHA-256,按文件 mtime 失效重建;不再每请求重算。
-3. `lib.rs` `require_supported_client`:缓存 `app-update.json` 解析结果,同样 mtime 失效。
+- [x] `app_update.rs`:启动时缓存 APK 字节 + SHA-256,按文件 mtime 失效重建;不再每请求重算。
+- [x] `lib.rs` `require_supported_client`:缓存 `app-update.json` 解析结果,同样 mtime 失效。
 
 ## Validation
 
-- `cargo fmt --all -- --check && cargo test --locked && cargo clippy --all-targets --all-features -- -D warnings`
-- 既有 handler/store 测试不改语义应全绿。
+- [x] `cargo fmt --all -- --check && cargo test --locked && cargo clippy --all-targets --all-features -- -D warnings`
+- [x] 既有 handler/store 测试保持全绿。

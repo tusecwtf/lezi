@@ -9,9 +9,9 @@ because a cancelled synchronize never reached Idle/Error. Network-settings
 **Blocked by:** Soft-after 01 on wizard abandon paths; can start immediately for
 sync status / members loading.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Cancel while Submitting → Editing or RetryableFailure; begin works again.
-- [ ] Members roster refresh cancel/finally clears loading.
-- [ ] Cancelled synchronize does not leave orphan “正在同步…”.
-- [ ] Tests force CancellationException mid-wizard-submit and mid-sync status.
+- [x] Cancel while Submitting → Editing or RetryableFailure; begin works again.
+- [x] Members roster refresh cancel/finally clears loading.
+- [x] Cancelled synchronize does not leave orphan “正在同步…”.
+- [x] Tests force CancellationException mid-wizard-submit and mid-sync status.

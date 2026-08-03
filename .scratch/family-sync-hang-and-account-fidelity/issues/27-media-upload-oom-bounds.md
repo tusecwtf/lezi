@@ -7,11 +7,11 @@ prepare failure and retry, not process death.
 
 **Blocked by:** None — can start immediately; complements 15–16.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Avatar composable uses bounded decode (max edge / pixel budget) like
+- [x] Avatar composable uses bounded decode (max edge / pixel budget) like
       record preview.
-- [ ] prepareUpload peak decode is capped; OOM caught; bitmaps recycled from
+- [x] prepareUpload peak decode is capped; OOM caught; bitmaps recycled from
       first allocation.
-- [ ] Tests or device smoke: large avatar file does not OOM UI; large record
+- [x] Tests or device smoke: large avatar file does not OOM UI; large record
       photo fails prepare closed without killing process.

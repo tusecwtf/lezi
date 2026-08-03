@@ -9,11 +9,11 @@ Idle.
 
 **Blocked by:** None — can start immediately; pairs with 09 for status copy.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Account primary CTA and chrome distinguish reauth from true unjoined.
-- [ ] Joined-only actions are not silently offered as if session were healthy;
+- [x] Account primary CTA and chrome distinguish reauth from true unjoined.
+- [x] Joined-only actions are not silently offered as if session were healthy;
       recovery actions remain reachable where product allows.
-- [ ] Log (and preferably summary/growth) banner or status treats ReauthRequired
+- [x] Log (and preferably summary/growth) banner or status treats ReauthRequired
       as actionable, not invisible.
-- [ ] Semantics/unit coverage for reauth vs unjoined vs error.
+- [x] Semantics/unit coverage for reauth vs unjoined vs error.

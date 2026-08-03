@@ -9,11 +9,16 @@ cannot brick the family lock forever.
 **Blocked by:** None — can start immediately; **requires lezi-sync release**
 (not Android-only).
 
-**Status:** ready-for-agent
+**Status:** implemented — awaiting live acceptance on `6b278242`
 
-- [ ] Family lock acquired after body validation or narrowed to per-bundle /
+- [x] Family lock acquired after body validation or narrowed to per-bundle /
       short critical sections, not whole stream.
-- [ ] Stalled upload cannot block pull/commit indefinitely.
-- [ ] Rust tests or integration proof concurrent pull during large put (or
+- [x] Stalled upload cannot block pull/commit indefinitely.
+- [x] Rust tests or integration proof concurrent pull during large put (or
       documented lock scope with timeout).
-- [ ] Deploy notes: server version bump; Android remains compatible.
+- [x] Deploy notes: server version bump; Android remains compatible.
+
+**Residual:** static implementation, Rust concurrency coverage, and deploy notes are
+accepted; production acceptance remains:
+
+- [ ] NAS CD followed by a concurrent stalled/large media upload and pull/commit smoke.

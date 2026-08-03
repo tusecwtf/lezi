@@ -4,8 +4,8 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Soft-delete baby with dirty child records does not hard-fail push with “本地宝宝档案不存在”.
-- [ ] Other family outbox roots continue to push in the same cycle.
-- [ ] JVM regression for tombstoned baby + dirty record package.
+- [x] Soft-delete baby with dirty child records does not hard-fail push with “本地宝宝档案不存在”.
+- [x] Other family outbox roots continue to push in the same cycle.
+- [x] JVM regression for tombstoned baby + dirty record package.

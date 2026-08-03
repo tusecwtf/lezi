@@ -1,6 +1,6 @@
 # 11 · Design-system consistency sweep
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -27,8 +27,8 @@ Status: ready-for-agent
 
 ## Fix
 
-逐项对齐;格式统一走现有 seam(`CareLogPresentation`/token),不新增平行工具函数。
+- [x] 逐项对齐;格式统一走现有 seam(`CareLogPresentation`/token),不新增平行工具函数。
 
 ## Validation
 
-- `./gradlew :app:assembleDebug lintDebug`;受影响页面 preview/截图核对。
+- [x] `./gradlew :app:assembleDebug lintDebug`;受影响页面 preview/截图核对。

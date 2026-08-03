@@ -4,8 +4,8 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Wizard CertificateChanged → forget → re-TOFU does not resume sync with old refresh.
-- [ ] Joined TrustChanged has a guided recovery CTA (not only generic offline).
-- [ ] Tests for forget then remember pin requires new session.
+- [x] Wizard CertificateChanged → forget → re-TOFU does not resume sync with old refresh.
+- [x] Joined TrustChanged has a guided recovery CTA (not only generic offline).
+- [x] Tests for forget then remember pin requires new session.

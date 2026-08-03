@@ -7,14 +7,14 @@ cannot permanently brick push at the open-staging cap.
 
 **Blocked by:** None — can start immediately; **requires lezi-sync release**.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Commit returns access expiry in the future relative to commit time (or
+- [x] Commit returns access expiry in the future relative to commit time (or
       client can refresh without immediate 401).
-- [ ] Open staging cap cannot permanently brick a family after many abandoned
+- [x] Open staging cap cannot permanently brick a family after many abandoned
       stages without operator DB surgery (TTL, replace, or GC).
-- [ ] Approved member requests that cannot be claimed have an owner-visible
+- [x] Approved member requests that cannot be claimed have an owner-visible
       recovery or automatic release of reserved display name (at least document
       + implement one: reject/cancel approved or expire reservation early on
       claim failure class).
-- [ ] Rust tests for commit-time access TTL; staging GC/TTL behavior.
+- [x] Rust tests for commit-time access TTL; staging GC/TTL behavior.

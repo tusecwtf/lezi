@@ -4,8 +4,14 @@
 
 **Blocked by:** Soft with 17 (settings busy).
 
-**Status:** ready-for-agent
+**Status:** implemented — awaiting live acceptance on `6b278242`
 
-- [ ] Two devices cannot permanently push >10 live defs.
-- [ ] Dock custom:N survives wipe without binding the wrong item.
-- [ ] Tombstoned def cannot create new local record that only fails on push.
+- [x] Two devices cannot permanently push >10 live defs.
+- [x] Dock custom:N survives wipe without binding the wrong item.
+- [x] Tombstoned def cannot create new local record that only fails on push.
+
+**Residual:** server/client caps, stable migration identity, and tombstone guards are
+accepted by static and automated evidence; family-device acceptance remains:
+
+- [ ] On two real devices, exercise concurrent custom creation, wipe/rejoin layout
+      restoration, and tombstoned-definition record rejection.

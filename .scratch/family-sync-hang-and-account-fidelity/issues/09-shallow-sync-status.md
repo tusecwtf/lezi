@@ -9,14 +9,14 @@ when applicable. No full datetime dump as the only success form; no silent
 
 **Blocked by:** None — can start immediately (may share projectors with 03/10).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] One domain/sync projector (or equivalent) feeds account + data pages.
-- [ ] Pending outbox/local-change count appears when joined and items await
+- [x] One domain/sync projector (or equivalent) feeds account + data pages.
+- [x] Pending outbox/local-change count appears when joined and items await
       publish (exact wording per PRD/design).
-- [ ] Summary/Growth do not use raw global Syncing alone as the only refresh
+- [x] Summary/Growth do not use raw global Syncing alone as the only refresh
       chrome without user intent (prefer local refreshing flag like log where
       needed).
-- [ ] Unit tests for label matrix: Idle+pending, Idle+none, Syncing, Error,
+- [x] Unit tests for label matrix: Idle+pending, Idle+none, Syncing, Error,
       Reauth, unjoined, waiting approval.
-- [ ] No tokens, HTTP codes, or server IDs in the shallow line.
+- [x] No tokens, HTTP codes, or server IDs in the shallow line.

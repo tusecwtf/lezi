@@ -1,6 +1,6 @@
 # 10 · Data screens reauth + milk summary fields
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -16,11 +16,11 @@ Status: ready-for-agent
 
 ## Fix
 
-1. 三处失败判断纳入 `SyncStatus.ReauthRequired`,文案复用
+- [x] 三处失败判断纳入 `SyncStatus.ReauthRequired`,文案复用
    `feature/family/.../FamilyUiPolicy.kt:232` 的「登录已失效,请重新登录或申请」。
-2. `MilkPayload` 摘要在有值时追加冲调量/耗时,格式与现有摘要风格一致
+- [x] `MilkPayload` 摘要在有值时追加冲调量/耗时,格式与现有摘要风格一致
    (时间线/搜索/导出/小组件经同一 seam 自动生效)。
 
 ## Validation
 
-- `./gradlew :core:model:test`(摘要新增用例)+ `lintDebug`。
+- [x] `./gradlew :core:model:test`(摘要新增用例)+ `lintDebug`。

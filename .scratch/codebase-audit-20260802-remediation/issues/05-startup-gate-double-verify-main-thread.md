@@ -1,6 +1,6 @@
 # 05 · Startup gate: single verify, off main thread
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -13,11 +13,11 @@ Status: ready-for-agent
 
 ## Fix
 
-1. `mutex.withLock` 内先重查 `state.value is Ready` 直接返回。
-2. 环境 I/O(`environment.inspect()/verify/prepareSnapshot` 段)包
+- [x] `mutex.withLock` 内先重查 `state.value is Ready` 直接返回。
+- [x] 环境 I/O(`environment.inspect()/verify/prepareSnapshot` 段)包
    `withContext(Dispatchers.IO)`。
 
 ## Validation
 
-- `./gradlew :core:common:test`(或对应模块)+ 新增回归:并发两个 `ensureReady`
+- [x] `./gradlew :core:common:test`;并发两个 `ensureReady`
   只跑一次环境校验;`retry` 在 IO dispatcher 执行(可用 test dispatcher 断言)。

@@ -9,15 +9,15 @@ cancellation-safe as save (no stuck “删除中…” after domain success).
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] `writeDecision` (and command snapshot) captured at confirm / save entry;
+- [x] `writeDecision` (and command snapshot) captured at confirm / save entry;
       post-import path reuses frozen decision or re-validates against it, not a
       fresh wall clock alone.
-- [ ] Time fields, notes, and sleep “同时记醒来” disabled while
+- [x] Time fields, notes, and sleep “同时记醒来” disabled while
       saving/deleting/handoffBusy (same as photo/confirm chrome).
-- [ ] Future→past flip during long photo import cannot silently change plan vs
+- [x] Future→past flip during long photo import cannot silently change plan vs
       fact after confirm.
-- [ ] Delete success publishes onDeleted / clears commit lock under
+- [x] Delete success publishes onDeleted / clears commit lock under
       NonCancellable-equivalent path.
-- [ ] Unit tests for clock flip mid-save and convert flip; UI busy field lock.
+- [x] Unit tests for clock flip mid-save and convert flip; UI busy field lock.

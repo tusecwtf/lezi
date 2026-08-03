@@ -1,6 +1,6 @@
 # 06 · Timeline invalidation observes fulfillment_candidates
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -14,9 +14,9 @@ Status: ready-for-agent
 
 ## Fix
 
-- `observeInvalidations()` count 查询追加 `+ (SELECT COUNT(*) FROM fulfillment_candidates)`。
+- [x] `observeInvalidations()` count 查询追加 `+ (SELECT COUNT(*) FROM fulfillment_candidates)`。
 
 ## Validation
 
-- `./gradlew :core:database:test`;回归:只写 fulfillment_candidates 时
+- [x] `./gradlew connectedDebugAndroidTest`;Room 回归只写 fulfillment_candidates 时
   `observeInvalidations` 发射新值。

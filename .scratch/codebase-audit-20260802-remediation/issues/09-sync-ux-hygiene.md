@@ -1,6 +1,6 @@
 # 09 · Sync UX hygiene
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -16,12 +16,12 @@ Status: ready-for-agent
 
 ## Fix
 
-1. 显式捕获并 rethrow `CancellationException`(对齐项目其余处写法)。
-2. `memberLoginCheckEvents` 改 `onBufferOverflow = DROP_OLDEST`(或 `tryEmit`)。
-3. spinner 只在 `PullToRefresh` 触发的同步期间转圈(自有 refreshing 标志或 trigger
+- [x] 显式捕获并 rethrow `CancellationException`(对齐项目其余处写法)。
+- [x] `memberLoginCheckEvents` 改 `onBufferOverflow = DROP_OLDEST`(或 `tryEmit`)。
+- [x] spinner 只在 `PullToRefresh` 触发的同步期间转圈(自有 refreshing 标志或 trigger
    过滤,取改动小者)。
-4. `checkMemberApproval` 补 20s `withTimeout`。
+- [x] `checkMemberApproval` 补 20s `withTimeout`。
 
 ## Validation
 
-- `./gradlew :sync:test :domain:test`;feature 改动随 `lintDebug` 核对。
+- [x] `./gradlew :sync:test :domain:test`;feature 改动随 `lintDebug` 核对。

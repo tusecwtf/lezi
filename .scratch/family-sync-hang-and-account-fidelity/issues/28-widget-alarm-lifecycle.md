@@ -11,11 +11,11 @@ ticket 37 calendar path).
 
 **Blocked by:** None — can start immediately; soft-serial with 37 on package-replaced.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Local clear / leave family wipes widget state or forces unconfigured redraw.
-- [ ] Baby delete cancels that baby’s plan alarms; no ghost due notif.
-- [ ] Complete/skip/delete plan cancels drawer notification id.
-- [ ] Request codes unique across plan id space (not 16-bit modulo only).
-- [ ] POST_NOTIFICATIONS request or settings deep-link when reminders enabled.
-- [ ] MY_PACKAGE_REPLACED / install SUCCESS → reschedule + widget refresh.
+- [x] Local clear / leave family wipes widget state or forces unconfigured redraw.
+- [x] Baby delete cancels that baby’s plan alarms; no ghost due notif.
+- [x] Complete/skip/delete plan cancels drawer notification id.
+- [x] Request codes unique across plan id space (not 16-bit modulo only).
+- [x] POST_NOTIFICATIONS request or settings deep-link when reminders enabled.
+- [x] MY_PACKAGE_REPLACED / install SUCCESS → reschedule + widget refresh.

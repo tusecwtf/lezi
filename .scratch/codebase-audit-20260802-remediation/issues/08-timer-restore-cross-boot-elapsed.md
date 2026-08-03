@@ -1,6 +1,6 @@
 # 08 · Timer restore: no cross-boot elapsedRealtime
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -13,9 +13,9 @@ Status: ready-for-agent
 
 ## Fix
 
-- `savedBootCount != null && nowBootCount == null` 分支显式走 wall 对兜底,与
+- [x] `savedBootCount != null && nowBootCount == null` 分支显式走 wall 对兜底,与
   `savedBootCount == null && nowBootCount != null` 对称。
 
 ## Validation
 
-- `./gradlew :feature:timer:test`;回归:该分支输入下返回 wall 差值而非 elapsed 差值。
+- [x] `./gradlew :feature:timer:test`;回归:该分支输入下返回 wall 差值而非 elapsed 差值。

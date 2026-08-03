@@ -4,8 +4,8 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Foreign app cannot silently setCurrentBaby + open composer.
-- [ ] Fulfill deep link shows confirm (or same-app-only) before composer.
-- [ ] Device test or instrumented intent spoof denied without confirm.
+- [x] Foreign app cannot silently setCurrentBaby + open composer.
+- [x] Fulfill deep link shows confirm (or same-app-only) before composer.
+- [x] Device test or instrumented intent spoof denied without confirm.

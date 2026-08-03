@@ -1,6 +1,6 @@
 # 2026-08-02 全库诊断修复
 
-Status: ready-for-agent
+Status: complete — implementation `6b278242`; ticket 07 regression `d160fe68`
 
 ## Goal
 
@@ -18,13 +18,13 @@ UI 与设计·后端对照)确认的全部问题:前后端交互卡死链条、�
 
 ## Must
 
-- 服务端:任何阻塞 SQLite/文件 I/O 不占 tokio worker;bundle 媒体上传不再持 family 锁
+- [x] 服务端:任何阻塞 SQLite/文件 I/O 不占 tokio worker;bundle 媒体上传不再持 family 锁
   跨 body 流;请求有整体超时;APK 与 app-update.json 不再每请求重读重算。
-- 客户端:上传写路径有停滞看门狗,不再可能阻塞到 tcp_retries2;APK 下载不占
+- [x] 客户端:上传写路径有停滞看门狗,不再可能阻塞到 tcp_retries2;APK 下载不占
   `sessionMutex`;取消不被吞成 Error。
-- 正确性:冷启动门只校验一次且不在主线程;时间线在冲突解决后刷新;自定义项目
+- [x] 正确性:冷启动门只校验一次且不在主线程;时间线在冲突解决后刷新;自定义项目
   更新/移动事务化;计时器恢复不在跨重启时误用 elapsedRealtime。
-- UI:数据页在 ReauthRequired 下有提示;冲调量/耗时在摘要可见;同页日期/体重/时长
+- [x] UI:数据页在 ReauthRequired 下有提示;冲调量/耗时在摘要可见;同页日期/体重/时长
   格式统一;typography ramp 补齐;无真实 NAS 地址占位符;死代码删除。
 
 ## Out of scope
@@ -35,6 +35,8 @@ UI 与设计·后端对照)确认的全部问题:前后端交互卡死链条、�
 
 ## Validation (program-level)
 
-- `cd tools/lezi-sync && cargo fmt --all -- --check && cargo test --locked && cargo clippy --all-targets --all-features -- -D warnings`
-- `./gradlew test` 全量;05/06/07/08 各带一条回归测试。
-- `./gradlew :app:assembleDebug lintDebug`;UI 改动页核对。
+- [x] `cd tools/lezi-sync && cargo fmt --all -- --check && cargo test --locked && cargo clippy --all-targets --all-features -- -D warnings`
+- [x] `./gradlew test` 全量;05/08 及 07 已有事务/回滚回归均通过。
+- [x] `./gradlew connectedDebugAndroidTest`;06 的 Room invalidation device 回归通过。
+- [x] 07 在 `d160fe68` 补齐并通过“并发 update 同名仅一方成功”的回归测试。
+- [x] `./gradlew :app:assembleDebug lintDebug`;UI 改动页核对。

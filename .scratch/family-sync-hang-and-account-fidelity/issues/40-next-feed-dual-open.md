@@ -4,8 +4,8 @@
 
 **Blocked by:** Soft with 32 (family-global single-open pattern).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Two devices offline complete+reschedule with divergent seeds → after sync one open remains.
-- [ ] Pull/apply path heals extra open next-feed markers, not only local schedule.
-- [ ] Same-UUID concurrent create remains no-op (existing); this ticket is divergent UUID only.
+- [x] Two devices offline complete+reschedule with divergent seeds → after sync one open remains.
+- [x] Pull/apply path heals extra open next-feed markers, not only local schedule.
+- [x] Same-UUID concurrent create remains no-op (existing); this ticket is divergent UUID only.

@@ -16,10 +16,10 @@ explanation. Zero/near-zero complete polish may ride along if cheap.
 **Blocked by:** None — can start after policy A/B is chosen (document choice in
 commit/PR).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Chosen policy A or B is written in the PR and implemented consistently for
+- [x] Chosen policy A or B is written in the PR and implemented consistently for
       top-bar, system back, and discard.
-- [ ] Never look fully exited while timer runs with no explanation.
-- [ ] Feature tests: back-with-data and discard-with-data match the chosen policy
+- [x] Never look fully exited while timer runs with no explanation.
+- [x] Feature tests: back-with-data and discard-with-data match the chosen policy
       only.

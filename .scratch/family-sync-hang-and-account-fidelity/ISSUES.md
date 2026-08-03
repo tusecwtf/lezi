@@ -1,6 +1,6 @@
 # 家庭同步抗卡死、数据正确性与交互硬化
 
-Status: ready-for-agent  
+Status: implementation-complete — live acceptance pending (`6b278242`)
 Last consolidation: 2026-08-03 (rounds 1–3 multi-scope audit + **dedup**)
 
 ## Dedup principle
@@ -15,47 +15,63 @@ Last consolidation: 2026-08-03 (rounds 1–3 multi-scope audit + **dedup**)
 
 | # | Title | Status | Blocked by | Code | Notes |
 |---|-------|--------|------------|------|-------|
-| 01 | Abandon-waiting honest | ready | — | partial | domain local-first done |
-| 02 | Join before first full sync | ready | — | partial | recover still under barrier |
-| 03 | Account card fidelity | ready | soft∥09/10 | open | rename A/B decision first |
-| 04a | Bound **session-establish** busy | ready | **02** | open | was over-blocked as full 04 |
-| 04b | Bound **roster/network** busy timeout | ready | soft←08 host | open | free of 01 |
-| 05 | Gate baby-create busy | ready | — | open | |
-| 06 | Busy destructive confirms | ready | — | partial | + rename/QR multi-tap single-flight |
-| 07 | Network host busy hygiene (DR cancel + finally) | ready | soft∥04b | open | host launchBusy only |
-| 08 | Wizard/sync cancel hygiene (Submitting + Syncing) | ready | soft after 01 | open | not network host |
-| 09 | Shallow sync + outbox N | ready | soft before 10 | partial | owns status projector |
-| 10 | Reauth product surface | ready | soft←09 | partial | CTA matrix; not force shell |
-| 11 | Productize error copy | ready | soft DR after 07 | open | + probe twin maps / 根密码 wording |
-| 12 | Timer leave vs discard | ready | **product A/B** | open | |
-| 13 | Freeze composer write decision | ready | — | partial | |
-| 14 | Timer post-save durability | ready | **12** | partial | |
-| 15 | Local clear media epoch | ready | soft after 16 | open | |
-| 16 | Media delete path safety | ready | — | partial | |
-| 17 | Settings clear/custom durable busy | ready | — | open | Forced-about → **23** |
-| 18 | Post-push full-resync + receipt CAS | ready | — | partial | |
-| 19 | Server family lock not across upload | ready | — | open | + get_media lock |
-| 20 | Server restore access TTL + staging GC | ready | — | open | approved-name split later |
-| 21 | Claim `claimed` replay | ready | — | open | P0 auth |
-| 22 | Refresh rotation crash-safe | ready | — | open | P0 auth |
-| 23 | Force shell survives reauth (+ install busy/dismiss) | ready | — | open | P0; absorbs APK sessionMutex / optional dismiss |
-| 24 | Availability Checking stuck + demote + debounce | ready | — | open | P0 |
-| 25 | Server FC pull co-group | ready | — | open | P0 |
-| 26 | Single pending-waiting authority | ready | soft after 01 | open | dual wizard / root unmount |
-| 27 | Avatar display + prepareUpload OOM bounds | ready | — | open | P0 |
-| 28 | Widget + alarm lifecycle | ready | — | open | requestCode; notif cancel; clear wipe; **+ MY_PACKAGE_REPLACED** |
-| **29** | Soft-deleted baby must not brick outbox push | ready | — | open | **NEW P0** capture vs `babyDao.get` |
-| **30** | Apply: dirty must not skip strictly newer remote | ready | — | open | **NEW P0** LWW/tombstone/full-resync |
-| **31** | Server record manage ACL (ForbiddenRecord) | ready | — | open | **NEW P0** member edit any record |
-| **32** | Multi-device open sleep: family-global wake | ready | — | open | **NEW P0** lost wake |
-| **33** | Owner reconnect: no ghost devices + sticky login id | ready | — | open | **NEW P0** reconnectOwner |
-| **34** | forgetEndpoint / re-TOFU clears credentials | ready | — | open | **NEW P1** PRD §10 |
-| **35** | Composer mid-save process-death identity | ready | soft∥13 | open | **NEW P0** duplicate fact |
-| **36** | Custom-item family invariants (cap/layout id/record create) | ready | soft∥17 | open | **NEW P1** multi-device |
-| **37** | Calendar handoff dual-notify + boot/package rehydrate | ready | soft∥28 | open | **NEW P1**; package-replaced with 28 |
-| **38** | Untrusted deep-link confirm (fulfill / composer / setCurrent) | ready | — | open | **NEW P1** exported MainActivity |
-| **39** | Baby apply dirty-hold + merge avatar policy | ready | soft∥30 | open | **NEW P0/P1** clobber / immutable media |
-| **40** | Dual open next-feed markers multi-device | ready | soft∥32 | open | **NEW P1** (saturation: only novel left) |
+| 01 | Abandon-waiting honest | complete | — | done | `6b278242` |
+| 02 | Join before first full sync | implemented | — | done | awaiting isolation join/create smoke |
+| 03 | Account card fidelity | complete | soft∥09/10 | done | Path A · `6b278242` |
+| 04a | Bound **session-establish** busy | complete | **02** | done | `6b278242` |
+| 04b | Bound **roster/network** busy timeout | complete | soft←08 host | done | `6b278242` |
+| 05 | Gate baby-create busy | complete | — | done | `6b278242` |
+| 06 | Busy destructive confirms | complete | — | done | `6b278242` |
+| 07 | Network host busy hygiene (DR cancel + finally) | complete | soft∥04b | done | `6b278242` |
+| 08 | Wizard/sync cancel hygiene (Submitting + Syncing) | complete | soft after 01 | done | `6b278242` |
+| 09 | Shallow sync + outbox N | complete | soft before 10 | done | `6b278242` |
+| 10 | Reauth product surface | complete | soft←09 | done | `6b278242` |
+| 11 | Productize error copy | complete | soft DR after 07 | done | `6b278242` |
+| 12 | Timer leave vs discard | complete | **product B** | done | `6b278242` |
+| 13 | Freeze composer write decision | complete | — | done | `6b278242` |
+| 14 | Timer post-save durability | complete | **12** | done | `6b278242` |
+| 15 | Local clear media epoch | complete | soft after 16 | done | `6b278242` |
+| 16 | Media delete path safety | complete | — | done | `6b278242` |
+| 17 | Settings clear/custom durable busy | complete | — | done | `6b278242` |
+| 18 | Post-push full-resync + receipt CAS | complete | — | done | `6b278242` |
+| 19 | Server family lock not across upload | implemented | — | done | awaiting NAS CD smoke |
+| 20 | Server restore access TTL + staging GC | complete | — | done | `6b278242` |
+| 21 | Claim `claimed` replay | complete | — | done | `6b278242` |
+| 22 | Refresh rotation crash-safe | implemented | — | done | awaiting live refresh recovery |
+| 23 | Force shell survives reauth (+ install busy/dismiss) | complete | — | done | `6b278242` |
+| 24 | Availability Checking stuck + demote + debounce | complete | — | done | `6b278242` |
+| 25 | Server FC pull co-group | implemented | — | done | awaiting NAS FC pull smoke |
+| 26 | Single pending-waiting authority | complete | soft after 01 | done | `6b278242` |
+| 27 | Avatar display + prepareUpload OOM bounds | complete | — | done | `6b278242` |
+| 28 | Widget + alarm lifecycle | complete | — | done | `6b278242` |
+| **29** | Soft-deleted baby must not brick outbox push | complete | — | done | `6b278242` |
+| **30** | Apply: dirty must not skip strictly newer remote | complete | — | done | `6b278242` |
+| **31** | Server record manage ACL (ForbiddenRecord) | implemented | — | done | awaiting NAS ACL smoke |
+| **32** | Multi-device open sleep: family-global wake | complete | — | done | `6b278242` |
+| **33** | Owner reconnect: no ghost devices + sticky login id | implemented | — | done | awaiting real owner reconnect |
+| **34** | forgetEndpoint / re-TOFU clears credentials | complete | — | done | `6b278242` |
+| **35** | Composer mid-save process-death identity | complete | soft∥13 | done | `6b278242` |
+| **36** | Custom-item family invariants (cap/layout id/record create) | implemented | soft∥17 | done | awaiting multi-device custom smoke |
+| **37** | Calendar handoff dual-notify + boot/package rehydrate | complete | soft∥28 | done | `6b278242` |
+| **38** | Untrusted deep-link confirm (fulfill / composer / setCurrent) | complete | — | done | `6b278242` |
+| **39** | Baby apply dirty-hold + merge avatar policy | complete | soft∥30 | done | `6b278242` |
+| **40** | Dual open next-feed markers multi-device | complete | soft∥32 | done | `6b278242` |
+
+## Acceptance evidence
+
+All implementation/static/automated Must items are accepted on fixed HEAD
+`6b2782425860d37f9357ea9c6ee9455171aad95c`. The only unchecked items are
+external acceptance gates that cannot be proven by repository tests alone:
+
+| Ticket | Residual acceptance |
+|--------|---------------------|
+| 02 | Isolated 0.3.3 join/create prompt-return plus later foreground convergence |
+| 19 | NAS CD plus concurrent stalled/large upload and pull/commit smoke |
+| 22 | Real refresh rotation interrupted between server accept and client handoff |
+| 25 | Post-CD FC-only-page pull resolves the Android unresolved set |
+| 31 | Post-CD real Member foreign-record/media ACL and same-membership allowance |
+| 33 | Real Owner reconnect creates no ghost active Owner device |
+| 36 | Two-device custom cap, wipe/rejoin layout identity, and tombstone smoke |
 
 Issue files: `issues/01-*.md` …; **29–40** from consolidation + saturation. Former **08** file remains wizard/sync; network finally is **07**.
 

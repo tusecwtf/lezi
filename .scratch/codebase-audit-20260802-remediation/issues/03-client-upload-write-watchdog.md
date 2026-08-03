@@ -1,6 +1,6 @@
 # 03 · Client upload write watchdog
 
-Status: ready-for-agent
+Status: complete — accepted on `6b278242`
 
 ## Findings
 
@@ -13,13 +13,11 @@ Status: ready-for-agent
 
 ## Fix
 
-- 写循环分块写,每块后 `currentCoroutineContext().ensureActive()`;加停滞看门狗:
+- [x] 写循环分块写,每块后 `currentCoroutineContext().ensureActive()`;加停滞看门狗:
   最后一次成功 `write` 超过 N 秒无进展(建议 30s)即 `connection.disconnect()` 并抛
   `IOException`(走既有重试/失败语义)。实现限于 `HttpSyncBackend` 内部,不动调用链。
-- 小 body 路径(`requestJson`/`requestBytes`)如可行同样受益,至少保证 connect/read
-  timeout 已覆盖的现状不回退。
+- [x] 小 body 路径(`requestJson`/`requestBytes`)维持既有 connect/read timeout，不回退。
 
 ## Validation
 
-- `./gradlew :sync:test`;补一条看门狗单测(假 source/连接或抽出可测接缝),
-  不引入真实网络。
+- [x] `./gradlew :sync:test`;看门狗回归使用本地假服务，不依赖外网。

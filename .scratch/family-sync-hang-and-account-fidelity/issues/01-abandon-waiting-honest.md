@@ -11,16 +11,16 @@ afterward without being stuck on the previous pending.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Waiting dialog shows busy/disabled actions while abandon runs; re-taps do not
+- [x] Waiting dialog shows busy/disabled actions while abandon runs; re-taps do not
       silently no-op without feedback.
-- [ ] Abandon always leaves a non-waiting UI when local pending is gone; failure copy
+- [x] Abandon always leaves a non-waiting UI when local pending is gone; failure copy
       never claims the request is still kept unless local pending is still present.
-- [ ] Empty-pending abandon is success (idempotent), including coordinator/gateway.
-- [ ] Candidate reconnect cancel clears local attempt immediately; remote cancel does
+- [x] Empty-pending abandon is success (idempotent), including coordinator/gateway.
+- [x] Candidate reconnect cancel clears local attempt immediately; remote cancel does
       not block the network-settings busy flag when the NAS is unreachable.
-- [ ] After abandon, a new member request can be submitted on the same device without
+- [x] After abandon, a new member request can be submitted on the same device without
       a stuck local slot.
-- [ ] Domain/sync unit coverage for idempotent abandon, offline remote cancel, and
+- [x] Domain/sync unit coverage for idempotent abandon, offline remote cancel, and
       reconnect local-first cancel; UI/semantics cover busy abandon and leave-waiting.

@@ -4,9 +4,9 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Dirty local T1 + remote tombstone T2 → local deleted; cursor honest.
-- [ ] Full-resync after peer advanced → device converges, not stuck dirty@old.
-- [ ] Mid-push: live body and outbox epoch are not mixed (abort/rebuild if clocks diverge).
-- [ ] JVM tests for dirty+newer remote and full-resync dirty policy.
+- [x] Dirty local T1 + remote tombstone T2 → local deleted; cursor honest.
+- [x] Full-resync after peer advanced → device converges, not stuck dirty@old.
+- [x] Mid-push: live body and outbox epoch are not mixed (abort/rebuild if clocks diverge).
+- [x] JVM tests for dirty+newer remote and full-resync dirty policy.

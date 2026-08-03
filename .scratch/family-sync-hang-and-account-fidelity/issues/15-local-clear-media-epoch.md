@@ -7,12 +7,12 @@ privacy expectation matches product copy.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Clear finish (or post-finish pass) sweeps known media roots for unreferenced
+- [x] Clear finish (or post-finish pass) sweeps known media roots for unreferenced
       files, or durable draft-path ledger is reclaimed on clear.
-- [ ] Record/photo writers are excluded or fail-closed for the clear epoch (not
+- [x] Record/photo writers are excluded or fail-closed for the clear epoch (not
       only calendar reminder guard).
-- [ ] No path-gate ↔ syncMutex deadlock introduced.
-- [ ] Tests: draft import file without MediaAsset is gone after clear; concurrent
+- [x] No path-gate ↔ syncMutex deadlock introduced.
+- [x] Tests: draft import file without MediaAsset is gone after clear; concurrent
       attach during clear does not leave inconsistent half-family data.

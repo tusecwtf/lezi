@@ -4,9 +4,14 @@
 
 **Blocked by:** None — lezi-sync release.
 
-**Status:** ready-for-agent
+**Status:** implemented — awaiting live acceptance on `6b278242`
 
-- [ ] Member cannot LWW-edit or tombstone another member/owner’s record.
-- [ ] Same-membership second device may still manage own author rows.
-- [ ] Record-attached log media requires creator or owner.
-- [ ] API regression tests 403 ForbiddenRecord (or product-equivalent).
+- [x] Member cannot LWW-edit or tombstone another member/owner’s record.
+- [x] Same-membership second device may still manage own author rows.
+- [x] Record-attached log media requires creator or owner.
+- [x] API regression tests 403 ForbiddenRecord (or product-equivalent).
+
+**Residual:** ACL rules and API regressions are accepted; deployed-family acceptance remains:
+
+- [ ] After NAS CD, verify a real Member receives ForbiddenRecord for foreign record/media
+      mutation while the same membership’s second device remains allowed.

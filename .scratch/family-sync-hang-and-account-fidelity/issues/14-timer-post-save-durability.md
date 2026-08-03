@@ -9,17 +9,17 @@ family join invalidates the session.
 
 **Blocked by:** 12 — Timer leave vs discard policy (share one back policy).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Back/pop while `completionUi.saving` is blocked or defers until
+- [x] Back/pop while `completionUi.saving` is blocked or defers until
       NonCancellable succeed+clear finishes.
-- [ ] Back during next-feed either finishes/skips the offer durably or keeps
+- [x] Back during next-feed either finishes/skips the offer durably or keeps
       stage outside nav-scoped loss.
-- [ ] Post-success timer clear failure retries or sticky-flags until JSON is
+- [x] Post-success timer clear failure retries or sticky-flags until JSON is
       empty; no “memory empty / disk full session” ghost after leave.
-- [ ] After local clear (or session invalidation), in-memory timer cannot
+- [x] After local clear (or session invalidation), in-memory timer cannot
       re-persist a stale baby/session without user starting fresh.
-- [ ] STARTING-before-markActive clear path does not leave orphan FGS without
+- [x] STARTING-before-markActive clear path does not leave orphan FGS without
       durable session (stop-by-token or equivalent).
-- [ ] Tests: cancel/pop mid-save after domain commit; clear failure recovery;
+- [x] Tests: cancel/pop mid-save after domain commit; clear failure recovery;
       clear then no ghost re-persist.

@@ -7,10 +7,10 @@ or receipt was not written—avoid silent “pushed but no receipt” holes.
 
 **Blocked by:** None — can start immediately (Android sync only).
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Member post-push `pullAllPages` wrapped in full-resync recovery like other
+- [x] Member post-push `pullAllPages` wrapped in full-resync recovery like other
       pull paths.
-- [ ] On receipt CAS miss, do not markSynced/delete outbox when dirty still
+- [x] On receipt CAS miss, do not markSynced/delete outbox when dirty still
       requires republish (or re-enqueue).
-- [ ] JVM tests for 409 on member post-push path and CAS-miss retention.
+- [x] JVM tests for 409 on member post-push path and CAS-miss retention.

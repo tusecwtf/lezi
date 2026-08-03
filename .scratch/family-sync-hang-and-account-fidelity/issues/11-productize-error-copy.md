@@ -8,14 +8,14 @@ log details at debug level.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] `familySyncError` / HTTP formatter path used by UI does not pass through
+- [x] `familySyncError` / HTTP formatter path used by UI does not pass through
       raw HTTP status + body for product surfaces.
-- [ ] Disaster recovery UI never prints raw `recoveryStatus` machine strings for
+- [x] Disaster recovery UI never prints raw `recoveryStatus` machine strings for
       unknown states; uses a safe fallback phrase.
-- [ ] Snapshot tests or string assertions: no `HTTP `, no bare internal status
+- [x] Snapshot tests or string assertions: no `HTTP `, no bare internal status
       tokens in user-visible family feedback.
-- [ ] Unjoined-but-remembered endpoint: account can show continue/forget style
+- [x] Unjoined-but-remembered endpoint: account can show continue/forget style
       recovery consistent with onboarding (or ticket documents deferral if folded
       into 03).

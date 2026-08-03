@@ -13,13 +13,13 @@ with retryable Chinese errors. DR long upload is out of scope here (ticket 07).
 - **04b (roster / network timeouts):** None — can start immediately; soft-serial
   with 07 on `FamilyNetworkSettingsHost`.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] 04a: Create/owner/check submit chrome ends by success, retryable error, or
+- [x] 04a: Create/owner/check submit chrome ends by success, retryable error, or
       timeout ≤ T without waiting full multi-page media sync.
-- [ ] 04b: Roster refresh timeout → not loading forever; prior roster retained +
+- [x] 04b: Roster refresh timeout → not loading forever; prior roster retained +
       retryable error.
-- [ ] 04b: Network-settings probe/reconnect (non-DR) timeout → busy false +
+- [x] 04b: Network-settings probe/reconnect (non-DR) timeout → busy false +
       actionable copy.
-- [ ] DR long steps not “timed out” as false success (owned by 07).
-- [ ] Tests: hung listFamilyMembers / never-answering probe → not-busy + retry.
+- [x] DR long steps not “timed out” as false success (owned by 07).
+- [x] Tests: hung listFamilyMembers / never-answering probe → not-busy + retry.

@@ -4,8 +4,13 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** implemented — awaiting live acceptance on `6b278242`
 
-- [ ] Reconnect same device does not leave an extra active Owner device by default.
-- [ ] Durable login request id retry-safe; conflict surfaces recoverable Chinese copy.
-- [ ] Takeover vs login mode cannot permanently brick against a committed server row without a new id path.
+- [x] Reconnect same device does not leave an extra active Owner device by default.
+- [x] Durable login request id retry-safe; conflict surfaces recoverable Chinese copy.
+- [x] Takeover vs login mode cannot permanently brick against a committed server row without a new id path.
+
+**Residual:** request-id lifecycle and conflict recovery are accepted by automated tests;
+real-account acceptance remains:
+
+- [ ] Reconnect the real Owner phone and verify no ghost active Owner device is created.

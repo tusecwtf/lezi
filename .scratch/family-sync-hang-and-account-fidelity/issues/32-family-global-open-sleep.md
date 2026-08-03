@@ -4,8 +4,8 @@
 
 **Blocked by:** None.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Two open UUIDs; one wake → no remaining open sleep on either replica after sync.
-- [ ] Heal/wrong-end residual documented or improved without reintroducing dual open.
-- [ ] Cross-device offline→online matrix test or equivalent JVM fixtures.
+- [x] Two open UUIDs; one wake → no remaining open sleep on either replica after sync.
+- [x] Heal/wrong-end residual documented or improved without reintroducing dual open.
+- [x] Cross-device offline→online matrix test or equivalent JVM fixtures.

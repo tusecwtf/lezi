@@ -8,12 +8,12 @@ Wi‑Fi flap cannot burn battery.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Cancel mid-probe restores previous availability or Unavailable with a
+- [x] Cancel mid-probe restores previous availability or Unavailable with a
       nextProbeAt; never durable Checking with no schedule.
-- [ ] LocalWrite while formerly Checking eventually probes or surfaces retry.
-- [ ] Transport sync failure demotes or forces re-probe (not indefinite Available
+- [x] LocalWrite while formerly Checking eventually probes or surfaces retry.
+- [x] Transport sync failure demotes or forces re-probe (not indefinite Available
       lease while SyncStatus.Error).
-- [ ] NetworkRecovered probes are debounced/rate-limited under flapping.
-- [ ] Tests for cancel-while-Checking and LocalWrite recovery.
+- [x] NetworkRecovered probes are debounced/rate-limited under flapping.
+- [x] Tests for cancel-while-Checking and LocalWrite recovery.

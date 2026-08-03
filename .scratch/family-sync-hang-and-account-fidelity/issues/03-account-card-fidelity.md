@@ -15,9 +15,9 @@ ticket **09** (do not re-own outbox pending projector here).
 **Blocked by:** Soft-serial with 09/10 on account chrome; can start immediately
 after path A/B is chosen.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Path A or B implemented and documented in PR.
-- [ ] Roster entry: loading label while fetching; error + retry when failed.
-- [ ] Sync line remains non-interactive result text.
-- [ ] Semantics: unjoined | waiting | Owner | Member primary paths.
+- [x] Path A or B implemented and documented in PR.
+- [x] Roster entry: loading label while fetching; error + retry when failed.
+- [x] Sync line remains non-interactive result text.
+- [x] Semantics: unjoined | waiting | Owner | Member primary paths.

@@ -4,8 +4,8 @@
 
 **Blocked by:** Soft with 28.
 
-**Status:** ready-for-agent
+**Status:** complete — accepted on `6b278242`
 
-- [ ] Plan edit clears ready only with pending (or cancel under guard) so dual fire cannot occur.
-- [ ] ABSENT event cleanup scrubs orphan reminders when product requires.
-- [ ] If 28 rehydrate entry is shared, calendar path uses it without forking a second package-replaced handler.
+- [x] Plan edit clears ready only with pending (or cancel under guard) so dual fire cannot occur.
+- [x] ABSENT event cleanup scrubs orphan reminders when product requires.
+- [x] If 28 rehydrate entry is shared, calendar path uses it without forking a second package-replaced handler.
