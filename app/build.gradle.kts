@@ -126,6 +126,12 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+
+    sourceSets {
+        getByName("androidTest").assets.srcDir(
+            rootProject.file("core/database/schemas"),
+        )
+    }
 }
 
 val validateReleaseSigning = tasks.register("validateReleaseSigning") {
@@ -310,6 +316,7 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.room.testing)
     androidTestImplementation(libs.truth)
     testImplementation(libs.junit)
     testImplementation(libs.truth)

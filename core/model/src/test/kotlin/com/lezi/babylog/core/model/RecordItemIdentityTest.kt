@@ -37,6 +37,18 @@ class RecordItemIdentityTest {
     }
 
     @Test
+    fun familyCustomCatalogKeyUsesStableClientUuid() {
+        val clientUuid = "123e4567-e89b-12d3-a456-426614174000"
+
+        val identity = RecordItemIdentity.parseCatalogKey(
+            RecordItemIdentity.customFamilyCatalogKey(clientUuid),
+        )
+
+        assertEquals(RecordItemIdentity.FamilyCustom(clientUuid), identity)
+        assertEquals(RecordType.CUSTOM, identity?.recordType)
+    }
+
+    @Test
     fun onlyConcreteCustomIdentityIsAvailableForNewEntry() {
         assertFalse(RecordType.CUSTOM.isAvailableForNewEntry)
         assertTrue(RecordType.DIARY.isAvailableForNewEntry)

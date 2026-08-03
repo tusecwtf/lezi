@@ -13,7 +13,8 @@ import kotlinx.serialization.json.jsonPrimitive
  * Device-local catalog layout policy shared by “所有记录项目” and the more-sheet.
  *
  * - [categoryOrderJson]: ordered section storage keys (see [RecordSection.storageKey])
- * - [itemOrderJson]: ordered catalog keys including built-in type keys and `custom:{id}`
+ * - [itemOrderJson]: ordered catalog keys including built-in type keys and
+ *   `custom:{familyClientUuid}`
  *
  * Items never cross categories. Hide/show keeps keys in the order list so re-enable
  * restores the previous position.
@@ -107,14 +108,15 @@ fun moveCategoryToIndex(
  * Includes currently hidden keys so order survives disable/re-enable.
  */
 fun knownCatalogKeys(
-    customItemIds: Collection<Long>,
+    customClientUuids: Collection<String>,
     builtIns: List<RecordType> = RecordType.availableForNewEntry(),
 ): List<String> {
     val builtInKeys = builtIns.map { it.key }
-    val customKeys = customItemIds
-        .filter { it > 0L }
+    val customKeys = customClientUuids
+        .map(String::trim)
+        .filter(String::isNotEmpty)
         .distinct()
-        .map { RecordItemIdentity.customCatalogKey(it) }
+        .map { RecordItemIdentity.customFamilyCatalogKey(it) }
     return builtInKeys + customKeys
 }
 
@@ -141,7 +143,9 @@ fun catalogSectionForKey(catalogKey: String): RecordSection? {
     val identity = RecordItemIdentity.parseCatalogKey(catalogKey) ?: return null
     return when (identity) {
         is RecordItemIdentity.BuiltIn -> identity.type.presentation.section
-        is RecordItemIdentity.Custom -> RecordSection.Custom
+        is RecordItemIdentity.Custom,
+        is RecordItemIdentity.FamilyCustom,
+        -> RecordSection.Custom
     }
 }
 

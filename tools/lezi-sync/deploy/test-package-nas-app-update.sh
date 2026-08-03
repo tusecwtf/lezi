@@ -4,11 +4,25 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/lezi-package-app-update-test.XXXXXX")"
 cleanup() {
   rm -rf -- "${test_root}"
 }
 trap cleanup EXIT HUP INT TERM
+
+ledger_values="$(python3 - "${REPO_ROOT}/config/local-data-contracts.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    ledger = json.load(source)
+print(ledger["current_contract"])
+print(ledger["minimum_migratable_contract"])
+PY
+)"
+current_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '1p')"
+minimum_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '2p')"
 
 apk_path="${test_root}/app-release.apk"
 printf 'lezi-fake-release-apk-bytes-for-gate-test\n' >"${apk_path}"
@@ -24,8 +38,8 @@ cat <<MANIFEST
     android:versionName="${LEZI_FAKE_VERSION_NAME:-0.3.1}"
     package="${LEZI_FAKE_PACKAGE_NAME:-com.lezi.babylog}">
   <application>
-    <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_LOCAL_DATA_CONTRACT:-1}" />
-    <meta-data android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_MINIMUM_LOCAL_DATA_CONTRACT:-1}" />
+    <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_LOCAL_DATA_CONTRACT:-${LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT:?}}" />
+    <meta-data android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_MINIMUM_LOCAL_DATA_CONTRACT:-${LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT:?}}" />
   </application>
 </manifest>
 MANIFEST
@@ -70,6 +84,8 @@ write_meta "${good_json}" "${apk_sha}" "gate smoke"
 write_meta "${bad_sha_json}" "${wrong_sha}" "wrong hash"
 
 run_check() {
+  LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT="${current_local_data_contract}" \
+    LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT="${minimum_local_data_contract}" \
   LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
     LEZI_APK_ANALYZER="${apk_analyzer}" \
     LEZI_APK_SIGNER="${LEZI_TEST_APK_SIGNER:-${apk_signer}}" \
@@ -151,7 +167,7 @@ fi
 
 # Manifest contract outside the tracked ledger → fail closed before staging.
 bad_contract_log="${test_root}/bad-contract.log"
-if LEZI_FAKE_LOCAL_DATA_CONTRACT=2 run_check "${apk_path}" "${good_json}" \
+if LEZI_FAKE_LOCAL_DATA_CONTRACT=999999 run_check "${apk_path}" "${good_json}" \
     >"${bad_contract_log}" 2>&1; then
   echo "error: APK with untracked local-data contract was accepted" >&2
   cat "${bad_contract_log}" >&2

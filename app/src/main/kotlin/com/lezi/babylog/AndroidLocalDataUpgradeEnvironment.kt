@@ -21,14 +21,22 @@ import javax.inject.Singleton
 import kotlinx.coroutines.flow.first
 
 @Singleton
-internal class AndroidLocalDataUpgradeEnvironment @Inject constructor(
-    @ApplicationContext private val context: Context,
+internal class AndroidLocalDataUpgradeEnvironment internal constructor(
+    private val context: Context,
     private val settings: Lazy<DataStore<Preferences>>,
     private val credentials: Lazy<SecureRefreshTokenStore>,
+    private val storage: AndroidLocalDataStoragePaths,
 ) : LocalDataUpgradeEnvironment {
-    private val dataRoot = File(context.applicationInfo.dataDir)
-    private val database = context.getDatabasePath(DATABASE_NAME)
-    private val upgradeRoot = File(context.noBackupFilesDir, UPGRADE_DIRECTORY)
+    @Inject
+    constructor(
+        @ApplicationContext context: Context,
+        settings: Lazy<DataStore<Preferences>>,
+        credentials: Lazy<SecureRefreshTokenStore>,
+    ) : this(context, settings, credentials, productionLocalDataStoragePaths(context))
+
+    private val dataRoot = storage.dataRoot
+    private val database = storage.database
+    private val upgradeRoot = storage.upgradeRoot
     private val roomSchemasByContract = BuildConfig.LOCAL_DATA_CONTRACT_ROOM_SCHEMAS
         .split(',')
         .associate { entry ->
@@ -47,15 +55,15 @@ internal class AndroidLocalDataUpgradeEnvironment @Inject constructor(
                     File(database.path + "-shm"),
                 ),
                 LocalDataDomain.Settings to listOf(
-                    File(context.filesDir, "datastore/lezi_settings.preferences_pb"),
-                    File(dataRoot, "shared_prefs/care_widget_state_v2.xml"),
+                    storage.settingsDataStore,
+                    storage.widgetPreferences,
                 ),
                 LocalDataDomain.Credentials to listOf(
-                    File(dataRoot, "shared_prefs/lezi_secure_family.xml"),
+                    storage.securePreferences,
                 ),
                 LocalDataDomain.Media to listOf(
-                    File(context.filesDir, "record-media"),
-                    File(context.filesDir, "baby_avatars"),
+                    storage.recordMedia,
+                    storage.babyAvatars,
                 ),
             ),
         ),
@@ -149,11 +157,11 @@ internal class AndroidLocalDataUpgradeEnvironment @Inject constructor(
             }
         }
         settings.get().data.first()
-        val securePreferences = File(dataRoot, "shared_prefs/lezi_secure_family.xml")
+        val securePreferences = storage.securePreferences
         if (securePreferences.exists()) credentials.get().verifyReadable()
-        val widgetPreferences = File(dataRoot, "shared_prefs/care_widget_state_v2.xml")
+        val widgetPreferences = storage.widgetPreferences
         if (widgetPreferences.exists()) {
-            context.getSharedPreferences("care_widget_state_v2", Context.MODE_PRIVATE).all
+            context.getSharedPreferences(storage.widgetPreferencesName, Context.MODE_PRIVATE).all
         }
     }
 
@@ -184,12 +192,39 @@ internal class AndroidLocalDataUpgradeEnvironment @Inject constructor(
         }
     }
 
-    private companion object {
-        const val DATABASE_NAME = "lezi.db"
-        const val UPGRADE_DIRECTORY = "local-data-upgrade"
-        const val CONTRACT_MARKER_FILE = "contract.properties"
-    }
 }
+
+internal data class AndroidLocalDataStoragePaths(
+    val dataRoot: File,
+    val database: File,
+    val upgradeRoot: File,
+    val settingsDataStore: File,
+    val widgetPreferences: File,
+    val widgetPreferencesName: String,
+    val securePreferences: File,
+    val recordMedia: File,
+    val babyAvatars: File,
+)
+
+private fun productionLocalDataStoragePaths(context: Context): AndroidLocalDataStoragePaths {
+    val dataRoot = File(context.applicationInfo.dataDir)
+    return AndroidLocalDataStoragePaths(
+        dataRoot = dataRoot,
+        database = context.getDatabasePath(PRODUCTION_DATABASE_NAME),
+        upgradeRoot = File(context.noBackupFilesDir, UPGRADE_DIRECTORY),
+        settingsDataStore = File(context.filesDir, "datastore/lezi_settings.preferences_pb"),
+        widgetPreferences = File(dataRoot, "shared_prefs/$WIDGET_PREFERENCES_NAME.xml"),
+        widgetPreferencesName = WIDGET_PREFERENCES_NAME,
+        securePreferences = File(dataRoot, "shared_prefs/lezi_secure_family.xml"),
+        recordMedia = File(context.filesDir, "record-media"),
+        babyAvatars = File(context.filesDir, "baby_avatars"),
+    )
+}
+
+internal const val PRODUCTION_DATABASE_NAME = "lezi.db"
+private const val UPGRADE_DIRECTORY = "local-data-upgrade"
+private const val CONTRACT_MARKER_FILE = "contract.properties"
+private const val WIDGET_PREFERENCES_NAME = "care_widget_state_v2"
 
 internal fun detectLocalDataInspection(
     markerVersion: Int?,

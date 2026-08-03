@@ -18,7 +18,7 @@ import androidx.room.RoomDatabase
         PendingReminderCleanupEntity::class,
         PendingReplicaCleanupEntity::class,
     ],
-    version = 24,
+    version = 25,
     exportSchema = true,
 )
 abstract class LeziDatabase : RoomDatabase() {

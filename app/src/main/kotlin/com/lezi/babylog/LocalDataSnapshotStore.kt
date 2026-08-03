@@ -4,6 +4,7 @@ import com.lezi.babylog.core.common.LocalDataDomain
 import com.lezi.babylog.core.common.LocalDataUpgradeBlockReason
 import com.lezi.babylog.core.common.LocalDataUpgradeFailure
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -26,6 +27,7 @@ internal class LocalDataSnapshotStore(
     private val availableBytes: () -> Long = {
         snapshotRoot.closestExistingDirectory().usableSpace
     },
+    private val sourceCopier: (File, File) -> Unit = ::copyRecursivelyChecked,
 ) {
     fun prepare(
         fromContractVersion: Int,
@@ -35,11 +37,6 @@ internal class LocalDataSnapshotStore(
         require(toContractVersion == fromContractVersion + 1) {
             "Local-data snapshots require an adjacent contract step"
         }
-        val selectedSources = domains
-            .sortedBy(LocalDataDomain::name)
-            .flatMap { inventory.sources[it].orEmpty() }
-            .filter(File::exists)
-            .distinctBy { it.canonicalPath }
         val snapshotName = "$fromContractVersion-to-$toContractVersion"
         val snapshotDirectory = File(snapshotRoot, snapshotName)
         val journal = readJournal()
@@ -70,41 +67,70 @@ internal class LocalDataSnapshotStore(
             }
         }
 
-        val sourceBytes = selectedSources.sumOf(::recursiveSize)
-        val safetyBytes = maxOf(MINIMUM_SAFETY_BYTES, sourceBytes / 10)
-        if (availableBytes() < sourceBytes + safetyBytes) {
-            throw LocalDataUpgradeFailure(
-                reason = LocalDataUpgradeBlockReason.InsufficientSpace,
-                message = "空间不足：本地数据快照至少需要 ${sourceBytes + safetyBytes} 字节",
-            )
-        }
-
         snapshotRoot.mkdirsOrThrow()
         val temporaryDirectory = File(snapshotRoot, ".$snapshotName.tmp")
-        temporaryDirectory.deleteSnapshotTree()
-        temporaryDirectory.mkdirsOrThrow()
-        try {
-            selectedSources.forEach { source ->
-                val relative = source.canonicalFile.relativeTo(inventory.dataRoot.canonicalFile)
-                copyRecursivelyChecked(source, File(temporaryDirectory, "data/${relative.path}"))
+        repeat(MAX_SNAPSHOT_ATTEMPTS) { attempt ->
+            val selectedSources = selectSources(domains)
+            val sourceBytes = selectedSources.sumOf(::recursiveSize)
+            val safetyBytes = maxOf(MINIMUM_SAFETY_BYTES, sourceBytes / 10)
+            if (availableBytes() < sourceBytes + safetyBytes) {
+                throw LocalDataUpgradeFailure(
+                    reason = LocalDataUpgradeBlockReason.InsufficientSpace,
+                    message = "空间不足：本地数据快照至少需要 ${sourceBytes + safetyBytes} 字节",
+                )
             }
-            writeChecksums(temporaryDirectory)
-            check(verifySnapshot(temporaryDirectory)) { "本地数据快照校验失败" }
-            snapshotDirectory.deleteSnapshotTree()
-            check(temporaryDirectory.renameTo(snapshotDirectory)) {
-                "无法提交本地数据快照"
-            }
-            writeJournal(fromContractVersion, toContractVersion, domains, snapshotName)
-        } catch (failure: Throwable) {
+
             temporaryDirectory.deleteSnapshotTree()
-            if (failure is LocalDataUpgradeFailure) throw failure
-            throw LocalDataUpgradeFailure(
-                reason = LocalDataUpgradeBlockReason.MigrationFailed,
-                message = failure.message.orEmpty().ifBlank { "本地数据快照失败" },
-                cause = failure,
-            )
+            temporaryDirectory.mkdirsOrThrow()
+            try {
+                selectedSources.forEach { source ->
+                    val relative = source.canonicalFile.relativeTo(inventory.dataRoot.canonicalFile)
+                    try {
+                        sourceCopier(
+                            source,
+                            File(temporaryDirectory, "data/${relative.path}"),
+                        )
+                    } catch (failure: FileNotFoundException) {
+                        if (source.isVolatileSqliteSidecar() && !source.exists()) {
+                            throw VolatileSqliteSidecarChanged(failure)
+                        }
+                        throw failure
+                    }
+                }
+                if (selectedSources.any { it.isVolatileSqliteSidecar() && !it.exists() }) {
+                    throw VolatileSqliteSidecarChanged()
+                }
+                writeChecksums(temporaryDirectory)
+                check(verifySnapshot(temporaryDirectory)) { "本地数据快照校验失败" }
+                snapshotDirectory.deleteSnapshotTree()
+                check(temporaryDirectory.renameTo(snapshotDirectory)) {
+                    "无法提交本地数据快照"
+                }
+                writeJournal(fromContractVersion, toContractVersion, domains, snapshotName)
+                return
+            } catch (failure: Throwable) {
+                temporaryDirectory.deleteSnapshotTree()
+                if (
+                    attempt + 1 < MAX_SNAPSHOT_ATTEMPTS &&
+                    failure is VolatileSqliteSidecarChanged
+                ) {
+                    return@repeat
+                }
+                if (failure is LocalDataUpgradeFailure) throw failure
+                throw LocalDataUpgradeFailure(
+                    reason = LocalDataUpgradeBlockReason.MigrationFailed,
+                    message = failure.message.orEmpty().ifBlank { "本地数据快照失败" },
+                    cause = failure,
+                )
+            }
         }
     }
+
+    private fun selectSources(domains: Set<LocalDataDomain>): List<File> = domains
+        .sortedBy(LocalDataDomain::name)
+        .flatMap { inventory.sources[it].orEmpty() }
+        .filter(File::exists)
+        .distinctBy { it.canonicalPath }
 
     fun cleanupVerifiedSnapshots() {
         snapshotRoot.listFiles().orEmpty()
@@ -213,8 +239,15 @@ internal class LocalDataSnapshotStore(
         const val JOURNAL_FILE = "upgrade.properties"
         const val CHECKSUMS_FILE = "SHA256SUMS"
         const val MINIMUM_SAFETY_BYTES = 1024L * 1024L
+        const val MAX_SNAPSHOT_ATTEMPTS = 3
     }
 }
+
+private class VolatileSqliteSidecarChanged(
+    cause: FileNotFoundException? = null,
+) : Exception("SQLite sidecar changed during snapshot", cause)
+
+private fun File.isVolatileSqliteSidecar(): Boolean = name.endsWith("-wal") || name.endsWith("-shm")
 
 private fun recursiveSize(file: File): Long = when {
     file.isFile -> file.length()

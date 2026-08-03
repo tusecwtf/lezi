@@ -120,9 +120,22 @@ internal fun resolveQuickSlot(
                 ?: return QuickDockCell.Empty
             // Live rename / icon follow the current definition.
             QuickDockCell.Bound(
-                identity = identity,
+                identity = RecordItemIdentity.custom(item.id, item.clientUuid),
                 label = item.name,
-                catalogKey = identity.catalogKey,
+                catalogKey = RecordItemIdentity.custom(item.id, item.clientUuid).catalogKey,
+                recordType = RecordType.CUSTOM,
+                customIconSlot = item.iconSlot,
+            )
+        }
+        is RecordItemIdentity.FamilyCustom -> {
+            val item = customItems.firstOrNull {
+                it.clientUuid.equals(identity.clientUuid, ignoreCase = true)
+            } ?: return QuickDockCell.Empty
+            val resolved = RecordItemIdentity.custom(item.id, item.clientUuid)
+            QuickDockCell.Bound(
+                identity = resolved,
+                label = item.name,
+                catalogKey = resolved.catalogKey,
                 recordType = RecordType.CUSTOM,
                 customIconSlot = item.iconSlot,
             )

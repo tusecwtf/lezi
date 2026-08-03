@@ -4,8 +4,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /** A persistence domain that must be snapshotted before an upgrade step mutates it. */
 enum class LocalDataDomain {
@@ -165,7 +167,12 @@ class DefaultLocalDataGate(
         return retry() is LocalDataUpgradeState.Ready
     }
 
-    override suspend fun retry(): LocalDataUpgradeState = mutex.withLock {
+    override suspend fun retry(): LocalDataUpgradeState = withContext(Dispatchers.IO) {
+        retryLocked()
+    }
+
+    private suspend fun retryLocked(): LocalDataUpgradeState = mutex.withLock {
+        if (state.value is LocalDataUpgradeState.Ready) return@withLock state.value
         mutableState.value = LocalDataUpgradeState.Checking
         val inspection = try {
             environment.inspect()

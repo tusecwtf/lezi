@@ -1,13 +1,79 @@
 package com.lezi.babylog.core.common
 
 import com.google.common.truth.Truth.assertThat
-import kotlinx.coroutines.test.runTest
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class DefaultLocalDataGateTest {
+    @Test
+    fun concurrentEnsureReadyRunsTheExpensiveInspectionOnlyOnce() = runTest {
+        val inspectCalls = AtomicInteger()
+        val inspectionStarted = CompletableDeferred<Unit>()
+        val releaseInspection = CompletableDeferred<Unit>()
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 1,
+            minimumMigratableContractVersion = 1,
+            steps = emptySet(),
+            environment = object : LocalDataUpgradeEnvironment {
+                override suspend fun inspect(): LocalDataInspection {
+                    inspectCalls.incrementAndGet()
+                    inspectionStarted.complete(Unit)
+                    releaseInspection.await()
+                    return LocalDataInspection(1)
+                }
+
+                override suspend fun prepareSnapshot(step: LocalDataUpgradeStep) = Unit
+                override suspend fun commitContract(contractVersion: Int) = Unit
+                override suspend fun cleanupSnapshots() = Unit
+                override suspend fun verifyCurrent() = Unit
+                override fun diagnosticContext(): String = "concurrent"
+            },
+        )
+
+        val first = async { gate.ensureReady() }
+        inspectionStarted.await()
+        val second = async { gate.ensureReady() }
+        yield()
+        releaseInspection.complete(Unit)
+
+        assertThat(first.await()).isTrue()
+        assertThat(second.await()).isTrue()
+        assertThat(inspectCalls.get()).isEqualTo(1)
+    }
+
+    @Test
+    fun retryRunsPersistenceInspectionOffTheCallingThread() = runTest {
+        val callingThread = Thread.currentThread()
+        var inspectionThread: Thread? = null
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 1,
+            minimumMigratableContractVersion = 1,
+            steps = emptySet(),
+            environment = object : LocalDataUpgradeEnvironment {
+                override suspend fun inspect(): LocalDataInspection {
+                    inspectionThread = Thread.currentThread()
+                    return LocalDataInspection(1)
+                }
+
+                override suspend fun prepareSnapshot(step: LocalDataUpgradeStep) = Unit
+                override suspend fun commitContract(contractVersion: Int) = Unit
+                override suspend fun cleanupSnapshots() = Unit
+                override suspend fun verifyCurrent() = Unit
+                override fun diagnosticContext(): String = "dispatcher"
+            },
+        )
+
+        assertThat(gate.retry()).isEqualTo(LocalDataUpgradeState.Ready(1))
+        assertThat(inspectionThread).isNotSameInstanceAs(callingThread)
+    }
+
     @Test
     fun migrationSnapshotsBeforeMutationAndPublishesReadyOnlyAfterVerification() = runTest {
         val events = mutableListOf<String>()

@@ -13,6 +13,8 @@ import kotlinx.coroutines.CancellationException
 internal fun CustomItemSettingsDialog(
     items: List<CustomRecordItem>,
     hiddenItems: Set<String> = emptySet(),
+    saveBusyLabel: String? = null,
+    layoutBusy: Boolean = false,
     onDismiss: () -> Unit,
     onAdd: (String, Int, (String?) -> Unit) -> Unit,
     onUpdate: (CustomRecordItem, (String?) -> Unit) -> Unit,
@@ -26,6 +28,8 @@ internal fun CustomItemSettingsDialog(
         items = items.map { it.toManageRow() },
         mode = CustomItemManageMode.Settings,
         hiddenItems = hiddenItems,
+        saveBusyLabel = saveBusyLabel,
+        layoutBusy = layoutBusy,
         onDismiss = onDismiss,
         onAdd = onAdd,
         onUpdate = { row, done ->
@@ -54,4 +58,9 @@ internal suspend fun executeCustomItemDelete(
 }
 
 private fun CustomRecordItem.toManageRow(): CustomItemManageRow =
-    CustomItemManageRow(id = id, name = name, iconSlot = iconSlot)
+    CustomItemManageRow(
+        id = id,
+        name = name,
+        iconSlot = iconSlot,
+        clientUuid = clientUuid,
+    )

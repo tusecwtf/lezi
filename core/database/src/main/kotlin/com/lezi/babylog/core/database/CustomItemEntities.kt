@@ -12,7 +12,10 @@ import kotlinx.coroutines.flow.Flow
 
 @Entity(
     tableName = "custom_items",
-    indices = [Index("syncDirty")],
+    indices = [
+        Index("syncDirty"),
+        Index(value = ["clientUuid"], unique = true),
+    ],
 )
 data class CustomItemEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,

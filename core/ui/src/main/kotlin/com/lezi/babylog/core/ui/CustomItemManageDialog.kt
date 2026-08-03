@@ -20,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +36,7 @@ data class CustomItemManageRow(
     val id: Long,
     val name: String,
     val iconSlot: Int,
+    val clientUuid: String = "",
 )
 
 /**
@@ -156,15 +158,20 @@ fun CustomItemManageDialog(
     onUpdate: (CustomItemManageRow, (String?) -> Unit) -> Unit,
     onDelete: (Long, (String?) -> Unit) -> Unit,
     hiddenItems: Set<String> = emptySet(),
+    saveBusyLabel: String? = null,
+    layoutBusy: Boolean = false,
     onMove: (Long, Int) -> Unit = { _, _ -> },
     onToggleLocalHidden: (Long) -> Unit = {},
     canManage: (CustomItemManageRow) -> Boolean = { true },
 ) {
-    var editing by remember { mutableStateOf<CustomItemManageRow?>(null) }
-    var name by remember { mutableStateOf("") }
-    var iconSlot by remember { mutableIntStateOf(0) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val itemsById = items.associateBy(CustomItemManageRow::id)
+    var editingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val editing = editingId?.let(itemsById::get)
+    var name by rememberSaveable { mutableStateOf("") }
+    var iconSlot by rememberSaveable { mutableIntStateOf(0) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteState by remember { mutableStateOf(CustomItemDeleteState()) }
+    val externalBusy = saveBusyLabel != null || layoutBusy
     val showLocalHide = mode == CustomItemManageMode.Settings
     val showReorder = mode == CustomItemManageMode.Settings
     val nameFieldTag = when (mode) {
@@ -177,7 +184,7 @@ fun CustomItemManageDialog(
     }
 
     fun reset() {
-        editing = null
+        editingId = null
         name = ""
         iconSlot = 0
         error = null
@@ -198,7 +205,7 @@ fun CustomItemManageDialog(
 
     AlertDialog(
         onDismissRequest = {
-            if (!deleteState.deleting) onDismiss()
+            if (!deleteState.deleting && !externalBusy) onDismiss()
         },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
@@ -224,7 +231,10 @@ fun CustomItemManageDialog(
                 )
                 items.forEachIndexed { index, item ->
                     val manageable = canManage(item)
-                    val catalogKey = RecordItemIdentity.customCatalogKey(item.id)
+                    val catalogKey = RecordItemIdentity.custom(
+                        item.id,
+                        item.clientUuid,
+                    ).catalogKey
                     val locallyHidden = catalogKey in hiddenItems
                     Column(Modifier.fillMaxWidth()) {
                         Row(
@@ -253,23 +263,25 @@ fun CustomItemManageDialog(
                                 Row {
                                     if (showReorder) {
                                         TextButton(
-                                            enabled = index > 0,
+                                            enabled = !externalBusy && index > 0,
                                             onClick = { onMove(item.id, -1) },
                                         ) { Text("↑") }
                                         TextButton(
-                                            enabled = index < items.lastIndex,
+                                            enabled = !externalBusy && index < items.lastIndex,
                                             onClick = { onMove(item.id, 1) },
                                         ) { Text("↓") }
                                     }
                                     TextButton(
+                                        enabled = !externalBusy,
                                         onClick = {
-                                            editing = item
+                                            editingId = item.id
                                             name = item.name
                                             iconSlot = item.iconSlot
                                             error = null
                                         },
                                     ) { Text("改") }
                                     TextButton(
+                                        enabled = !externalBusy,
                                         onClick = {
                                             dispatchDelete(CustomItemDeleteAction.Request(item))
                                         },
@@ -298,6 +310,7 @@ fun CustomItemManageDialog(
                                     style = LeziTypography.Label,
                                 )
                                 Switch(
+                                    enabled = !externalBusy,
                                     checked = !locallyHidden,
                                     onCheckedChange = { onToggleLocalHidden(item.id) },
                                 )
@@ -306,6 +319,7 @@ fun CustomItemManageDialog(
                     }
                 }
                 OutlinedTextField(
+                    enabled = !externalBusy,
                     value = name,
                     onValueChange = {
                         name = it.take(20)
@@ -335,6 +349,7 @@ fun CustomItemManageDialog(
                         icons.forEachIndexed { columnIndex, icon ->
                             val slot = rowIndex * 4 + columnIndex
                             FilterChip(
+                                enabled = !externalBusy,
                                 selected = iconSlot == slot,
                                 onClick = { iconSlot = slot },
                                 label = { Text(icon) },
@@ -343,7 +358,9 @@ fun CustomItemManageDialog(
                     }
                 }
                 TextButton(
-                    enabled = name.isNotBlank() && (editing != null || items.size < 10),
+                    enabled = !externalBusy &&
+                        name.isNotBlank() &&
+                        (editing != null || items.size < 10),
                     onClick = {
                         val trimmed = name.trim()
                         if (trimmed.isEmpty()) {
@@ -367,6 +384,7 @@ fun CustomItemManageDialog(
                 ) {
                     Text(
                         when {
+                            saveBusyLabel != null -> saveBusyLabel
                             editing == null && mode == CustomItemManageMode.LayoutEdit -> "新增"
                             editing == null -> "添加项目"
                             mode == CustomItemManageMode.LayoutEdit -> "保存改名"
@@ -375,13 +393,16 @@ fun CustomItemManageDialog(
                     )
                 }
                 if (editing != null && mode == CustomItemManageMode.Settings) {
-                    TextButton(onClick = { reset() }) { Text("取消修改") }
+                    TextButton(
+                        enabled = !externalBusy,
+                        onClick = { reset() },
+                    ) { Text("取消修改") }
                 }
             }
         },
         confirmButton = {
             TextButton(
-                enabled = !deleteState.deleting,
+                enabled = !deleteState.deleting && !externalBusy,
                 onClick = onDismiss,
             ) { Text("完成") }
         },

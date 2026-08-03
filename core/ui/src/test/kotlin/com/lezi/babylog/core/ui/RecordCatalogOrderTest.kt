@@ -140,11 +140,28 @@ class RecordCatalogOrderTest {
 
     @Test
     fun hideDoesNotDropKeyFromMergedOrder() {
-        val known = knownCatalogKeys(listOf(3L))
-        val order = encodeItemOrder(listOf("pee", "custom:3", "sleep"))
+        val clientUuid = "33333333-3333-4333-8333-333333333333"
+        val customKey = RecordItemIdentity.customFamilyCatalogKey(clientUuid)
+        val known = knownCatalogKeys(listOf(clientUuid))
+        val order = encodeItemOrder(listOf("pee", customKey, "sleep"))
         val merged = mergeItemOrder(order, known)
-        assertTrue(merged.contains("custom:3"))
-        assertTrue(merged.indexOf("pee") < merged.indexOf("custom:3"))
+        assertTrue(merged.contains(customKey))
+        assertTrue(merged.indexOf("pee") < merged.indexOf(customKey))
+        assertFalse(merged.contains(RecordItemIdentity.customCatalogKey(3L)))
+    }
+
+    @Test
+    fun knownCatalogKeysUseStableFamilyIdentityInsteadOfReusableLocalRowId() {
+        val firstUuid = "11111111-1111-4111-8111-111111111111"
+        val secondUuid = "22222222-2222-4222-8222-222222222222"
+
+        val first = knownCatalogKeys(listOf(firstUuid))
+        val second = knownCatalogKeys(listOf(secondUuid))
+
+        assertTrue(first.contains(RecordItemIdentity.customFamilyCatalogKey(firstUuid)))
+        assertFalse(first.contains(RecordItemIdentity.customCatalogKey(7L)))
+        assertFalse(second.contains(RecordItemIdentity.customFamilyCatalogKey(firstUuid)))
+        assertTrue(second.contains(RecordItemIdentity.customFamilyCatalogKey(secondUuid)))
     }
 
     @Test

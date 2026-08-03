@@ -56,31 +56,33 @@ internal class CustomItemCatalog(
     }
 
     suspend fun updateCustomItem(item: CustomRecordItem) {
-        val existing = customItemDao.getById(item.id) ?: return
-        if (existing.deletedAt != null) return
-        requireCanManageCustomItem(existing)
         val normalized = item.name.trim()
         require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
         require(item.iconSlot in 0..7) { "图标槽必须在 0..7" }
-        require(
-            customItemDao.listAll().none { it.id != item.id && it.name == normalized },
-        ) { "自定义项目名称不可重复" }
-        val sharedChanged =
-            existing.name != normalized || existing.iconSlot != item.iconSlot
-        // sortOrder is device-local layout — never dirty family sync by itself.
-        customItemDao.update(
-            existing.copy(
-                name = normalized,
-                iconSlot = item.iconSlot,
-                sortOrder = item.sortOrder.coerceAtLeast(0),
-                updatedAt = if (sharedChanged) {
-                    System.currentTimeMillis().coerceAtLeast(existing.updatedAt + 1)
-                } else {
-                    existing.updatedAt
-                },
-                syncDirty = existing.syncDirty || sharedChanged,
-            ),
-        )
+        val sharedChanged = transactionRunner.run {
+            val existing = customItemDao.getById(item.id) ?: return@run false
+            if (existing.deletedAt != null) return@run false
+            requireCanManageCustomItem(existing)
+            require(
+                customItemDao.listAll().none { it.id != item.id && it.name == normalized },
+            ) { "自定义项目名称不可重复" }
+            val changed = existing.name != normalized || existing.iconSlot != item.iconSlot
+            // sortOrder is device-local layout — never dirty family sync by itself.
+            customItemDao.update(
+                existing.copy(
+                    name = normalized,
+                    iconSlot = item.iconSlot,
+                    sortOrder = item.sortOrder.coerceAtLeast(0),
+                    updatedAt = if (changed) {
+                        System.currentTimeMillis().coerceAtLeast(existing.updatedAt + 1)
+                    } else {
+                        existing.updatedAt
+                    },
+                    syncDirty = existing.syncDirty || changed,
+                ),
+            )
+            changed
+        }
         if (sharedChanged) requestLocalSync()
     }
 
@@ -89,18 +91,20 @@ internal class CustomItemCatalog(
      * [CustomItemEntity.syncDirty] so family LWW renames are not clobbered.
      */
     suspend fun moveCustomItem(id: Long, delta: Int) {
-        val items = customItemDao.listAll()
-        val from = items.indexOfFirst { it.id == id }
-        if (from < 0) return
-        requireCanManageCustomItem(items[from])
-        val to = (from + delta).coerceIn(0, items.lastIndex)
-        if (to == from) return
-        val reordered = items.toMutableList().apply {
-            add(to, removeAt(from))
-        }
-        reordered.forEachIndexed { index, item ->
-            if (item.sortOrder != index) {
-                customItemDao.update(item.copy(sortOrder = index))
+        transactionRunner.run {
+            val items = customItemDao.listAll()
+            val from = items.indexOfFirst { it.id == id }
+            if (from < 0) return@run
+            requireCanManageCustomItem(items[from])
+            val to = (from + delta).coerceIn(0, items.lastIndex)
+            if (to == from) return@run
+            val reordered = items.toMutableList().apply {
+                add(to, removeAt(from))
+            }
+            reordered.forEachIndexed { index, item ->
+                if (item.sortOrder != index) {
+                    customItemDao.update(item.copy(sortOrder = index))
+                }
             }
         }
     }

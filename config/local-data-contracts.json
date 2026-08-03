@@ -1,5 +1,5 @@
 {
-  "current_contract": 1,
+  "current_contract": 2,
   "permanent_baseline_contract": 1,
   "minimum_migratable_contract": 1,
   "contracts": [
@@ -10,7 +10,22 @@
       "settings_revision": 1,
       "credentials_revision": 1,
       "media_revision": 1
+    },
+    {
+      "contract_version": 2,
+      "introduced_in_version_code": 12,
+      "room_schema": 25,
+      "settings_revision": 1,
+      "credentials_revision": 1,
+      "media_revision": 1
     }
   ],
-  "migrations": []
+  "migrations": [
+    {
+      "from_contract": 1,
+      "to_contract": 2,
+      "affected_domains": ["room", "settings"],
+      "implementation": "CustomItemClientUuidIndexUpgradeStep"
+    }
+  ]
 }

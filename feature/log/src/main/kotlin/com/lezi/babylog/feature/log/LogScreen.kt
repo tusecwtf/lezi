@@ -299,7 +299,7 @@ fun LogRoute(
             if (inLayoutEdit) {
                 val prefs = checkNotNull(editingPrefs)
                 val known = remember(state.customItems) {
-                    knownCatalogKeys(state.customItems.map { it.id })
+                    knownCatalogKeys(state.customItems.map { it.clientUuid })
                 }
                 val undoCandidate =
                     (layoutUndoState as? LayoutUndoState.Available)?.candidate

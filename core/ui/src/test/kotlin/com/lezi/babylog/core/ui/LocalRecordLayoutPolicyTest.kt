@@ -9,12 +9,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalRecordLayoutPolicyTest {
-    private val known = knownCatalogKeys(listOf(3L, 5L))
+    private val firstCustomKey = RecordItemIdentity.customFamilyCatalogKey(
+        "33333333-3333-4333-8333-333333333333",
+    )
+    private val secondCustomKey = RecordItemIdentity.customFamilyCatalogKey(
+        "55555555-5555-4555-8555-555555555555",
+    )
+    private val known = knownCatalogKeys(
+        listOf(
+            "33333333-3333-4333-8333-333333333333",
+            "55555555-5555-4555-8555-555555555555",
+        ),
+    )
 
     @Test
     fun restoreAppendsToSectionVisibleEnd() {
         val order = encodeItemOrder(
-            listOf("nursing", "formula", "pee", "sleep", "custom:3", "custom:5"),
+            listOf("nursing", "formula", "pee", "sleep", firstCustomKey, secondCustomKey),
         )
         // Hide formula (was between nursing and pee in feeding? formula is feeding)
         val hidden = setOf("formula", "pee")

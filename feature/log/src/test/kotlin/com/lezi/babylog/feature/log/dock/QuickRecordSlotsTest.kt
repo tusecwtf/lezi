@@ -22,6 +22,31 @@ class QuickRecordSlotsTest {
     )
 
     @Test
+    fun stableCustomSlotRebindsByClientUuidAfterLocalIdsChange() {
+        val clientUuid = "123e4567-e89b-12d3-a456-426614174000"
+        val storedKey = RecordItemIdentity.customFamilyCatalogKey(clientUuid)
+        val wrongSameLocalId = customTouch.copy(
+            clientUuid = "223e4567-e89b-12d3-a456-426614174000",
+            name = "不应误绑",
+        )
+        val restored = customTouch.copy(
+            id = 87L,
+            clientUuid = clientUuid,
+            name = "重加入后抚触",
+        )
+
+        val cell = resolveQuickSlot(
+            catalogKey = storedKey,
+            hiddenItems = emptySet(),
+            customItems = listOf(wrongSameLocalId, restored),
+        ) as QuickDockCell.Bound
+
+        assertEquals("重加入后抚触", cell.label)
+        assertEquals(87L, (cell.identity as RecordItemIdentity.Custom).customItemId)
+        assertEquals(storedKey, cell.catalogKey)
+    }
+
+    @Test
     fun migrationCompatibilitySymbolsAreAbsent() {
         val quickSlotMethods = Class.forName(
             "com.lezi.babylog.feature.log.dock.QuickRecordSlotsKt",

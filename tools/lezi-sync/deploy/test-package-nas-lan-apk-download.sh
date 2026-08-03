@@ -3,6 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 test_root="$(mktemp -d "${TMPDIR:-/tmp}/lezi-package-lan-apk-test.XXXXXX")"
 cleanup() {
   rm -rf -- "${test_root}"
@@ -13,6 +14,19 @@ fail() {
   echo "error: $*" >&2
   exit 1
 }
+
+ledger_values="$(python3 - "${REPO_ROOT}/config/local-data-contracts.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    ledger = json.load(source)
+print(ledger["current_contract"])
+print(ledger["minimum_migratable_contract"])
+PY
+)"
+current_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '1p')"
+minimum_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '2p')"
 
 mkdir -p "${test_root}/bin"
 apk_path="${test_root}/app-release.apk"
@@ -33,15 +47,15 @@ EOF
 apk_analyzer="${test_root}/apkanalyzer"
 cat >"${apk_analyzer}" <<'EOF'
 #!/usr/bin/env bash
-cat <<'MANIFEST'
+cat <<MANIFEST
 <manifest
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:versionCode="12"
     android:versionName="0.3.5"
     package="com.lezi.babylog">
   <application>
-    <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="1" />
-    <meta-data android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION" android:value="1" />
+    <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT:?}" />
+    <meta-data android:name="com.lezi.babylog.MINIMUM_MIGRATABLE_LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT:?}" />
   </application>
 </manifest>
 MANIFEST
@@ -95,6 +109,8 @@ common_env=(
   "LEZI_APK_SIGNER=${apk_signer}"
   "LEZI_RELEASE_APK=${apk_path}"
   "LEZI_APP_UPDATE_JSON=${app_update_json}"
+  "LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT=${current_local_data_contract}"
+  "LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT=${minimum_local_data_contract}"
   "LEZI_TLS_HOST=192.168.50.4"
 )
 

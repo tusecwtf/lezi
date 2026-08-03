@@ -24,7 +24,9 @@ internal fun LayoutCustomManageDialog(
 ) {
     val byId = items.associateBy { it.id }
     CustomItemManageDialog(
-        items = items.map { CustomItemManageRow(it.id, it.name, it.iconSlot) },
+        items = items.map {
+            CustomItemManageRow(it.id, it.name, it.iconSlot, it.clientUuid)
+        },
         mode = CustomItemManageMode.LayoutEdit,
         onDismiss = onDismiss,
         onAdd = onAdd,

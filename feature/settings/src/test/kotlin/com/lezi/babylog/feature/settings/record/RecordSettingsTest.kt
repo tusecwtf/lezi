@@ -38,8 +38,9 @@ class RecordSettingsTest {
     @Test
     fun restoreFromLocalDeletedAppendsToSectionEnd() {
         // Product: 本机已删除 restore lands at category visible end (not prior index).
-        val customKey = RecordItemIdentity.customCatalogKey(7)
-        val known = knownCatalogKeys(listOf(7L))
+        val clientUuid = "77777777-7777-4777-8777-777777777777"
+        val customKey = RecordItemIdentity.customFamilyCatalogKey(clientUuid)
+        val known = knownCatalogKeys(listOf(clientUuid))
         val base = listOf("pee", customKey, "sleep", "nursing")
         val orderJson = encodeItemOrder(base)
         val afterRestore = com.lezi.babylog.core.ui.appendCatalogKeyToSectionEnd(
@@ -57,7 +58,9 @@ class RecordSettingsTest {
 
     @Test
     fun inCategoryMoveDoesNotPullForeignKeys() {
-        val known = knownCatalogKeys(listOf(2L))
+        val known = knownCatalogKeys(
+            listOf("22222222-2222-4222-8222-222222222222"),
+        )
         val order = encodeItemOrder(mergeItemOrder("[]", known))
         val nursing = RecordType.NURSING.key
         val after = moveCatalogKeyWithinSection(order, nursing, 1, known)

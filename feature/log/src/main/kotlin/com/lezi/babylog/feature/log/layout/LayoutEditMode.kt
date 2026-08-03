@@ -143,12 +143,14 @@ internal fun LayoutEditCanvas(
     onDragGuidanceClose: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val known = remember(customItems) { knownCatalogKeys(customItems.map { it.id }) }
+    val known = remember(customItems) {
+        knownCatalogKeys(customItems.map { it.clientUuid })
+    }
     val labels = remember(customItems) {
         buildMap {
             RecordType.availableForNewEntry().forEach { put(it.key, it.presentation.label) }
             customItems.forEach {
-                put(RecordItemIdentity.customCatalogKey(it.id), it.name)
+                put(RecordItemIdentity.custom(it.id, it.clientUuid).catalogKey, it.name)
             }
         }
     }
@@ -167,7 +169,7 @@ internal fun LayoutEditCanvas(
             }
             customItems.forEach { item ->
                 put(
-                    RecordItemIdentity.customCatalogKey(item.id),
+                    RecordItemIdentity.custom(item.id, item.clientUuid).catalogKey,
                     LayoutItemVisual(
                         label = item.name,
                         recordType = RecordType.CUSTOM,

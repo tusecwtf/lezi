@@ -8,6 +8,7 @@ import dagger.Binds
 import dagger.Module
 import dagger.Provides
 import dagger.multibindings.Multibinds
+import dagger.multibindings.IntoSet
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
@@ -22,6 +23,12 @@ internal abstract class LocalDataUpgradeModule {
 
     @Multibinds
     abstract fun upgradeSteps(): Set<LocalDataUpgradeStep>
+
+    @Binds
+    @IntoSet
+    abstract fun customItemClientUuidIndexUpgradeStep(
+        implementation: CustomItemClientUuidIndexUpgradeStep,
+    ): LocalDataUpgradeStep
 
     companion object {
         @Provides

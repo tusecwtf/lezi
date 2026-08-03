@@ -17,7 +17,9 @@ import com.lezi.babylog.feature.log.composer.*
 import com.lezi.babylog.feature.log.photo.*
 
 class LocalLayoutEditPolicyTest {
-    private val known = knownCatalogKeys(listOf(7L))
+    private val customClientUuid = "77777777-7777-4777-8777-777777777777"
+    private val customKey = RecordItemIdentity.customFamilyCatalogKey(customClientUuid)
+    private val known = knownCatalogKeys(listOf(customClientUuid))
     private val base = DeviceLayoutPrefs(
         quickRecordSlots = listOf("pee", "sleep", "nursing", "formula"),
         hiddenItems = emptySet(),
@@ -105,7 +107,6 @@ class LocalLayoutEditPolicyTest {
 
     @Test
     fun customCatalogKeyTrashAndRestore() {
-        val customKey = RecordItemIdentity.customCatalogKey(7L)
         val withCustom = base.copy(
             quickRecordSlots = listOf(customKey, "pee", "", ""),
         )
@@ -129,6 +130,10 @@ class LocalLayoutEditPolicyTest {
             restored.hiddenItems,
         )
         assertEquals(customKey, customVisible.last())
+        assertFalse(
+            RecordItemIdentity.customCatalogKey(7L) in
+                com.lezi.babylog.core.ui.parseJsonStringArray(restored.itemOrderJson),
+        )
     }
 
     @Test

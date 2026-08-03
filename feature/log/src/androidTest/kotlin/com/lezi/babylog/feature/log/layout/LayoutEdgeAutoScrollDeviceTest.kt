@@ -44,10 +44,13 @@ class LayoutEdgeAutoScrollDeviceTest {
             name = "自定义${index + 1}",
             iconSlot = index % 8,
             sortOrder = index,
+            clientUuid = "00000000-0000-4000-8000-${(index + 1).toString().padStart(12, '0')}",
         )
     }
-    private val customKeys = customItems.map { RecordItemIdentity.customCatalogKey(it.id) }
-    private val known = knownCatalogKeys(customItems.map { it.id })
+    private val customKeys = customItems.map {
+        RecordItemIdentity.custom(it.id, it.clientUuid).catalogKey
+    }
+    private val known = knownCatalogKeys(customItems.map { it.clientUuid })
     private val prefs = DeviceLayoutPrefs(
         quickRecordSlots = listOf("", "", "", ""),
         hiddenItems = known.toSet() - customKeys.toSet(),

@@ -5,7 +5,8 @@ package com.lezi.babylog.core.model
  * Composer create requests, quick slots, and settings keys.
  *
  * - Built-in items use [RecordType.key] (e.g. `"pee"`, `"nursing"`).
- * - Specific custom definitions use `"custom:<localId>"` (e.g. `"custom:12"`).
+ * - Specific custom definitions persist `"custom:<familyClientUuid>"`.
+ * - Legacy `"custom:<localId>"` keys remain parseable only for contract migration.
  *
  * Bare `"custom"` is not a concrete identity and therefore never parses.
  */
@@ -19,10 +20,22 @@ sealed class RecordItemIdentity : java.io.Serializable {
         }
     }
 
-    /** One specific custom item definition (local row id until family UUID lands). */
-    data class Custom(val customItemId: Long) : RecordItemIdentity() {
+    /** One resolved custom definition: local row for lookup, family UUID for persistence. */
+    data class Custom(
+        val customItemId: Long,
+        /** Stable family identity used by persisted layout keys when available. */
+        val familyClientUuid: String? = null,
+    ) : RecordItemIdentity() {
         init {
             require(customItemId > 0L) { "customItemId must be positive" }
+            familyClientUuid?.let(::requireCanonicalCustomClientUuid)
+        }
+    }
+
+    /** Stable persisted reference awaiting resolution to this device's local row id. */
+    data class FamilyCustom(val clientUuid: String) : RecordItemIdentity() {
+        init {
+            requireCanonicalCustomClientUuid(clientUuid)
         }
     }
 
@@ -30,7 +43,10 @@ sealed class RecordItemIdentity : java.io.Serializable {
     val catalogKey: String
         get() = when (this) {
             is BuiltIn -> type.key
-            is Custom -> customCatalogKey(customItemId)
+            is Custom -> familyClientUuid
+                ?.let(::customFamilyCatalogKey)
+                ?: customCatalogKey(customItemId)
+            is FamilyCustom -> customFamilyCatalogKey(clientUuid)
         }
 
     /** Wire/storage [RecordType] written on the Record row. */
@@ -38,16 +54,28 @@ sealed class RecordItemIdentity : java.io.Serializable {
         get() = when (this) {
             is BuiltIn -> type
             is Custom -> RecordType.CUSTOM
+            is FamilyCustom -> RecordType.CUSTOM
         }
 
     companion object {
         private const val CUSTOM_KEY_PREFIX = "custom:"
 
+        /** Legacy device-row key. New persisted layout must use [customFamilyCatalogKey]. */
         fun customCatalogKey(customItemId: Long): String = "$CUSTOM_KEY_PREFIX$customItemId"
+
+        fun customFamilyCatalogKey(clientUuid: String): String =
+            "$CUSTOM_KEY_PREFIX${requireCanonicalCustomClientUuid(clientUuid)}"
 
         fun builtIn(type: RecordType): BuiltIn = BuiltIn(type)
 
-        fun custom(customItemId: Long): Custom = Custom(customItemId)
+        fun custom(customItemId: Long, familyClientUuid: String? = null): Custom =
+            Custom(
+                customItemId = customItemId,
+                familyClientUuid = familyClientUuid
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?.let(::requireCanonicalCustomClientUuid),
+            )
 
         /**
          * Parse a catalog/settings key into a concrete identity.
@@ -56,15 +84,30 @@ sealed class RecordItemIdentity : java.io.Serializable {
         fun parseCatalogKey(key: String): RecordItemIdentity? {
             if (key.isBlank()) return null
             if (key.startsWith(CUSTOM_KEY_PREFIX)) {
-                val id = key.removePrefix(CUSTOM_KEY_PREFIX).toLongOrNull() ?: return null
-                if (id <= 0L) return null
-                return Custom(id)
+                val suffix = key.removePrefix(CUSTOM_KEY_PREFIX)
+                val id = suffix.toLongOrNull()
+                if (id != null) return id.takeIf { it > 0L }?.let(::Custom)
+                val clientUuid = canonicalCustomClientUuidOrNull(suffix) ?: return null
+                return FamilyCustom(clientUuid)
             }
             val type = RecordType.fromKey(key) ?: return null
             if (type == RecordType.CUSTOM) return null
             return BuiltIn(type)
         }
     }
+}
+
+private fun requireCanonicalCustomClientUuid(value: String): String =
+    requireNotNull(canonicalCustomClientUuidOrNull(value)) {
+        "custom family clientUuid must be a canonical UUID"
+    }
+
+private fun canonicalCustomClientUuidOrNull(value: String): String? {
+    val normalized = value.trim().lowercase()
+    if (normalized.isEmpty()) return null
+    val canonical = runCatching { java.util.UUID.fromString(normalized).toString() }.getOrNull()
+        ?: return null
+    return canonical.takeIf { it == normalized }
 }
 
 /** Built-in types that may appear in new-entry catalogs. */
