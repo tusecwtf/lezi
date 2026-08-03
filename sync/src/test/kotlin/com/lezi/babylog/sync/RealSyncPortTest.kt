@@ -18,8 +18,6 @@ import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MediaLocalPathGate
-import com.lezi.babylog.core.database.OutboxDao
-import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.database.RecordDao
@@ -461,16 +459,6 @@ class RealSyncPortTest {
                 updatedAt = 120,
             ),
         )
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = oldSession.familyId,
-                entityType = "record",
-                clientUuid = "record-local",
-                payloadJson = "{}",
-                updatedAt = 120,
-            ),
-        )
-
         val summary = rig.port.prepareDisasterRecovery().getOrThrow()
         val staged = rig.port.startDisasterRecovery(
             endpoint = candidate,
@@ -488,7 +476,6 @@ class RealSyncPortTest {
         assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
         assertThat(rig.preferences.current()).isEqualTo(oldSession)
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
-        assertThat(rig.outbox.all()).hasSize(1)
         assertThat(rig.backend.disasterRestoreStartEndpoints).containsExactly(candidate)
         assertThat(rig.backend.disasterRestoreStartFamilyIds).containsExactly("family-a")
         assertThat(rig.backend.disasterRestoreStartRootPasswords)
@@ -518,16 +505,6 @@ class RealSyncPortTest {
                 createdByMembershipId = oldSession.membershipId,
             ),
         )
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = oldSession.familyId,
-                entityType = "record",
-                clientUuid = "record-after-restore-start",
-                payloadJson = "{}",
-                updatedAt = 130,
-            ),
-        )
-
         val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
 
         assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
@@ -545,8 +522,6 @@ class RealSyncPortTest {
         assertThat(rig.records.getByClientUuid("record-after-restore-start")?.createdByMembershipId)
             .isEqualTo("restored-owner-membership")
         assertThat(rig.records.getByClientUuid("record-after-restore-start")?.syncDirty).isTrue()
-        assertThat(rig.outbox.all().map { it.clientUuid })
-            .containsExactly("record-after-restore-start")
         assertThat(rig.backend.disasterRestoreCommitRootPasswords)
             .containsExactly("commit-root-secret")
         assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
@@ -2419,7 +2394,6 @@ class RealSyncPortTest {
 
         assertThat(rig.backend.pushes).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(0)
-        assertThat(rig.outbox.all()).isEmpty()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Disabled)
     }
 
@@ -2828,7 +2802,6 @@ class RealSyncPortTest {
         assertThat(result.isSuccess).isTrue()
         assertThat(rig.backend.stagedBundles.map { it.root.type })
             .containsExactly("baby", "record")
-        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
@@ -2876,16 +2849,6 @@ class RealSyncPortTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(localBaby())
         rig.records.seed(localRecord(babyId))
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = "family-b",
-                entityType = "record",
-                clientUuid = "other-family-record",
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-        )
-
         val result = rig.port.sync(SyncTrigger.LocalWrite)
         assertThat(result.exceptionOrNull()).isNull()
 
@@ -2898,9 +2861,6 @@ class RealSyncPortTest {
         assertThat(recordPayload["payload_json"]).isInstanceOf(
             kotlinx.serialization.json.JsonObject::class.java,
         )
-        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
-        assertThat(rig.outbox.peek("family-b", 100).map(OutboxEntity::clientUuid))
-            .containsExactly("other-family-record")
     }
 
     @Test
@@ -2916,7 +2876,6 @@ class RealSyncPortTest {
         assertThat(rig.backend.operationOrder)
             .containsExactly("stage:baby", "stage:record")
             .inOrder()
-        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
     @Test
@@ -2960,7 +2919,6 @@ class RealSyncPortTest {
         assertThat(babyDraft.bundleId).isEqualTo(
             AtomicBundleId.forBaby("22222222-2222-4222-8222-222222222222", 110),
         )
-        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
     @Test
@@ -2992,7 +2950,6 @@ class RealSyncPortTest {
         assertThat(rig.backend.operationOrder)
             .containsExactly("stage:baby", "stage:custom_item", "stage:care_plan")
             .inOrder()
-        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
     @Test
@@ -3064,7 +3021,6 @@ class RealSyncPortTest {
                 "stage:fulfillment_candidate",
             )
             .inOrder()
-        assertThat(rig.outbox.peek("family-new", 100)).isEmpty()
         assertThat(rig.customItems.get("custom-local")?.syncDirty).isFalse()
         assertThat(rig.fulfillmentCandidates.getByClientUuid("candidate-local")?.syncDirty)
             .isFalse()
@@ -3273,7 +3229,6 @@ class RealSyncPortTest {
         assertThat(hydrated.updatedAt).isEqualTo(120)
         assertThat(hydrated.payloadJson).isEqualTo("""{"amount_ml":120}""")
         assertThat(hydrated.syncDirty).isFalse()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
     @Test
@@ -3615,7 +3570,6 @@ class RealSyncPortTest {
                 .containsAtLeast(recordDraft.bundleId, planDraft.bundleId, candidateDraft.bundleId)
             assertThat(rig.backend.committedBundles.indexOf(planDraft.bundleId))
                 .isLessThan(rig.backend.committedBundles.indexOf(recordDraft.bundleId))
-            assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
             assertThat(rig.customItems.get("custom-plan-$photoCount")?.deletedAt).isEqualTo(400)
         }
 
@@ -3624,7 +3578,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun oneSyncDrainsEveryOutboxBatchWithoutStarvingRowsPastLimit() = runTest {
+    fun oneSyncDrainsEveryEphemeralBatchWithoutStarvingRowsPastLimit() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         repeat(205) { index ->
             rig.babies.seed(
@@ -3641,7 +3595,6 @@ class RealSyncPortTest {
         assertThat(rig.backend.stagedBundles).hasSize(205)
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .containsExactlyElementsIn((0 until 205).map { "baby-$it" })
-        assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
     }
 
     @Test
@@ -3754,7 +3707,6 @@ class RealSyncPortTest {
 
         val babyBundle = rig.backend.stagedBundles.first { it.root.clientUuid == "baby-0" }
         assertThat(babyBundle.media.map(SyncEntity::clientUuid)).contains(avatarUuid)
-        assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
     }
 
     @Test
@@ -3802,7 +3754,6 @@ class RealSyncPortTest {
             ).jsonObject
             assertThat(recordPayload["baby_client_uuid"]?.jsonPrimitive?.content)
                 .isEqualTo("baby-soft-deleted-history")
-            assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
             assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
             assertThat(
                 rig.customItems.getByClientUuid("custom-after-parent-tombstone")?.syncDirty,
@@ -3875,7 +3826,6 @@ class RealSyncPortTest {
             .containsExactly(avatarUuid, legacyUuid)
         assertThat(babyBundle.media.map(SyncEntity::deletedAt)).containsExactly(deletedAt, deletedAt)
         assertThat(rig.backend.mediaUploads).isEmpty()
-        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
     @Test
@@ -4076,7 +4026,6 @@ class RealSyncPortTest {
         val publishedAvatar = requireNotNull(rig.media.getByClientUuid(avatarUuid))
         assertThat(publishedAvatar.deletedAt).isEqualTo(deletedAt)
         assertThat(publishedAvatar.syncDirty).isFalse()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
         val retryBundles = rig.backend.stagedBundles.filter { it.bundleId == expectedBundleId }
         assertThat(retryBundles).hasSize(2)
         retryBundles.forEach { bundle ->
@@ -4339,35 +4288,6 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()?.message).contains("分页期间变更了家庭名")
         assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
-    }
-
-    @Test
-    fun committedRecordClearFailureCannotRepublishDeletedRecordBeforeCleanupRetry() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        rig.records.seed(localRecord(babyId).copy(syncDirty = false))
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "record",
-                clientUuid = "record-local",
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-        )
-        rig.outbox.failDeleteTypeAttempts = 1
-
-        val failure = rig.port.clearLocalData(
-            LocalDataClearScope.RecordsOnly,
-            realPortClearWorkflow { rig.records.deleteAll() },
-        ).exceptionOrNull()
-
-        assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
-        assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
-
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()).isNull()
-        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
-            .doesNotContain("record")
     }
 
     @Test
@@ -5366,7 +5286,6 @@ class RealSyncPortTest {
         assertThat(record.createdByMembershipId).isEqualTo("membership-b")
         assertThat(record.updatedAt).isEqualTo(210)
         assertThat(record.syncDirty).isFalse()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(9)
     }
 
@@ -5834,7 +5753,7 @@ class RealSyncPortTest {
                     ),
                 )
             }
-            // Snapshot dirty entities into outbox via a sync cycle.
+            // Snapshot dirty entities into an ephemeral plan via a sync cycle.
             val result = rig.port.sync(SyncTrigger.LocalWrite)
             assertThat(result.exceptionOrNull()).isNull()
             val draft = rig.backend.stagedBundles.last()
@@ -6269,14 +6188,7 @@ class RealSyncPortTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        // Local unpushed mutation: stage fails so dirty remains, and pull never
-        // runs on the same cycle. A subsequent pull with empty outbox + dirty row
-        // exercises the syncDirty guard (capture re-queues, so clear outbox after
-        // a failed push and force stage to fail again before pull would need a
-        // push-less path — here we clear outbox then pull with stage still failing
-        // on the re-captured package so apply never runs; instead verify that a
-        // direct higher remote cannot land while dirty by clearing outbox and
-        // temporarily making publication a no-op: delete record outbox rows only).
+        // Local unpushed mutation: stage fails, so Room remains dirty.
         rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = "record-hold",
@@ -6289,8 +6201,6 @@ class RealSyncPortTest {
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
         assertThat(rig.records.getByClientUuid("record-hold")?.syncDirty).isTrue()
 
-        // Drop outbox rows so push is empty, keep row dirty, allow stage, pull remote.
-        rig.outbox.deleteFamily("family-a")
         rig.backend.stageBundleFailure = null
         rig.backend.nextPull = PullResult(
             entities = listOf(
@@ -6620,7 +6530,6 @@ class RealSyncPortTest {
         assertThat(draft.root.updatedAt).isEqualTo(501)
         assertThat(draft.bundleId)
             .isEqualTo(AtomicBundleId.forRecord("record-standalone-log", 501))
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
     @Test
@@ -6699,7 +6608,6 @@ class RealSyncPortTest {
         assertThat(draft.root.updatedAt).isEqualTo(301)
         assertThat(draft.bundleId)
             .isEqualTo(AtomicBundleId.forBaby("baby-avatar-only", 301))
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
     @Test
@@ -6756,7 +6664,7 @@ class RealSyncPortTest {
         // Synthetic package used rootUpdatedAt = 401; receipt advances without clearing dirty.
         assertThat(concurrent.familyPublishedUpdatedAt).isEqualTo(401)
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
-        // Outbox for the newer root is rebuilt on the next capture (dirty retained).
+        // The newer root is rebuilt into the next ephemeral plan (dirty retained).
         assertThat(rig.records.listPendingSync().map { it.clientUuid })
             .contains("record-standalone-concurrent")
     }
@@ -6868,7 +6776,6 @@ class RealSyncPortTest {
         assertThat(published.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
     @Test
@@ -6978,7 +6885,6 @@ class RealSyncPortTest {
         assertThat(published.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
     @Test
@@ -7080,7 +6986,6 @@ class RealSyncPortTest {
         assertThat(baby.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(avatarUuid)?.remoteUri).isNotNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
     @Test
@@ -7221,7 +7126,6 @@ class RealSyncPortTest {
         assertThat(media.syncDirty).isFalse()
         assertThat(media.remoteUri)
             .isEqualTo(rig.preferences.current().expectedMediaReceipt(mediaUuid))
-        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
@@ -7318,7 +7222,6 @@ class RealSyncPortTest {
             val session = rig.preferences.current()
             assertThat(media.map { it.remoteUri })
                 .containsExactlyElementsIn(mediaUuids.map(session::expectedMediaReceipt))
-            assertThat(rig.outbox.all()).isEmpty()
         }
 
         runCase(
@@ -7448,7 +7351,6 @@ class RealSyncPortTest {
             .isFalse()
         assertThat(rig.carePlans.getByClientUuid("plan-shared-media-publisher")?.syncDirty)
             .isFalse()
-        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
@@ -7493,7 +7395,6 @@ class RealSyncPortTest {
         assertThat(media.syncDirty).isFalse()
         assertThat(media.remoteUri)
             .isEqualTo(rig.preferences.current().expectedMediaReceipt(mediaUuid))
-        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
@@ -9962,7 +9863,6 @@ private class SyncRig(
     val preferences = (syncPreferences ?: MemorySyncPreferences(session)).also {
         it.trustCurrentEndpointForTest()
     }
-    val outbox = MemoryOutboxDao()
     val records = MemoryRecordDao()
     val carePlans = MemoryCarePlanDao()
     val fulfillmentCandidates = MemoryFulfillmentCandidateDao()
@@ -9997,7 +9897,6 @@ private class SyncRig(
         preferences = preferences,
         setupProbe = setupProbe,
         foregroundSyncGate = ForegroundSyncGate(),
-        outboxDao = outbox,
         pendingPublishDao = pendingPublish,
         recordDao = records,
         carePlanDao = carePlans,
@@ -10435,111 +10334,6 @@ private fun pendingReplicaCleanup(
     mediaClientUuids = mediaClientUuids,
     localMediaPaths = localMediaPaths,
 )
-
-internal class MemoryOutboxDao : OutboxDao {
-    private val rows = mutableListOf<OutboxEntity>()
-    private val rowSnapshots = MutableStateFlow<List<OutboxEntity>>(emptyList())
-    private val ids = AtomicLong(1)
-    val deleteEntityBatchSizes = mutableListOf<Int>()
-    var failDeleteTypeAttempts = 0
-    var afterDeleteFamily: suspend (String) -> Unit = {}
-
-    fun all(): List<OutboxEntity> = rows.toList()
-
-    override fun observeCount(familyId: String): Flow<Int> = rowSnapshots.map { snapshot ->
-        snapshot.count { it.familyId == familyId }
-    }
-
-    override suspend fun enqueue(row: OutboxEntity): Long {
-        rows.removeAll {
-            it.familyId == row.familyId &&
-                it.entityType == row.entityType &&
-                it.clientUuid == row.clientUuid
-        }
-        val id = row.id.takeIf { it != 0L } ?: ids.getAndIncrement()
-        rows += row.copy(id = id)
-        publishRows()
-        return id
-    }
-
-    override suspend fun peek(familyId: String, limit: Int): List<OutboxEntity> =
-        rows.filter { it.familyId == familyId }.sortedBy(OutboxEntity::id).take(limit)
-
-    override suspend fun find(
-        familyId: String,
-        entityType: String,
-        clientUuid: String,
-    ): OutboxEntity? = rows.find {
-        it.familyId == familyId &&
-            it.entityType == entityType &&
-            it.clientUuid == clientUuid
-    }
-
-    override suspend fun deleteIds(ids: List<Long>) {
-        rows.removeAll { it.id in ids }
-        publishRows()
-    }
-
-    override suspend fun deleteFamily(familyId: String) {
-        rows.removeAll { it.familyId == familyId }
-        publishRows()
-        afterDeleteFamily(familyId)
-    }
-
-    override suspend fun deleteType(familyId: String, entityType: String) {
-        if (failDeleteTypeAttempts > 0) {
-            failDeleteTypeAttempts--
-            error("outbox delete failed")
-        }
-        rows.removeAll { it.familyId == familyId && it.entityType == entityType }
-        publishRows()
-    }
-
-    override suspend fun deleteTypeAcrossFamilies(entityType: String) {
-        if (failDeleteTypeAttempts > 0) {
-            failDeleteTypeAttempts--
-            error("outbox delete failed")
-        }
-        rows.removeAll { it.entityType == entityType }
-        publishRows()
-    }
-
-    override suspend fun deleteEntities(
-        familyId: String,
-        entityType: String,
-        clientUuids: List<String>,
-    ) {
-        deleteEntityBatchSizes += clientUuids.size
-        require(clientUuids.size <= 400)
-        rows.removeAll {
-            it.familyId == familyId &&
-                it.entityType == entityType &&
-                it.clientUuid in clientUuids
-        }
-        publishRows()
-    }
-
-    override suspend fun deleteEntitiesAcrossFamilies(
-        entityType: String,
-        clientUuids: List<String>,
-    ) {
-        deleteEntityBatchSizes += clientUuids.size
-        require(clientUuids.size <= 400)
-        rows.removeAll {
-            it.entityType == entityType && it.clientUuid in clientUuids
-        }
-        publishRows()
-    }
-
-    override suspend fun deleteAll() {
-        rows.clear()
-        publishRows()
-    }
-
-    private fun publishRows() {
-        rowSnapshots.value = rows.toList()
-    }
-}
 
 internal class MemoryBabyDao : BabyDao {
     private val rows = MutableStateFlow<List<BabyEntity>>(emptyList())

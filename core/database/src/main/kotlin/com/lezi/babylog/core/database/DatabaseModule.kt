@@ -76,7 +76,6 @@ object DatabaseModule {
     @Provides fun mediaAssetDao(db: LeziDatabase): MediaAssetDao = db.mediaAssetDao()
     @Provides fun timelineWindowDao(db: LeziDatabase): TimelineWindowDao = db.timelineWindowDao()
     @Provides fun pendingPublishDao(db: LeziDatabase): PendingPublishDao = db.pendingPublishDao()
-    @Provides fun outboxDao(db: LeziDatabase): OutboxDao = db.outboxDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
     @Provides
     @Singleton

@@ -1,6 +1,6 @@
 # Client publish plan: reconcile-first, ephemeral outbox
 
-Status: in progress — contract and engine complete; upgrade migration pending
+Status: complete — contract, engine, and upgrade migration accepted
 
 ## Goal
 
@@ -105,3 +105,8 @@ This track fixes the **mechanism**, not a single incident bugfix.
   Room as offline intent (A), incremental pull+diff (A), Owner always
   pull→plan→push (A), delete durable outbox, no NAS protocol change, acceptance
   includes old-APK upgrade data safety + push under new mechanism.
+- 2026-08-04: Room 26 / local-data contract 3 retires the table only after
+  transferring supported residual identities to Room dirty state. Device
+  migration fixtures preserve care rows and media bytes; JVM fake-backend
+  coverage proves the resulting Room intent is publishable without durable
+  queue state.

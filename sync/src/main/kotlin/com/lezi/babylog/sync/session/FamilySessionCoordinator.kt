@@ -1,5 +1,4 @@
 package com.lezi.babylog.sync.session
-import com.lezi.babylog.core.database.OutboxDao
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -149,7 +148,6 @@ internal interface FamilySessionReplica {
 internal class FamilySessionCoordinator(
     private val backend: SyncBackend,
     private val preferences: SyncPreferences,
-    private val outboxDao: OutboxDao,
     private val replica: FamilySessionReplica,
     private val barrier: Mutex,
     private val requireRemoteAllowed: suspend (FamilyEndpointConfig) -> Unit,

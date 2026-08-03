@@ -462,7 +462,7 @@ interface SyncPort {
     /**
      * Clears the selected local domain and replica state under one sync barrier.
      * [LocalDataClearScope.AllLocalData] also removes avatar media and all
-     * outbox rows so a subsequent join cannot push stale residue.
+     * dirty publication markers so a subsequent join cannot push stale residue.
      */
     suspend fun clearLocalData(
         scope: LocalDataClearScope,

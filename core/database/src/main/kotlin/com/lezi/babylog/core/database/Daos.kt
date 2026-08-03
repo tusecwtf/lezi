@@ -89,7 +89,7 @@ interface BabyDao {
      * Advance + clear dirty only when local revision still equals
      * [expectedLocalUpdatedAt]. Concurrent profile edits (including ones that
      * land exactly on [publishedUpdatedAt]) are never overwritten and dirty
-     * stays set so capture rebuilds outbox for the newer root.
+     * stays set so the next sync cycle replans the newer root.
      *
      * Returns true when local content matched the published epoch and was
      * advanced (or already clean at published) — the baby equivalent of a
@@ -346,7 +346,7 @@ interface RecordDao {
      * - Concurrent newer content (including `updatedAt == publishedUpdatedAt`
      *   with dirty still set): never overwrite body; advance receipt only when
      *   [publishedUpdatedAt] ≤ current `updatedAt` (monotonic); keep dirty so
-     *   capture rebuilds outbox for the newer root.
+     *   the next sync cycle replans the newer root.
      * - Already clean at [publishedUpdatedAt] (idempotent retry): ensure receipt.
      *
      * Returns true when local content was confirmed at the published revision.
@@ -379,7 +379,7 @@ interface RecordDao {
         return decision.confirmed
     }
 
-    /** Merge server-owned metadata without changing content, revision, dirty state, or outbox. */
+    /** Merge server-owned metadata without changing content, revision, or dirty state. */
     @Query(
         """
         UPDATE records SET createdByMembershipId = :membershipId

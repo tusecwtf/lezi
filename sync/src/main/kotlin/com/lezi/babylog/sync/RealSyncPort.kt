@@ -7,7 +7,6 @@ import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
-import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
@@ -117,7 +116,6 @@ class RealSyncPort @Inject constructor(
     private val preferences: SyncPreferences,
     private val setupProbe: SetupProbe,
     private val foregroundSyncGate: ForegroundSyncGate,
-    private val outboxDao: OutboxDao,
     private val pendingPublishDao: PendingPublishDao,
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
@@ -209,7 +207,6 @@ class RealSyncPort @Inject constructor(
     private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
         barrier = syncMutex,
         preferences = preferences,
-        outboxDao = outboxDao,
         babyDao = babyDao,
         mediaDao = mediaDao,
         mediaFiles = mediaFiles,
@@ -219,7 +216,6 @@ class RealSyncPort @Inject constructor(
     private val familySessionCoordinator = FamilySessionCoordinator(
         backend = backend,
         preferences = preferences,
-        outboxDao = outboxDao,
         replica = replicaSyncEngine,
         barrier = syncMutex,
         requireRemoteAllowed = { config ->
@@ -866,7 +862,7 @@ class RealSyncPort @Inject constructor(
                 familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
                 membershipId = joined.membershipId.trim(),
             )
-            retireDisasterRestoreReceipts(previous, session, checkpoint)
+            retireDisasterRestoreReceipts(session, checkpoint)
             preferences.saveReconnectedSession(session, checkpoint.endpoint)
             preferences.clearDisasterRestoreCheckpoint()
             publishSession(session)
@@ -1871,14 +1867,13 @@ class RealSyncPort @Inject constructor(
     }
 
     private suspend fun retireDisasterRestoreReceipts(
-        previous: SyncSession,
         restored: SyncSession,
         checkpoint: DisasterRestoreCheckpoint,
     ) {
         transactionRunner.run {
             // Care remains writable while a restore batch uploads. Re-author every local row to
             // the new Owner, including rows created after the immutable restore manifest, but
-            // retire publication state only when the Room/outbox version is exactly the version
+            // retire publication state only when the Room version is exactly the version
             // activated by the server. Newer local work stays dirty and publishes after switch.
             recordDao.listAllIncludingDeleted().forEach { record ->
                 if (record.createdByMembershipId != restored.membershipId) {
@@ -1908,7 +1903,6 @@ class RealSyncPort @Inject constructor(
                     )
                 }
             }
-            val retiredOutboxIds = mutableListOf<Long>()
             checkpoint.entityVersions.forEach { version ->
                 when (version.type) {
                     "baby" -> babyDao.markSynced(version.clientUuid, version.updatedAt)
@@ -1999,14 +1993,7 @@ class RealSyncPort @Inject constructor(
                             )
                         }
                 }
-                outboxDao.find(previous.familyId, version.type, version.clientUuid)
-                    ?.takeIf { row ->
-                        row.updatedAt == version.updatedAt &&
-                            (row.deletedAt == null) == version.restored
-                    }
-                    ?.let { retiredOutboxIds += it.id }
             }
-            if (retiredOutboxIds.isNotEmpty()) outboxDao.deleteIds(retiredOutboxIds)
         }
     }
 

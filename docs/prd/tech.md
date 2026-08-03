@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 可信 HTTPS、每设备会话、无网络名称身份的仅前台 Outbox/pull/push |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | 可信 HTTPS、每设备会话、仅前台 reconcile/临时 plan/push |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -149,6 +149,8 @@ UI 事件
 Owner 与 Member 使用同一对账优先次序。跨进程只持久化 Room 实体、媒体与修订回执，不持久化
 待发送 payload 队列；进程终止后丢弃临时 plan，下次成功对账后由当前 `syncDirty`/回执重新生成。
 浅层待同步数量来自仍需发布的 Room 实体，而不是历史请求残留。
+升级完成后能在本机看到记录只证明数据保留；家庭侧可见性仍须等待首次成功的
+`pull/reconcile → plan → push`，运营验收不得把“本机可见”误报为“已发布到家庭”。
 
 `FamilyServerAvailability` 是协调器私有网络门闩和家庭网络设置的结果态，不替代浅层
 `SyncStatus`。匿名客户端在可信 TLS 下并行检查 `/health`、`/ready` 与 setup capability，
@@ -380,7 +382,7 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 - 便便枚举边界；尿尿 `pee_amount` 1–3；排泄图标资源存在性（designsystem）
 - `client_uuid` 幂等合并
 - NoOpSyncPort 不抛未捕获异常
-- fresh Room 创建当前 schema；force-stop/重启后当前数据、Outbox、TimerState 与提醒清理状态保持
+- fresh Room 创建当前 schema；force-stop/重启后当前数据、dirty/发布回执、TimerState 与提醒清理状态保持
 - APK 原地替换先经过本地数据升级门禁；相邻迁移先按受影响域创建校验快照，失败不得自动清库
 - 基线之前、未来版、空间不足或不一致数据稳定进入恢复界面；业务、提醒、Widget 不得提前打开持久化
 - 应用内更新：SyncPort 检查结果（NotJoined / UpToDate / Optional / Forced）、校验失败不安装、

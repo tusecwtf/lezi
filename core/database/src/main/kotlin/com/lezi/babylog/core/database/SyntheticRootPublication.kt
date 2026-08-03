@@ -73,7 +73,7 @@ internal fun decideSyntheticRootPublicationWithReceipt(
         currentUpdatedAt == publishedUpdatedAt -> {
             if (currentSyncDirty) {
                 // Concurrent edit landed exactly on the elevated revision: keep
-                // body + dirty so capture rebuilds outbox; merge receipt only.
+                // body + dirty so the next cycle replans it; merge receipt only.
                 concurrentReceiptOnly(
                     currentUpdatedAt = currentUpdatedAt,
                     currentFamilyPublishedUpdatedAt = currentFamilyPublishedUpdatedAt,

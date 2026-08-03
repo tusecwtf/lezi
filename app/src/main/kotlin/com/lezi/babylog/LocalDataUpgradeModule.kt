@@ -30,6 +30,12 @@ internal abstract class LocalDataUpgradeModule {
         implementation: CustomItemClientUuidIndexUpgradeStep,
     ): LocalDataUpgradeStep
 
+    @Binds
+    @IntoSet
+    abstract fun outboxRetirementUpgradeStep(
+        implementation: OutboxRetirementUpgradeStep,
+    ): LocalDataUpgradeStep
+
     companion object {
         @Provides
         @Singleton

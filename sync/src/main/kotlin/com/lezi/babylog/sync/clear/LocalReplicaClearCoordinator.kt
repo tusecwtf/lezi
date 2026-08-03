@@ -4,7 +4,6 @@ import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.PendingReplicaCleanup
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import kotlinx.coroutines.NonCancellable
@@ -25,12 +24,11 @@ import com.lezi.babylog.sync.session.SyncSession
  *
  * The marker and domain deletion commit in one Room transaction. External file
  * and DataStore work then runs non-cancellably, and a final Room transaction
- * atomically retires captured outbox/media rows with the marker.
+ * atomically retires captured media rows with the marker.
  */
 internal class LocalReplicaClearCoordinator(
     private val barrier: Mutex,
     private val preferences: SyncPreferences,
-    private val outboxDao: OutboxDao,
     private val babyDao: BabyDao,
     private val mediaDao: MediaAssetDao,
     private val mediaFiles: SyncMediaFileStore,
@@ -191,28 +189,15 @@ internal class LocalReplicaClearCoordinator(
                 scope = pending.scope,
                 retainedLocalUris = protectedPaths,
             )
-            when (pending.scope) {
-                LocalDataClearScope.RecordsOnly -> finishRecordsOnly(pending)
-                LocalDataClearScope.AllLocalData -> outboxDao.deleteAll()
-            }
-            pending.mediaClientUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
+            pending.mediaClientUuids.chunked(MEDIA_DELETE_CHUNK_SIZE).forEach { chunk ->
                 mediaDao.deleteByClientUuids(chunk)
             }
             pendingStore.delete()
         }
     }
-
-    private suspend fun finishRecordsOnly(pending: PendingReplicaCleanup) {
-        outboxDao.deleteTypeAcrossFamilies("record")
-        outboxDao.deleteTypeAcrossFamilies("care_plan")
-        outboxDao.deleteTypeAcrossFamilies("fulfillment_candidate")
-        pending.mediaClientUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
-            outboxDao.deleteEntitiesAcrossFamilies("media", chunk)
-        }
-    }
 }
 
-private const val OUTBOX_DELETE_CHUNK_SIZE = 400
+private const val MEDIA_DELETE_CHUNK_SIZE = 400
 
 private fun Throwable.cancellationCauseOrNull(): CancellationException? {
     var current: Throwable? = this

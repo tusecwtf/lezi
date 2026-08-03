@@ -1,6 +1,5 @@
 package com.lezi.babylog.sync.session
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.OutboxEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -25,7 +24,6 @@ import com.lezi.babylog.sync.backend.SessionBootstrapResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
-import com.lezi.babylog.sync.MemoryOutboxDao
 import com.lezi.babylog.sync.MemorySyncPreferences
 import com.lezi.babylog.sync.RecordingSyncBackend
 
@@ -49,7 +47,6 @@ class FamilySessionCoordinatorTest {
         val coordinator = FamilySessionCoordinator(
             backend = RecordingSyncBackend(),
             preferences = preferences,
-            outboxDao = MemoryOutboxDao(),
             replica = replica,
             barrier = Mutex(),
             requireRemoteAllowed = {},
@@ -583,23 +580,12 @@ class FamilySessionCoordinatorTest {
         val previous = joinedFamilySession(role = FamilyRole.Member)
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend()
-        val outbox = MemoryOutboxDao()
-        outbox.enqueue(
-            OutboxEntity(
-                familyId = previous.familyId,
-                entityType = "record",
-                clientUuid = "record-a",
-                payloadJson = "{}",
-                updatedAt = 10,
-            ),
-        )
         backend.onLeave = {
             assertThat(preferences.current()).isEqualTo(previous)
         }
         val coordinator = coordinator(
             preferences = preferences,
             backend = backend,
-            outbox = outbox,
         )
 
         val outcome = coordinator.execute(
@@ -608,7 +594,6 @@ class FamilySessionCoordinatorTest {
 
         assertThat(outcome.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
         assertThat(preferences.current()).isEqualTo(previous)
-        assertThat(outbox.all()).hasSize(1)
     }
 
     @Test
@@ -616,16 +601,6 @@ class FamilySessionCoordinatorTest {
         val previous = joinedFamilySession(role = FamilyRole.Owner)
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend()
-        val outbox = MemoryOutboxDao()
-        outbox.enqueue(
-            OutboxEntity(
-                familyId = previous.familyId,
-                entityType = "record",
-                clientUuid = "record-a",
-                payloadJson = "{}",
-                updatedAt = 10,
-            ),
-        )
         val events = mutableListOf<String>()
         backend.onDeleteFamily = {
             assertThat(preferences.current()).isEqualTo(previous)
@@ -634,7 +609,6 @@ class FamilySessionCoordinatorTest {
         val coordinator = coordinator(
             preferences = preferences,
             backend = backend,
-            outbox = outbox,
         )
 
         val outcome = coordinator.execute(
@@ -644,7 +618,6 @@ class FamilySessionCoordinatorTest {
         assertThat(outcome.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
         assertThat(events).containsExactly("remote-deleted")
         assertThat(preferences.current()).isEqualTo(previous)
-        assertThat(outbox.all()).hasSize(1)
         assertThat(backend.deletedFamilyConfirmations)
             .containsExactly("乐乐一家" to "root-password-secret")
     }
@@ -1433,7 +1406,6 @@ class FamilySessionCoordinatorTest {
 private fun coordinator(
     preferences: MemorySyncPreferences,
     backend: RecordingSyncBackend = RecordingSyncBackend(),
-    outbox: MemoryOutboxDao = MemoryOutboxDao(),
     replica: RecordingFamilySessionReplica = RecordingFamilySessionReplica(),
     requireRemoteAllowed: suspend (FamilyEndpointConfig) -> Unit = {},
     onSessionChanged: (SyncSession) -> Unit = {},
@@ -1443,7 +1415,6 @@ private fun coordinator(
 ): FamilySessionCoordinator = FamilySessionCoordinator(
     backend = backend,
     preferences = preferences,
-    outboxDao = outbox,
     replica = replica,
     barrier = Mutex(),
     requireRemoteAllowed = requireRemoteAllowed,

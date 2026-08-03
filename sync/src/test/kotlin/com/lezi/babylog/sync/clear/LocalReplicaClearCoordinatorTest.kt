@@ -4,7 +4,6 @@ import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.PendingReplicaCleanup
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
@@ -24,7 +23,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.MemoryBabyDao
 import com.lezi.babylog.sync.MemoryCarePlanDao
 import com.lezi.babylog.sync.MemoryMediaDao
-import com.lezi.babylog.sync.MemoryOutboxDao
 import com.lezi.babylog.sync.MemoryRecordDao
 import com.lezi.babylog.sync.MemorySyncPreferences
 import com.lezi.babylog.sync.TestMediaFileStore
@@ -185,7 +183,6 @@ class LocalReplicaClearCoordinatorTest {
                 pullGeneration = "known-generation",
             ),
         )
-        rig.outbox.enqueue(outbox(entityType = "record", clientUuid = "record-local"))
         rig.pending.stageFailure = IllegalStateException("marker write failed")
         var callbackCalls = 0
 
@@ -195,8 +192,6 @@ class LocalReplicaClearCoordinatorTest {
 
         assertThat(failure).hasMessageThat().isEqualTo("marker write failed")
         assertThat(callbackCalls).isEqualTo(0)
-        assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
-            .containsExactly("record-local")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(9)
     }
 
@@ -204,7 +199,6 @@ class LocalReplicaClearCoordinatorTest {
     fun committedFileFailureRetainsDurableMarkerAndRoomReplicaRows() = runTest {
         val rig = ClearRig()
         rig.media.seed(media("log-media", "log", "photos/log.jpg"))
-        rig.outbox.enqueue(outbox(entityType = "media", clientUuid = "log-media"))
         val fileFailure = IllegalStateException("file delete failed")
         rig.mediaFiles.deleteFailures += fileFailure
 
@@ -217,7 +211,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(failure.cause).hasMessageThat().isEqualTo(fileFailure.message)
         assertThat(rig.pending.pending).isNotNull()
         assertThat(rig.media.getByClientUuid("log-media")).isNotNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isNotEmpty()
         assertThat(rig.mediaFiles.deleted).containsExactly("photos/log.jpg")
     }
 
@@ -230,7 +223,6 @@ class LocalReplicaClearCoordinatorTest {
             ),
         )
         rig.media.seed(media("log-media", "log", "photos/log.jpg"))
-        rig.outbox.enqueue(outbox(entityType = "media", clientUuid = "log-media"))
         rig.preferences.failUpdateCursorAttempts = 1
         var callbackCalls = 0
 
@@ -241,13 +233,11 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
         assertThat(rig.pending.pending).isNotNull()
         assertThat(rig.media.getByClientUuid("log-media")).isNotNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isNotEmpty()
 
         assertThat(rig.newCoordinator().recoverPending().isSuccess).isTrue()
         assertThat(callbackCalls).isEqualTo(1)
         assertThat(rig.pending.pending).isNull()
         assertThat(rig.media.getByClientUuid("log-media")).isNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("known-generation")
     }
 
@@ -255,7 +245,6 @@ class LocalReplicaClearCoordinatorTest {
     fun finalRoomTransactionFailureRetainsMarkerForRetry() = runTest {
         val rig = ClearRig()
         rig.media.seed(media("log-media", "log", "photos/log.jpg"))
-        rig.outbox.enqueue(outbox(entityType = "media", clientUuid = "log-media"))
         rig.transactions.failRunNumbers += 2
 
         val failure = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
@@ -265,7 +254,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(failure!!.cause).hasMessageThat().isEqualTo("transaction 2 failed")
         assertThat(rig.pending.pending).isNotNull()
         assertThat(rig.media.getByClientUuid("log-media")).isNotNull()
-        assertThat(rig.outbox.peek("family-a", 10)).isNotEmpty()
 
         assertThat(rig.newCoordinator().recoverPending().isSuccess).isTrue()
         assertThat(rig.pending.pending).isNull()
@@ -322,16 +310,6 @@ class LocalReplicaClearCoordinatorTest {
         rig.media.seed(media("record-media", "log", "photos/record.jpg"))
         rig.media.seed(media("plan-media", "log", "photos/plan.jpg", carePlanId = 1))
         rig.media.seed(media("avatar-media", "avatar", "avatars/baby.jpg"))
-        listOf(
-            outbox("record", "record-local"),
-            outbox("care_plan", "plan-local"),
-            outbox("fulfillment_candidate", "candidate-local"),
-            outbox("media", "record-media"),
-            outbox("media", "plan-media"),
-            outbox("media", "avatar-media"),
-            outbox("baby", "baby-local"),
-        ).forEach { rig.outbox.enqueue(it) }
-
         val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
             rig.records.deleteAll()
             rig.carePlans.deleteAll()
@@ -346,8 +324,6 @@ class LocalReplicaClearCoordinatorTest {
             "photos/record.jpg",
             "photos/plan.jpg",
         )
-        assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
-            .containsExactly("avatar-media", "baby-local")
     }
 
     @Test
@@ -404,8 +380,6 @@ class LocalReplicaClearCoordinatorTest {
         )
         rig.media.seed(media("log-media", "log", "photos/log.jpg"))
         rig.media.seed(media("avatar-media", "avatar", "avatars/baby.jpg"))
-        rig.outbox.enqueue(outbox("record", "record-local"))
-        rig.outbox.enqueue(outbox("baby", "other-family-baby", familyId = "family-b"))
 
         val result = rig.coordinator.clear(LocalDataClearScope.AllLocalData) {
             rig.records.deleteAll()
@@ -421,8 +395,6 @@ class LocalReplicaClearCoordinatorTest {
             "avatars/baby.jpg",
         )
         assertThat(rig.mediaFiles.deleted).doesNotContain("photos/inline.jpg")
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
-        assertThat(rig.outbox.peek("family-b", 10)).isEmpty()
         assertThat(rig.pending.pending).isNull()
     }
 
@@ -432,33 +404,12 @@ class LocalReplicaClearCoordinatorTest {
         repeat(1_005) { index ->
             val uuid = "log-media-$index"
             rig.media.seed(media(uuid, "log", "photos/$index.jpg"))
-            rig.outbox.enqueue(outbox("media", uuid))
         }
 
         val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
 
         assertThat(result.isSuccess).isTrue()
-        assertThat(rig.outbox.deleteEntityBatchSizes).containsExactly(400, 400, 205).inOrder()
-        assertThat(rig.outbox.peek("family-a", 2_000)).isEmpty()
-    }
-
-    @Test
-    fun recordsOnlyClearsRelevantOutboxAcrossStaleFamiliesWhenUnjoined() = runTest {
-        val rig = ClearRig(session = SyncSession())
-        rig.media.seed(media("stale-media", "log", "photos/stale.jpg"))
-        listOf(
-            outbox("record", "old-record", familyId = "family-old"),
-            outbox("care_plan", "old-plan", familyId = "family-old"),
-            outbox("fulfillment_candidate", "old-candidate", familyId = "family-old"),
-            outbox("media", "stale-media", familyId = "family-old"),
-            outbox("baby", "old-baby", familyId = "family-old"),
-        ).forEach { rig.outbox.enqueue(it) }
-
-        assertThat(rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}.isSuccess)
-            .isTrue()
-
-        assertThat(rig.outbox.peek("family-old", 10).map(OutboxEntity::clientUuid))
-            .containsExactly("old-baby")
+        assertThat(rig.media.listAllIncludingDeleted()).isEmpty()
     }
 
     @Test
@@ -547,7 +498,6 @@ private class ClearRig(
 ) {
     val barrier = Mutex()
     val preferences = MemorySyncPreferences(session)
-    val outbox = MemoryOutboxDao()
     val records = MemoryRecordDao()
     val carePlans = MemoryCarePlanDao()
     val babies = MemoryBabyDao()
@@ -559,7 +509,6 @@ private class ClearRig(
     fun newCoordinator() = LocalReplicaClearCoordinator(
         barrier = barrier,
         preferences = preferences,
-        outboxDao = outbox,
         babyDao = babies,
         mediaDao = media,
         mediaFiles = mediaFiles,
@@ -632,18 +581,6 @@ private class TransactionObservingMediaFileStore(
         super.delete(localUri)
     }
 }
-
-private fun outbox(
-    entityType: String,
-    clientUuid: String,
-    familyId: String = "family-a",
-) = OutboxEntity(
-    familyId = familyId,
-    entityType = entityType,
-    clientUuid = clientUuid,
-    payloadJson = "{}",
-    updatedAt = 1,
-)
 
 private fun media(
     clientUuid: String,

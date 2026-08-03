@@ -29,7 +29,7 @@ class FreshDatabaseTest {
         val db = openDatabase("fresh-schema")
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(25, sqlite.version)
+        assertEquals(26, sqlite.version)
         val tables = buildSet {
             sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table'").use { cursor ->
                 while (cursor.moveToNext()) add(cursor.getString(0))
@@ -46,13 +46,13 @@ class FreshDatabaseTest {
                     "care_plans",
                     "fulfillment_candidates",
                     "media_assets",
-                    "outbox",
                     "custom_items",
                     "pending_reminder_cleanup",
                     "pending_replica_cleanup",
                 ),
             ),
         )
+        assertFalse(tables.contains("outbox"))
         assertFalse(tables.contains("calendar_events"))
 
         val recordColumns = buildSet {
@@ -206,7 +206,7 @@ class FreshDatabaseTest {
         }.exceptionOrNull()
 
         assertNotNull(failure)
-        assertTrue(failure!!.message.orEmpty().contains("migration from 23 to 25"))
+        assertTrue(failure!!.message.orEmpty().contains("migration from 23 to 26"))
         database!!.close()
         database = null
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->

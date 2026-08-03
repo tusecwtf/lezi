@@ -320,7 +320,7 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 
 ### 6.3 家庭同步与扩展
 
-- [x] Android `SyncPort`、可信 endpoint 门闩、前台触发、Outbox、媒体与家庭 UI 实现
+- [x] Android `SyncPort`、可信 endpoint 门闩、前台 reconcile/临时发布计划、媒体与家庭 UI 实现
 - [x] NAS `tools/lezi-sync` API、SQLite、Docker/Compose 单数据根配置与自动化测试
 - [x] 本机 Docker 镜像构建与运行
 - [x] 可信 session 与双向同步协议自动化覆盖

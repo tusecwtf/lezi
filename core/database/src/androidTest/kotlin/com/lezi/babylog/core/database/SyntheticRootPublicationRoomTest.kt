@@ -210,7 +210,7 @@ class SyntheticRootPublicationRoomTest {
         assertEquals(71L, row.updatedAt)
         assertFalse(row.syncDirty)
 
-        // Concurrent profile edit: do not clobber, leave dirty for outbox rebuild.
+        // Concurrent profile edit: do not clobber; leave dirty for next-cycle replanning.
         babies.update(row.copy(nickname = "新昵称", updatedAt = 90, syncDirty = true))
         assertFalse(
             babies.acknowledgeSyntheticRootPublication(

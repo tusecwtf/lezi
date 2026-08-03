@@ -13,12 +13,11 @@ import androidx.room.RoomDatabase
         CarePlanEntity::class,
         FulfillmentCandidateEntity::class,
         MediaAssetEntity::class,
-        OutboxEntity::class,
         CustomItemEntity::class,
         PendingReminderCleanupEntity::class,
         PendingReplicaCleanupEntity::class,
     ],
-    version = 25,
+    version = 26,
     exportSchema = true,
 )
 abstract class LeziDatabase : RoomDatabase() {
@@ -32,7 +31,6 @@ abstract class LeziDatabase : RoomDatabase() {
     abstract fun mediaAssetDao(): MediaAssetDao
     abstract fun timelineWindowDao(): TimelineWindowDao
     abstract fun pendingPublishDao(): PendingPublishDao
-    abstract fun outboxDao(): OutboxDao
     abstract fun customItemDao(): CustomItemDao
     abstract fun pendingReminderCleanupDao(): PendingReminderCleanupDao
     abstract fun pendingReplicaCleanupDao(): PendingReplicaCleanupDao

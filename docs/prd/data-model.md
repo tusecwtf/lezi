@@ -19,7 +19,7 @@
 1. **先写本地，再同步**（有实现时）：UI 只依赖 Room。  
 2. **家庭域 vs 本机域** 分离，避免设置冲突。  
 3. 每条业务实体带 **`client_uuid`**，便于幂等与后期同步。  
-4. 未登录、离线、等待审批或可信 endpoint 不可达时，`SyncPort` 安全 no-op / 保留 Outbox，
+4. 未登录、离线、等待审批或可信 endpoint 不可达时，`SyncPort` 安全 no-op / 保留 Room dirty，
    **不得**阻塞记账。
 
 ---
@@ -35,7 +35,7 @@ Family 1──* CustomItemDef
 Baby 1──* Record
 Record 1──* MediaAsset
 LocalUser 1──1 SettingsLocal     # 永不进家庭同步域
-Family 可选 Outbox                  # 上行队列
+Room syncDirty / 发布回执             # 长期发布意图
 ```
 
 离线最小路径只需本机 `LocalUser` + `Baby` + `Record`；`Family` 在可信服务器完成建家后才建立，
@@ -148,7 +148,7 @@ self。新登录设备读取完整家庭历史。不做保育只读角色、不�
 
 家庭会话中只有 owner 可创建、修改、删除或上传 Baby；member 只 pull/apply 家庭权威宝宝，仍可切换当前宝宝并修改本机 `theme_color` / `sort_order`。member 加入前的本机孤宝宝不上传：若 pull 完整轮次后恰有一个家庭权威宝宝，自动把孤宝宝的 Record、CarePlan 与相关媒体再绑定过去；若有多个权威宝宝，只允许用户显式选择「孤宝宝 → 权威宝宝」，不得按昵称猜测；若没有权威宝宝则保留本机数据并展示等待管理员的空态。再绑定完成前，孤宝宝下的事实、计划与媒体保持本机 dirty，不携带无效宝宝引用上行；合并后再捕获新版。
 
-Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、清 `avatar_media_uuid`/`avatar_path`，并以不倒退的时间 tombstone 该宝宝下**全部** active `kind=avatar` MediaAsset（含 legacy 多 active 行，不只是指针指向的一行）。提交后才走引用感知文件回收；事务失败时 Baby、头像指针、MediaAsset 与文件全部保持原状。Outbox/atomic baby 包发布 deleted Baby root（`avatar_media_uuid = null`）与对应 media tombstone，不得再把 live avatar 带进墓碑包。对端 pull/apply 得到 deleted Baby + 非活跃 avatar 后，pointer repair 不得复活头像。物理文件只在提交后且无其它 active 引用时删除；失败保留 durable cleanup marker 可重试。删除、同步失败重试、commit-response 丢失和进程恢复均不得复活头像或丢 tombstone。产品仍保持「至少保留一个 active 宝宝」。
+Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、清 `avatar_media_uuid`/`avatar_path`，并以不倒退的时间 tombstone 该宝宝下**全部** active `kind=avatar` MediaAsset（含 legacy 多 active 行，不只是指针指向的一行）。提交后才走引用感知文件回收；事务失败时 Baby、头像指针、MediaAsset 与文件全部保持原状。临时发布计划/atomic baby 包发布 deleted Baby root（`avatar_media_uuid = null`）与对应 media tombstone，不得再把 live avatar 带进墓碑包。对端 pull/apply 得到 deleted Baby + 非活跃 avatar 后，pointer repair 不得复活头像。物理文件只在提交后且无其它 active 引用时删除；失败保留 durable cleanup marker 可重试。删除、同步失败重试、commit-response 丢失和进程恢复均不得复活头像或丢 tombstone。产品仍保持「至少保留一个 active 宝宝」。
 
 ### 3.5 Record
 
@@ -173,8 +173,8 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 两条路径必须调用同一个纯决策：按 `timestamp` 升序排列，时间相同时按跨设备稳定的
 `client_uuid` 排列并保留最后一条；其余条目依次关闭在下一条的开始时刻。相同/异常开始时刻
 使用注入的修复时钟与饱和的一分钟兜底，两者取较晚值，绝不产生负区间或 `Long` 溢出。
-规则本身不读数据库和系统时间。本地适配仍在原事务中走本地更新、dirty 与 Outbox 语义；
-pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语义，不伪造本地 Outbox。
+规则本身不读数据库和系统时间。本地适配仍在原事务中走本地更新与 dirty 语义；
+pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语义，不伪造待发布事实。
 
 家庭 wake 是宝宝级事实，而不是只作用于某个 sleep UUID：pull 到任一已闭合睡眠后，所有开始
 时间不晚于该 wake 的开放睡眠都在本机闭合到同一 wake，标记 anomaly 并以更高修订发布；时钟
@@ -219,7 +219,7 @@ UID 查找）的精确映射。清除记录（RecordsOnly）或全部本地数�
 atomic commit 在 `record_authors` 回执中返回本次请求涉及的
 canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
 server-owned metadata；不修改护理内容、照片、删除状态或业务时间，不提高
-`updatedAt`，不改变 `syncDirty`，也不生成 Outbox。响应缺少当前必需字段时整次 apply
+`updatedAt`，不改变 `syncDirty`，也不生成额外发布候选。响应缺少当前必需字段时整次 apply
 失败并保留本地行与检查点，不猜测作者。
 
 ### 3.6 typed payload 当前约定
@@ -275,7 +275,7 @@ Record 的本机 Room payload 使用正数 `custom_item_id`。家庭 wire 不发
 | `mime` / `width` / `height` | |
 | `byte_size` | |
 | `created_at` / `updated_at` / `deleted_at` | LWW 与 tombstone |
-| `sync_dirty` | 需快照入当前家庭 Outbox |
+| `sync_dirty` | 下次成功 reconcile 后需纳入临时发布计划 |
 
 当前仅支持图片；视频不做。
 NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UUID、`mime`、
@@ -311,7 +311,7 @@ CarePlan，但多个 active 行可以用相同 `local_uri` 共享同一份本机
 Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和同步 tombstone 只把精确
 媒体行标记删除；物理文件须在同一路径已无任何 `deleted_at IS NULL` 的媒体行后才可回收，
 因此待上传的 active dirty 行也会保护文件。回收成功（或文件已经缺失）后只清空 tombstone
-行的本机 `local_uri`，不删除 MediaAsset tombstone 或 Outbox 元数据。删除失败或中断时保留
+行的本机 `local_uri`，不删除 MediaAsset tombstone。删除失败或中断时保留
 该路径作为重启重试 marker；live 行若有 `remote_uri` 但本机路径为空，继续按既有下载恢复
 规则补齐。
 
@@ -379,7 +379,7 @@ Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和�
 持久化单元；旧字段只在同一次 DataStore 事务内保留完整镜像以兼容降级。快照固定四槽、
 非空 key 唯一且允许任意数量空槽，不自动补位。每次布局意图串行写入一个完整快照；
 失败或取消保留上一份耐久快照并允许重试，未知未来版本不得被当前版本静默清空或回写。
-该快照只存在当前设备，不进入 Outbox、家庭同步 wire 或 NAS 数据。
+该快照只存在当前设备，不进入家庭同步 wire 或 NAS 数据。
 
 布局撤销是进程内、单层且带 token 的短时写入协议，不是持久化历史。只有清空常用槽和
 移入本机已删除的完整 `after` 快照写入成功后，才临时保留对应完整 `before` 快照；任何
@@ -393,7 +393,7 @@ Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和�
 
 旧 `ShareInvite` 短码模型已退役，不存在于当前 Android、NAS schema 或 wire。当前成员申请只在
 本机暂存无权限 request ID、pending secret 与过期时间；管理员签发的成员登录授权十分钟、
-单次使用，服务端只存哈希。两者都不得进入家庭业务 Outbox、系统备份或日志。
+单次使用，服务端只存哈希。两者都不得进入家庭业务同步、系统备份或日志。
 
 成员申请在 `pending` 与 `approved` 且尚未领取时都属于开放申请。批准不会提前创建新
 membership；`approved` 申请保留家庭称呼并继续对 Owner 可见，直至申请设备领取、Owner
@@ -522,16 +522,12 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 两台设备上各转一次且未共享指针时，产品接受两条独立普通记录。`adoptionStatus` 与
 `convertedRecordClientUuid` 均为本机派生字段，不进家庭 wire。
 
-### 3.12 Outbox
+### 3.12 临时发布计划
 
-| 字段 | 说明 |
-|------|------|
-| `family_id` | 队列所属家庭，防止跨家庭 ACK |
-| `entity_type` | `baby` \| `record` \| `media` \| `custom_item` \| `care_plan`（atomic bundle 根）\| `fulfillment_candidate` |
-| `client_uuid` | portable 实体键 |
-| `payload_json` | 不含本机自增 id / 文件绝对路径 |
-| `updated_at` / `deleted_at` | LWW 与 tombstone |
-| 唯一约束 | `(family_id, entity_type, client_uuid)`，后写覆盖同键待发送快照 |
+发布计划不是 Room 表，也不跨进程保存 payload。每个已加入家庭的同步周期先 pull/reconcile，
+再从六类 `sync_dirty` Room 实体和根发布回执生成内存候选，按 atomic bundle 依赖排序后提交。
+成功回执只以 `(client_uuid, updated_at)` CAS 清 dirty；失败或进程终止只丢弃计划，下一周期从
+Room 当前事实重新生成。contract 2→3 升级先把旧 outbox identity 对应行标 dirty，再删除旧表。
 
 ---
 
@@ -680,7 +676,7 @@ interface SyncPort {
 
 - 无会话时状态保持 `Disabled`，前台与本地写触发为安全 no-op。
 - 建家、管理员登录或成员申请前必须先确认可信 endpoint；失败返回中文产品文案。
-- 只有有效设备会话才会生成并上传 Outbox；endpoint 变化时必须重新建立 trust 并普通登录，
+- 只有有效设备会话才会生成并上传临时发布计划；endpoint 变化时必须重新建立 trust 并普通登录，
   不向新地址发送旧 credential。
 
 ### 6.4 当前规则（摘要）
@@ -734,7 +730,7 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 | 操作 | 行为 |
 |------|------|
-| 删一条记录 | `deleted_at` 软删并进入 Outbox |
+| 删一条记录 | `deleted_at` 软删并保持 `sync_dirty = 1`，下次对账后发布 |
 | 成员退出 | membership 标记离开并吊销其全部 credentials；**NAS 业务数据保留** |
 | 清除本机记录（RecordsOnly） | 清 Record/CarePlan/履行候选/日志媒体与对应提醒、系统日历投影；**停止并清除捕获的本机 nursing timer session/JSON**（session epoch 保护）；保留宝宝档案、自定义项目与家庭会话 |
 | 清除本机全部 / 设备撤销（AllLocalData） | 多重确认或撤设备路径清空本地库与会话投影；**同一 coordinator 停止并清除捕获的 nursing timer**；**默认仅本地** |
@@ -745,10 +741,11 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 ## 8. 当前数据层
 
-Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；当前契约
+Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级。数据域包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
-SettingsLocal、ShareInvite、Outbox、CustomItemDef、CarePlan 与 FulfillmentCandidate，
+相邻升级；当前契约 v3（0.3.6 / versionCode 13）为 Room v26，通过
+`OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含 LocalUser、Family、
+Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、CustomItemDef、CarePlan 与 FulfillmentCandidate，
 并使用真实 `SyncPort` 和 Record/计划媒体原子包。后续本地数据契约必须通过相邻迁移链保留
 Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前无破坏阻断。
-当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、Outbox、计时与提醒恢复状态。
+当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、dirty/发布回执、计时与提醒恢复状态。

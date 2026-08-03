@@ -6,7 +6,7 @@
 > [ADR-0014](../adr/0014-owner-device-restores-only-empty-family-servers.md)
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
-本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；未改变的 Room/Outbox、本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线。
+本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选由 ADR-0016 的 reconcile-first 临时计划生成。
 
 ## 1. 一句话合同
 
@@ -19,7 +19,7 @@ ping 和 health 都不再充当身份或同步门闩。
 | 主题 | 目标合同 |
 |------|----------|
 | 产品拓扑 | 单家庭、单服务实例、同一时刻一个写入 authority |
-| 客户端真相源 | Room；所有写入先落本地 Outbox，再在前台同步 |
+| 客户端真相源 | Room；所有写入先落 Room dirty，再在前台对账并临时规划发布 |
 | 服务器位置 | 家庭 NAS 或单实例 VPS；App 不感知部署类型 |
 | 网络 | 任意可用网络；不读取、存储、展示或匹配 SSID/BSSID |
 | 传输 | 生产 HTTPS only；VPS 用系统 PKI，家庭自签名服务用用户确认的 TOFU/SPKI |
@@ -188,7 +188,7 @@ probe 的地址草稿离开即丢弃，不能覆盖上一次可信 endpoint、�
 - refresh 没有时间或不活跃自动过期：有效设备可长期静默续期，直到显式撤销、主动退出、token
   丢失或 replay 安全事件。
 - replay 只撤销该设备 session，保留本地家庭数据，并要求重新走管理员批准。
-- 普通 401、凭证丢失或 token 失效不等于设备/成员被删除；App 保留 Room、Outbox、media 与
+- 普通 401、凭证丢失或 token 失效不等于设备/成员被删除；App 保留 Room dirty、media 与
   endpoint，显示重新申请入口。
 
 ## 6. 删除、退出与本地数据
@@ -198,7 +198,7 @@ probe 的地址草稿离开即丢弃，不能覆盖上一次可信 endpoint、�
 管理员可撤销任意设备，普通成员可从当前设备执行「退出这台设备」。服务端删除/撤销该设备
 session，不影响 membership 和其它设备。
 
-- 当前设备主动退出：服务端确认后立即清空本地 Room、Outbox、media、endpoint 与凭证。
+- 当前设备主动退出：服务端确认后立即清空本地 Room、media、endpoint 与凭证。
 - 管理员远程撤销：设备下一次可信连接收到明确 `device_removed`，然后清空同一范围。
 - 离线设备无法保证即时远程擦除；UI 和安全声明不得暗示已经远程销毁。
 - 被撤销设备以后可重新提交加入申请。
@@ -271,7 +271,7 @@ session，不影响 membership 和其它设备。
 | `device_removed` | 清当前设备的全部本地家庭数据 |
 | `membership_deleted` | 清当前设备的全部本地家庭数据 |
 | `family_deleted` | 清当前设备的全部本地家庭数据 |
-| 非法 Outbox 操作 403 | 单项终止并解释；不阻断普通 pull |
+| 非法发布操作 403 | 单项终止并解释；不阻断普通 pull |
 | `client_update_required` | 本机 versionCode 缺失或低于服务器 `min_supported_version_code`；**映射为强制升级 UI**（有包 → 可安装强制态；元数据暂缺 → `PackageUnknown` 强制壳 + 重试检查），不得呈现为普通网络/NAS 故障或无强制层的「假正常」；本地 Room 与会话保留；更新检查与 APK 下载仍可用 |
 
 ## 7.4 客户端版本门槛与自托管更新
@@ -349,7 +349,7 @@ device 或 role。服务端不得记录根密码、access/refresh token、grant 
 服务器运维者仍可按部署流程完整搬迁同一数据库、媒体和 TLS 身份。已加入设备同时提供安全
 重连路径：地址编辑只产生候选配置；候选必须在不发送旧凭证的前提下通过可信 TLS、Lezi
 `/health` + `/ready` + setup probe。失败、取消或进程中断不改变旧 endpoint、session、Room、
-Outbox 或 media。
+Room dirty/发布回执或 media。
 
 - 地址或 TOFU 证书变化都视为新信任边界；自签名变化显示旧/新指纹并二次确认，接受后仍须
   重新登录/审批。系统 PKI 地址继续只按平台证书校验。
@@ -363,7 +363,7 @@ Outbox 或 media。
   且不落盘；中段用高熵、限时、可撤销恢复凭证。`/data` staging/journal 校验引用、大小与
   SHA-256 后一次激活，24 小时过期；request ID 幂等，重启与 commit 回包丢失后可查询续传。
 - staging 提交前不能加入或普通同步。commit 成功后客户端在 sync mutex 内切换 endpoint/session、
-  替换成员目录并退休旧 Outbox/回执。现有 configured 数据根升级 0.3.5 不进入恢复路径。
+  替换成员目录并按精确 Room 修订退休发布回执。现有 configured 数据根升级 0.3.5 不进入恢复路径。
 - 普通 NAS CD、回滚与容器重启必须保留已有 TLS 证书/私钥并在部署前后得到相同 SPKI；证书
   缺失、无效、错配或不可读时失败关闭。只有经确认的全新空数据根可首次生成证书；有意轮换
   属于独立授权维护。证书变化相关测试只允许使用自建隔离服务和临时数据根，真实家庭 NAS

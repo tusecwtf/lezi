@@ -76,7 +76,7 @@ class LocalDataContractMigrationDeviceTest {
     }
 
     @Test
-    fun contractOneGateMigratesRealRoom24DatabaseAndRoom25Opens() = runBlocking {
+    fun contractOneGateRunsAdjacentStepsAndRoom26Opens() = runBlocking {
         migrationHelper.createDatabase(DATABASE_NAME, 24).apply {
             execSQL(
                 """
@@ -101,7 +101,7 @@ class LocalDataContractMigrationDeviceTest {
                 itemOrderJson = """["custom:999","pee","custom:1"]""",
             ),
         )
-        val step = CustomItemClientUuidIndexUpgradeStep(storage.database, settings)
+        val customItemStep = CustomItemClientUuidIndexUpgradeStep(storage.database, settings)
         val environment = AndroidLocalDataUpgradeEnvironment(
             context = context,
             settings = Lazy { dataStore },
@@ -109,15 +109,18 @@ class LocalDataContractMigrationDeviceTest {
             storage = storage,
         )
         val gate = DefaultLocalDataGate(
-            currentContractVersion = 2,
+            currentContractVersion = 3,
             minimumMigratableContractVersion = 1,
-            steps = setOf(step),
+            steps = setOf(
+                customItemStep,
+                OutboxRetirementUpgradeStep(storage.database),
+            ),
             environment = environment,
         )
 
         val ready = gate.ensureReady()
         assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
-        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(2))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(3))
 
         val room = Room.databaseBuilder(
             context,
@@ -143,9 +146,94 @@ class LocalDataContractMigrationDeviceTest {
         )
     }
 
+    @Test
+    fun contractTwoGateTransfersResidualOutboxIntentAndRoom26Opens() = runBlocking {
+        migrationHelper.createDatabase(DATABASE_NAME, 25).apply {
+            execSQL(
+                """
+                INSERT INTO babies(
+                    id, familyId, nickname, birthdayEpochDay, themeColorArgb, sortOrder,
+                    clientUuid, updatedAt, syncDirty, familyAuthority
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(1L, 7L, "年年", 20_000L, 0L, 0L, BABY_UUID, 100L, 0, 1),
+            )
+            execSQL(
+                """
+                INSERT INTO records(
+                    clientUuid, babyId, type, timestamp, payloadJson, schemaVersion,
+                    updatedAt, syncDirty, createdByMembershipId
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(RECORD_UUID, 1L, "formula", 100L, "{}", 2, 120L, 0, "member-1"),
+            )
+            execSQL(
+                """
+                INSERT INTO outbox(
+                    familyId, entityType, clientUuid, payloadJson, updatedAt, createdAt
+                ) VALUES(?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>("family-a", "record", RECORD_UUID, "{}", 120L, 120L),
+            )
+            close()
+        }
+        val retainedMedia = File(storage.recordMedia, "retained.jpg").apply {
+            parentFile?.mkdirs()
+            writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+        val dataStore = PreferenceDataStoreFactory.create(
+            scope = storeScope,
+            produceFile = { settingsFile },
+        )
+        val environment = AndroidLocalDataUpgradeEnvironment(
+            context = context,
+            settings = Lazy { dataStore },
+            credentials = Lazy { InMemorySecureRefreshTokenStore() },
+            storage = storage,
+        )
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 3,
+            minimumMigratableContractVersion = 1,
+            steps = setOf(
+                CustomItemClientUuidIndexUpgradeStep(
+                    storage.database,
+                    SettingsDataSource(dataStore),
+                ),
+                OutboxRetirementUpgradeStep(storage.database),
+            ),
+            environment = environment,
+        )
+
+        val ready = gate.ensureReady()
+
+        assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(3))
+        val room = Room.databaseBuilder(
+            context,
+            LeziDatabase::class.java,
+            DATABASE_NAME,
+        ).build()
+        openedDatabase = room
+        assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.syncDirty).isTrue()
+        assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.syncDirty).isFalse()
+        val tables = buildSet {
+            room.openHelper.readableDatabase.query(
+                "SELECT name FROM sqlite_master WHERE type = 'table'",
+            ).use { cursor ->
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+        assertThat(tables).doesNotContain("outbox")
+        assertThat(retainedMedia.readBytes().toList())
+            .containsExactlyElementsIn(byteArrayOf(1, 2, 3, 4).toList())
+            .inOrder()
+    }
+
     private companion object {
         const val DATABASE_NAME = "local-data-contract-migration.db"
         const val SETTINGS_STORE_NAME = "local_data_contract_migration_settings"
         const val CLIENT_UUID = "11111111-1111-4111-8111-111111111111"
+        const val BABY_UUID = "22222222-2222-4222-8222-222222222222"
+        const val RECORD_UUID = "33333333-3333-4333-8333-333333333333"
     }
 }

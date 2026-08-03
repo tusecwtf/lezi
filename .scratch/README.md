@@ -7,7 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`sync-publish-reconcile-first`](./sync-publish-reconcile-first/) | **open** — 客户端发表计划改为对账优先、临时 plan；去掉持久 outbox 真相；旧 APK 升级不丢数据且能推 |
+| [`sync-publish-reconcile-first`](./sync-publish-reconcile-first/) | **complete** — 客户端发表计划改为对账优先、临时 plan；Room 26 迁移保留旧 APK 数据与发布意图 |
 | [`family-sync-hang-and-account-fidelity`](./family-sync-hang-and-account-fidelity/) | **implementation-complete** — 0.3.5 已从 `149b7ae6` 部署；7 项保留 live/NAS/多设备验收 |
 | [`family-network-offline-disaster-recovery`](./family-network-offline-disaster-recovery/) | **acceptance — awaiting joined-device smoke** — live 已前进至 0.3.5；票 07 真机补传待完成 |
 | [`codebase-audit-20260802-remediation`](./codebase-audit-20260802-remediation/) | **complete** — implementation `6b278242`; ticket 07 regression `d160fe68` |

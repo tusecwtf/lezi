@@ -56,7 +56,7 @@ interface PendingReminderCleanupDao {
  * Durable write-ahead marker for post-commit local replica cleanup.
  *
  * The marker is inserted in the same Room transaction as the domain clear and
- * deleted only after file, DataStore, outbox, and media cleanup succeeds.
+ * deleted only after file, DataStore, and media cleanup succeeds.
  */
 @Entity(tableName = "pending_replica_cleanup")
 data class PendingReplicaCleanupEntity(
