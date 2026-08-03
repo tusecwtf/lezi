@@ -6,7 +6,6 @@ import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MediaLocalPathGate
-import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -33,7 +32,6 @@ import com.lezi.babylog.sync.MemoryCustomItemDao
 import com.lezi.babylog.sync.MemoryFamilyDao
 import com.lezi.babylog.sync.MemoryFulfillmentCandidateDao
 import com.lezi.babylog.sync.MemoryMediaDao
-import com.lezi.babylog.sync.MemoryOutboxDao
 import com.lezi.babylog.sync.MemoryRecordDao
 import com.lezi.babylog.sync.MemorySyncPreferences
 import com.lezi.babylog.sync.RecordingSyncBackend
@@ -42,7 +40,53 @@ import com.lezi.babylog.sync.TestMediaFileStore
 
 class ReplicaSyncEngineTest {
     @Test
-    fun midPushRecordEditKeepsLiveBodyAndCapturedOutboxEpochSeparate() = runTest {
+    fun ownerReconcilesBeforeBuildingAndPublishingTheRoomPlan() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session)
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = true))
+
+        val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.syncOrder)
+            .containsExactly("pull:0", "stage:baby")
+            .inOrder()
+    }
+
+    @Test
+    fun reconcileRemovesRemoteNewerIdentityBeforeTheEphemeralPlanIsBuilt() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session)
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordUuid = "record-remote-newer-before-plan"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(remoteReplicaRecord(recordUuid).copy(updatedAt = 200)),
+            cursor = 1,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
+
+        val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+            .doesNotContain(recordUuid)
+    }
+
+    @Test
+    fun midPushRecordEditKeepsRoomDirtyAndNextCycleReplansTheNewRevision() = runTest {
         val session = joinedReplicaSession()
         val rig = ReplicaEngineRig(session)
         val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
@@ -90,16 +134,22 @@ class ReplicaSyncEngineTest {
 
         val published = rig.backend.stagedBundles.single { it.root.type == "record" }.root
         val live = requireNotNull(rig.records.getByClientUuid("record-mid-push-edit"))
-        val retainedOutbox = requireNotNull(
-            rig.outbox.find(session.familyId, "record", "record-mid-push-edit"),
-        )
         assertThat(published.updatedAt).isEqualTo(100)
         assertThat(published.payloadJson).contains("80")
         assertThat(published.payloadJson).doesNotContain("120")
         assertThat(live.note).isEqualTo("上传途中产生的新内容")
         assertThat(live.updatedAt).isEqualTo(200)
         assertThat(live.syncDirty).isTrue()
-        assertThat(retainedOutbox.updatedAt).isEqualTo(100)
+
+        rig.engine.synchronize(rig.preferences.current(), SyncTrigger.LocalWrite)
+
+        val retried = rig.backend.stagedBundles
+            .filter { it.root.type == "record" }
+            .last()
+            .root
+        assertThat(retried.updatedAt).isEqualTo(200)
+        assertThat(retried.payloadJson).contains("120")
+        assertThat(rig.records.getByClientUuid("record-mid-push-edit")?.syncDirty).isFalse()
     }
 
     @Test
@@ -433,7 +483,7 @@ class ReplicaSyncEngineTest {
     }
 
     @Test
-    fun concurrentNextFeedCreateAcceptsNasWinnerAndDropsLosingOutbox() = runTest {
+    fun concurrentNextFeedCreateAcceptsNasWinnerWithoutAQueuedSecondTruth() = runTest {
         val session = joinedReplicaSession().copy(
             role = FamilyRole.Member,
             membershipId = "member-local",
@@ -451,15 +501,6 @@ class ReplicaSyncEngineTest {
                 syncDirty = true,
             ),
         )
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = session.familyId,
-                entityType = "care_plan",
-                clientUuid = planUuid,
-                payloadJson = "{}",
-                updatedAt = 300,
-            ),
-        )
         val remote = SyncEntity(
             type = "care_plan",
             clientUuid = planUuid,
@@ -474,7 +515,6 @@ class ReplicaSyncEngineTest {
         assertThat(winner.createdByMembershipId).isEqualTo("member-remote")
         assertThat(winner.scheduledAt).isEqualTo(9_000_000_001_000)
         assertThat(winner.syncDirty).isFalse()
-        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
@@ -541,7 +581,6 @@ class ReplicaSyncEngineTest {
         assertThat(winner.scheduledAt).isEqualTo(9_000_000_001_000)
         assertThat(winner.updatedAt).isEqualTo(250)
         assertThat(winner.syncDirty).isFalse()
-        assertThat(rig.outbox.all()).isEmpty()
         assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
         assertThat(rig.media.getByClientUuid(losingMediaUuid)).isNull()
         assertThat(rig.mediaFiles.deleted).containsExactly("photos/losing-next-feed.jpg")
@@ -592,15 +631,6 @@ class ReplicaSyncEngineTest {
                 syncDirty = true,
             ),
         )
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = session.familyId,
-                entityType = "record",
-                clientUuid = "record-local-orphan",
-                payloadJson = "{}",
-                updatedAt = 500,
-            ),
-        )
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 remoteReplicaBaby(),
@@ -615,11 +645,8 @@ class ReplicaSyncEngineTest {
 
         assertThat(rig.babies.listFamilyAuthority()).hasSize(2)
         assertThat(rig.records.getByClientUuid("record-local-orphan")!!.syncDirty).isTrue()
-        assertThat(rig.outbox.all().none { it.clientUuid == "record-local-orphan" }).isTrue()
         assertThat(
-            rig.backend.pushes.flatMap { it.entities }.none {
-                it.clientUuid == "record-local-orphan"
-            },
+            rig.backend.stagedBundles.none { it.root.clientUuid == "record-local-orphan" },
         ).isTrue()
     }
 
@@ -876,15 +903,8 @@ class ReplicaSyncEngineTest {
             trigger = SyncTrigger.LocalWrite,
         )
 
-        val planPayload = Json.parseToJsonElement(
-            rig.backend.stagedBundles.single { it.root.type == "care_plan" }.root.payloadJson,
-        ).jsonObject
-        val itemPayload = Json.parseToJsonElement(
-            rig.backend.stagedBundles.single { it.root.type == "custom_item" }.root.payloadJson,
-        ).jsonObject
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
-        assertThat(planPayload["created_by_membership_id"].toString()).isEqualTo("null")
-        assertThat(itemPayload["created_by_membership_id"].toString()).isEqualTo("null")
+        assertThat(rig.backend.stagedBundles).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(1)
         assertThat(rig.carePlans.getByClientUuid("plan-recovered-blank")?.let {
             Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
@@ -892,7 +912,6 @@ class ReplicaSyncEngineTest {
         assertThat(rig.customItems.get("item-recovered-blank")?.let {
             Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
         }).isEqualTo(Triple("canonical-membership", 720L, false))
-        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
@@ -1123,7 +1142,7 @@ class ReplicaSyncEngineTest {
     }
 
     @Test
-    fun rootReceiptCasMissRetainsOutboxForDirtyConcurrentRecord() = runTest {
+    fun rootReceiptCasMissKeepsRoomDirtyAndNextCycleReplans() = runTest {
         val rig = ReplicaEngineRig(joinedReplicaSession())
         val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
         rig.records.seed(
@@ -1162,11 +1181,15 @@ class ReplicaSyncEngineTest {
         )
         assertThat(current.note).isEqualTo("提交期间的新编辑")
         assertThat(current.syncDirty).isTrue()
-        assertThat(
-            rig.outbox.all()
-                .filter { it.entityType == "record" }
-                .map(OutboxEntity::clientUuid),
-        ).contains("record-receipt-cas-miss")
+        rig.engine.synchronize(rig.preferences.current(), SyncTrigger.LocalWrite)
+
+        val retried = rig.backend.stagedBundles
+            .filter { it.root.clientUuid == "record-receipt-cas-miss" }
+            .last()
+            .root
+        assertThat(retried.updatedAt).isEqualTo(101)
+        assertThat(retried.payloadJson).contains("提交期间的新编辑")
+        assertThat(rig.records.getByClientUuid("record-receipt-cas-miss")?.syncDirty).isFalse()
     }
 
     @Test
@@ -1322,7 +1345,6 @@ class ReplicaSyncEngineTest {
         assertThat(record.syncDirty).isFalse()
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .doesNotContain(recordUuid)
-        assertThat(rig.outbox.all().none { it.clientUuid == recordUuid }).isTrue()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
     }
@@ -1509,7 +1531,6 @@ private class ReplicaEngineRig(
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
-    val outbox = MemoryOutboxDao()
     val records = MemoryRecordDao()
     val carePlans = MemoryCarePlanDao()
     val fulfillmentCandidates = MemoryFulfillmentCandidateDao()
@@ -1533,7 +1554,6 @@ private class ReplicaEngineRig(
     val engine = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
-        outboxDao = outbox,
         recordDao = records,
         carePlanDao = carePlans,
         babyDao = babies,

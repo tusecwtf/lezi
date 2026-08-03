@@ -1,6 +1,5 @@
 package com.lezi.babylog.sync.media
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.OutboxEntity
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -10,13 +9,14 @@ import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.mediaUuidsToUpload
+import com.lezi.babylog.sync.engine.PublishCandidate
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.receiptFor
 
 /**
  * Publishes one already-mapped root and its complete media manifest atomically.
  *
- * Root mapping, ownership selection, acknowledgement, and outbox cleanup remain
+ * Root mapping, ownership selection, acknowledgement, and plan consumption remain
  * caller responsibilities so a failed upload or commit cannot partially drain
  * the local root package.
  *
@@ -53,7 +53,7 @@ internal class AtomicMediaBundlePublisher(
         session: SyncSession,
         bundleId: String,
         root: SyncEntity,
-        mediaRows: List<OutboxEntity>,
+        mediaRows: List<PublishCandidate>,
     ): BundleCommitResult {
         val ownedSources = mutableListOf<PreparedMedia>()
         var primaryFailure: Throwable? = null
@@ -101,7 +101,7 @@ internal class AtomicMediaBundlePublisher(
     }
 
     private suspend fun prepare(
-        mediaRows: List<OutboxEntity>,
+        mediaRows: List<PublishCandidate>,
         ownedSources: MutableList<PreparedMedia>,
     ): AtomicMediaPackage {
         val mediaEntities = mutableListOf<SyncEntity>()

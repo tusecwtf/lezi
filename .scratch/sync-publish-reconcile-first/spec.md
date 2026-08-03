@@ -1,6 +1,6 @@
 # Client publish plan: reconcile-first, ephemeral outbox
 
-Status: in progress — contract complete; engine and upgrade implementation pending
+Status: in progress — contract and engine complete; upgrade migration pending
 
 ## Goal
 
@@ -79,8 +79,8 @@ This track fixes the **mechanism**, not a single incident bugfix.
 
 ## Public seams (expected)
 
-- Android: `ReplicaSyncEngine` / `OutboxPushPipeline` (or replacement
-  `PublishPlanner` + publisher), `OutboxDao` removal or deprecation, local-data
+- Android: `ReplicaSyncEngine` / `EphemeralPublishPipeline`, `OutboxDao` removal,
+  local-data
   contract / Room migration, shallow sync status pending count source.
 - Server: **none** for this track.
 

@@ -6,7 +6,7 @@ rows.
 
 **Blocked by:** 01 (contract text can land in same PR if small).
 
-**Status:** open
+**Status:** complete
 
 ## Scope
 
@@ -24,11 +24,11 @@ rows.
 
 ## Tests (minimum)
 
-- [ ] Owner: order is pull then push (recording backend op order).
-- [ ] After reconcile adopts remote newer revision, that identity is **not**
+- [x] Owner: order is pull then push (recording backend op order).
+- [x] After reconcile adopts remote newer revision, that identity is **not**
       planned for push; local-ahead identity **is** planned.
-- [ ] Simulated “no durable outbox” still publishes dirty/local-ahead Room rows.
-- [ ] Failure mid-push does not delete local Room content; next cycle can replan.
+- [x] Simulated “no durable outbox” still publishes dirty/local-ahead Room rows.
+- [x] Failure mid-push does not delete local Room content; next cycle can replan.
 
 ## Out of scope
 
@@ -39,3 +39,7 @@ rows.
 ## Comments
 
 - Baseline: current tree **without** the reverted outbox-retirement experiment.
+- Accepted on `a9df639c` + working tree with
+  `./gradlew :sync:testDebugUnitTest` (507 tests). The engine reconciles before
+  capture, publishes an in-memory `EphemeralPublishPlan`, CAS-clears Room
+  receipts, and derives the shallow pending count from dirty Room entities.

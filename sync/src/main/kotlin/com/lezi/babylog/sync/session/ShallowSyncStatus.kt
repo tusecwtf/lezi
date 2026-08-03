@@ -52,13 +52,13 @@ data class ShallowSyncFacts(
     val joined: Boolean,
     val retainedFamilyIdentity: Boolean,
     val waitingForAdmin: Boolean,
-    val pendingOutboxCount: Int,
+    val pendingPublishCount: Int,
     val lastSuccessAtMillis: Long?,
     val nowMillis: Long,
 )
 
 fun projectShallowSyncLine(facts: ShallowSyncFacts): ShallowSyncLine {
-    val pendingCount = facts.pendingOutboxCount.coerceAtLeast(0)
+    val pendingCount = facts.pendingPublishCount.coerceAtLeast(0)
     if (
         facts.transportStatus == SyncStatus.ReauthRequired ||
         (!facts.joined && facts.retainedFamilyIdentity)
@@ -125,16 +125,16 @@ fun shallowSyncLineFlow(
     transportStatus: Flow<SyncStatus>,
     session: Flow<SyncSession>,
     pendingMemberLogin: Flow<PendingMemberLogin?>,
-    pendingOutboxCount: Flow<Int>,
+    pendingPublishCount: Flow<Int>,
     nowMillis: () -> Long = System::currentTimeMillis,
     clockTicks: Flow<Unit> = processShallowSyncTicks,
 ): Flow<ShallowSyncLine> = combine(
     transportStatus,
     session,
     pendingMemberLogin,
-    pendingOutboxCount,
+    pendingPublishCount,
     clockTicks,
-) { status, currentSession, pendingLogin, outboxCount, _ ->
+) { status, currentSession, pendingLogin, publishCount, _ ->
     projectShallowSyncLine(
         ShallowSyncFacts(
             transportStatus = status,
@@ -142,7 +142,7 @@ fun shallowSyncLineFlow(
             retainedFamilyIdentity = currentSession.reauthRequired &&
                 currentSession.familyId.isNotBlank(),
             waitingForAdmin = pendingLogin != null,
-            pendingOutboxCount = outboxCount,
+            pendingPublishCount = publishCount,
             lastSuccessAtMillis = currentSession.lastSuccessAt,
             nowMillis = nowMillis(),
         ),

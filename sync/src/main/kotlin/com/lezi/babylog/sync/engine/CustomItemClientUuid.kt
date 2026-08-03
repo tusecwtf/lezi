@@ -10,7 +10,7 @@ import kotlinx.serialization.json.longOrNull
 
 /**
  * Resolve a CUSTOM record's definition [clientUuid] for wire packaging.
- * Shared by outbox capture/push and replica capture so schema rules stay single-sourced.
+ * Shared by publish planning and replica capture so schema rules stay single-sourced.
  */
 internal suspend fun resolveRecordCustomItemClientUuid(
     record: RecordEntity,

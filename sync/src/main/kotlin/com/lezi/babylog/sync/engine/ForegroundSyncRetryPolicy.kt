@@ -5,7 +5,7 @@ import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 
-/** Foreground-only automatic retry policy for durable outbox publication. */
+/** Foreground-only automatic retry policy for Room-backed publication. */
 internal object ForegroundSyncRetryPolicy {
     private val delaysMillis = longArrayOf(30_000L, 120_000L, 600_000L)
 

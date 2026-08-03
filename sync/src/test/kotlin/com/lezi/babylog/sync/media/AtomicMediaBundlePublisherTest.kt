@@ -1,7 +1,6 @@
 package com.lezi.babylog.sync.media
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -14,6 +13,7 @@ import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
+import com.lezi.babylog.sync.engine.PublishCandidate
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.backend.FakeSyncBackend
@@ -84,7 +84,7 @@ class AtomicMediaBundlePublisherTest {
                 payloadJson = "{}",
                 updatedAt = 10,
             ),
-            mediaRows = listOf(mediaOutboxRow("media-1")),
+            mediaRows = listOf(mediaPublishCandidate("media-1")),
         )
 
         val stagedMedia = backend.staged.single().media.single()
@@ -140,7 +140,7 @@ class AtomicMediaBundlePublisherTest {
                 session = session,
                 bundleId = "record:record-1:10",
                 root = SyncEntity("record", "record-1", "{}", 10),
-                mediaRows = listOf(mediaOutboxRow("media-1")),
+                mediaRows = listOf(mediaPublishCandidate("media-1")),
             )
         }.exceptionOrNull()
 
@@ -189,7 +189,7 @@ class AtomicMediaBundlePublisherTest {
             writeCommitReceipt = store::writeCommitReceipt,
             requireRemoteAllowed = { backend.operations += "gate" },
         )
-        val rows = (1..3).map { mediaOutboxRow("media-$it") }
+        val rows = (1..3).map { mediaPublishCandidate("media-$it", planId = it.toLong()) }
 
         val firstFailure = runCatching {
             publisher.publish(
@@ -263,7 +263,9 @@ class AtomicMediaBundlePublisherTest {
                     session = session,
                     bundleId = "record:record-1:10",
                     root = SyncEntity("record", "record-1", "{}", 10),
-                    mediaRows = (1..3).map { mediaOutboxRow("media-$it") },
+                    mediaRows = (1..3).map {
+                        mediaPublishCandidate("media-$it", planId = it.toLong())
+                    },
                 )
             }
             runCatching { publishing.await() }.exceptionOrNull()
@@ -315,7 +317,7 @@ class AtomicMediaBundlePublisherTest {
             session = session,
             bundleId = "record:record-1:10",
             root = SyncEntity("record", "record-1", "{}", 10),
-            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+            mediaRows = listOf(mediaPublishCandidate("media-1", updatedAt = 2)),
         )
 
         val after = store.get("media-1")
@@ -367,7 +369,7 @@ class AtomicMediaBundlePublisherTest {
             session = session,
             bundleId = "record:record-1:10",
             root = SyncEntity("record", "record-1", "{}", 10),
-            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+            mediaRows = listOf(mediaPublishCandidate("media-1", updatedAt = 2)),
         )
 
         val after = store.get("media-1")
@@ -420,7 +422,7 @@ class AtomicMediaBundlePublisherTest {
             session = session,
             bundleId = "record:record-1:10",
             root = SyncEntity("record", "record-1", "{}", 10),
-            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+            mediaRows = listOf(mediaPublishCandidate("media-1", updatedAt = 2)),
         )
 
         val after = store.get("media-1")
@@ -476,7 +478,7 @@ class AtomicMediaBundlePublisherTest {
             session = session,
             bundleId = "record:record-1:10",
             root = SyncEntity("record", "record-1", "{}", 10),
-            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+            mediaRows = listOf(mediaPublishCandidate("media-1", updatedAt = 2)),
         )
 
         val after = store.get("media-1")
@@ -541,9 +543,12 @@ class AtomicMediaBundlePublisherTest {
             syncDirty = syncDirty,
         )
 
-        fun mediaOutboxRow(clientUuid: String, updatedAt: Long = 2) = OutboxEntity(
-            id = 2,
-            familyId = "family-1",
+        fun mediaPublishCandidate(
+            clientUuid: String,
+            updatedAt: Long = 2,
+            planId: Long = 2,
+        ) = PublishCandidate(
+            planId = planId,
             entityType = "media",
             clientUuid = clientUuid,
             payloadJson = "{\"kind\":\"log\"}",

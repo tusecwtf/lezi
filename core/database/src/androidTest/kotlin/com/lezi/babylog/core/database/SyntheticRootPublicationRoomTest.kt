@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
 
 /**
  * Room regressions for synthetic elevated-root publication receipts after
- * standalone log/avatar packages (see OutboxPushPipeline + ADR-0008).
+ * standalone log/avatar packages (see EphemeralPublishPipeline + ADR-0008).
  */
 @RunWith(AndroidJUnit4::class)
 class SyntheticRootPublicationRoomTest {

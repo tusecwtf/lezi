@@ -15,14 +15,14 @@ import org.junit.Test
 
 class ShallowSyncStatusProjectorTest {
     @Test
-    fun joinedIdleWithOutboxReportsLocalCopyAndExactPendingCount() {
+    fun joinedIdleWithDirtyRoomEntitiesReportsLocalCopyAndExactPendingCount() {
         val line = projectShallowSyncLine(
             ShallowSyncFacts(
                 transportStatus = SyncStatus.Idle,
                 joined = true,
                 retainedFamilyIdentity = true,
                 waitingForAdmin = false,
-                pendingOutboxCount = 3,
+                pendingPublishCount = 3,
                 lastSuccessAtMillis = 1_000L,
                 nowMillis = 121_000L,
             ),
@@ -38,14 +38,14 @@ class ShallowSyncStatusProjectorTest {
     }
 
     @Test
-    fun joinedIdleWithoutOutboxReportsRelativeLastSuccessTime() {
+    fun joinedIdleWithoutDirtyRoomEntitiesReportsRelativeLastSuccessTime() {
         val line = projectShallowSyncLine(
             ShallowSyncFacts(
                 transportStatus = SyncStatus.Idle,
                 joined = true,
                 retainedFamilyIdentity = true,
                 waitingForAdmin = false,
-                pendingOutboxCount = 0,
+                pendingPublishCount = 0,
                 lastSuccessAtMillis = 1_000L,
                 nowMillis = 121_000L,
             ),
@@ -67,7 +67,7 @@ class ShallowSyncStatusProjectorTest {
                 joined = true,
                 retainedFamilyIdentity = true,
                 waitingForAdmin = false,
-                pendingOutboxCount = 2,
+                pendingPublishCount = 2,
                 lastSuccessAtMillis = null,
                 nowMillis = 200_000L,
             ),
@@ -90,7 +90,7 @@ class ShallowSyncStatusProjectorTest {
                 joined = true,
                 retainedFamilyIdentity = true,
                 waitingForAdmin = false,
-                pendingOutboxCount = 4,
+                pendingPublishCount = 4,
                 lastSuccessAtMillis = 1_000L,
                 nowMillis = 200_000L,
             ),
@@ -116,7 +116,7 @@ class ShallowSyncStatusProjectorTest {
             joined = false,
             retainedFamilyIdentity = retainedFamilyIdentity,
             waitingForAdmin = waitingForAdmin,
-            pendingOutboxCount = 0,
+            pendingPublishCount = 0,
             lastSuccessAtMillis = null,
             nowMillis = 200_000L,
         )
@@ -169,7 +169,7 @@ class ShallowSyncStatusProjectorTest {
                 joined = false,
                 retainedFamilyIdentity = true,
                 waitingForAdmin = false,
-                pendingOutboxCount = 2,
+                pendingPublishCount = 2,
                 lastSuccessAtMillis = 1_000L,
                 nowMillis = 2_000L,
             ),
@@ -191,7 +191,7 @@ class ShallowSyncStatusProjectorTest {
                 joined = true,
                 retainedFamilyIdentity = true,
                 waitingForAdmin = false,
-                pendingOutboxCount = 0,
+                pendingPublishCount = 0,
                 lastSuccessAtMillis = null,
                 nowMillis = 200_000L,
             ),
@@ -206,7 +206,7 @@ class ShallowSyncStatusProjectorTest {
     }
 
     @Test
-    fun sharedFlowProjectsSessionAndOutboxIntoTheSameProductLine() = runTest {
+    fun sharedFlowProjectsSessionAndDirtyRoomCountIntoTheSameProductLine() = runTest {
         val line = shallowSyncLineFlow(
             transportStatus = flowOf(SyncStatus.Idle),
             session = flowOf(
@@ -219,7 +219,7 @@ class ShallowSyncStatusProjectorTest {
                 ),
             ),
             pendingMemberLogin = flowOf(null),
-            pendingOutboxCount = flowOf(5),
+            pendingPublishCount = flowOf(5),
             nowMillis = { 121_000L },
         ).first()
 
@@ -249,7 +249,7 @@ class ShallowSyncStatusProjectorTest {
                     ),
                 ),
                 pendingMemberLogin = flowOf(null),
-                pendingOutboxCount = flowOf(0),
+                pendingPublishCount = flowOf(0),
                 nowMillis = { testScheduler.currentTime },
                 clockTicks = shallowSyncMinuteTicks(),
             ).take(3).toList(lines)

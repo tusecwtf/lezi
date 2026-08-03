@@ -15,8 +15,6 @@ import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.OutboxDao
-import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
@@ -83,18 +81,22 @@ internal sealed interface ReplicaSyncOutcome {
     data object Synchronized : ReplicaSyncOutcome
 }
 
+private data class CapturedLocalChanges(
+    val candidates: List<PublishCandidate>,
+    val pendingCreatorAcknowledgements: Set<CreatorAcknowledgementRef>,
+)
+
 /**
  * Owns one complete foreground replica cycle behind a single interface.
  *
- * The caller supplies a joined session and trigger. Local changes are snapshotted
- * before the remote gate is evaluated so offline writes remain durable. Every
- * remote page and media retry re-enters the same gate. Failures and cancellation
- * escape without being translated, leaving the last durable checkpoint intact.
+ * The caller supplies a joined session and trigger. Each cycle reconciles remote state before
+ * snapshotting dirty Room entities into an ephemeral publication plan. Every remote page and
+ * media retry re-enters the same gate. Failures and cancellation escape without being translated;
+ * Room remains authoritative and the next cycle replans from its current state.
  */
 internal class ReplicaSyncEngine(
     private val backend: SyncBackend,
     private val preferences: SyncPreferences,
-    private val outboxDao: OutboxDao,
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
     private val babyDao: BabyDao,
@@ -111,9 +113,8 @@ internal class ReplicaSyncEngine(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
 ) : FamilySessionReplica {
-    private val outboxPush = OutboxPushPipeline(
+    private val publisher = EphemeralPublishPipeline(
         backend = backend,
-        outboxDao = outboxDao,
         recordDao = recordDao,
         carePlanDao = carePlanDao,
         babyDao = babyDao,
@@ -130,74 +131,38 @@ internal class ReplicaSyncEngine(
     ): ReplicaSyncOutcome {
         session.requireCurrentReplicaSession()
         mediaFileCleanup.cleanupPendingTombstones()
-        val capturedPendingCreatorAcknowledgements = captureLocalChanges(session)
         val mediaEditGuard = captureLocalMediaEditGuard()
         val plan = SyncPlan.forTrigger(trigger)
         var current = preferences.session.first()
-        // The home-network gate refreshes health capabilities. Reading them
-        // before this call would lose first-cycle creator acknowledgement intent.
         requireRemoteAllowed(current)
-        if (capturedPendingCreatorAcknowledgements.isNotEmpty()) {
-            preferences.updateCreatorAcknowledgements(
-                add = capturedPendingCreatorAcknowledgements,
-            )
-            current = preferences.session.first()
-        }
         current = convergeAuthenticatedSelfMembership(
             current,
             backend.members(current),
         )
         var recovered = false
-        val requiresCreatorAcknowledgementPull =
-            current.pendingCreatorAcknowledgements.isNotEmpty()
-        val memberPullFirst = current.role == FamilyRole.Member &&
-            (plan.pull || requiresCreatorAcknowledgementPull)
-        if (memberPullFirst) {
-            try {
-                current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
-            } catch (error: SyncHttpException) {
-                val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-                current = recoverFullResync(current, checkpoint, mediaEditGuard)
-                recovered = true
-            }
+        try {
+            current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
+        } catch (error: SyncHttpException) {
+            val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
+            current = recoverFullResync(current, checkpoint, mediaEditGuard)
+            recovered = true
         }
-        if (plan.push && !recovered && !memberPullFirst) {
-            try {
-                pushPending(current)
-            } catch (error: SyncHttpException) {
-                val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-                current = recoverFullResync(current, checkpoint, mediaEditGuard)
-                recovered = true
-            }
-        }
-        // Exact local provenance is durable across process death. It only
-        // schedules an authoritative acknowledgement pull and never supplies a
-        // creator membership value of its own.
-        if ((plan.pull || requiresCreatorAcknowledgementPull) && !recovered && !memberPullFirst) {
-            try {
-                current = pullAllPages(
-                    initial = current,
-                    mediaEditGuard = mediaEditGuard,
+        if (plan.push && !recovered) {
+            val captured = captureLocalChanges(current)
+            if (captured.pendingCreatorAcknowledgements.isNotEmpty()) {
+                preferences.updateCreatorAcknowledgements(
+                    add = captured.pendingCreatorAcknowledgements,
                 )
-            } catch (error: SyncHttpException) {
-                val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-                current = recoverFullResync(current, checkpoint, mediaEditGuard)
-            }
-        }
-        if (memberPullFirst && plan.push && !recovered) {
-            val afterAuthorityCapture = captureLocalChanges(current)
-            if (afterAuthorityCapture.isNotEmpty()) {
-                preferences.updateCreatorAcknowledgements(add = afterAuthorityCapture)
                 current = preferences.session.first()
             }
             try {
-                pushPending(current)
+                pushPending(current, captured.candidates)
             } catch (error: SyncHttpException) {
                 val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
                 current = recoverFullResync(current, checkpoint, mediaEditGuard)
                 recovered = true
             }
-            if (afterAuthorityCapture.isNotEmpty() && !recovered) {
+            if (captured.pendingCreatorAcknowledgements.isNotEmpty() && !recovered) {
                 try {
                     pullAllPages(current, mediaEditGuard = mediaEditGuard)
                 } catch (error: SyncHttpException) {
@@ -227,8 +192,11 @@ internal class ReplicaSyncEngine(
         }
     }
 
-    private suspend fun pushPending(session: SyncSession) {
-        outboxPush.pushPending(session)
+    private suspend fun pushPending(
+        session: SyncSession,
+        candidates: List<PublishCandidate>,
+    ) {
+        publisher.pushPending(session, candidates)
     }
 
     private suspend fun applyRemote(
@@ -459,7 +427,6 @@ internal class ReplicaSyncEngine(
             discardedLocalMediaPaths += losingMedia.map(MediaAssetEntity::localUri)
             if (losingMediaUuids.isNotEmpty()) {
                 mediaDao.deleteByClientUuids(losingMediaUuids)
-                outboxDao.deleteEntities(session.familyId, "media", losingMediaUuids)
             }
         }
         carePlanDao.upsert(
@@ -506,9 +473,6 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
-        if (concurrentNextFeedCreate) {
-            outboxDao.deleteEntities(session.familyId, "care_plan", listOf(entity.clientUuid))
-        }
         return true
     }
 
@@ -1208,8 +1172,14 @@ internal class ReplicaSyncEngine(
             deferCursorUntilComplete = true,
             mediaEditGuard = mediaEditGuard,
         )
-        captureLocalChanges(current)
-        pushPending(current)
+        val captured = captureLocalChanges(current)
+        if (captured.pendingCreatorAcknowledgements.isNotEmpty()) {
+            preferences.updateCreatorAcknowledgements(
+                add = captured.pendingCreatorAcknowledgements,
+            )
+            current = preferences.session.first()
+        }
+        pushPending(current, captured.candidates)
         current = preferences.session.first()
         return pullAllPages(
             initial = current,
@@ -1345,7 +1315,18 @@ internal class ReplicaSyncEngine(
 
     private suspend fun captureLocalChanges(
         session: SyncSession,
-    ): Set<CreatorAcknowledgementRef> {
+    ): CapturedLocalChanges {
+        val candidates = mutableListOf<PublishCandidate>()
+        fun enqueue(entity: SyncEntity) {
+            candidates += PublishCandidate(
+                planId = candidates.size.toLong() + 1,
+                entityType = entity.type,
+                clientUuid = entity.clientUuid,
+                payloadJson = entity.payloadJson,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+            )
+        }
         val authorityBabyIds = if (session.role == FamilyRole.Member) {
             babyDao.listAllIncludingDeleted()
                 .filter(BabyEntity::familyAuthority)
@@ -1387,7 +1368,7 @@ internal class ReplicaSyncEngine(
             babies = babySnapshots,
         )
         // Avatar inspection can suspend. Re-read every pending Baby before
-        // materializing its outbox row so a concurrent profile edit is either
+        // materializing its plan row so a concurrent profile edit is either
         // packaged as one current epoch or rejected later by the push CAS.
         val babies = if (session.role == FamilyRole.Member) {
             emptyList()
@@ -1403,7 +1384,7 @@ internal class ReplicaSyncEngine(
                         memberRecordsById[asset.recordId]?.babyId in authorityBabyIds
                     asset.carePlanId != null ->
                         memberPlansById[asset.carePlanId]?.babyId in authorityBabyIds
-                    else -> false // Member avatar media never enters the family outbox.
+                    else -> false // Member avatar media never enters a family publish plan.
                 }
             }
         }
@@ -1450,7 +1431,6 @@ internal class ReplicaSyncEngine(
                     }
             }
             enqueue(
-                session,
                 SyncWireMapper.baby(
                     baby,
                     avatarMediaUuid,
@@ -1458,7 +1438,7 @@ internal class ReplicaSyncEngine(
             )
         }
         customItems.forEach { item ->
-            enqueue(session, SyncWireMapper.customItem(item))
+            enqueue(SyncWireMapper.customItem(item))
             if (item.createdByMembershipId.isBlank()) {
                 capturedPendingCreatorAcknowledgements += CreatorAcknowledgementRef(
                     entityType = "custom_item",
@@ -1466,14 +1446,13 @@ internal class ReplicaSyncEngine(
                 )
             }
         }
-        // Outbox materialization only; atomic commit order is care_plan packages →
-        // record packages → fulfillment_candidate package (see pushOutboxBatch).
+        // Ephemeral plan materialization only; atomic commit order is care_plan
+        // packages → record packages → fulfillment_candidate package.
         records.forEach { record ->
             val babyUuid = babyDao.getIncludingDeleted(record.babyId)?.clientUuid
                 ?: return@forEach
             val customItemUuid = recordCustomItemClientUuid(record)
             enqueue(
-                session,
                 SyncWireMapper.record(
                     record,
                     babyUuid,
@@ -1489,7 +1468,6 @@ internal class ReplicaSyncEngine(
             // Custom-item plans need a definition on the wire path; if the def is
             // still local-only, capture it via customItems dirty (dependency expand).
             enqueue(
-                session,
                 SyncWireMapper.carePlan(
                     plan,
                     babyUuid,
@@ -1511,7 +1489,7 @@ internal class ReplicaSyncEngine(
             }
         }
         fulfillmentCandidates.forEach { candidate ->
-            enqueue(session, SyncWireMapper.fulfillmentCandidate(candidate))
+            enqueue(SyncWireMapper.fulfillmentCandidate(candidate))
         }
         media.forEach { asset ->
             if (session.role == FamilyRole.Member && asset.kind == "avatar") {
@@ -1536,7 +1514,6 @@ internal class ReplicaSyncEngine(
                 return@forEach
             }
             enqueue(
-                session,
                 SyncWireMapper.media(
                     asset,
                     recordClientUuid = recordUuid,
@@ -1545,7 +1522,10 @@ internal class ReplicaSyncEngine(
                 ),
             )
         }
-        return capturedPendingCreatorAcknowledgements
+        return CapturedLocalChanges(
+            candidates = candidates,
+            pendingCreatorAcknowledgements = capturedPendingCreatorAcknowledgements,
+        )
     }
 
     private suspend fun recordCustomItemClientUuid(record: RecordEntity): String? =
@@ -1577,19 +1557,6 @@ internal class ReplicaSyncEngine(
         }
         ref.takeIf { applied }
     }.toSet()
-
-    private suspend fun enqueue(session: SyncSession, entity: SyncEntity) {
-        outboxDao.enqueue(
-            com.lezi.babylog.core.database.OutboxEntity(
-                familyId = session.familyId,
-                entityType = entity.type,
-                clientUuid = entity.clientUuid,
-                payloadJson = entity.payloadJson,
-                updatedAt = entity.updatedAt,
-                deletedAt = entity.deletedAt,
-            ),
-        )
-    }
 
     private suspend fun materializeLocalMedia(
         includeAvatars: Boolean,

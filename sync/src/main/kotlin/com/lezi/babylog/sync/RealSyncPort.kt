@@ -8,6 +8,7 @@ import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.OutboxDao
+import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.RootPublicationState
@@ -117,6 +118,7 @@ class RealSyncPort @Inject constructor(
     private val setupProbe: SetupProbe,
     private val foregroundSyncGate: ForegroundSyncGate,
     private val outboxDao: OutboxDao,
+    private val pendingPublishDao: PendingPublishDao,
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
     private val babyDao: BabyDao,
@@ -172,7 +174,6 @@ class RealSyncPort @Inject constructor(
     private val replicaSyncEngine = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
-        outboxDao = outboxDao,
         recordDao = recordDao,
         carePlanDao = carePlanDao,
         babyDao = babyDao,
@@ -349,8 +350,12 @@ class RealSyncPort @Inject constructor(
     override fun lastServerHealthyAt(): Flow<Long?> = preferences.lastServerHealthyAt
     override fun session(): Flow<SyncSession> = preferences.session
     @OptIn(ExperimentalCoroutinesApi::class)
-    override fun pendingOutboxCount(): Flow<Int> = preferences.session.flatMapLatest { session ->
-        session.familyId.takeIf(String::isNotBlank)?.let(outboxDao::observeCount) ?: flowOf(0)
+    override fun pendingPublishCount(): Flow<Int> = preferences.session.flatMapLatest { session ->
+        if (!session.isJoined) {
+            flowOf(0)
+        } else {
+            pendingPublishDao.observeCount()
+        }
     }
     override fun familyMemberDirectory(): Flow<List<FamilyMember>> =
         preferences.familyMemberDirectory

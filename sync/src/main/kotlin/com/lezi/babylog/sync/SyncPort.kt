@@ -312,10 +312,10 @@ interface SyncPort {
         transportStatus = status(),
         session = session(),
         pendingMemberLogin = pendingMemberLogin(),
-        pendingOutboxCount = pendingOutboxCount(),
+        pendingPublishCount = pendingPublishCount(),
     )
-    /** Device-local queued mutation count for the current retained family. */
-    fun pendingOutboxCount(): Flow<Int> = kotlinx.coroutines.flow.flowOf(0)
+    /** Dirty Room entity count for the current retained family. */
+    fun pendingPublishCount(): Flow<Int> = kotlinx.coroutines.flow.flowOf(0)
     /** Device-local minimal roster; never waits for the family server. */
     fun familyMemberDirectory(): Flow<List<FamilyMember>> =
         kotlinx.coroutines.flow.flowOf(emptyList())
