@@ -5,7 +5,6 @@ import com.lezi.babylog.sync.SyncNotEnabledException
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
-import com.lezi.babylog.sync.backend.formatSyncHttpFailure
 
 /** One product-facing error policy shared by all family-session entry points. */
 fun familySyncError(error: Throwable, fallback: String): String {
@@ -17,15 +16,20 @@ fun familySyncError(error: Throwable, fallback: String): String {
             "需要更新乐记后才能继续同步家庭数据"
         }
     }
-    // Always surface HTTP status + server `detail` for ops (422 validation, 401, …).
-    // Message is already product-shaped by [formatSyncHttpFailure]; do not re-filter.
-    // client_update_required is remapped so users are not told the NAS is "down".
+    // The exception retains HTTP status/body for debug logging, but product surfaces
+    // receive only short action copy. Server detail is not a trusted UI string.
     if (error is SyncHttpException) {
         if (error.clientUpdateRequiredOrNull() != null) {
             return "需要更新乐记后才能继续同步家庭数据"
         }
-        return error.message?.trim().orEmpty().ifEmpty {
-            formatSyncHttpFailure(error.statusCode, error.responseBody)
+        return when (error.statusCode) {
+            401, 403 -> "登录已失效，请重新登录或联系家庭管理员"
+            408, 504 -> "家庭服务器响应超时，请检查家庭网络后重试"
+            409 -> "家庭状态已变化，请刷新后重试"
+            422 -> "提交内容不符合要求，请检查后重试"
+            429 -> "操作太频繁，请稍后重试"
+            in 500..599 -> "家庭服务器暂时不可用，请稍后重试"
+            else -> fallback
         }
     }
     if (looksTechnicalDetail(error.message.orEmpty())) {

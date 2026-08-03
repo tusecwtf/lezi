@@ -27,7 +27,8 @@ interface TimelineWindowDao {
         SELECT
             (SELECT COUNT(*) FROM records) +
             (SELECT COUNT(*) FROM care_plans) +
-            (SELECT COUNT(*) FROM media_assets)
+            (SELECT COUNT(*) FROM media_assets) +
+            (SELECT COUNT(*) FROM fulfillment_candidates)
         """,
     )
     fun observeInvalidations(): Flow<Long>

@@ -28,6 +28,47 @@ class ReferenceAwareMediaFileCleanupTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun discardedPathCleanupWaitsForConcurrentAttachAndRechecksActiveOwner() = runTest {
+        val media = MemoryMediaDao()
+        val files = RealTemporaryMediaFileStore()
+        val pathGate = MediaLocalPathGate()
+        val cleanup = newCleanup(media, files, pathGate = pathGate)
+        val photo = temporaryFolder.newFile("concurrent-discarded-attach.jpg").apply {
+            writeBytes(byteArrayOf(1, 2, 3))
+        }
+        val attachEntered = CompletableDeferred<Unit>()
+        val releaseAttach = CompletableDeferred<Unit>()
+        val attach = async {
+            pathGate.withLock(photo.absolutePath) {
+                attachEntered.complete(Unit)
+                releaseAttach.await()
+                media.seed(
+                    logMedia(
+                        clientUuid = "12121212-1212-3212-8212-121212121212",
+                        localUri = photo.absolutePath,
+                        recordId = 7,
+                    ),
+                )
+            }
+        }
+        attachEntered.await()
+
+        val reclaim = async {
+            cleanup.cleanupUnreferencedPaths(setOf(photo.absolutePath))
+        }
+        delay(50)
+        assertThat(reclaim.isCompleted).isFalse()
+        assertThat(photo.isFile).isTrue()
+
+        releaseAttach.complete(Unit)
+        attach.await()
+        reclaim.await()
+
+        assertThat(photo.isFile).isTrue()
+        assertThat(files.deletedPaths).isEmpty()
+    }
+
+    @Test
     fun sharedRecordAndPlanBytesAreDeletedOnlyAfterTheLastActiveReference() = runTest {
         val media = MemoryMediaDao()
         val files = RealTemporaryMediaFileStore()
@@ -555,4 +596,9 @@ private class RealTemporaryMediaFileStore(
         check(!file.exists() || file.delete()) { "failed to delete $localUri" }
         failureAfterDelete?.let { throw it }
     }
+
+    override suspend fun sweepUnreferenced(
+        scope: com.lezi.babylog.core.database.LocalDataClearScope,
+        retainedLocalUris: Set<String>,
+    ) = error("local clear is outside this test")
 }

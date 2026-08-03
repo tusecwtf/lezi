@@ -103,7 +103,7 @@ internal class OutboxPushPipeline(
             // those roots (and cyclic Baby/avatar metadata) before asking the NAS
             // to validate an atomic Record/CarePlan bundle against them.
             val prerequisites = plan.residual.filter { it.isAtomicBundlePrerequisite() }
-            pushAtomicResiduals(session, prerequisites)
+            var mayContinue = pushAtomicResiduals(session, prerequisites)
             val residual = plan.residual - prerequisites.toSet()
             // Publish CarePlan before its fulfillment Record. The NAS uses the
             // persisted completed plan as the authority that permits a new fact
@@ -111,20 +111,20 @@ internal class OutboxPushPipeline(
             // completed plan until the linked Record arrives, so a pull page may
             // safely end between the two atomic packages.
             for (planRow in plan.carePlanRows) {
-                pushCarePlanAtomicBundle(session, planRow, pending)
+                mayContinue = pushCarePlanAtomicBundle(session, planRow, pending) && mayContinue
             }
             // Every Record (including 0-photo) is an atomic package root.
             for (recordRow in plan.recordRows) {
-                pushRecordAtomicBundle(session, recordRow, pending)
+                mayContinue = pushRecordAtomicBundle(session, recordRow, pending) && mayContinue
             }
-            if (residual.isEmpty()) return true
-            pushAtomicResiduals(session, residual)
-            return true
+            if (residual.isNotEmpty()) {
+                mayContinue = pushAtomicResiduals(session, residual) && mayContinue
+            }
+            return mayContinue
         }
 
         if (plan.residual.isEmpty()) return true
-        pushAtomicResiduals(session, plan.residual)
-        return true
+        return pushAtomicResiduals(session, plan.residual)
     }
 
     /**
@@ -162,13 +162,14 @@ internal class OutboxPushPipeline(
     }
 
     private suspend fun isFamilyAuthorityBaby(babyId: Long): Boolean =
-        babyDao.get(babyId)?.familyAuthority == true
+        babyDao.getIncludingDeleted(babyId)?.familyAuthority == true
 
     private suspend fun pushAtomicResiduals(
         session: SyncSession,
         residual: List<OutboxEntity>,
-    ) {
-        if (residual.isEmpty()) return
+    ): Boolean {
+        if (residual.isEmpty()) return true
+        var mayContinue = true
         val consumed = mutableSetOf<Long>()
         val avatarRows = residual.filter { row -> row.isAvatarMedia() }
         for (babyRow in residual.filter { it.entityType == "baby" }) {
@@ -181,7 +182,8 @@ internal class OutboxPushPipeline(
                         (baby.deletedAt == null || media.deletedAt != null)
                 } == true
             }
-            pushBabyAtomicBundle(session, baby, babyRow, babyAvatarRows)
+            mayContinue =
+                pushBabyAtomicBundle(session, baby, babyRow, babyAvatarRows) && mayContinue
             consumed += babyRow.id
             consumed += babyAvatarRows.map(OutboxEntity::id)
         }
@@ -200,7 +202,9 @@ internal class OutboxPushPipeline(
                 consumed += avatarRow.id
                 continue
             }
-            pushBabyAtomicBundle(session, baby, babyRow = null, listOf(avatarRow))
+            mayContinue =
+                pushBabyAtomicBundle(session, baby, babyRow = null, listOf(avatarRow)) &&
+                mayContinue
             consumed += avatarRow.id
         }
 
@@ -219,6 +223,7 @@ internal class OutboxPushPipeline(
             }
             consumed += row.id
         }
+        return mayContinue
     }
 
     private fun OutboxEntity.isAvatarMedia(): Boolean =
@@ -231,7 +236,12 @@ internal class OutboxPushPipeline(
         baby: BabyEntity,
         babyRow: OutboxEntity?,
         avatarRows: List<OutboxEntity>,
-    ) {
+    ): Boolean {
+        if (babyRow != null) {
+            require(baby.updatedAt == babyRow.updatedAt) {
+                "本地宝宝资料在同步打包期间已更新，请重试"
+            }
+        }
         // Content epoch packaged on the wire; synthetic packages may elevate above this.
         val expectedLocalUpdatedAt = baby.updatedAt
         val rootUpdatedAt = maxOf(
@@ -264,6 +274,7 @@ internal class OutboxPushPipeline(
             outboxDao.deleteIds(listOf(babyRow.id))
         }
         acknowledgeMediaRows(avatarRows)
+        return babyRow == null || confirmed
     }
 
     private suspend fun pushEmptyMediaRoot(
@@ -417,10 +428,13 @@ internal class OutboxPushPipeline(
         session: SyncSession,
         recordRow: OutboxEntity,
         pending: List<OutboxEntity>,
-    ) {
+    ): Boolean {
         val record = recordDao.getByClientUuid(recordRow.clientUuid)
             ?: error("本地记录不存在")
-        val baby = babyDao.get(record.babyId)
+        require(record.updatedAt == recordRow.updatedAt) {
+            "本地记录在同步打包期间已更新，请重试"
+        }
+        val baby = babyDao.getIncludingDeleted(record.babyId)
             ?: error("本地宝宝档案不存在")
         val mediaRows = pending.filter { row ->
             if (row.entityType != "media") return@filter false
@@ -443,9 +457,15 @@ internal class OutboxPushPipeline(
             authors = commit.recordAuthors,
             expectedUpdatedAt = mapOf(record.clientUuid to recordRow.updatedAt),
         )
-        recordDao.acknowledgeFamilyPublishedVersion(record.clientUuid, recordRow.updatedAt)
-        mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
-        outboxDao.deleteIds((listOf(recordRow) + mediaRows).map { it.id })
+        val confirmed = recordDao.acknowledgeFamilyPublishedVersion(
+            record.clientUuid,
+            recordRow.updatedAt,
+        )
+        if (confirmed) {
+            mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+            outboxDao.deleteIds((listOf(recordRow) + mediaRows).map { it.id })
+        }
+        return confirmed
     }
 
     /**
@@ -456,10 +476,13 @@ internal class OutboxPushPipeline(
         session: SyncSession,
         planRow: OutboxEntity,
         pending: List<OutboxEntity>,
-    ) {
+    ): Boolean {
         val plan = carePlanDao.getByClientUuid(planRow.clientUuid)
             ?: error("本地护理计划不存在")
-        val baby = babyDao.get(plan.babyId)
+        require(plan.updatedAt == planRow.updatedAt) {
+            "本地护理计划在同步打包期间已更新，请重试"
+        }
+        val baby = babyDao.getIncludingDeleted(plan.babyId)
             ?: error("本地宝宝档案不存在")
         val mediaRows = pending.filter { row ->
             if (row.entityType != "media") return@filter false
@@ -479,9 +502,15 @@ internal class OutboxPushPipeline(
         )
         val bundleId = AtomicBundleId.forCarePlan(plan.clientUuid, planRow.updatedAt)
         publishRootWithMedia(session, bundleId, root, mediaRows)
-        carePlanDao.acknowledgeFamilyPublishedVersion(plan.clientUuid, planRow.updatedAt)
-        mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
-        outboxDao.deleteIds((listOf(planRow) + mediaRows).map { it.id })
+        val confirmed = carePlanDao.acknowledgeFamilyPublishedVersion(
+            plan.clientUuid,
+            planRow.updatedAt,
+        )
+        if (confirmed) {
+            mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+            outboxDao.deleteIds((listOf(planRow) + mediaRows).map { it.id })
+        }
+        return confirmed
     }
 
     private suspend fun isStaleAfterHardDelete(row: OutboxEntity): Boolean = when (row.entityType) {

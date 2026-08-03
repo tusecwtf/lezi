@@ -7,6 +7,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 @Entity(
     tableName = "outbox",
@@ -32,6 +33,9 @@ data class OutboxEntity(
 interface OutboxDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun enqueue(row: OutboxEntity): Long
+
+    @Query("SELECT COUNT(*) FROM outbox WHERE familyId = :familyId")
+    fun observeCount(familyId: String): Flow<Int>
 
     @Query(
         """

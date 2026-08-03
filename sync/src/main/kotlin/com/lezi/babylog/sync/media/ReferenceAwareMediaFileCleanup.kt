@@ -50,6 +50,26 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
             }
     }
 
+    /**
+     * Reclaims staged/discarded paths that have no active MediaAsset row.
+     * The path gate is acquired before the final Room recheck, so a concurrent
+     * attach either publishes first and protects the bytes or waits until the
+     * reclaim finishes; filesystem I/O never holds a Room write lease.
+     */
+    suspend fun cleanupUnreferencedPaths(paths: Set<String>) {
+        paths.asSequence()
+            .filter(String::isNotBlank)
+            .distinct()
+            .forEach { path ->
+                pathGate.withLock(path) {
+                    val hasActiveOwner = transactionRunner.run {
+                        mediaDao.countActiveReferences(path) > 0
+                    }
+                    if (!hasActiveOwner) mediaFiles.delete(path)
+                }
+            }
+    }
+
     private suspend fun cleanupOne(clientUuid: String) {
         // Peek may race a path rebinding; under lock we re-resolve and retry once so a
         // single cleanupTombstones(uuid) call still converges without waiting for a sweep.

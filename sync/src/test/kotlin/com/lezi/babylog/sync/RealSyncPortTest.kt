@@ -1,4 +1,7 @@
 package com.lezi.babylog.sync
+
+import com.lezi.babylog.sync.session.ShallowSyncLine
+import com.lezi.babylog.sync.session.ShallowSyncState
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
@@ -22,22 +25,29 @@ import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.model.RootPublicationState
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.contentOrNull
@@ -113,6 +123,36 @@ import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 class RealSyncPortTest {
+    @Test
+    fun shallowStatusTracksCurrentFamilyOutboxCount() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(lastSuccessAt = 1_000L),
+        )
+        val pendingLine = async {
+            rig.port.shallowStatus()
+                .filter { it.pendingCount == 1 }
+                .first()
+        }
+
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = "family-a",
+                entityType = "record",
+                clientUuid = "record-a",
+                payloadJson = "{}",
+                updatedAt = 2_000L,
+            ),
+        )
+
+        assertThat(pendingLine.await()).isEqualTo(
+            ShallowSyncLine(
+                state = ShallowSyncState.Pending,
+                text = "已保存在本机 · 待同步 1 项",
+                pendingCount = 1,
+            ),
+        )
+    }
+
     @Test
     fun reconnectCandidateRequiresSetupHealthAndReadyWithoutTouchingCurrentReplica() = runTest {
         val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
@@ -265,6 +305,32 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun ownerReconnectRetriesWithOneDurableTakeoverRequestInsteadOfMintingGhostDevices() =
+        runTest {
+            val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+            val rig = SyncRig(
+                session = joinedSession("family-a"),
+                setupProbe = SetupProbe { _, trusted ->
+                    SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+                },
+            )
+            rig.backend.nextOwnerLoginFamilyId = "family-a"
+            rig.backend.ownerLoginFailure = SyncHttpException(503, "maintenance")
+
+            assertThat(
+                rig.port.reconnectOwner(candidate, "同一部手机", "root-password").isFailure,
+            ).isTrue()
+            rig.backend.ownerLoginFailure = null
+            assertThat(
+                rig.port.reconnectOwner(candidate, "同一部手机", "root-password").isSuccess,
+            ).isTrue()
+
+            assertThat(rig.backend.ownerLoginRequestIds).hasSize(2)
+            assertThat(rig.backend.ownerLoginRequestIds.distinct()).hasSize(1)
+            assertThat(rig.backend.ownerLoginTakeovers).containsExactly(true, true).inOrder()
+        }
+
+    @Test
     fun memberCandidateWaitsWithoutReplacingOldSessionThenBlocksDifferentFamilyClaim() = runTest {
         val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
         val rig = SyncRig(
@@ -294,6 +360,81 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()).isInstanceOf(DifferentFamilyServerException::class.java)
         assertThat(rig.preferences.current()).isEqualTo(oldSession)
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(oldEndpoint)
+    }
+
+    @Test
+    fun reconnectMemberClaimedStatusReplaysClaimInsteadOfDiscardingTheAttempt() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.port.requestReconnectMember(candidate, "妈妈", "妈妈手机").getOrThrow()
+        rig.backend.memberLoginStatuses += MemberLoginStatus.Claimed
+        rig.backend.nextMemberLoginClaim = rig.backend.nextMemberLoginClaim.copy(
+            familyId = "family-a",
+        )
+
+        val result = rig.port.checkReconnectMember().getOrThrow()
+
+        assertThat(result).isInstanceOf(MemberLoginCheckResult.Joined::class.java)
+        assertThat(rig.backend.memberLoginClaimCalls).isEqualTo(1)
+        assertThat(rig.preferences.current().familyId).isEqualTo("family-a")
+        assertThat(rig.preferences.current().isJoined).isTrue()
+    }
+
+    @Test
+    fun reconnectMemberTransientClaimReplayFailureKeepsTheAttemptForRetry() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.port.requestReconnectMember(candidate, "妈妈", "妈妈手机").getOrThrow()
+        rig.backend.memberLoginStatuses += MemberLoginStatus.Claimed
+        rig.backend.memberLoginClaimFailure = SyncHttpException(503, "maintenance")
+
+        assertThat(rig.port.checkReconnectMember().isFailure).isTrue()
+
+        rig.backend.memberLoginClaimFailure = null
+        rig.backend.memberLoginStatuses += MemberLoginStatus.Claimed
+        rig.backend.nextMemberLoginClaim = rig.backend.nextMemberLoginClaim.copy(
+            familyId = "family-a",
+        )
+        assertThat(rig.port.checkReconnectMember().isSuccess).isTrue()
+        assertThat(rig.backend.memberLoginClaimCalls).isEqualTo(2)
+        assertThat(rig.preferences.current().isJoined).isTrue()
+    }
+
+    @Test
+    fun reconnectMemberCancelClearsTheLocalAttemptBeforeRemoteCleanupCompletes() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-new.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(role = FamilyRole.Member),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.port.requestReconnectMember(candidate, "妈妈", "妈妈手机").getOrThrow()
+        val remoteStarted = CompletableDeferred<Unit>()
+        val remoteRelease = CompletableDeferred<Unit>()
+        rig.backend.beforeCancelMemberLoginReturn = {
+            remoteStarted.complete(Unit)
+            remoteRelease.await()
+        }
+
+        val cancelling = async { rig.port.cancelReconnectMember().getOrThrow() }
+        remoteStarted.await()
+
+        withTimeout(1_000) { cancelling.await() }
+        assertThat(
+            rig.port.requestReconnectMember(candidate, "妈妈", "妈妈手机").isSuccess,
+        ).isTrue()
+        remoteRelease.complete(Unit)
     }
 
     @Test
@@ -444,6 +585,108 @@ class RealSyncPortTest {
         assertThat(leased).isEqualTo(result)
         assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
         assertThat(rig.backend.anonymousReadyCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun cancelledAvailabilityProbeRestoresStateAndLocalWriteCanProbeAgain() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.backend.anonymousHealthGate = CompletableDeferred()
+        val cancelledProbe = async {
+            rig.port.probeServerAvailability(AvailabilityProbeReason.Foreground).getOrThrow()
+        }
+        rig.port.availability()
+            .filter { it is FamilyServerAvailability.Checking }
+            .first()
+
+        cancelledProbe.cancel()
+        assertThat(runCatching { cancelledProbe.await() }.exceptionOrNull())
+            .isInstanceOf(CancellationException::class.java)
+        assertThat(rig.port.availability().first())
+            .isEqualTo(FamilyServerAvailability.Disabled)
+
+        val healthCallsBeforeRecovery = rig.backend.anonymousHealthCalls
+        val readyCallsBeforeRecovery = rig.backend.anonymousReadyCalls
+        rig.backend.anonymousHealthGate = null
+        rig.port.notifyLocalChanges()
+
+        val recovered = rig.port.availability()
+            .filter { it is FamilyServerAvailability.Available }
+            .first()
+        assertThat(recovered).isInstanceOf(FamilyServerAvailability.Available::class.java)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(healthCallsBeforeRecovery + 1)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(readyCallsBeforeRecovery + 1)
+    }
+
+    @Test
+    fun transportSyncFailureDemotesHealthyAvailabilityLease() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.awaitStartupRecovery()
+        val available = rig.port
+            .probeServerAvailability(AvailabilityProbeReason.Foreground)
+            .getOrThrow() as FamilyServerAvailability.Available
+        rig.backend.pullFailures += IOException("connection reset")
+
+        val syncResult = rig.port.sync(SyncTrigger.PullToRefresh)
+
+        assertThat(syncResult.isFailure).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
+        val unavailable = rig.port.availability().first()
+            as FamilyServerAvailability.Unavailable
+        assertThat(unavailable.reason).isEqualTo(FamilyServerUnavailableReason.Unreachable)
+        assertThat(unavailable.lastHealthyAtMillis).isEqualTo(available.lastHealthyAtMillis)
+        assertThat(unavailable.nextProbeAtMillis).isEqualTo(rig.clock.now + 30_000)
+        assertThat(unavailable.consecutiveFailures).isEqualTo(1)
+    }
+
+    @Test
+    fun networkRecoveredProbesAreDebouncedWhileTheLinkFlaps() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, trusted ->
+                SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Configured)
+            },
+        )
+        rig.awaitStartupRecovery()
+        val firstProbeGate = CompletableDeferred<Unit>()
+        val firstProbeStarted = CompletableDeferred<Unit>()
+        val secondProbeGate = CompletableDeferred<Unit>()
+        rig.backend.anonymousHealthGate = firstProbeGate
+        rig.backend.anonymousHealthStarted = firstProbeStarted
+        rig.backend.pullStarted = CompletableDeferred()
+
+        try {
+            rig.port.notifyNetworkRecovered()
+            firstProbeStarted.await()
+            assertThat(rig.port.availability().first())
+                .isInstanceOf(FamilyServerAvailability.Checking::class.java)
+
+            rig.backend.anonymousHealthGate = secondProbeGate
+            rig.port.notifyNetworkRecovered()
+            firstProbeGate.complete(Unit)
+            rig.backend.pullStarted!!.await()
+
+            val secondProbeStarted = withContext(Dispatchers.IO) {
+                withTimeoutOrNull(250) {
+                    while (rig.backend.anonymousHealthCalls < 2) delay(5)
+                    true
+                } ?: false
+            }
+            assertThat(secondProbeStarted).isFalse()
+            assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
+        } finally {
+            firstProbeGate.complete(Unit)
+            secondProbeGate.complete(Unit)
+        }
     }
 
     @Test
@@ -732,6 +975,35 @@ class RealSyncPortTest {
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun reauthRetryCheckKeepsPackageUnknownForceShell() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.getAppUpdateMetadataFailure =
+            SyncHttpException(500, """{"detail":"update store unavailable"}""")
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+
+        rig.preferences.clearDeviceCredentialsForReauth()
+        runCurrent()
+        val result = rig.port.checkAppUpdate().getOrThrow()
+
+        assertThat(result).isEqualTo(AppUpdateCheckResult.ForcedPackageUnknown)
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(
+            withTimeout(1_000L) {
+                rig.port.status().first { it == SyncStatus.ReauthRequired }
+            },
+        ).isEqualTo(SyncStatus.ReauthRequired)
     }
 
     @Test
@@ -1353,12 +1625,16 @@ class RealSyncPortTest {
         )
         rig.awaitStartupRecovery()
         rig.backend.appUpdateApkBytes = byteArrayOf(1, 2, 3)
+        rig.backend.appUpdateMetadata = metadata
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.OptionalUpdate(metadata))
 
         val result = rig.port.installAvailableAppUpdate(metadata).getOrThrow()
 
         assertThat(result).isEqualTo(AppUpdateInstallResult.RequiresInstallPermission)
         assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(0)
         assertThat(installer.installCalls).isEmpty()
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(metadata)
     }
 
     @Test
@@ -2057,6 +2333,31 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun cancelledSynchronizeRestoresJoinedIdleInsteadOfLeavingSyncing() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.awaitStartupRecovery()
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 1L,
+            generation = "current-generation",
+            hasMore = false,
+        )
+        rig.backend.pullStarted = CompletableDeferred()
+        rig.backend.releasePull = CompletableDeferred()
+        val syncing = async {
+            rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
+        }
+        rig.backend.pullStarted!!.await()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Syncing)
+
+        syncing.cancel()
+        val thrown = runCatching { syncing.await() }.exceptionOrNull()
+
+        assertThat(thrown).isInstanceOf(CancellationException::class.java)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
     fun startupRecoveryContainsOperationalFailureAndReportsIt() = runTest {
         val failure = IllegalStateException("marker unavailable")
         var reported: Throwable? = null
@@ -2149,6 +2450,39 @@ class RealSyncPortTest {
         )
         assertThat(preferences.current().isJoined).isFalse()
         assertThat(preferences.pendingMemberLogin.first()).isNull()
+    }
+
+    @Test
+    fun memberLoginChecksNeverBlockNetworkCompletionBehindSlowUiCollector() = runTest {
+        val initial = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+        )
+        val preferences = MemorySyncPreferences(initial)
+        val rig = SyncRig(session = initial, syncPreferences = preferences)
+        preferences.savePendingMemberLogin(
+            rig.backend.nextMemberLoginReceipt,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+        )
+        val firstObserved = CompletableDeferred<Unit>()
+        val collector = launch {
+            rig.port.memberLoginChecks().collect {
+                firstObserved.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        runCurrent()
+
+        assertThat(rig.port.checkMemberLogin().isSuccess).isTrue()
+        firstObserved.await()
+        assertThat(rig.port.checkMemberLogin().isSuccess).isTrue()
+
+        val thirdCheck = withTimeoutOrNull(1_000) { rig.port.checkMemberLogin() }
+
+        assertThat(thirdCheck).isNotNull()
+        assertThat(thirdCheck?.isSuccess).isTrue()
+        collector.cancel()
     }
 
 
@@ -2276,34 +2610,33 @@ class RealSyncPortTest {
         )
         val rig = SyncRig(session = configured)
         rig.awaitStartupRecovery()
+        val automaticSyncGate = CompletableDeferred<Unit>()
+        rig.backend.anonymousHealthGate = automaticSyncGate
         rig.backend.nextPull = PullResult(
             entities = emptyList(),
             cursor = 7,
             generation = "current-generation",
             hasMore = false,
         )
-        rig.backend.pullStarted = CompletableDeferred()
-        rig.backend.releasePull = CompletableDeferred()
         rig.babies.seed(localBaby())
 
-        val creating = async {
-            rig.port.createFamily(
-                displayName = "妈妈",
-                bootstrapSecret = "bootstrap",
-                familyName = "乐乐家",
-            ).getOrThrow()
-        }
-        rig.backend.pullStarted!!.await()
+        val created = rig.port.createFamily(
+            displayName = "妈妈",
+            bootstrapSecret = "bootstrap",
+            familyName = "乐乐家",
+        ).getOrThrow()
 
-        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Syncing)
+        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
         assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.port.session().first().refreshToken).isEqualTo("owner-refresh-token")
+        assertThat(rig.backend.pullCursors).isEmpty()
 
-        rig.backend.releasePull!!.complete(Unit)
-        val created = creating.await()
+        rig.foreground.setForeground(false)
+        automaticSyncGate.complete(Unit)
+        rig.foreground.setForeground(true)
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(created.reclaimed).isFalse()
-        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
         assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.backend.pullCursors).containsExactly(0L)
         assertThat(rig.backend.syncOrder)
@@ -2321,6 +2654,8 @@ class RealSyncPortTest {
         )
         val rig = SyncRig(session = configured)
         rig.awaitStartupRecovery()
+        val automaticSyncGate = CompletableDeferred<Unit>()
+        rig.backend.anonymousHealthGate = automaticSyncGate
         rig.backend.pullFailures += SyncHttpException(503)
         rig.babies.seed(localBaby())
 
@@ -2332,10 +2667,17 @@ class RealSyncPortTest {
 
         assertThat(result.isSuccess).isTrue()
         assertThat(result.getOrThrow().dataRecovery)
-            .isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+            .isEqualTo(InitialFamilyDataRecovery.NotRequired)
         assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.port.session().first().refreshToken).isEqualTo("owner-refresh-token")
         assertThat(rig.port.session().first().pullCursor).isEqualTo(0L)
+        assertThat(rig.backend.pullCursors).isEmpty()
+
+        rig.foreground.setForeground(false)
+        automaticSyncGate.complete(Unit)
+        rig.foreground.setForeground(true)
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
         assertThat(rig.backend.pullCursors).containsExactly(0L)
 
@@ -2360,7 +2702,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun qrMemberLoginExposesRetryableInitialDataRecovery() = runTest {
+    fun qrMemberLoginFinishesBeforeRetryableInitialDataRecovery() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://192.168.1.20:8787")
         val preferences = MemorySyncPreferences(SyncSession()).apply {
             rememberEndpoint(endpoint)
@@ -2370,6 +2712,7 @@ class RealSyncPortTest {
             syncPreferences = preferences,
         )
         rig.awaitStartupRecovery()
+        rig.foreground.setForeground(false)
         rig.backend.pullFailures += SyncHttpException(503)
         val payload = MemberLoginQrPayload(
             endpoint = endpoint,
@@ -2382,7 +2725,12 @@ class RealSyncPortTest {
         val result = rig.port.claimMemberLoginQr(payload, "Pixel Tablet").getOrThrow()
 
         assertThat(result.session.isJoined).isTrue()
-        assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+        assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
+        assertThat(rig.backend.pullCursors).isEmpty()
+        rig.foreground.setForeground(true)
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.session().first().isJoined).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
         assertThat(rig.backend.memberLoginGrantClaims)
             .containsExactly(Triple(endpoint, payload.grant, "Pixel Tablet"))
     }
@@ -2405,13 +2753,15 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun queuedNetworkChangeCannotSkipFreshCreateFullPull() = runTest {
+    fun queuedNetworkChangeWaitsForDurableCreateWithoutExtendingCreateThroughFirstPull() = runTest {
         val configured = SyncSession(
             serverHost = "192.168.1.20",
             serverPort = 8787,
         )
         val rig = SyncRig(session = configured)
         rig.awaitStartupRecovery()
+        val automaticSyncGate = CompletableDeferred<Unit>()
+        rig.backend.anonymousHealthGate = automaticSyncGate
         rig.backend.createStarted = CompletableDeferred()
         rig.backend.releaseCreate = CompletableDeferred()
         rig.backend.nextPull = PullResult(
@@ -2441,11 +2791,14 @@ class RealSyncPortTest {
 
         rig.backend.releaseCreate!!.complete(Unit)
         val created = creating.await()
+        rig.foreground.setForeground(false)
+        automaticSyncGate.complete(Unit)
         changingNetwork.await()
 
-        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
-        assertThat(rig.backend.pullCursors).containsExactly(0L)
-        assertThat(rig.backend.syncOrder).contains("pull:0")
+        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
+        assertThat(rig.backend.pullCursors).isEmpty()
+        assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.99")
+        assertThat(rig.preferences.current().isJoined).isFalse()
     }
 
     @Test
@@ -2956,7 +3309,6 @@ class RealSyncPortTest {
 
             val result = rig.port.sync(SyncTrigger.LocalWrite)
 
-            assertThat(result.isFailure).isTrue()
             assertThat(result.exceptionOrNull()).hasMessageThat().contains("record_authors")
             val retained = requireNotNull(rig.records.getByClientUuid("pre-join-record"))
             assertThat(retained.createdByMembershipId).isEmpty()
@@ -3410,6 +3762,59 @@ class RealSyncPortTest {
         val babyBundle = rig.backend.stagedBundles.first { it.root.clientUuid == "baby-0" }
         assertThat(babyBundle.media.map(SyncEntity::clientUuid)).contains(avatarUuid)
         assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
+    }
+
+    @Test
+    fun dirtyRecordUnderSoftDeletedBabyPushesWithoutBlockingLaterRoots() = runTest {
+        for (role in listOf(FamilyRole.Owner, FamilyRole.Member)) {
+            val rig = SyncRig(session = joinedSession("family-a").copy(role = role))
+            val deletedAt = 300L
+            val babyId = rig.babies.seed(
+                localBaby().copy(
+                    clientUuid = "baby-soft-deleted-history",
+                    nickname = "历史宝宝",
+                    updatedAt = deletedAt,
+                    deletedAt = deletedAt,
+                    syncDirty = false,
+                    familyAuthority = role == FamilyRole.Member,
+                ),
+            )
+            val recordUuid = "record-after-parent-tombstone"
+            rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = recordUuid,
+                    updatedAt = 310,
+                    syncDirty = true,
+                ),
+            )
+            rig.customItems.seed(
+                CustomItemEntity(
+                    clientUuid = "custom-after-parent-tombstone",
+                    familyId = 1,
+                    name = "后续定义",
+                    iconSlot = 1,
+                    updatedAt = 320,
+                    syncDirty = true,
+                ),
+            )
+
+            val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+            assertThat(result.isSuccess).isTrue()
+            assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+                .containsAtLeast(recordUuid, "custom-after-parent-tombstone")
+            val recordPayload = Json.parseToJsonElement(
+                rig.backend.stagedBundles.single { it.root.clientUuid == recordUuid }
+                    .root.payloadJson,
+            ).jsonObject
+            assertThat(recordPayload["baby_client_uuid"]?.jsonPrimitive?.content)
+                .isEqualTo("baby-soft-deleted-history")
+            assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+            assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
+            assertThat(
+                rig.customItems.getByClientUuid("custom-after-parent-tombstone")?.syncDirty,
+            ).isFalse()
+        }
     }
 
     @Test
@@ -6144,9 +6549,14 @@ class RealSyncPortTest {
             )
             rig.backend.commitBundleFailure = failure
 
-            val result = rig.port.sync(SyncTrigger.LocalWrite)
+            val syncFailure = runCatching {
+                rig.port.sync(SyncTrigger.LocalWrite).getOrThrow()
+            }.exceptionOrNull()
 
-            assertThat(result.isFailure).isTrue()
+            assertThat(syncFailure).isSameInstanceAs(failure)
+            if (failure is CancellationException) {
+                assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+            }
             assertThat(rig.records.getByClientUuid(recordUuid)?.familyPublishedUpdatedAt)
                 .isNull()
             assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isTrue()
@@ -8460,6 +8870,7 @@ internal class RecordingSyncBackend : SyncBackend {
     )
     val memberLoginStatuses = ArrayDeque<MemberLoginStatus>()
     var memberLoginClaimCalls = 0
+    var memberLoginClaimFailure: Throwable? = null
     var nextMemberLoginClaim = SessionBootstrapResult(
         familyId = "family-member-approved",
         accessToken = "member-approved-access",
@@ -8512,6 +8923,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var anonymousHealthFailure: Throwable? = null
     var anonymousReadyFailure: Throwable? = null
     var anonymousHealthGate: CompletableDeferred<Unit>? = null
+    var anonymousHealthStarted: CompletableDeferred<Unit>? = null
     var anonymousReadyGate: CompletableDeferred<Unit>? = null
     val disasterRestoreStartEndpoints = mutableListOf<TrustedEndpointProfile>()
     val disasterRestoreStartRequestIds = mutableListOf<String>()
@@ -8546,7 +8958,9 @@ internal class RecordingSyncBackend : SyncBackend {
     override suspend fun anonymousHealth(endpoint: TrustedEndpointProfile): AnonymousHealth {
         anonymousHealthCalls++
         anonymousHealthEndpoints += endpoint
-        anonymousHealthGate?.await()
+        val gate = anonymousHealthGate
+        anonymousHealthStarted?.complete(Unit)
+        gate?.await()
         anonymousHealthFailure?.let { throw it }
         return anonymousHealthResult
     }
@@ -8744,6 +9158,7 @@ internal class RecordingSyncBackend : SyncBackend {
 
     override suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): SessionBootstrapResult {
         memberLoginClaimCalls++
+        memberLoginClaimFailure?.let { throw it }
         return nextMemberLoginClaim
     }
 
@@ -9093,13 +9508,16 @@ internal class MemorySyncPreferences(
     private var disasterRestoreRequestIds: DisasterRestoreRequestIds? = null
     private var createRequestId: String? = null
     private var ownerLoginRequestId: String? = null
+    private var refreshRequestId: String? = null
     private val shouldBlockSecretMigration = AtomicBoolean(blockFirstSecretMigration)
     val secretMigrationStarted = CompletableDeferred<Unit>()
     val releaseSecretMigration = CompletableDeferred<Unit>()
     var saveSessionCalls = 0
+    var failSaveSessionAttempts = 0
     var failUpdateCursorAttempts = 0
     var clearCreateRequestIdFailure: Throwable? = null
     var clearCreateRequestIdCalls = 0
+    var clearOwnerLoginRequestIdCalls = 0
     var pendingDeviceRemovalClear = false
     var pendingMembershipDeletionClear = false
     var pendingFamilyDeletionClear = false
@@ -9185,8 +9603,13 @@ internal class MemorySyncPreferences(
 
     override suspend fun saveSession(session: SyncSession) {
         saveSessionCalls += 1
+        if (failSaveSessionAttempts > 0) {
+            failSaveSessionAttempts--
+            error("session persistence interrupted")
+        }
         createRequestId = null
         ownerLoginRequestId = null
+        refreshRequestId = null
         pendingMemberState.value = null
         memberPendingSecret = ""
         pendingReplicaResetPrevious = null
@@ -9220,6 +9643,7 @@ internal class MemorySyncPreferences(
         saveSessionCalls += 1
         createRequestId = null
         ownerLoginRequestId = null
+        refreshRequestId = null
         pendingMemberState.value = null
         memberPendingSecret = ""
         pendingReplicaResetPrevious = previous
@@ -9304,6 +9728,16 @@ internal class MemorySyncPreferences(
             ownerLoginRequestId = it
         }
 
+    override suspend fun clearOwnerLoginRequestId() {
+        clearOwnerLoginRequestIdCalls += 1
+        ownerLoginRequestId = null
+    }
+
+    override suspend fun ensureRefreshRequestId(): String =
+        refreshRequestId ?: UUID.randomUUID().toString().also {
+            refreshRequestId = it
+        }
+
     override suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
@@ -9355,6 +9789,7 @@ internal class MemorySyncPreferences(
         disasterRestoreState.value = null
         disasterRestoreRecoveryToken = ""
         disasterRestoreRequestIds = null
+        refreshRequestId = null
     }
 
     override suspend fun clearCreateRequestId() {
@@ -9376,6 +9811,7 @@ internal class MemorySyncPreferences(
     }
 
     override suspend fun clearDeviceCredentialsForReauth() {
+        refreshRequestId = null
         state.value = state.value.copy(
             accessToken = "",
             refreshToken = "",
@@ -9447,6 +9883,8 @@ private class TestRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
 
 internal open class TestMediaFileStore : SyncMediaFileStore {
     val deleted = mutableListOf<String>()
+    val existing = linkedSetOf<String>()
+    val sweepCalls = mutableListOf<Pair<LocalDataClearScope, Set<String>>>()
     val deleteFailures = ArrayDeque<Throwable>()
     var afterInspect: (suspend () -> Unit)? = null
     var afterSaveDownloaded: (suspend () -> Unit)? = null
@@ -9473,6 +9911,25 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     override open suspend fun delete(localUri: String) {
         deleted += localUri
         deleteFailures.removeFirstOrNull()?.let { throw it }
+        existing -= localUri
+    }
+
+    override suspend fun sweepUnreferenced(
+        scope: LocalDataClearScope,
+        retainedLocalUris: Set<String>,
+    ) {
+        sweepCalls += scope to retainedLocalUris
+        val roots = when (scope) {
+            LocalDataClearScope.RecordsOnly -> setOf("record-media/")
+            LocalDataClearScope.AllLocalData -> setOf("record-media/", "baby_avatars/")
+        }
+        val reclaim = existing.filter { path ->
+            roots.any(path::startsWith) && path !in retainedLocalUris
+        }
+        reclaim.forEach {
+            deleted += it
+            existing -= it
+        }
     }
 }
 
@@ -10021,12 +10478,17 @@ private fun pendingReplicaCleanup(
 
 internal class MemoryOutboxDao : OutboxDao {
     private val rows = mutableListOf<OutboxEntity>()
+    private val rowSnapshots = MutableStateFlow<List<OutboxEntity>>(emptyList())
     private val ids = AtomicLong(1)
     val deleteEntityBatchSizes = mutableListOf<Int>()
     var failDeleteTypeAttempts = 0
     var afterDeleteFamily: suspend (String) -> Unit = {}
 
     fun all(): List<OutboxEntity> = rows.toList()
+
+    override fun observeCount(familyId: String): Flow<Int> = rowSnapshots.map { snapshot ->
+        snapshot.count { it.familyId == familyId }
+    }
 
     override suspend fun enqueue(row: OutboxEntity): Long {
         rows.removeAll {
@@ -10036,6 +10498,7 @@ internal class MemoryOutboxDao : OutboxDao {
         }
         val id = row.id.takeIf { it != 0L } ?: ids.getAndIncrement()
         rows += row.copy(id = id)
+        publishRows()
         return id
     }
 
@@ -10054,10 +10517,12 @@ internal class MemoryOutboxDao : OutboxDao {
 
     override suspend fun deleteIds(ids: List<Long>) {
         rows.removeAll { it.id in ids }
+        publishRows()
     }
 
     override suspend fun deleteFamily(familyId: String) {
         rows.removeAll { it.familyId == familyId }
+        publishRows()
         afterDeleteFamily(familyId)
     }
 
@@ -10067,6 +10532,7 @@ internal class MemoryOutboxDao : OutboxDao {
             error("outbox delete failed")
         }
         rows.removeAll { it.familyId == familyId && it.entityType == entityType }
+        publishRows()
     }
 
     override suspend fun deleteTypeAcrossFamilies(entityType: String) {
@@ -10075,6 +10541,7 @@ internal class MemoryOutboxDao : OutboxDao {
             error("outbox delete failed")
         }
         rows.removeAll { it.entityType == entityType }
+        publishRows()
     }
 
     override suspend fun deleteEntities(
@@ -10089,6 +10556,7 @@ internal class MemoryOutboxDao : OutboxDao {
                 it.entityType == entityType &&
                 it.clientUuid in clientUuids
         }
+        publishRows()
     }
 
     override suspend fun deleteEntitiesAcrossFamilies(
@@ -10100,10 +10568,16 @@ internal class MemoryOutboxDao : OutboxDao {
         rows.removeAll {
             it.entityType == entityType && it.clientUuid in clientUuids
         }
+        publishRows()
     }
 
     override suspend fun deleteAll() {
         rows.clear()
+        publishRows()
+    }
+
+    private fun publishRows() {
+        rowSnapshots.value = rows.toList()
     }
 }
 

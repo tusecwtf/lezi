@@ -169,6 +169,93 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun forgettingCurrentTrustedEndpointForcesReauthButKeepsFamilyReplicaIdentity() = runTest {
+        val file = File.createTempFile("lezi-forget-current-trust-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureRefreshTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store, tokens)
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            "https://family.home:8765",
+            Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() }),
+        )
+        val active = SyncSession(
+            serverHost = "family.home",
+            serverPort = 8765,
+            serverScheme = "https",
+            familyId = "family-current",
+            accessToken = "active-token",
+            refreshToken = "active-refresh",
+            accessExpiresAtEpochSeconds = 2_000_900,
+            deviceId = "device-current",
+            role = FamilyRole.Member,
+            pullCursor = 41,
+            membershipId = "membership-current",
+        )
+        preferences.rememberEndpoint(endpoint)
+        preferences.saveSession(active)
+
+        preferences.forgetEndpoint()
+
+        assertThat(preferences.verifiedEndpoint.first()).isNull()
+        val retained = preferences.session.first()
+        assertThat(retained.reauthRequired).isTrue()
+        assertThat(retained.accessToken).isEmpty()
+        assertThat(retained.refreshToken).isEmpty()
+        assertThat(retained.familyId).isEqualTo(active.familyId)
+        assertThat(retained.membershipId).isEqualTo(active.membershipId)
+        assertThat(retained.deviceId).isEqualTo(active.deviceId)
+        assertThat(retained.pullCursor).isEqualTo(active.pullCursor)
+        assertThat(tokens.getToken()).isEmpty()
+        file.delete()
+    }
+
+    @Test
+    fun replacingCurrentTofuPinForcesReauthBeforeTrustingTheNewCertificate() = runTest {
+        val file = File.createTempFile("lezi-repin-current-trust-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureRefreshTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store, tokens)
+        val origin = "https://family.home:8765"
+        val oldEndpoint = TrustedEndpointProfile.tofuSpki(
+            origin,
+            Base64.getEncoder().encodeToString(ByteArray(32) { 1 }),
+        )
+        val newEndpoint = TrustedEndpointProfile.tofuSpki(
+            origin,
+            Base64.getEncoder().encodeToString(ByteArray(32) { 2 }),
+        )
+        preferences.rememberEndpoint(oldEndpoint)
+        preferences.saveSession(
+            SyncSession(
+                serverHost = "family.home",
+                serverPort = 8765,
+                serverScheme = "https",
+                familyId = "family-current",
+                accessToken = "active-token",
+                refreshToken = "active-refresh",
+                accessExpiresAtEpochSeconds = 2_000_900,
+                deviceId = "device-current",
+                role = FamilyRole.Owner,
+                membershipId = "membership-current",
+            ),
+        )
+
+        preferences.rememberEndpoint(newEndpoint)
+
+        assertThat(preferences.verifiedEndpoint.first()).isEqualTo(newEndpoint)
+        val retained = preferences.session.first()
+        assertThat(retained.reauthRequired).isTrue()
+        assertThat(retained.accessToken).isEmpty()
+        assertThat(retained.refreshToken).isEmpty()
+        assertThat(retained.familyId).isEqualTo("family-current")
+        assertThat(retained.membershipId).isEqualTo("membership-current")
+        assertThat(tokens.getToken()).isEmpty()
+        file.delete()
+    }
+
+    @Test
     fun tofuSpkiPinSurvivesStoreRecreationWithoutPersistingAHandshakeCandidate() = runTest {
         val file = File.createTempFile("lezi-tofu-endpoint-", ".preferences_pb")
             .also { it.delete() }
@@ -825,6 +912,127 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun sessionCredentialWriteFailureKeepsClaimAndOwnerReplayCapabilities() = runTest {
+        val file = File.createTempFile("lezi-session-replay-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = FailOnceSetTokenStore()
+        val preferences = preferences(
+            PreferenceDataStoreFactory.create(scope = backgroundScope) { file },
+            tokens,
+        )
+        val ownerRequestId = preferences.ensureOwnerLoginRequestId()
+        val receipt = MemberLoginReceipt(
+            requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            pendingSecret = "pending-secret-000000000000000000000001",
+            expiresAtEpochSeconds = 1_753_504_800,
+        )
+        preferences.savePendingMemberLogin(receipt, "爸爸", "Pixel 9")
+        tokens.failNextSet = true
+        val joined = SyncSession(
+            serverHost = "family.home",
+            serverScheme = "https",
+            familyId = "family",
+            accessToken = "member-access",
+            refreshToken = "member-refresh",
+            deviceId = "member-device",
+            role = FamilyRole.Member,
+            membershipId = "member-membership",
+        )
+
+        assertThat(runCatching { preferences.saveSession(joined) }.isFailure).isTrue()
+
+        assertThat(preferences.ensureOwnerLoginRequestId()).isEqualTo(ownerRequestId)
+        assertThat(preferences.pendingMemberLogin.first()?.requestId).isEqualTo(receipt.requestId)
+        assertThat(preferences.pendingMemberSecret()).isEqualTo(receipt.pendingSecret)
+
+        preferences.saveSession(joined)
+        assertThat(preferences.ensureOwnerLoginRequestId()).isNotEqualTo(ownerRequestId)
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+        assertThat(preferences.pendingMemberSecret()).isEmpty()
+        file.delete()
+    }
+
+    @Test
+    fun refreshRequestIdSurvivesRestartAndRetiresOnlyWithDurableRotatedSession() = runTest {
+        val file = File.createTempFile("lezi-refresh-rotation-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureRefreshTokenStore()
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(
+            PreferenceDataStoreFactory.create(scope = firstScope) { file },
+            tokens,
+        )
+        val requestId = first.ensureRefreshRequestId()
+        assertThat(requestId.length).isAtLeast(32)
+        assertThat(requestId.matches(Regex("[A-Za-z0-9_-]{32,128}"))).isTrue()
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(
+            PreferenceDataStoreFactory.create(scope = secondScope) { file },
+            tokens,
+        )
+        assertThat(restored.ensureRefreshRequestId()).isEqualTo(requestId)
+        restored.saveSession(
+            SyncSession(
+                serverHost = "family.home",
+                serverScheme = "https",
+                familyId = "family",
+                accessToken = "rotated-access",
+                refreshToken = "rotated-refresh",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+                membershipId = "owner",
+            ),
+        )
+        assertThat(restored.ensureRefreshRequestId()).isNotEqualTo(requestId)
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun failedRotatedTokenWriteLeavesOldJoinedSessionAndReplayNonceUsable() = runTest {
+        val file = File.createTempFile("lezi-refresh-write-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = FailOnceSetTokenStore()
+        val preferences = preferences(
+            PreferenceDataStoreFactory.create(scope = backgroundScope) { file },
+            tokens,
+        )
+        val original = SyncSession(
+            serverHost = "family.home",
+            serverScheme = "https",
+            familyId = "family",
+            accessToken = "old-access",
+            refreshToken = "old-refresh",
+            accessExpiresAtEpochSeconds = 100,
+            deviceId = "device",
+            role = FamilyRole.Owner,
+            membershipId = "owner",
+        )
+        preferences.saveSession(original)
+        val requestId = preferences.ensureRefreshRequestId()
+        tokens.failNextSet = true
+        val rotated = original.copy(
+            accessToken = "new-access",
+            refreshToken = "new-refresh",
+            accessExpiresAtEpochSeconds = 200,
+        )
+
+        assertThat(runCatching { preferences.saveRefreshedSession(rotated) }.isFailure).isTrue()
+
+        assertThat(preferences.session.first()).isEqualTo(original)
+        assertThat(preferences.session.first().isJoined).isTrue()
+        assertThat(preferences.ensureRefreshRequestId()).isEqualTo(requestId)
+
+        preferences.saveRefreshedSession(rotated)
+        assertThat(preferences.session.first()).isEqualTo(rotated)
+        assertThat(preferences.ensureRefreshRequestId()).isNotEqualTo(requestId)
+        file.delete()
+    }
+
+    @Test
     fun pendingMemberCapabilitySurvivesProcessButIsEncryptedAndRetiredWithSession() = runTest {
         val file = File.createTempFile("lezi-member-pending-", ".preferences_pb")
             .also { it.delete() }
@@ -1064,6 +1272,12 @@ private class FailOnceSetTokenStore : SecureRefreshTokenStore {
     }
 
     override fun clearToken() = delegate.clearToken()
+
+    override fun getPendingMemberSecret(): String = delegate.getPendingMemberSecret()
+
+    override fun setPendingMemberSecret(secret: String) = delegate.setPendingMemberSecret(secret)
+
+    override fun clearPendingMemberSecret() = delegate.clearPendingMemberSecret()
 }
 
 private class ThreadRecordingPendingSecretStore : SecureRefreshTokenStore {

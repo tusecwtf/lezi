@@ -1,6 +1,9 @@
 package com.lezi.babylog.sync.backend
 import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import com.lezi.babylog.sync.session.FamilyRole
@@ -9,7 +12,28 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.MemorySyncPreferences
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RefreshingSyncBackendTest {
+    @Test
+    fun appUpdateDownloadDoesNotBlockOtherAuthenticatedRequests() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val delegate = RefreshRecordingBackend().apply {
+            downloadStarted = CompletableDeferred()
+            releaseDownload = CompletableDeferred()
+        }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+
+        val download = async { backend.downloadAppUpdateApk(preferences.current()) }
+        delegate.downloadStarted?.await()
+        val pull = async { backend.pull(preferences.current()) }
+        runCurrent()
+
+        assertThat(pull.isCompleted).isTrue()
+        assertThat(pull.await().cursor).isEqualTo(7)
+        delegate.releaseDownload?.complete(Unit)
+        assertThat(download.await()).isEqualTo("release-apk".toByteArray())
+    }
+
     @Test
     fun expiredOrProcessRecreatedAccessRefreshesBeforeOneOriginalRequest() = runTest {
         val preferences = MemorySyncPreferences(joinedSession(accessToken = "", expiresAt = 0))
@@ -24,6 +48,29 @@ class RefreshingSyncBackendTest {
         assertThat(preferences.current().accessToken).isEqualTo("access-new")
         assertThat(preferences.current().refreshToken).isEqualTo("refresh-new")
         assertThat(preferences.current().accessExpiresAtEpochSeconds).isEqualTo(2_000_900)
+    }
+
+    @Test
+    fun refreshResponseLostBeforeDurableSaveReplaysWithTheSameRotationRequestId() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession(accessToken = "", expiresAt = 0))
+        val delegate = RefreshRecordingBackend()
+        preferences.failSaveSessionAttempts = 1
+
+        assertThat(
+            runCatching {
+                RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+                    .pull(preferences.current())
+            }.isFailure,
+        ).isTrue()
+
+        RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+            .pull(preferences.current())
+
+        assertThat(delegate.refreshTokens).containsExactly("refresh-old", "refresh-old").inOrder()
+        assertThat(delegate.refreshRequestIds).hasSize(2)
+        assertThat(delegate.refreshRequestIds.distinct()).hasSize(1)
+        assertThat(preferences.ensureRefreshRequestId())
+            .isNotEqualTo(delegate.refreshRequestIds.first())
     }
 
     @Test
@@ -276,6 +323,7 @@ class RefreshingSyncBackendTest {
 
 private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
     val refreshTokens = mutableListOf<String>()
+    val refreshRequestIds = mutableListOf<String>()
     val refreshEndpoints = mutableListOf<TrustedEndpointProfile>()
     val pullTokens = mutableListOf<String>()
     val bindCalls = mutableListOf<Triple<String, String, String>>()
@@ -285,6 +333,8 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
     var alwaysFailPullWith401 = false
     var refreshFailure: Throwable? = null
     var pullFailure: Throwable? = null
+    var downloadStarted: CompletableDeferred<Unit>? = null
+    var releaseDownload: CompletableDeferred<Unit>? = null
 
     override suspend fun refresh(baseUrl: String, refreshToken: String): SessionRefreshResult {
         refreshTokens += refreshToken
@@ -303,10 +353,30 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
     }
 
     override suspend fun refresh(
+        baseUrl: String,
+        refreshToken: String,
+        refreshRequestId: String,
+    ): SessionRefreshResult {
+        refreshRequestIds += refreshRequestId
+        return refresh(baseUrl, refreshToken)
+    }
+
+    override suspend fun refresh(
         endpoint: TrustedEndpointProfile,
         refreshToken: String,
     ): SessionRefreshResult {
         refreshEndpoints += endpoint
+        return refresh(endpoint.origin, refreshToken)
+    }
+
+
+    override suspend fun refresh(
+        endpoint: TrustedEndpointProfile,
+        refreshToken: String,
+        refreshRequestId: String,
+    ): SessionRefreshResult {
+        refreshEndpoints += endpoint
+        refreshRequestIds += refreshRequestId
         return refresh(endpoint.origin, refreshToken)
     }
 
@@ -323,6 +393,12 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
             hasMore = false,
             familyName = "乐乐一家",
         )
+    }
+
+    override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray {
+        downloadStarted?.complete(Unit)
+        releaseDownload?.await()
+        return "release-apk".toByteArray()
     }
 
     override suspend fun bindExistingMemberLogin(

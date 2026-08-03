@@ -41,4 +41,32 @@ class RecordPhotoResourcePolicyTest {
         assertThat(RecordPhotoResourcePolicy.isAllowedMime("text/plain")).isFalse()
         assertThat(RecordPhotoResourcePolicy.isAllowedMime(null)).isFalse()
     }
+
+    @Test
+    fun decodeSampleKeepsPowerOfTwoBitmapInsidePeakPixelBudget() {
+        assertThat(
+            RecordPhotoResourcePolicy.decodeSampleSize(
+                width = 8_000,
+                height = 6_000,
+                maxEdge = RecordPhotoResourcePolicy.maxUploadEdge,
+                maxPixels = RecordPhotoResourcePolicy.maxUploadPixels,
+            ),
+        ).isEqualTo(8)
+        assertThat(
+            RecordPhotoResourcePolicy.decodeSampleSize(
+                width = 65_535,
+                height = 4_096,
+                maxEdge = 512,
+                maxPixels = 512L * 512,
+            ),
+        ).isEqualTo(128)
+        assertThat(
+            RecordPhotoResourcePolicy.decodeSampleSize(
+                width = 1_200,
+                height = 800,
+                maxEdge = 1_600,
+                maxPixels = 2_560_000,
+            ),
+        ).isEqualTo(1)
+    }
 }

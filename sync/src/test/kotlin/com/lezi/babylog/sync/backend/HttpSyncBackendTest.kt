@@ -1,14 +1,18 @@
 package com.lezi.babylog.sync.backend
 import com.google.common.truth.Truth.assertThat
+import java.io.IOException
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.HttpURLConnection
 import java.net.ServerSocket
+import java.net.SocketTimeoutException
 import java.net.Socket
 import java.net.URL
 import java.security.cert.Certificate
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLHandshakeException
@@ -26,6 +30,38 @@ import com.lezi.babylog.sync.session.requireDeviceName
 import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 class HttpSyncBackendTest {
+    @Test
+    fun stalledMediaUploadDisconnectsAndFailsWithIOException() = runTest {
+        val connection = BlockingUploadConnection()
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory { connection },
+            uploadWriteStallTimeoutMillis = 25,
+        )
+        val session = SyncSession(
+            serverHost = "family.example.com",
+            serverPort = 8765,
+            serverScheme = "https",
+            familyId = "family",
+            membershipId = "membership",
+            deviceId = "device",
+            accessToken = "access-token",
+            pullGeneration = "generation",
+        )
+
+        val failure = runCatching {
+            backend.putBundleMedia(
+                session = session,
+                bundleId = "bundle",
+                clientUuid = "media",
+                source = TestMediaUploadSource(byteArrayOf(1)),
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(SocketTimeoutException::class.java)
+        assertThat(failure).isInstanceOf(IOException::class.java)
+        assertThat(connection.disconnected.get()).isTrue()
+    }
+
     @Test
     fun disasterRestoreUsesRootOnlyAtBoundariesAndRecoveryTokenInTheMiddle() = runTest {
         val server = ServerSocket(0, 3, InetAddress.getByName("127.0.0.1"))
@@ -290,7 +326,7 @@ class HttpSyncBackendTest {
                         request.startsWith("POST /v1/member/requests/claim HTTP") ->
                             """{"family_id":"family","membership_id":"membership-member","device_id":"device-member","session_id":"session-member","role":"member","access_token":"member-access","token":"member-access","access_expires_at":1753419300,"refresh_token":"member-refresh","generation":"generation-a","family_name":"乐乐一家"}"""
                         request.startsWith("GET /v1/member/requests HTTP") ->
-                            """{"requests":[{"request_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","display_name":"爸爸","device_name":"Pixel 9","created_at":1753418400,"expires_at":1753504800}]}"""
+                            """{"requests":[{"request_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","display_name":"爸爸","device_name":"Pixel 9","created_at":1753418400,"expires_at":1753504800},{"request_id":"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb","display_name":"外婆","device_name":"旧手机","status":"approved","created_at":1753418500,"expires_at":1753504800}]}"""
                         request.contains("/approve-new ") ->
                             """{"ok":true,"status":"approved"}"""
                         request.contains("/bind-existing ") ->
@@ -331,7 +367,10 @@ class HttpSyncBackendTest {
             assertThat(status).isEqualTo(MemberLoginStatus.Approved)
             assertThat(claimed.role).isEqualTo(FamilyRole.Member)
             assertThat(claimed.refreshToken).isEqualTo("member-refresh")
-            assertThat(pending.single().displayName).isEqualTo("爸爸")
+            assertThat(pending.map(PendingMemberLoginRequest::displayName))
+                .containsExactly("爸爸", "外婆").inOrder()
+            assertThat(pending.map(PendingMemberLoginRequest::status))
+                .containsExactly(MemberLoginStatus.Pending, MemberLoginStatus.Approved).inOrder()
             assertThat(captured.take(4).all { "Authorization:" !in it }).isTrue()
             assertThat(captured[0].substringAfter("\n\n")).isEqualTo(
                 """{"display_name":"Dad","device_name":"Pixel 9"}""",
@@ -343,6 +382,9 @@ class HttpSyncBackendTest {
             assertThat(captured[3].substringAfter("\n\n"))
                 .isEqualTo("""{"pending_secret":"$pendingSecret"}""")
             assertThat(captured.drop(4).all { "Authorization: Bearer family-token" in it }).isTrue()
+            assertThat(captured[4]).contains(
+                "X-Lezi-Member-Request-View: open-v1",
+            )
             assertThat(captured[5].lineSequence().first())
                 .startsWith("POST /v1/member/requests/$requestId/approve-new ")
             assertThat(captured[6].lineSequence().first())
@@ -1592,11 +1634,15 @@ class HttpSyncBackendTest {
             val result = loopbackBackend().refresh(
                 "http://${server.inetAddress.hostAddress}:${server.localPort}",
                 "refresh-old",
+                "refresh-request-0000000000000001",
             )
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(request.lineSequence().first()).startsWith("POST /v1/session/refresh")
             assertThat(request).doesNotContain("Authorization:")
+            assertThat(request).contains(
+                "X-Lezi-Refresh-Request-Id: refresh-request-0000000000000001",
+            )
             assertThat(request.substringAfter("\n\n")).isEqualTo(
                 """{"refresh_token":"refresh-old"}""",
             )
@@ -1773,6 +1819,34 @@ class HttpSyncBackendTest {
             .isEqualTo("family_deleted")
         assertThat(syncHttpCodeOrNull("not-json")).isNull()
     }
+}
+
+private class BlockingUploadConnection : HttpURLConnection(
+    URL("https://family.example.com:8765/v1/bundles/bundle/media/media"),
+) {
+    val disconnected = AtomicBoolean(false)
+    private val released = CountDownLatch(1)
+
+    override fun getOutputStream(): OutputStream = object : OutputStream() {
+        override fun write(value: Int) {
+            write(byteArrayOf(value.toByte()), 0, 1)
+        }
+
+        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+            if (!released.await(2, TimeUnit.SECONDS)) {
+                throw IOException("test upload did not disconnect")
+            }
+            throw IOException("connection disconnected")
+        }
+    }
+
+    override fun disconnect() {
+        disconnected.set(true)
+        released.countDown()
+    }
+
+    override fun usingProxy(): Boolean = false
+    override fun connect() = Unit
 }
 
 private class RejectingPinnedHttpsConnection : HttpsURLConnection(

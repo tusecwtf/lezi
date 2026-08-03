@@ -90,13 +90,25 @@ data class MemberLoginReceipt(
 
 enum class MemberLoginStatus { Pending, Approved, Rejected, Cancelled, Expired, Claimed }
 
+/**
+ * Legacy compatibility name for an Owner-visible open login request.
+ * The open view contains only Pending or Approved-but-unclaimed rows; callers must inspect status.
+ */
 data class PendingMemberLoginRequest(
     val requestId: String,
     val displayName: String,
     val deviceName: String,
     val createdAtEpochSeconds: Long,
     val expiresAtEpochSeconds: Long,
-)
+    /** Owner list includes both undecided and approved-but-unclaimed requests. */
+    val status: MemberLoginStatus = MemberLoginStatus.Pending,
+) {
+    init {
+        require(status == MemberLoginStatus.Pending || status == MemberLoginStatus.Approved) {
+            "管理员设备申请列表状态无效"
+        }
+    }
+}
 
 data class PendingMemberRenameRequest(
     val requestId: String,
@@ -286,9 +298,21 @@ interface SyncBackend {
         throw UnsupportedOperationException("Session refresh is not implemented")
 
     suspend fun refresh(
+        baseUrl: String,
+        refreshToken: String,
+        refreshRequestId: String,
+    ): SessionRefreshResult = refresh(baseUrl, refreshToken)
+
+    suspend fun refresh(
         endpoint: TrustedEndpointProfile,
         refreshToken: String,
     ): SessionRefreshResult = refresh(endpoint.origin, refreshToken)
+
+    suspend fun refresh(
+        endpoint: TrustedEndpointProfile,
+        refreshToken: String,
+        refreshRequestId: String,
+    ): SessionRefreshResult = refresh(endpoint, refreshToken)
 
     /** Authenticates a new Owner Device; takeover revokes older Owner Devices. */
     suspend fun ownerLogin(
@@ -349,6 +373,7 @@ interface SyncBackend {
         pendingSecret: String,
     ): SessionBootstrapResult = claimMemberLogin(endpoint.origin, pendingSecret)
 
+    /** Legacy name: returns the negotiated Owner open view, not necessarily only Pending rows. */
     suspend fun pendingMemberLogins(session: SyncSession): List<PendingMemberLoginRequest> =
         throw UnsupportedOperationException("Pending member login list is not implemented")
 

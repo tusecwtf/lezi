@@ -13,7 +13,7 @@ import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
 import java.io.File
-import java.util.UUID
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
@@ -24,16 +24,20 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
@@ -78,6 +82,7 @@ import com.lezi.babylog.sync.engine.NoOpCarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.NoOpFamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.engine.ReplicaSyncEngine
 import com.lezi.babylog.sync.engine.ReplicaSyncOutcome
+import com.lezi.babylog.sync.media.MediaPrepareException
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
@@ -155,6 +160,7 @@ class RealSyncPort @Inject constructor(
         java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
         extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
@@ -226,7 +232,6 @@ class RealSyncPort @Inject constructor(
         onSessionChanged = ::publishSession,
         onSessionObserved = { session -> cachedSession = session },
         requestSync = ::requestSync,
-        recoverReclaimedSession = ::recoverReclaimedSessionLocked,
         beforeOperation = ::recoverPendingLocalClearLocked,
         launchBestEffort = { work -> processScope.launch { work() } },
     )
@@ -234,6 +239,7 @@ class RealSyncPort @Inject constructor(
     private val pullRequested = AtomicBoolean(false)
     private val pendingAvailabilityReason =
         AtomicReference(AvailabilityProbeReason.LocalChanges)
+    private val lastAcceptedNetworkRecoveredAtMillis = AtomicReference<Long?>(null)
     @Volatile private var cachedSession = SyncSession()
 
     init {
@@ -342,6 +348,10 @@ class RealSyncPort @Inject constructor(
     override fun availability(): Flow<FamilyServerAvailability> = currentAvailability
     override fun lastServerHealthyAt(): Flow<Long?> = preferences.lastServerHealthyAt
     override fun session(): Flow<SyncSession> = preferences.session
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override fun pendingOutboxCount(): Flow<Int> = preferences.session.flatMapLatest { session ->
+        session.familyId.takeIf(String::isNotBlank)?.let(outboxDao::observeCount) ?: flowOf(0)
+    }
     override fun familyMemberDirectory(): Flow<List<FamilyMember>> =
         preferences.familyMemberDirectory
 
@@ -436,6 +446,7 @@ class RealSyncPort @Inject constructor(
                     reason = FamilyServerUnavailableReason.Unreachable,
                 )
             } catch (cancelled: CancellationException) {
+                currentAvailability.value = previous
                 throw cancelled
             } catch (failure: AvailabilityProbeFailure) {
                 publishAvailabilityFailure(previous, lastHealthyAt, failure.reason)
@@ -591,6 +602,19 @@ class RealSyncPort @Inject constructor(
     }
 
     override fun notifyNetworkRecovered() {
+        val now = clock.nowMillis()
+        while (true) {
+            val lastAccepted = lastAcceptedNetworkRecoveredAtMillis.get()
+            if (
+                !FamilyServerAvailabilityPolicy.shouldAcceptNetworkRecoveredSignal(
+                    lastAcceptedAtMillis = lastAccepted,
+                    nowMillis = now,
+                )
+            ) {
+                return
+            }
+            if (lastAcceptedNetworkRecoveredAtMillis.compareAndSet(lastAccepted, now)) break
+        }
         pullRequested.set(true)
         pendingAvailabilityReason.set(AvailabilityProbeReason.NetworkRecovered)
         syncSignal.trySend(Unit)
@@ -666,17 +690,25 @@ class RealSyncPort @Inject constructor(
             }
             val previous = preferences.session.first()
             require(previous.familyId.isNotBlank()) { "本机没有可重连的家庭身份" }
+            val loginRequestId = preferences.ensureOwnerLoginRequestId()
             val joined = try {
                 backend.ownerLogin(
                     endpoint = endpoint,
                     deviceName = com.lezi.babylog.sync.session.requireDeviceName(deviceName),
-                    loginRequestId = UUID.randomUUID().toString(),
+                    loginRequestId = loginRequestId,
                     rootPassword = rootPassword,
-                    takeover = false,
+                    // Network-settings reconnect is recovery of the one retained
+                    // Owner identity. Revoke older Owner devices by default so a
+                    // retry does not silently accumulate ghost administrators.
+                    takeover = true,
                 )
             } catch (error: SyncHttpException) {
                 if (error.statusCode == 401 || error.statusCode == 403) {
                     throw OwnerRootPasswordRejectedException()
+                }
+                if (error.statusCode == 409) {
+                    preferences.clearOwnerLoginRequestId()
+                    throw IllegalStateException("登录方式或设备称呼已变化，请重试", error)
                 }
                 throw error
             }
@@ -702,8 +734,13 @@ class RealSyncPort @Inject constructor(
             preferences.saveReconnectedSession(session, endpoint)
             publishSession(session)
             currentAvailability.value = FamilyServerAvailability.Disabled
-            requestSync(SyncTrigger.Foreground)
-            OwnerLoginResult(session, InitialFamilyDataRecovery.Complete)
+            val dataRecovery = try {
+                requestSync(SyncTrigger.Foreground)
+                InitialFamilyDataRecovery.NotRequired
+            } catch (_: Throwable) {
+                InitialFamilyDataRecovery.RetryRequired
+            }
+            OwnerLoginResult(session, dataRecovery)
         }
     }
 
@@ -901,9 +938,21 @@ class RealSyncPort @Inject constructor(
             when (val status = backend.memberLoginStatus(attempt.endpoint, attempt.pendingSecret)) {
                 com.lezi.babylog.sync.backend.MemberLoginStatus.Pending ->
                     MemberLoginCheckResult.Waiting(attempt.request)
-                com.lezi.babylog.sync.backend.MemberLoginStatus.Approved -> {
-                    val joined = backend.claimMemberLogin(attempt.endpoint, attempt.pendingSecret)
-                    pendingReconnectMember.set(null)
+                com.lezi.babylog.sync.backend.MemberLoginStatus.Approved,
+                com.lezi.babylog.sync.backend.MemberLoginStatus.Claimed,
+                -> {
+                    val joined = try {
+                        backend.claimMemberLogin(attempt.endpoint, attempt.pendingSecret)
+                    } catch (error: SyncHttpException) {
+                        if (
+                            status == com.lezi.babylog.sync.backend.MemberLoginStatus.Claimed &&
+                            error.statusCode in setOf(404, 409, 410)
+                        ) {
+                            pendingReconnectMember.set(null)
+                            return@withLock MemberLoginCheckResult.Terminal(status)
+                        }
+                        throw error
+                    }
                     val previous = preferences.session.first()
                     if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
                     require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
@@ -930,10 +979,16 @@ class RealSyncPort @Inject constructor(
                         publishSession(session)
                         currentAvailability.value = FamilyServerAvailability.Disabled
                     }
-                    requestSync(SyncTrigger.Foreground)
+                    pendingReconnectMember.set(null)
+                    val dataRecovery = try {
+                        requestSync(SyncTrigger.Foreground)
+                        InitialFamilyDataRecovery.NotRequired
+                    } catch (_: Throwable) {
+                        InitialFamilyDataRecovery.RetryRequired
+                    }
                     MemberLoginCheckResult.Joined(
                         session,
-                        InitialFamilyDataRecovery.Complete,
+                        dataRecovery,
                     )
                 }
                 else -> {
@@ -945,16 +1000,26 @@ class RealSyncPort @Inject constructor(
     }
 
     override suspend fun cancelReconnectMember(): Result<Unit> = runCatching {
-        reconnectMutex.withLock {
-            val attempt = pendingReconnectMember.getAndSet(null) ?: return@withLock
-            backend.cancelMemberLogin(attempt.endpoint, attempt.pendingSecret)
+        val attempt = reconnectMutex.withLock {
+            pendingReconnectMember.getAndSet(null)
+        }
+        if (attempt != null) {
+            processScope.launch {
+                try {
+                    backend.cancelMemberLogin(attempt.endpoint, attempt.pendingSecret)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    // The candidate attempt is already retired locally; remote cleanup expires.
+                }
+            }
         }
     }
 
     override suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> {
         val result = executeFamily(FamilySessionCommand.CheckMemberLogin)
             .map { (it as FamilySessionOutcome.MemberLoginChecked).result }
-        result.getOrNull()?.let { memberLoginCheckEvents.emit(it) }
+        result.getOrNull()?.let(memberLoginCheckEvents::tryEmit)
         return result
     }
 
@@ -1122,6 +1187,13 @@ class RealSyncPort @Inject constructor(
             }
         }
         val failure = result.exceptionOrNull()
+        if (failure is CancellationException) {
+            // Cancellation is control flow, not a sync failure. Restore the durable session's
+            // steady projection before propagating it so no collector is orphaned in Syncing.
+            publishSession(cachedSession)
+            throw failure
+        }
+        if (failure != null) demoteAvailabilityAfterTransportFailure(failure)
         var handledClientUpdateRequired = false
         val mapped = when (failure) {
             is RemoteDeviceRemovedException -> handleRemoteDeviceRemoved(failure)
@@ -1218,8 +1290,18 @@ class RealSyncPort @Inject constructor(
         val session = preferences.session.first()
         if (!session.isJoined) {
             optionalAppUpdateState.value = null
-            forcedAppUpdateState.value = null
-            return Result.success(AppUpdateCheckResult.NotJoined)
+            val retainedForce = forcedAppUpdateState.value
+                .takeIf { session.retainsFamilyIdentityForReauth() }
+            if (retainedForce == null) forcedAppUpdateState.value = null
+            return Result.success(
+                when (retainedForce) {
+                    is ForcedAppUpdateState.WithPackage ->
+                        AppUpdateCheckResult.ForcedUpdate(retainedForce.metadata)
+                    ForcedAppUpdateState.PackageUnknown ->
+                        AppUpdateCheckResult.ForcedPackageUnknown
+                    null -> AppUpdateCheckResult.NotJoined
+                },
+            )
         }
         // Manual check must never mutate SyncStatus — surface failures only to the UI.
         return runCatching {
@@ -1283,7 +1365,6 @@ class RealSyncPort @Inject constructor(
         return withAppUpdateInstallLockOrElse(
             onBusy = { Result.failure(AppUpdateInstallInProgressException()) },
             block = {
-                dismissOptionalAppUpdate(metadata.versionCode)
                 // Download / sha256 / archive identity / PackageInstaller stay off the main thread.
                 // Failures surface only via Result — never mutate SyncStatus
                 // (mirror checkAppUpdate; do not call requireAllowed / updateFailureStatus).
@@ -1332,6 +1413,13 @@ class RealSyncPort @Inject constructor(
                         } finally {
                             // Always remove private staging after the attempt so no shareable APK remains.
                             cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+                        }
+                    }
+                }.onSuccess { result ->
+                    if (result == AppUpdateInstallResult.SessionStarted) {
+                        val current = optionalAppUpdateState.value
+                        if (current?.versionCode == metadata.versionCode) {
+                            optionalAppUpdateState.value = null
                         }
                     }
                 }
@@ -1385,7 +1473,9 @@ class RealSyncPort @Inject constructor(
             val session = preferences.session.first()
             if (!session.isJoined) {
                 optionalAppUpdateState.value = null
-                forcedAppUpdateState.value = null
+                if (!session.retainsFamilyIdentityForReauth()) {
+                    forcedAppUpdateState.value = null
+                }
                 return
             }
             val decision = foregroundSyncGate.evaluate(
@@ -1658,20 +1748,6 @@ class RealSyncPort @Inject constructor(
             preferences.clearPendingFamilyDeletionClear()
             publishSession(preferences.session.first())
         }
-    }
-
-    /** Caller owns [syncMutex]; identity remains committed when recovery is retryable. */
-    private suspend fun recoverReclaimedSessionLocked(
-        session: SyncSession,
-    ): InitialFamilyDataRecovery = try {
-        currentStatus.value = SyncStatus.Syncing
-        synchronizeJoinedSessionLocked(session, SyncTrigger.PullToRefresh)
-        InitialFamilyDataRecovery.Complete
-    } catch (error: CancellationException) {
-        throw error
-    } catch (error: Throwable) {
-        updateFailureStatus(error)
-        InitialFamilyDataRecovery.RetryRequired
     }
 
     private suspend fun synchronizeJoinedSessionLocked(
@@ -1968,6 +2044,16 @@ class RealSyncPort @Inject constructor(
         }
     }
 
+    private fun demoteAvailabilityAfterTransportFailure(failure: Throwable) {
+        if (!failure.isAvailabilityTransportFailure()) return
+        val available = currentAvailability.value as? FamilyServerAvailability.Available ?: return
+        publishAvailabilityFailure(
+            previous = available,
+            lastHealthyAt = available.lastHealthyAtMillis,
+            reason = failure.toAvailabilityUnavailableReason(),
+        )
+    }
+
     private fun publishAvailabilityFailure(
         previous: FamilyServerAvailability,
         lastHealthyAt: Long?,
@@ -2031,12 +2117,22 @@ private fun Throwable.toAvailabilityUnavailableReason(): FamilyServerUnavailable
     else -> FamilyServerUnavailableReason.Unreachable
 }
 
+private fun Throwable.isAvailabilityTransportFailure(): Boolean = when {
+    causeChainContains<MediaPrepareException>() -> false
+    this is SyncHttpException -> statusCode == 408 || statusCode in 500..599
+    else -> causeChainContains<IOException>()
+}
+
 private const val AVAILABILITY_TIMEOUT_MILLIS = 8_000L
 private val REQUIRED_HEALTH_CAPABILITIES = setOf(
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
 )
+
+/** Reauth keeps the family replica/identity; only a true leave/unconfigure retires force UI. */
+private fun SyncSession.retainsFamilyIdentityForReauth(): Boolean =
+    reauthRequired && familyId.isNotBlank() && membershipId.isNotBlank() && baseUrl.isNotBlank()
 
 private fun SyncTrigger.toAvailabilityProbeReason(): AvailabilityProbeReason = when (this) {
     SyncTrigger.Foreground -> AvailabilityProbeReason.Foreground

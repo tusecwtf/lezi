@@ -369,6 +369,25 @@ class LocalReplicaClearCoordinatorTest {
     }
 
     @Test
+    fun recordsOnlySweepsOrphanDraftImportsButPreservesAvatarRoot() = runTest {
+        val rig = ClearRig()
+        val orphanDraft = "record-media/orphan-draft.jpg"
+        val avatarOwnedRecordPath = "record-media/avatar-owned.jpg"
+        val orphanAvatar = "baby_avatars/orphan-avatar.jpg"
+        rig.mediaFiles.existing += orphanDraft
+        rig.mediaFiles.existing += avatarOwnedRecordPath
+        rig.mediaFiles.existing += orphanAvatar
+        rig.media.seed(media("avatar-in-record-root", "avatar", avatarOwnedRecordPath))
+
+        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(rig.mediaFiles.existing).doesNotContain(orphanDraft)
+        assertThat(rig.mediaFiles.existing).contains(avatarOwnedRecordPath)
+        assertThat(rig.mediaFiles.existing).contains(orphanAvatar)
+    }
+
+    @Test
     fun allLocalClearsEveryCapturedReplicaAndDropsGeneration() = runTest {
         val rig = ClearRig(
             session = joinedClearSession().copy(

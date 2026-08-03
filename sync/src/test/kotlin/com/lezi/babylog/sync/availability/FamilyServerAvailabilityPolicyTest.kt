@@ -75,4 +75,26 @@ class FamilyServerAvailabilityPolicyTest {
             ),
         ).isTrue()
     }
+
+    @Test
+    fun networkRecoveredSignalsAreDebouncedForThirtySeconds() {
+        assertThat(
+            FamilyServerAvailabilityPolicy.shouldAcceptNetworkRecoveredSignal(
+                lastAcceptedAtMillis = null,
+                nowMillis = 1_000,
+            ),
+        ).isTrue()
+        assertThat(
+            FamilyServerAvailabilityPolicy.shouldAcceptNetworkRecoveredSignal(
+                lastAcceptedAtMillis = 1_000,
+                nowMillis = 30_999,
+            ),
+        ).isFalse()
+        assertThat(
+            FamilyServerAvailabilityPolicy.shouldAcceptNetworkRecoveredSignal(
+                lastAcceptedAtMillis = 1_000,
+                nowMillis = 31_000,
+            ),
+        ).isTrue()
+    }
 }

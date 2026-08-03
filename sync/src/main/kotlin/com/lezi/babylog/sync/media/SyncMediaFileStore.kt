@@ -4,12 +4,14 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
+import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.file.Files
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -77,6 +79,17 @@ interface SyncMediaFileStore {
      * guard on this method or that path breaks.
      */
     suspend fun delete(localUri: String)
+
+    /**
+     * Reclaims files in product-owned media roots that have no surviving Room owner.
+     *
+     * Implementations must make this scope explicit; silently skipping the sweep
+     * would break the user-facing privacy contract of local clear.
+     */
+    suspend fun sweepUnreferenced(
+        scope: LocalDataClearScope,
+        retainedLocalUris: Set<String>,
+    )
 }
 
 @Singleton
@@ -115,40 +128,53 @@ class AndroidSyncMediaFileStore @Inject constructor(
                 bounds.outWidth.toLong() * bounds.outHeight <=
                 RecordPhotoResourcePolicy.maxSourcePixels,
         ) { "本地媒体尺寸超出支持范围" }
-        var sample = 1
-        while (
-            ceilDiv(bounds.outWidth, sample) > RecordPhotoResourcePolicy.maxUploadEdge * 2 ||
-            ceilDiv(bounds.outHeight, sample) > RecordPhotoResourcePolicy.maxUploadEdge * 2 ||
-            ceilDiv(bounds.outWidth, sample).toLong() * ceilDiv(bounds.outHeight, sample) >
-            RecordPhotoResourcePolicy.maxUploadPixels * 4
-        ) {
-            sample *= 2
+        val sample = RecordPhotoResourcePolicy.decodeSampleSize(
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            maxEdge = RecordPhotoResourcePolicy.maxUploadEdge,
+            maxPixels = RecordPhotoResourcePolicy.maxUploadPixels,
+        )
+        translateMediaPrepareOutOfMemory {
+            prepareDecodedUpload(file, sample)
         }
-        currentCoroutineContext().ensureActive()
-        val source = requireNotNull(
-            BitmapFactory.decodeFile(
-                file.path,
-                BitmapFactory.Options().apply { inSampleSize = sample },
-            ),
-        ) { "无法读取本地媒体" }
-        val oriented = applyExifOrientation(source, readExifOrientation(file))
-        val scaled = if (max(oriented.width, oriented.height) > RecordPhotoResourcePolicy.maxUploadEdge) {
-            val ratio = RecordPhotoResourcePolicy.maxUploadEdge.toDouble() /
-                max(oriented.width, oriented.height)
-            Bitmap.createScaledBitmap(
-                oriented,
-                (oriented.width * ratio).toInt().coerceAtLeast(1),
-                (oriented.height * ratio).toInt().coerceAtLeast(1),
-                true,
-            )
-        } else {
-            oriented
-        }
-        val temporaryDirectory = File(context.cacheDir, "sync-media-upload").apply {
-            check(exists() || mkdirs()) { "无法创建待上传媒体目录" }
-        }
-        val temporary = File.createTempFile("normalized_", ".jpg", temporaryDirectory)
+    }
+
+    private suspend fun prepareDecodedUpload(file: File, sample: Int): PreparedMedia {
+        var source: Bitmap? = null
+        var oriented: Bitmap? = null
+        var scaled: Bitmap? = null
+        var temporary: File? = null
+        var handedOff = false
         try {
+            currentCoroutineContext().ensureActive()
+            source = requireNotNull(
+                BitmapFactory.decodeFile(
+                    file.path,
+                    BitmapFactory.Options().apply { inSampleSize = sample },
+                ),
+            ) { "无法读取本地媒体" }
+            oriented = applyExifOrientation(source, readExifOrientation(file))
+            if (oriented !== source) source.recycleIfNeeded()
+            scaled = if (
+                max(oriented.width, oriented.height) > RecordPhotoResourcePolicy.maxUploadEdge
+            ) {
+                val ratio = RecordPhotoResourcePolicy.maxUploadEdge.toDouble() /
+                    max(oriented.width, oriented.height)
+                Bitmap.createScaledBitmap(
+                    oriented,
+                    (oriented.width * ratio).toInt().coerceAtLeast(1),
+                    (oriented.height * ratio).toInt().coerceAtLeast(1),
+                    true,
+                )
+            } else {
+                oriented
+            }
+            if (scaled !== oriented) oriented.recycleIfNeeded()
+
+            val temporaryDirectory = File(context.cacheDir, "sync-media-upload").apply {
+                check(exists() || mkdirs()) { "无法创建待上传媒体目录" }
+            }
+            temporary = File.createTempFile("normalized_", ".jpg", temporaryDirectory)
             currentCoroutineContext().ensureActive()
             val job = currentCoroutineContext()[Job]
             temporary.outputStream().buffered(RecordPhotoResourcePolicy.streamBufferBytes).use { output ->
@@ -168,19 +194,19 @@ class AndroidSyncMediaFileStore @Inject constructor(
                 }
             }
             currentCoroutineContext().ensureActive()
-            PreparedMedia(
+            val prepared = PreparedMedia(
                 file = temporary,
                 mime = "image/jpeg",
                 width = scaled.width,
                 height = scaled.height,
             )
-        } catch (failure: Throwable) {
-            temporary.delete()
-            throw failure
+            handedOff = true
+            return prepared
         } finally {
-            if (scaled !== oriented) scaled.recycle()
-            if (oriented !== source) oriented.recycle()
-            source.recycle()
+            if (!handedOff) temporary?.delete()
+            scaled.recycleIfNeeded()
+            if (oriented !== scaled) oriented.recycleIfNeeded()
+            if (source !== oriented && source !== scaled) source.recycleIfNeeded()
         }
     }
 
@@ -214,6 +240,17 @@ class AndroidSyncMediaFileStore @Inject constructor(
 
     override suspend fun delete(localUri: String) = withContext(Dispatchers.IO) {
         deleteExistingSyncMediaFile(resolve(localUri))
+    }
+
+    override suspend fun sweepUnreferenced(
+        scope: LocalDataClearScope,
+        retainedLocalUris: Set<String>,
+    ) = withContext(Dispatchers.IO) {
+        sweepUnreferencedProductMedia(
+            filesDir = context.filesDir,
+            scope = scope,
+            retainedLocalUris = retainedLocalUris,
+        )
     }
 
     private fun resolve(localUri: String): File? {
@@ -267,6 +304,71 @@ class AndroidSyncMediaFileStore @Inject constructor(
     }
 }
 
+/**
+ * Scope-aware local-clear sweep for the two app-private product media roots.
+ *
+ * RecordsOnly owns `record-media`; AllLocalData additionally owns `baby_avatars`.
+ * The root directories themselves remain so a later import does not race directory
+ * creation. Canonical containment keeps stale or hostile paths outside filesDir out
+ * of the deletion set.
+ */
+internal fun sweepUnreferencedProductMedia(
+    filesDir: File,
+    scope: LocalDataClearScope,
+    retainedLocalUris: Set<String>,
+) {
+    val filesRoot = filesDir.canonicalFile
+    val retained = retainedLocalUris.mapNotNullTo(linkedSetOf()) { localUri ->
+        resolveUnderFilesRoot(filesRoot, localUri)?.path
+    }
+    val roots = buildList {
+        add(File(filesRoot, "record-media").canonicalFile)
+        if (scope == LocalDataClearScope.AllLocalData) {
+            add(File(filesRoot, "baby_avatars").canonicalFile)
+        }
+    }
+    roots.forEach { root ->
+        if (!root.exists()) return@forEach
+        check(root.isDirectory && root.path.startsWith(filesRoot.path + File.separator)) {
+            "本机媒体目录无效"
+        }
+        sweepDirectoryContents(root, root, retained)
+    }
+}
+
+private fun resolveUnderFilesRoot(filesRoot: File, localUri: String): File? {
+    if (localUri.isBlank()) return null
+    val raw = File(localUri)
+    val candidate = if (raw.isAbsolute) raw.canonicalFile else File(filesRoot, localUri).canonicalFile
+    return candidate.takeIf { it.path.startsWith(filesRoot.path + File.separator) }
+}
+
+private fun sweepDirectoryContents(
+    directory: File,
+    ownedRoot: File,
+    retained: Set<String>,
+) {
+    val children = checkNotNull(directory.listFiles()) { "无法读取本机媒体目录" }
+    children.forEach { child ->
+        if (Files.isSymbolicLink(child.toPath())) {
+            check(Files.deleteIfExists(child.toPath())) { "无法清理本机媒体链接" }
+            return@forEach
+        }
+        val canonical = child.canonicalFile
+        if (!canonical.path.startsWith(ownedRoot.path + File.separator)) {
+            error("本机媒体路径越界")
+        }
+        if (child.isDirectory) {
+            sweepDirectoryContents(child, ownedRoot, retained)
+            if (child.listFiles()?.isEmpty() == true) {
+                check(child.delete() || !child.exists()) { "无法清理本机媒体空目录" }
+            }
+        } else if (canonical.path !in retained) {
+            check(child.delete() || !child.exists()) { "无法清理本机媒体文件" }
+        }
+    }
+}
+
 private class CancellableBoundedOutputStream(
     output: OutputStream,
     private val maxBytes: Long,
@@ -291,8 +393,9 @@ private class CancellableBoundedOutputStream(
     }
 }
 
-private fun ceilDiv(value: Int, divisor: Int): Int =
-    (value.toLong() + divisor - 1L).div(divisor).toInt()
+private fun Bitmap?.recycleIfNeeded() {
+    if (this != null && !isRecycled) recycle()
+}
 
 internal fun deleteExistingSyncMediaFile(file: File?) {
     if (file?.isFile != true) return

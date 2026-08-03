@@ -43,12 +43,20 @@ enum class AvailabilityProbeReason {
 
 object FamilyServerAvailabilityPolicy {
     const val HEALTHY_LEASE_MILLIS = 30_000L
+    const val NETWORK_RECOVERED_DEBOUNCE_MILLIS = 30_000L
 
     fun retryDelayMillis(consecutiveFailures: Int): Long = when {
         consecutiveFailures <= 1 -> 30_000L
         consecutiveFailures == 2 -> 120_000L
         else -> 600_000L
     }
+
+    fun shouldAcceptNetworkRecoveredSignal(
+        lastAcceptedAtMillis: Long?,
+        nowMillis: Long,
+    ): Boolean = lastAcceptedAtMillis == null ||
+        nowMillis < lastAcceptedAtMillis ||
+        nowMillis - lastAcceptedAtMillis >= NETWORK_RECOVERED_DEBOUNCE_MILLIS
 
     fun shouldProbe(
         state: FamilyServerAvailability,

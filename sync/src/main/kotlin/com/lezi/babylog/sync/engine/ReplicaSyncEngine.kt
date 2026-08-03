@@ -198,7 +198,13 @@ internal class ReplicaSyncEngine(
                 recovered = true
             }
             if (afterAuthorityCapture.isNotEmpty() && !recovered) {
-                pullAllPages(current, mediaEditGuard = mediaEditGuard)
+                try {
+                    pullAllPages(current, mediaEditGuard = mediaEditGuard)
+                } catch (error: SyncHttpException) {
+                    val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
+                    current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                    recovered = true
+                }
             }
         }
         return ReplicaSyncOutcome.Synchronized
@@ -246,6 +252,10 @@ internal class ReplicaSyncEngine(
         val appliedCarePlanUuids = mutableListOf<String>()
         try {
             transactionRunner.run {
+            requireCustomItemCapacityAfterApply(
+                existing = customItemDao.listAllIncludingDeleted(),
+                incoming = entities,
+            )
             val unresolved = mutableListOf<SyncEntity>()
             for (entity in entities.filter { it.type == "baby" }) {
                 if (!applyBaby(session, entity)) unresolved += entity
@@ -298,10 +308,19 @@ internal class ReplicaSyncEngine(
             for (planUuid in planUuidsForResolve) {
                 resolveFulfillmentAuthority(planUuid)
             }
+            entities.filter { it.type == "care_plan" }
+                .mapNotNull { entity -> carePlanDao.getByClientUuid(entity.clientUuid)?.babyId }
+                .distinct()
+                .forEach { babyId ->
+                    appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
+                }
             entities.filter { it.type == "record" }
                 .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.babyId }
                 .distinct()
-                .forEach { healDuplicateOpenSleeps(it) }
+                .forEach { babyId ->
+                    healOpenSleepsClosedByFamilyWake(babyId)
+                    healDuplicateOpenSleeps(babyId)
+                }
             (
                 entities.filter { it.type == "baby" }
                     .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
@@ -328,21 +347,11 @@ internal class ReplicaSyncEngine(
     }
 
     private suspend fun cleanupUnownedStagedMedia(paths: Set<String>) {
-        if (paths.isEmpty()) return
-        val owned = mediaDao.listAllIncludingDeleted()
-            .mapTo(hashSetOf(), MediaAssetEntity::localUri)
-        paths.filterNot(owned::contains).forEach { mediaFiles.delete(it) }
+        mediaFileCleanup.cleanupUnreferencedPaths(paths)
     }
 
     private suspend fun cleanupDiscardedLocalMedia(paths: List<String>) {
-        if (paths.isEmpty()) return
-        val owned = mediaDao.listAllIncludingDeleted()
-            .filter { it.deletedAt == null }
-            .mapTo(hashSetOf(), MediaAssetEntity::localUri)
-        paths.filter(String::isNotBlank)
-            .distinct()
-            .filterNot(owned::contains)
-            .forEach { mediaFiles.delete(it) }
+        mediaFileCleanup.cleanupUnreferencedPaths(paths.toSet())
     }
 
     /**
@@ -402,8 +411,6 @@ internal class ReplicaSyncEngine(
                 )
                 return true
             }
-            // Keep in-flight local create/edit until push commits.
-            if (existing != null && existing.syncDirty) return true
         }
         // Full-set co-gate: completed + linked record must not appear without the fact.
         if (
@@ -506,6 +513,69 @@ internal class ReplicaSyncEngine(
     }
 
     /**
+     * Different devices can complete the old next-feed plan offline and derive
+     * different generation UUIDs for the replacement. Resolve that family intent
+     * during pull rather than waiting for another local schedule action.
+     *
+     * The oldest published revision wins, with client UUID as the cross-replica
+     * tie breaker. A device publishes tombstones only for rows its principal can
+     * manage. Foreign losers become a clean local terminal projection: this
+     * immediately removes duplicate UI/reminders without forging a server write;
+     * the loser creator (or owner) publishes the durable tombstone when online.
+     */
+    private suspend fun healDuplicateOpenNextFeedPlans(
+        session: SyncSession,
+        babyId: Long,
+    ): List<String> {
+        val open = carePlanDao.listAllIncludingDeleted()
+            .filter { plan ->
+                plan.babyId == babyId &&
+                    plan.deletedAt == null &&
+                    plan.status in setOf(
+                        CarePlanStatus.PENDING.storageKey,
+                        CarePlanStatus.MISSED.storageKey,
+                    ) &&
+                    isNextFeedPlanNote(plan.note)
+            }
+            .sortedWith(
+                compareBy<CarePlanEntity> { it.updatedAt }
+                    .thenBy { it.clientUuid },
+            )
+        if (open.size <= 1) return emptyList()
+
+        val revisionFloor = maxOf(
+            clock.nowMillis(),
+            open.maxOf(CarePlanEntity::updatedAt),
+        )
+        val tombstoneAt = if (revisionFloor == Long.MAX_VALUE) {
+            Long.MAX_VALUE
+        } else {
+            revisionFloor + 1L
+        }
+        val actor = session.membershipId.trim()
+        val losers = open.drop(1)
+        losers.forEach { loser ->
+            val canPublishTerminal = session.role == FamilyRole.Owner ||
+                (actor.isNotEmpty() && loser.createdByMembershipId.trim() == actor) ||
+                (
+                    loser.createdByMembershipId.isBlank() &&
+                        session.isCreatorAcknowledgementPending("care_plan", loser.clientUuid)
+                    )
+            if (canPublishTerminal) {
+                carePlanDao.softDelete(loser.id, tombstoneAt)
+            } else {
+                carePlanDao.update(
+                    loser.copy(
+                        status = CarePlanStatus.SKIPPED.storageKey,
+                        syncDirty = false,
+                    ),
+                )
+            }
+        }
+        return losers.map(CarePlanEntity::clientUuid)
+    }
+
+    /**
      * Apply a remote fulfillment candidate. Requires plan + record to already be
      * local so the candidate is never the sole visible half of a fulfill result.
      * Winner selection runs after the full page apply via [resolveFulfillmentAuthority].
@@ -514,8 +584,6 @@ internal class ReplicaSyncEngine(
         val existing = fulfillmentCandidateDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseFulfillmentCandidateWire(payload)
-        // Keep in-flight local dirty until push commits (then markSynced clears dirty).
-        if (existing != null && existing.syncDirty) return true
         // Full-set: plan and record must already be applied (or present).
         if (carePlanDao.getByClientUuid(wire.carePlanClientUuid) == null) return false
         if (recordDao.getByClientUuid(wire.recordClientUuid) == null) return false
@@ -523,10 +591,18 @@ internal class ReplicaSyncEngine(
         // after markSynced, but must still adopt server-frozen stamps (role/membership/
         // confirmed_at) so every device adjudicates with the same evidence.
         if (existing != null && existing.updatedAt >= entity.updatedAt) {
+            val sameRevision = existing.updatedAt == entity.updatedAt
+            val acknowledgedDeletedAt = if (sameRevision && entity.deletedAt != null) {
+                entity.deletedAt
+            } else {
+                existing.deletedAt
+            }
             val needsStampMerge =
                 existing.submitterRole != wire.submitterRole ||
                     existing.submitterMembershipId != wire.submitterMembershipId ||
-                    existing.confirmedAt != wire.confirmedAt
+                    existing.confirmedAt != wire.confirmedAt ||
+                    existing.deletedAt != acknowledgedDeletedAt ||
+                    (sameRevision && existing.syncDirty)
             if (!needsStampMerge) return true
             fulfillmentCandidateDao.update(
                 existing.copy(
@@ -534,8 +610,8 @@ internal class ReplicaSyncEngine(
                     submitterMembershipId = wire.submitterMembershipId,
                     submitterRole = wire.submitterRole,
                     updatedAt = maxOf(existing.updatedAt, entity.updatedAt),
-                    deletedAt = entity.deletedAt ?: existing.deletedAt,
-                    syncDirty = false,
+                    deletedAt = acknowledgedDeletedAt,
+                    syncDirty = if (sameRevision) false else existing.syncDirty,
                 ),
             )
             return true
@@ -632,18 +708,6 @@ internal class ReplicaSyncEngine(
         // Match server LWW for business fields. Equal revisions may still carry
         // the NAS-owned immutable creator acknowledgement after a push.
         if (existing != null && existing.updatedAt > entity.updatedAt) return true
-        if (existing != null && existing.updatedAt == entity.updatedAt) {
-            acknowledgedEqualRevisionCreator(
-                session = session,
-                existingCreator = existing.createdByMembershipId,
-                payloadJson = entity.payloadJson,
-            )?.let { creator ->
-                customItemDao.update(existing.copy(createdByMembershipId = creator))
-            }
-            return true
-        }
-        // Keep in-flight local rename/delete until push commits.
-        if (existing != null && existing.syncDirty) return true
         val creator = resolvedImmutableCreator(
             session = session,
             existingCreator = existing?.createdByMembershipId,
@@ -712,12 +776,30 @@ internal class ReplicaSyncEngine(
         val wire = parseBabyWire(payload)
         // Members never own Baby LWW. The NAS snapshot wins even over an old
         // local dirty/equal revision; local appearance/order/path stay device-local.
-        if (
-            existing != null &&
-            existing.updatedAt >= entity.updatedAt &&
-            session.role != FamilyRole.Member
-        ) {
-            return true
+        if (existing != null && session.role != FamilyRole.Member) {
+            if (existing.updatedAt > entity.updatedAt) return true
+            val exactRevision = existing.updatedAt == entity.updatedAt &&
+                existing.nickname == wire.nickname &&
+                existing.sex == wire.sex &&
+                existing.birthdayEpochDay == wire.birthdayEpochDay &&
+                existing.birthWeightGrams == wire.birthWeightGrams &&
+                existing.avatarMediaUuid == wire.avatarMediaUuid &&
+                existing.deletedAt == entity.deletedAt
+            if (exactRevision) {
+                if (existing.syncDirty) {
+                    babyDao.markSynced(entity.clientUuid, entity.updatedAt)
+                }
+                return true
+            }
+            // Owner LWW ties never let a different server body overwrite the
+            // local body. A dirty tie remains an explicit unresolved conflict;
+            // a clean tie can advance because neither side is strictly newer.
+            if (existing.updatedAt == entity.updatedAt) {
+                return !existing.syncDirty
+            }
+            // A concurrent owner edit is an explicit conflict. Do not advance the
+            // pull cursor past a remote revision that was not actually applied.
+            if (existing.syncDirty) return false
         }
         val familyId = existing?.familyId ?: familyDao.listAll().firstOrNull()?.id ?: return false
         babyDao.upsert(
@@ -765,10 +847,6 @@ internal class ReplicaSyncEngine(
             recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
             return true
         }
-        // Concurrent local dirty mutation: never clobber the in-flight package or
-        // clear syncDirty mid-edit. Creator keeps the local complete revision until
-        // push commits; receivers still see the prior published package.
-        if (existing != null && existing.syncDirty) return true
         val baby = babyDao.getByClientUuid(wire.babyClientUuid) ?: return false
         recordDao.upsert(
             RecordEntity(
@@ -834,6 +912,50 @@ internal class ReplicaSyncEngine(
         }
     }
 
+    /**
+     * A wake is family-global, not scoped to the UUID opened on one device.
+     * Close every still-open sleep that began no later than the newest known
+     * wake. A clock-skewed open beginning after that wake remains the single
+     * residual open instead of being given an invalid negative interval.
+     */
+    private suspend fun healOpenSleepsClosedByFamilyWake(babyId: Long) {
+        val records = recordDao.listAllIncludingDeleted()
+        val latestWake = records.asSequence()
+            .filter { record ->
+                record.babyId == babyId &&
+                    record.type == RecordType.SLEEP.key &&
+                    record.deletedAt == null &&
+                    record.endTimestamp != null
+            }
+            .maxWithOrNull(
+                compareBy<RecordEntity> { it.endTimestamp ?: Long.MIN_VALUE }
+                    .thenBy { it.updatedAt }
+                    .thenBy { it.clientUuid },
+            ) ?: return
+        val wakeAt = requireNotNull(latestWake.endTimestamp)
+        val now = clock.nowMillis()
+        recordDao.listOpenSleeps(babyId)
+            .filter { it.timestamp <= wakeAt }
+            .forEach { open ->
+                val flagged = withSleepAnomaly(open.payloadJson, open.schemaVersion)
+                val revisionFloor = maxOf(open.updatedAt, latestWake.updatedAt, now)
+                val updatedAt = if (revisionFloor == Long.MAX_VALUE) {
+                    Long.MAX_VALUE
+                } else {
+                    revisionFloor + 1
+                }
+                recordDao.update(
+                    open.copy(
+                        endTimestamp = wakeAt,
+                        payloadJson = flagged.first,
+                        schemaVersion = flagged.second,
+                        updatedAt = updatedAt,
+                        syncDirty = true,
+                    ),
+                )
+            }
+    }
+
     private fun withSleepAnomaly(
         payloadJson: String,
         schemaVersion: Int,
@@ -897,7 +1019,7 @@ internal class ReplicaSyncEngine(
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseMediaWire(payload)
         val existing = mediaDao.getByClientUuid(entity.clientUuid)
-        if (existing != null && mediaEditGuard?.canReplace(existing) == false) return true
+        if (existing != null && mediaEditGuard?.canReplace(existing) == false) return false
         // A newer local version still wins LWW. An equal remote version is the
         // authoritative receipt for the exact local bytes/metadata, including
         // after full-resync deliberately invalidated only sync bookkeeping.
@@ -905,6 +1027,7 @@ internal class ReplicaSyncEngine(
         if (existing != null && existing.updatedAt == entity.updatedAt) {
             val acknowledged = existing.copy(
                 remoteUri = session.receiptFor(entity.clientUuid),
+                deletedAt = entity.deletedAt ?: existing.deletedAt,
                 syncDirty = false,
             )
             mediaDao.update(acknowledged)
@@ -1224,7 +1347,9 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
     ): Set<CreatorAcknowledgementRef> {
         val authorityBabyIds = if (session.role == FamilyRole.Member) {
-            babyDao.listFamilyAuthority().mapTo(mutableSetOf(), BabyEntity::id)
+            babyDao.listAllIncludingDeleted()
+                .filter(BabyEntity::familyAuthority)
+                .mapTo(mutableSetOf(), BabyEntity::id)
         } else {
             null
         }
@@ -1240,7 +1365,7 @@ internal class ReplicaSyncEngine(
         }
         val memberPlansById = memberPlans.associateBy(CarePlanEntity::id)
         val memberPlansByUuid = memberPlans.associateBy(CarePlanEntity::clientUuid)
-        val babies = if (session.role == FamilyRole.Member) {
+        val babySnapshots = if (session.role == FamilyRole.Member) {
             emptyList()
         } else {
             babyDao.listPendingSync()
@@ -1259,8 +1384,16 @@ internal class ReplicaSyncEngine(
         val capturedPendingCreatorAcknowledgements = mutableSetOf<CreatorAcknowledgementRef>()
         materializeLocalMedia(
             includeAvatars = session.role != FamilyRole.Member,
-            babies = babies,
+            babies = babySnapshots,
         )
+        // Avatar inspection can suspend. Re-read every pending Baby before
+        // materializing its outbox row so a concurrent profile edit is either
+        // packaged as one current epoch or rejected later by the push CAS.
+        val babies = if (session.role == FamilyRole.Member) {
+            emptyList()
+        } else {
+            babyDao.listPendingSync()
+        }
         val directlyChangedMedia = mediaDao.listPendingSync().filter { asset ->
             if (authorityBabyIds == null) {
                 true
@@ -1639,6 +1772,31 @@ internal class ReplicaSyncEngine(
                 .toMutableMap(),
         )
 
+}
+
+/**
+ * Fail closed before a pull transaction could expose an eleventh live family
+ * custom definition. The calculation mirrors updated_at LWW and includes
+ * tombstones/replacements arriving in the same page.
+ */
+internal fun requireCustomItemCapacityAfterApply(
+    existing: List<CustomItemEntity>,
+    incoming: List<SyncEntity>,
+) {
+    val effective = existing.associate { item ->
+        item.clientUuid to (item.updatedAt to item.deletedAt)
+    }.toMutableMap()
+    incoming.asSequence()
+        .filter { it.type == "custom_item" }
+        .forEach { remote ->
+            val localRevision = effective[remote.clientUuid]?.first
+            if (localRevision == null || remote.updatedAt >= localRevision) {
+                effective[remote.clientUuid] = remote.updatedAt to remote.deletedAt
+            }
+        }
+    require(effective.values.count { (_, deletedAt) -> deletedAt == null } <= 10) {
+        "家庭自定义项目最多 10 个，请先删除一个后重试同步"
+    }
 }
 
 private data class BabyWire(

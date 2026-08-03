@@ -1,11 +1,16 @@
 package com.lezi.babylog.sync.backend
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Timer
+import java.util.TimerTask
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
@@ -42,12 +47,17 @@ import com.lezi.babylog.sync.session.requireDeviceName
 import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 private const val BOOTSTRAP_SECRET_HEADER = "X-Lezi-Bootstrap-Secret"
+internal const val REFRESH_REQUEST_ID_HEADER = "X-Lezi-Refresh-Request-Id"
+internal const val MEMBER_REQUEST_VIEW_HEADER = "X-Lezi-Member-Request-View"
+internal const val OPEN_MEMBER_REQUEST_VIEW = "open-v1"
+private val REFRESH_REQUEST_ID_PATTERN = Regex("[A-Za-z0-9_-]{32,128}")
 internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Self-hosted release APK download bound (full package, not media). */
 internal const val MAX_SYNC_APP_UPDATE_APK_BYTES = 100 * 1024 * 1024
 private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val MILLIS_PER_SECOND = 1_000L
+private const val DEFAULT_UPLOAD_WRITE_STALL_TIMEOUT_MILLIS = 30_000L
 /** Attached on authenticated family requests so the server can gate minSupported later. */
 internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"
 
@@ -67,7 +77,14 @@ class HttpSyncBackend internal constructor(
     private val connectionFactory: SyncHttpConnectionFactory,
     private val trustedEndpointResolver: TrustedEndpointResolver? = null,
     private val clientVersionCode: Int? = null,
+    private val uploadWriteStallTimeoutMillis: Long = DEFAULT_UPLOAD_WRITE_STALL_TIMEOUT_MILLIS,
 ) : SyncBackend {
+    init {
+        require(uploadWriteStallTimeoutMillis > 0) {
+            "上传写入停滞超时必须大于 0"
+        }
+    }
+
     @Inject
     constructor(
         preferences: SyncPreferences,
@@ -303,6 +320,22 @@ class HttpSyncBackend internal constructor(
     }
 
     override suspend fun refresh(
+        baseUrl: String,
+        refreshToken: String,
+        refreshRequestId: String,
+    ): SessionRefreshResult {
+        val token = refreshToken.trim()
+        require(token.isNotEmpty()) { "当前设备缺少 refresh token" }
+        return post(
+            baseUrl,
+            "/v1/session/refresh",
+            null,
+            buildJsonObject { put("refresh_token", token) },
+            extraHeaders = refreshRequestHeaders(refreshRequestId),
+        ).toSessionRefreshResult()
+    }
+
+    override suspend fun refresh(
         endpoint: TrustedEndpointProfile,
         refreshToken: String,
     ): SessionRefreshResult {
@@ -314,6 +347,30 @@ class HttpSyncBackend internal constructor(
             token = null,
             body = buildJsonObject { put("refresh_token", token) },
         ).toSessionRefreshResult()
+    }
+
+    override suspend fun refresh(
+        endpoint: TrustedEndpointProfile,
+        refreshToken: String,
+        refreshRequestId: String,
+    ): SessionRefreshResult {
+        val token = refreshToken.trim()
+        require(token.isNotEmpty()) { "当前设备缺少 refresh token" }
+        return post(
+            endpoint = endpoint,
+            path = "/v1/session/refresh",
+            token = null,
+            body = buildJsonObject { put("refresh_token", token) },
+            extraHeaders = refreshRequestHeaders(refreshRequestId),
+        ).toSessionRefreshResult()
+    }
+
+    private fun refreshRequestHeaders(refreshRequestId: String): Map<String, String> {
+        val normalized = refreshRequestId.trim()
+        require(REFRESH_REQUEST_ID_PATTERN.matches(normalized)) {
+            "refresh request id 格式无效"
+        }
+        return mapOf(REFRESH_REQUEST_ID_HEADER to normalized)
     }
 
     override suspend fun ownerLogin(
@@ -472,6 +529,7 @@ class HttpSyncBackend internal constructor(
         session.baseUrl,
         "/v1/member/requests",
         session.accessToken,
+        extraHeaders = mapOf(MEMBER_REQUEST_VIEW_HEADER to OPEN_MEMBER_REQUEST_VIEW),
     ).requiredArray("requests", "pending member requests").mapIndexed { index, element ->
         val request = element as? JsonObject
             ?: throw IllegalArgumentException("requests[$index] 不是对象")
@@ -481,6 +539,9 @@ class HttpSyncBackend internal constructor(
             deviceName = request.requiredNonBlankString("device_name", "requests[$index]"),
             createdAtEpochSeconds = request.requiredLong("created_at", "requests[$index]"),
             expiresAtEpochSeconds = request.requiredLong("expires_at", "requests[$index]"),
+            // 0.3.3 did not expose this field and only returned pending rows. Keep that
+            // response compatible during the server cutover; 0.3.5 marks approved rows.
+            status = request.memberLoginReviewStatus("requests[$index]"),
         )
     }
 
@@ -928,8 +989,12 @@ class HttpSyncBackend internal constructor(
         trustedEndpoint = endpoint,
     )
 
-    private suspend fun get(base: String, path: String, token: String?): JsonObject =
-        requestJson(base, path, "GET", token, null)
+    private suspend fun get(
+        base: String,
+        path: String,
+        token: String?,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): JsonObject = requestJson(base, path, "GET", token, null, extraHeaders)
 
     private suspend fun get(endpoint: TrustedEndpointProfile, path: String): JsonObject =
         requestJson(
@@ -1031,25 +1096,38 @@ class HttpSyncBackend internal constructor(
                     source.mime ?: "application/octet-stream",
                 )
                 connection.setFixedLengthStreamingMode(source.contentLength)
-                source.openStream().use { input ->
-                    connection.outputStream.use { output ->
-                        val buffer = ByteArray(RecordPhotoResourcePolicy.streamBufferBytes)
-                        var written = 0L
-                        while (true) {
-                            currentCoroutineContext().ensureActive()
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            if (count == 0) continue
-                            written += count
-                            require(written <= source.contentLength) {
+                val writeWatchdog = UploadWriteWatchdog(
+                    connection = connection,
+                    timeoutMillis = uploadWriteStallTimeoutMillis,
+                )
+                try {
+                    writeWatchdog.arm()
+                    source.openStream().use { input ->
+                        connection.outputStream.use { output ->
+                            val buffer = ByteArray(RecordPhotoResourcePolicy.streamBufferBytes)
+                            var written = 0L
+                            while (true) {
+                                currentCoroutineContext().ensureActive()
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                if (count == 0) continue
+                                written += count
+                                require(written <= source.contentLength) {
+                                    "待上传媒体长度与声明不一致"
+                                }
+                                output.write(buffer, 0, count)
+                                writeWatchdog.markProgress()
+                            }
+                            require(written == source.contentLength) {
                                 "待上传媒体长度与声明不一致"
                             }
-                            output.write(buffer, 0, count)
-                        }
-                        require(written == source.contentLength) {
-                            "待上传媒体长度与声明不一致"
                         }
                     }
+                    writeWatchdog.checkNotTimedOut()
+                } catch (error: IOException) {
+                    writeWatchdog.rethrowIfTimedOut(error)
+                } finally {
+                    writeWatchdog.close()
                 }
                 val (code, bytes) = readBoundedBody(
                     connection = connection,
@@ -1131,6 +1209,77 @@ class HttpSyncBackend internal constructor(
         } ?: byteArrayOf()
         return code to bytes
     }
+}
+
+/**
+ * HttpURLConnection has connect/read timeouts but no write timeout. A daemon timer remains
+ * independent of coroutine cancellation so it can disconnect a socket even while write() blocks.
+ */
+private class UploadWriteWatchdog(
+    private val connection: HttpURLConnection,
+    private val timeoutMillis: Long,
+) : AutoCloseable {
+    private val lock = Any()
+    private val timedOut = AtomicBoolean(false)
+    private val timer = Timer("lezi-sync-upload-watchdog", true)
+    private var pendingTask: TimerTask? = null
+    private var closed = false
+
+    fun arm() {
+        val task = object : TimerTask() {
+            override fun run() {
+                fireIfCurrent(this)
+            }
+        }
+        synchronized(lock) {
+            check(!closed) { "上传写入看门狗已经关闭" }
+            pendingTask?.cancel()
+            pendingTask = task
+            timer.schedule(task, timeoutMillis)
+        }
+    }
+
+    fun markProgress() {
+        checkNotTimedOut()
+        arm()
+    }
+
+    fun checkNotTimedOut() {
+        if (timedOut.get()) throw timeoutException()
+    }
+
+    fun rethrowIfTimedOut(error: IOException): Nothing {
+        if (!timedOut.get()) throw error
+        throw timeoutException(error)
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            pendingTask?.cancel()
+            pendingTask = null
+            timer.cancel()
+        }
+    }
+
+    private fun fireIfCurrent(task: TimerTask) {
+        val shouldDisconnect = synchronized(lock) {
+            if (closed || pendingTask !== task) {
+                false
+            } else {
+                pendingTask = null
+                timedOut.set(true)
+                true
+            }
+        }
+        if (shouldDisconnect) connection.disconnect()
+    }
+
+    private fun timeoutException(cause: IOException? = null): SocketTimeoutException =
+        SocketTimeoutException("家庭服务器上传写入超过 ${timeoutMillis}ms 无进展").also {
+            if (cause != null) it.initCause(cause)
+        }
 }
 
 private fun SyncSession.requireCurrentReplicaTransport() {
@@ -1281,8 +1430,8 @@ private fun pendingSecretBody(pendingSecret: String): JsonObject {
     return buildJsonObject { put("pending_secret", pendingSecret) }
 }
 
-private fun JsonObject.requiredMemberLoginStatus(context: String): MemberLoginStatus =
-    when (requiredString("status", context)) {
+private fun parseMemberLoginStatus(raw: String, context: String): MemberLoginStatus =
+    when (raw) {
         "pending" -> MemberLoginStatus.Pending
         "approved" -> MemberLoginStatus.Approved
         "rejected" -> MemberLoginStatus.Rejected
@@ -1291,6 +1440,20 @@ private fun JsonObject.requiredMemberLoginStatus(context: String): MemberLoginSt
         "claimed" -> MemberLoginStatus.Claimed
         else -> throw IllegalArgumentException("$context 响应 status 无效")
     }
+
+private fun JsonObject.requiredMemberLoginStatus(context: String): MemberLoginStatus =
+    parseMemberLoginStatus(requiredString("status", context), context)
+
+private fun JsonObject.memberLoginReviewStatus(context: String): MemberLoginStatus {
+    val element = this["status"] ?: return MemberLoginStatus.Pending
+    val raw = (element as? JsonPrimitive)?.contentOrNull
+        ?: throw IllegalArgumentException("$context 响应 status 无效")
+    return parseMemberLoginStatus(raw, context).also { status ->
+        require(status == MemberLoginStatus.Pending || status == MemberLoginStatus.Approved) {
+            "$context 响应 status 不是可处理状态"
+        }
+    }
+}
 
 private fun requireUrlSafeCapability(value: String): String = value.trim().also {
     require(it.matches(Regex("[A-Za-z0-9_-]{32,128}"))) { "成员登录授权格式无效" }

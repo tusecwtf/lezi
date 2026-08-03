@@ -145,6 +145,13 @@ interface SyncPreferences {
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
     /**
+     * Commits rotated credentials for the same Device identity without entering the
+     * cross-identity reauth gate. The durable refresh request id is retired last.
+     */
+    suspend fun saveRefreshedSession(session: SyncSession) {
+        saveSession(session)
+    }
+    /**
      * Candidate reconnect commit: endpoint trust, session identity, and retirement of the old
      * member directory share one durable commit.
      */
@@ -173,6 +180,10 @@ interface SyncPreferences {
     suspend fun ensureCreateRequestId(): String
     /** Durable across retries; retired atomically with a committed session. */
     suspend fun ensureOwnerLoginRequestId(): String
+    /** Retires a server-conflicted login mode/name key so the next explicit retry can proceed. */
+    suspend fun clearOwnerLoginRequestId()
+    /** Durable refresh-rotation nonce; retired only after rotated credentials are committed. */
+    suspend fun ensureRefreshRequestId(): String
     suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
@@ -261,7 +272,18 @@ class DataStoreSyncPreferences @Inject constructor(
         dataStore.data.map(::mapDisasterRestoreCheckpoint)
 
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile) {
+        var clearCredentials = false
         dataStore.edit { prefs ->
+            val previousOrigin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
+            val previousMode = prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE]
+            val previousPin = prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256]
+            val trustUnchanged = previousOrigin == endpoint.origin &&
+                previousMode == endpoint.trustMode.name &&
+                previousPin == endpoint.spkiSha256
+            clearCredentials = previousOrigin.isNotBlank() &&
+                !trustUnchanged &&
+                storedFamilySessionMatchesOrigin(prefs, previousOrigin)
+            if (clearCredentials) markCredentialsTerminal(prefs)
             prefs[Keys.VERIFIED_ENDPOINT_ORIGIN] = endpoint.origin
             prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE] = endpoint.trustMode.name
             val pin = endpoint.spkiSha256
@@ -271,14 +293,21 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256] = pin
             }
         }
+        if (clearCredentials) finishPendingFamilyCredentialClear()
     }
 
     override suspend fun forgetEndpoint() {
+        var clearCredentials = false
         dataStore.edit { prefs ->
+            val trustedOrigin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
+            clearCredentials = trustedOrigin.isNotBlank() &&
+                storedFamilySessionMatchesOrigin(prefs, trustedOrigin)
+            if (clearCredentials) markCredentialsTerminal(prefs)
             prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
             prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
             prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
         }
+        if (clearCredentials) finishPendingFamilyCredentialClear()
     }
 
     override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
@@ -383,6 +412,42 @@ class DataStoreSyncPreferences @Inject constructor(
         persistSession(session, pendingReplicaResetPrevious = null, reconnectedEndpoint = null)
     }
 
+    override suspend fun saveRefreshedSession(session: SyncSession) {
+        val current = this.session.first()
+        require(
+            current.familyId == session.familyId &&
+                current.membershipId == session.membershipId &&
+                current.deviceId == session.deviceId &&
+                current.role == session.role &&
+                current.baseUrl == session.baseUrl &&
+                current.familyId.isNotBlank() &&
+                session.refreshToken.isNotBlank(),
+        ) { "刷新凭据与当前家庭身份不一致" }
+
+        // This is a same-identity rotation, not an account switch. Write the
+        // Keystore token first: a process death leaves either the old token or
+        // the new token, while the durable request id remains available to replay
+        // the one deterministic server rotation. Retire that id only afterward.
+        secureStoreIo { setToken(session.refreshToken) }
+        processAccessToken.set(session.accessToken)
+        processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
+        dataStore.edit { prefs ->
+            check(
+                prefs[Keys.FAMILY_ID].orEmpty() == session.familyId &&
+                    prefs[Keys.MEMBERSHIP_ID].orEmpty() == session.membershipId &&
+                    prefs[Keys.DEVICE_ID].orEmpty() == session.deviceId &&
+                    prefs[Keys.ROLE].orEmpty() == session.role.name,
+            ) { "刷新期间家庭身份已变化" }
+            val sharedName = session.familyName?.trim()?.takeIf(String::isNotEmpty)
+            if (sharedName == null) {
+                prefs.remove(Keys.FAMILY_NAME)
+            } else {
+                prefs[Keys.FAMILY_NAME] = sharedName
+            }
+            prefs.remove(Keys.REFRESH_REQUEST_ID)
+        }
+    }
+
     override suspend fun saveReconnectedSession(
         session: SyncSession,
         endpoint: TrustedEndpointProfile,
@@ -440,12 +505,6 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
             }
-            // The owner session and retirement of its idempotency key are one
-            // durable commit. A separate post-commit edit can fail after the UI
-            // already owns a valid joined session.
-            prefs.remove(Keys.CREATE_REQUEST_ID)
-            prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
-            clearPendingMemberValues(prefs)
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
             prefs[Keys.PULL_CURSOR] = session.pullCursor
@@ -481,6 +540,14 @@ class DataStoreSyncPreferences @Inject constructor(
         processAccessToken.set(session.accessToken)
         processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
         dataStore.edit { prefs ->
+            // Claim/login/refresh replay capabilities retire in the same durable
+            // activation commit that removes the reauth gate. If the separate
+            // secure-token write fails, the original server operation can still
+            // be replayed after process death without minting another identity.
+            prefs.remove(Keys.CREATE_REQUEST_ID)
+            prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
+            prefs.remove(Keys.REFRESH_REQUEST_ID)
+            clearPendingMemberValues(prefs)
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
             prefs.remove(Keys.REAUTH_REQUIRED)
         }
@@ -600,6 +667,23 @@ class DataStoreSyncPreferences @Inject constructor(
         return requireNotNull(dataStore.data.first()[Keys.OWNER_LOGIN_REQUEST_ID])
     }
 
+    override suspend fun clearOwnerLoginRequestId() {
+        dataStore.edit { it.remove(Keys.OWNER_LOGIN_REQUEST_ID) }
+    }
+
+    override suspend fun ensureRefreshRequestId(): String {
+        dataStore.data.first()[Keys.REFRESH_REQUEST_ID]
+            ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+        val generated = UUID.randomUUID().toString()
+        dataStore.edit { prefs ->
+            if (prefs[Keys.REFRESH_REQUEST_ID].isNullOrBlank()) {
+                prefs[Keys.REFRESH_REQUEST_ID] = generated
+            }
+        }
+        return requireNotNull(dataStore.data.first()[Keys.REFRESH_REQUEST_ID])
+    }
+
     override suspend fun savePendingMemberLogin(
         receipt: MemberLoginReceipt,
         displayName: String,
@@ -713,8 +797,7 @@ class DataStoreSyncPreferences @Inject constructor(
 
     override suspend fun clearDeviceCredentialsForReauth() {
         dataStore.edit { prefs ->
-            prefs[Keys.REAUTH_REQUIRED] = true
-            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+            markCredentialsTerminal(prefs)
         }
         finishPendingFamilyCredentialClear()
     }
@@ -795,6 +878,23 @@ class DataStoreSyncPreferences @Inject constructor(
         // projection and cannot publish with credentials from the retired identity.
         prefs[Keys.REAUTH_REQUIRED] = true
         prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+        prefs.remove(Keys.REFRESH_REQUEST_ID)
+    }
+
+    private fun storedFamilySessionMatchesOrigin(
+        prefs: Preferences,
+        origin: String,
+    ): Boolean {
+        if (prefs[Keys.FAMILY_ID].isNullOrBlank()) return false
+        val scheme = prefs[Keys.SERVER_SCHEME].orEmpty().lowercase()
+        val host = prefs[Keys.SERVER_HOST].orEmpty()
+        if (scheme != "https" || host.isBlank()) return false
+        val config = FamilyEndpointConfig(
+            host = host,
+            port = prefs[Keys.SERVER_PORT] ?: DEFAULT_SERVER_PORT,
+            scheme = scheme,
+        ).withNormalized()
+        return config.baseUrl == origin
     }
 
     private fun writePendingReplicaReset(
@@ -833,6 +933,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.LAST_SUCCESS_AT)
         prefs.remove(Keys.CREATE_REQUEST_ID)
         prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
+        prefs.remove(Keys.REFRESH_REQUEST_ID)
         clearPendingMemberValues(prefs)
         prefs.remove(Keys.FAMILY_NAME)
         prefs.remove(Keys.MEMBERSHIP_ID)
@@ -1033,6 +1134,7 @@ class DataStoreSyncPreferences @Inject constructor(
         val LAST_SERVER_HEALTHY_AT = longPreferencesKey("sync_last_server_healthy_at")
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
         val OWNER_LOGIN_REQUEST_ID = stringPreferencesKey("sync_owner_login_request_id")
+        val REFRESH_REQUEST_ID = stringPreferencesKey("sync_refresh_request_id")
         val PENDING_MEMBER_REQUEST_ID = stringPreferencesKey("sync_pending_member_request_id")
         val PENDING_MEMBER_DISPLAY_NAME = stringPreferencesKey("sync_pending_member_display_name")
         val PENDING_MEMBER_DEVICE_NAME = stringPreferencesKey("sync_pending_member_device_name")

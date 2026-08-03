@@ -1,4 +1,5 @@
 package com.lezi.babylog.sync
+
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.SyncStatus
 import kotlinx.coroutines.flow.Flow
@@ -15,8 +16,10 @@ import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SetupProbeResult
+import com.lezi.babylog.sync.session.ShallowSyncLine
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
+import com.lezi.babylog.sync.session.shallowSyncLineFlow
 
 /**
  * Privacy-preserving family member projection from the home server.
@@ -304,6 +307,15 @@ interface SyncPort {
         reason: AvailabilityProbeReason,
     ): Result<FamilyServerAvailability> = Result.success(FamilyServerAvailability.Disabled)
     fun session(): Flow<SyncSession>
+    /** Shared product-level sync line; never exposes endpoint, token, or wire details. */
+    fun shallowStatus(): Flow<ShallowSyncLine> = shallowSyncLineFlow(
+        transportStatus = status(),
+        session = session(),
+        pendingMemberLogin = pendingMemberLogin(),
+        pendingOutboxCount = pendingOutboxCount(),
+    )
+    /** Device-local queued mutation count for the current retained family. */
+    fun pendingOutboxCount(): Flow<Int> = kotlinx.coroutines.flow.flowOf(0)
     /** Device-local minimal roster; never waits for the family server. */
     fun familyMemberDirectory(): Flow<List<FamilyMember>> =
         kotlinx.coroutines.flow.flowOf(emptyList())
@@ -398,6 +410,7 @@ interface SyncPort {
     suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> =
         Result.failure(SyncNotEnabledException())
     suspend fun cancelMemberLogin(): Result<Unit> = Result.failure(SyncNotEnabledException())
+    /** Legacy name: the Owner open view may also contain Approved-but-unclaimed requests. */
     suspend fun listPendingMemberLogins(): Result<List<PendingMemberLoginRequest>> =
         Result.failure(SyncNotEnabledException())
     suspend fun approveNewMemberLogin(requestId: String): Result<Unit> =
@@ -459,8 +472,9 @@ interface SyncPort {
     /**
      * Checks whether the trusted family server advertises a newer release APK.
      *
-     * Not joined → [AppUpdateCheckResult.NotJoined] without network I/O (also clears
-     * optional/forced surfaces).
+     * Truly left/unconfigured → [AppUpdateCheckResult.NotJoined] without network I/O
+     * and clears optional/forced surfaces. A retained family identity awaiting reauth
+     * keeps an existing forced shell so re-login cannot bypass a server update gate.
      * Joined → authenticated metadata fetch; compares integer versionCode only.
      * Failures do not change [status] (update checks must not look like sync errors).
      *
@@ -478,6 +492,8 @@ interface SyncPort {
      * Optional update discovered by foreground handshake/sync (or published after a
      * successful manual check). Null when none, not joined, up-to-date, forced, or the
      * user dismissed that versionCode for this process session ("稍后").
+     * Starting an install does not count as dismissal; permission/download failures
+     * keep the banner until explicit dismissal or a PackageInstaller session starts.
      */
     fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         kotlinx.coroutines.flow.flowOf(null)

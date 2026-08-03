@@ -181,6 +181,16 @@ internal class LocalReplicaClearCoordinator(
             pending.localMediaPaths
                 .filterNot(protectedPaths::contains)
                 .forEach { mediaFiles.delete(it) }
+            // A Composer import can exist before it has a MediaAsset owner. Sweep
+            // product-owned roots after the final ownership recheck so an explicit
+            // local clear fulfils its privacy promise for those orphan drafts too.
+            // Domain writers are excluded by LocalClearWorkflow's clear epoch; this
+            // filesystem pass deliberately does not acquire MediaLocalPathGate while
+            // [barrier] (syncMutex) is held, avoiding a reverse lock edge.
+            mediaFiles.sweepUnreferenced(
+                scope = pending.scope,
+                retainedLocalUris = protectedPaths,
+            )
             when (pending.scope) {
                 LocalDataClearScope.RecordsOnly -> finishRecordsOnly(pending)
                 LocalDataClearScope.AllLocalData -> outboxDao.deleteAll()

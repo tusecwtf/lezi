@@ -133,7 +133,7 @@ internal class RefreshingSyncBackend(
         authenticated(session, delegate::getAppUpdateMetadata)
 
     override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray =
-        authenticated(session, delegate::downloadAppUpdateApk)
+        authenticatedOnceOutsideMutex(session, delegate::downloadAppUpdateApk)
 
     override suspend fun stageBundle(
         session: SyncSession,
@@ -196,6 +196,32 @@ internal class RefreshingSyncBackend(
         }
     }
 
+    /**
+     * Resolves one usable credential snapshot under the refresh-rotation mutex, then releases it
+     * before the potentially long-running operation. APK bodies are intentionally not replayed on
+     * an access 401: a second large transfer would hide the first failure and block unrelated
+     * authenticated work for no security benefit.
+     */
+    private suspend fun <T> authenticatedOnceOutsideMutex(
+        requested: SyncSession,
+        operation: suspend (SyncSession) -> T,
+    ): T {
+        val current = sessionMutex.withLock {
+            val stored = currentCredentialsFor(requested)
+            if (stored.reauthRequired) throw ReauthRequiredException()
+            if (stored.hasUsableAccess()) stored else refreshOrRequireReauth(stored)
+        }
+        return try {
+            operation(current)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: SyncHttpException) {
+            failure.remoteTerminalRemovalOrNull()?.let { throw it }
+            failure.clientUpdateRequiredOrNull()?.let { throw it }
+            throw failure
+        }
+    }
+
     private suspend fun currentCredentialsFor(requested: SyncSession): SyncSession {
         val stored = preferences.session.first()
         return if (
@@ -217,14 +243,18 @@ internal class RefreshingSyncBackend(
         endpoint: TrustedEndpointProfile? = null,
     ): SyncSession {
         if (session.refreshToken.isBlank()) requireReauth()
+        // Persist before the server rotates. If the process dies after the server
+        // commit but before saveSession, the same old token and nonce replay the
+        // one accepted rotation instead of looking like token theft.
+        val refreshRequestId = preferences.ensureRefreshRequestId()
         val refreshed = try {
             if (endpoint == null) {
-                delegate.refresh(session.baseUrl, session.refreshToken)
+                delegate.refresh(session.baseUrl, session.refreshToken, refreshRequestId)
             } else {
                 require(endpoint.matchesOrigin(session.baseUrl)) {
                     "可信服务器与当前家庭会话不一致"
                 }
-                delegate.refresh(endpoint, session.refreshToken)
+                delegate.refresh(endpoint, session.refreshToken, refreshRequestId)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -250,7 +280,7 @@ internal class RefreshingSyncBackend(
             accessExpiresAtEpochSeconds = refreshed.accessExpiresAtEpochSeconds,
             reauthRequired = false,
             familyName = refreshed.familyName,
-        ).also { preferences.saveSession(it) }
+        ).also { preferences.saveRefreshedSession(it) }
     }
 
     private suspend fun requireReauth(): Nothing {

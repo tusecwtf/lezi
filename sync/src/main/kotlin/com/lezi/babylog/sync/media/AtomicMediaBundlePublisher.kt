@@ -110,6 +110,9 @@ internal class AtomicMediaBundlePublisher(
             var payload = row.payloadJson
             val media = loadMedia(row.clientUuid)
                 ?: error("本地媒体元数据不存在")
+            require(media.updatedAt == row.updatedAt && media.deletedAt == row.deletedAt) {
+                "本地媒体在同步打包期间已更新，请重试"
+            }
             if (row.deletedAt == null && media.localUri.isNotBlank()) {
                 val prepared = mediaFiles.prepareUpload(media.localUri)
                 ownedSources += prepared

@@ -702,6 +702,11 @@ private class StubMediaFileStore(
     ): String = error("download is outside this test")
 
     override suspend fun delete(localUri: String) = error("delete is outside this test")
+
+    override suspend fun sweepUnreferenced(
+        scope: com.lezi.babylog.core.database.LocalDataClearScope,
+        retainedLocalUris: Set<String>,
+    ) = error("local clear is outside this test")
 }
 
 private class QueueMediaFileStore(
@@ -721,6 +726,11 @@ private class QueueMediaFileStore(
     ): String = error("download is outside this test")
 
     override suspend fun delete(localUri: String) = error("delete is outside this test")
+
+    override suspend fun sweepUnreferenced(
+        scope: com.lezi.babylog.core.database.LocalDataClearScope,
+        retainedLocalUris: Set<String>,
+    ) = error("local clear is outside this test")
 }
 
 private fun preparedMedia(

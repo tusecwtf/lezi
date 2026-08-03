@@ -156,7 +156,6 @@ internal class FamilySessionCoordinator(
     private val onSessionChanged: (SyncSession) -> Unit,
     private val onSessionObserved: (SyncSession) -> Unit,
     private val requestSync: (SyncTrigger) -> Unit,
-    private val recoverReclaimedSession: suspend (SyncSession) -> InitialFamilyDataRecovery,
     private val beforeOperation: suspend () -> Unit = {},
     private val launchBestEffort: ((suspend () -> Unit) -> Unit) = {},
 ) {
@@ -256,9 +255,10 @@ internal class FamilySessionCoordinator(
                 deviceId = joined.deviceId,
                 joined = joined.copy(cursor = 0L),
             )
-            // The device session is durable before this independent cursor-zero pull.
-            // Failure leaves the session intact so foreground retry never reruns create.
-            val dataRecovery = recoverReclaimedSession(session)
+            // Session establishment ends at the durable credential boundary. Initial family data
+            // recovery belongs to the process sync loop and must never keep this wizard command
+            // suspended on an offline or wedged NAS.
+            val dataRecovery = scheduleInitialSync()
             FamilySessionOutcome.Joined(
                 session = session,
                 reclaimed = joined.reclaimed,
@@ -288,6 +288,10 @@ internal class FamilySessionCoordinator(
             if (error.statusCode == 401 || error.statusCode == 403) {
                 throw OwnerRootPasswordRejectedException()
             }
+            if (error.statusCode == 409) {
+                preferences.clearOwnerLoginRequestId()
+                throw IllegalStateException("登录方式或设备称呼已变化，请重试", error)
+            }
             throw error
         }
         require(joined.role == FamilyRole.Owner) { "管理员登录响应角色无效" }
@@ -296,9 +300,10 @@ internal class FamilySessionCoordinator(
             deviceId = joined.deviceId,
             joined = joined.copy(cursor = 0L),
         )
+        val dataRecovery = scheduleInitialSync()
         FamilySessionOutcome.Joined(
             session = session,
-            dataRecovery = recoverReclaimedSession(session),
+            dataRecovery = dataRecovery,
         )
     }
 
@@ -339,16 +344,39 @@ internal class FamilySessionCoordinator(
             MemberLoginStatus.Pending -> FamilySessionOutcome.MemberLoginChecked(
                 MemberLoginCheckResult.Waiting(pending),
             )
-            MemberLoginStatus.Approved -> {
-                val joined = backend.claimMemberLogin(current.endpointConfig.baseUrl, secret)
+            MemberLoginStatus.Approved,
+            MemberLoginStatus.Claimed,
+            -> {
+                val joined = try {
+                    backend.claimMemberLogin(current.endpointConfig.baseUrl, secret)
+                } catch (error: SyncHttpException) {
+                    if (
+                        status == MemberLoginStatus.Claimed &&
+                        error.statusCode in setOf(404, 409, 410)
+                    ) {
+                        preferences.clearPendingMemberLogin()
+                        return@withBarrier FamilySessionOutcome.MemberLoginChecked(
+                            MemberLoginCheckResult.Terminal(status),
+                        )
+                    }
+                    throw error
+                }
                 require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
                 val session = claimedMemberSession(current, joined)
                 val dataRecovery = try {
                     persistClaimedMemberSession(current, session)
-                    recoverReclaimedSession(session)
+                    // Initial pull belongs to the process sync loop. Account polling
+                    // returns at the durable session boundary and cannot hang on a
+                    // slow/offline NAS after the one-shot claim committed.
+                    scheduleInitialSync()
                 } catch (cancelled: CancellationException) {
                     throw cancelled
-                } catch (_: Throwable) {
+                } catch (error: Throwable) {
+                    // A failed secure-token handoff keeps the pending claim replay
+                    // capability. Do not report a joined session that never became
+                    // durable. Receipt-reset/initial-pull failures happen after the
+                    // replay slot retired and remain ordinary recovery work.
+                    if (preferences.pendingMemberLogin.first() != null) throw error
                     InitialFamilyDataRecovery.RetryRequired
                 }
                 FamilySessionOutcome.MemberLoginChecked(
@@ -358,7 +386,6 @@ internal class FamilySessionCoordinator(
             MemberLoginStatus.Rejected,
             MemberLoginStatus.Cancelled,
             MemberLoginStatus.Expired,
-            MemberLoginStatus.Claimed,
             -> {
                 preferences.clearPendingMemberLogin()
                 FamilySessionOutcome.MemberLoginChecked(MemberLoginCheckResult.Terminal(status))
@@ -369,8 +396,10 @@ internal class FamilySessionCoordinator(
     private suspend fun cancelMemberLogin(): FamilySessionOutcome = withBarrier {
         val current = preferences.session.first()
         require(!current.isJoined) { "这台设备已经加入家庭" }
-        requireNotNull(preferences.pendingMemberLogin.first()) {
-            "没有等待管理员确认的申请"
+        // The durable local slot is the authority. Repeated abandon after it was
+        // already cleared is an idempotent success, not a zombie-waiting error.
+        if (preferences.pendingMemberLogin.first() == null) {
+            return@withBarrier FamilySessionOutcome.Completed
         }
         val secret = try {
             preferences.pendingMemberSecret()
@@ -481,18 +510,23 @@ internal class FamilySessionCoordinator(
             joined = joined.copy(cursor = 0L),
             baseUrl = payload.endpoint.origin,
         )
-        val dataRecovery = try {
-            persistClaimedMemberSession(previous, session)
-            recoverReclaimedSession(session)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            InitialFamilyDataRecovery.RetryRequired
-        }
+        persistClaimedMemberSession(previous, session)
+        val dataRecovery = scheduleInitialSync()
         FamilySessionOutcome.Joined(
             session = session,
             dataRecovery = dataRecovery,
         )
+    }
+
+    private fun scheduleInitialSync(): InitialFamilyDataRecovery {
+        // Scheduling is deliberately best-effort: the joined session is already durable and the
+        // process-level foreground/background triggers remain available if this enqueue fails.
+        return try {
+            requestSync(SyncTrigger.Foreground)
+            InitialFamilyDataRecovery.NotRequired
+        } catch (_: Throwable) {
+            InitialFamilyDataRecovery.RetryRequired
+        }
     }
 
     private suspend fun listMembers(): FamilySessionOutcome =
