@@ -227,6 +227,13 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(retainedMedia.readBytes().toList())
             .containsExactlyElementsIn(byteArrayOf(1, 2, 3, 4).toList())
             .inOrder()
+
+        // Simulate process death after migrate/verify but before the contract marker commit.
+        openedDatabase?.close()
+        openedDatabase = null
+        val retry = OutboxRetirementUpgradeStep(storage.database)
+        retry.migrate()
+        retry.verify()
     }
 
     private companion object {

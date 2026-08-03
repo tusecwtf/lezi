@@ -19,7 +19,7 @@ import com.lezi.babylog.domain.toModel
  * Admin-facing conflict-not-adopted fulfillment audits (read surface).
  *
  * Conversion to an independent record stays on [CareLog] because it mutates
- * records, sleep state, and outbox through the care lifecycle.
+ * records, sleep state, and Room publish state through the care lifecycle.
  */
 internal class ConflictAuditQueries(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,

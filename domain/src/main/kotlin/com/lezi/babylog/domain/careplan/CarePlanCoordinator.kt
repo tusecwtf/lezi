@@ -583,7 +583,7 @@ internal class CarePlanCoordinator(
     /**
      * Create or re-dirty the durable fulfillment candidate for a plan+record pair.
      * Same-device retries reuse the existing [FulfillmentCandidateEntity.clientUuid]
-     * so outbox republish never invents a second candidate identity.
+     * so ephemeral replanning never invents a second candidate identity.
      *
      * Must run inside the caller's transaction.
      */

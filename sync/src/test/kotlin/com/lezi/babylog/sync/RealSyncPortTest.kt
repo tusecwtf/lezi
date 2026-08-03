@@ -4230,6 +4230,77 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun postMigrationDirtyRoomIntentPublishesAndBecomesVisibleToPeerWithoutOutbox() = runTest {
+        val sharedBackend = FakeSyncBackend()
+        val ownerJoin = sharedBackend.create(
+            baseUrl = "https://192.168.1.20:8787",
+            deviceId = "upgrade-owner",
+            displayName = "妈妈",
+            createRequestId = "create-upgrade-family",
+            bootstrapSecret = "bootstrap",
+            familyName = "升级验收家庭",
+        )
+        val ownerSession = joinedSession(ownerJoin.familyId).copy(
+            accessToken = ownerJoin.accessToken,
+            deviceId = "upgrade-owner",
+            role = ownerJoin.role,
+            familyName = ownerJoin.familyName,
+            membershipId = ownerJoin.membershipId,
+            pullGeneration = ownerJoin.generation,
+        )
+        val owner = SyncRig(ownerSession, syncBackend = sharedBackend)
+        sharedBackend.push(
+            ownerJoin.familyId,
+            "upgrade-owner",
+            listOf(
+                SyncEntity(
+                    type = "baby",
+                    clientUuid = "baby-local",
+                    payloadJson = """
+                        {
+                          "nickname":"本地宝宝",
+                          "sex":null,
+                          "birthday":"2024-10-04",
+                          "birth_weight_grams":null,
+                          "avatar_media_uuid":null
+                        }
+                    """.trimIndent(),
+                    updatedAt = 100,
+                ),
+            ),
+        ).getOrThrow()
+        val babyId = owner.babies.seed(localBaby().copy(syncDirty = false))
+        owner.records.seed(
+            localRecord(babyId).copy(
+                syncDirty = true,
+                createdByMembershipId = ownerJoin.membershipId,
+            ),
+        )
+
+        // This is the exact Room boundary produced by the contract 2→3 device fixture:
+        // the legacy queue is gone and the residual Record identity is dirty.
+        owner.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
+        assertThat(owner.records.getByClientUuid("record-local")?.syncDirty).isFalse()
+
+        val peer = SyncRig(
+            session = joinedSession(ownerJoin.familyId).copy(
+                accessToken = "peer-access",
+                deviceId = "upgrade-peer",
+                role = FamilyRole.Member,
+                familyName = ownerJoin.familyName,
+                membershipId = "peer-membership",
+                pullGeneration = ownerJoin.generation,
+            ),
+            syncBackend = sharedBackend,
+        )
+
+        peer.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
+        val received = requireNotNull(peer.records.getByClientUuid("record-local"))
+        assertThat(received.payloadJson).isEqualTo("""{"amount_ml":120}""")
+        assertThat(received.syncDirty).isFalse()
+    }
+
+    @Test
     fun multiPagePullKeepsConsistentCurrentFamilyNameEnvelope() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(

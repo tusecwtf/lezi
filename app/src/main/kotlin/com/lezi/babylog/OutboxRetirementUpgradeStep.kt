@@ -30,6 +30,8 @@ internal class OutboxRetirementUpgradeStep internal constructor(
             null,
             SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
         ).use { sqlite ->
+            if (isCompleteTarget(sqlite)) return@use
+            requireCompleteSource(sqlite)
             sqlite.beginTransaction()
             try {
                 rejectUnknownEntityTypes(sqlite)
@@ -96,6 +98,34 @@ internal class OutboxRetirementUpgradeStep internal constructor(
         }
     }
 
+    private fun isCompleteTarget(sqlite: SQLiteDatabase): Boolean =
+        sqlite.version == TARGET_ROOM_SCHEMA &&
+            !hasOutboxTable(sqlite) &&
+            roomIdentityHash(sqlite) == TARGET_ROOM_IDENTITY_HASH
+
+    private fun requireCompleteSource(sqlite: SQLiteDatabase) {
+        val isSource = sqlite.version == SOURCE_ROOM_SCHEMA &&
+            hasOutboxTable(sqlite) &&
+            roomIdentityHash(sqlite) == SOURCE_ROOM_IDENTITY_HASH
+        if (!isSource) {
+            throw LocalDataUpgradeFailure(
+                LocalDataUpgradeBlockReason.InconsistentData,
+                "Room/outbox 状态不是完整的 $SOURCE_ROOM_SCHEMA 源或 " +
+                    "$TARGET_ROOM_SCHEMA 目标，已保留原数据并停止升级",
+            )
+        }
+    }
+
+    private fun hasOutboxTable(sqlite: SQLiteDatabase): Boolean = sqlite.rawQuery(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'",
+        null,
+    ).use { it.moveToFirst() }
+
+    private fun roomIdentityHash(sqlite: SQLiteDatabase): String? = sqlite.rawQuery(
+        "SELECT identity_hash FROM room_master_table WHERE id = 42",
+        null,
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+
     private fun checkNoMappedRowRemainsClean(
         sqlite: SQLiteDatabase,
         entityType: String,
@@ -113,6 +143,8 @@ internal class OutboxRetirementUpgradeStep internal constructor(
     }
 
     private companion object {
+        const val SOURCE_ROOM_SCHEMA = 25
+        const val SOURCE_ROOM_IDENTITY_HASH = "91e42aafeee126b93e223e69b38d9747"
         const val TARGET_ROOM_SCHEMA = 26
         const val TARGET_ROOM_IDENTITY_HASH = "078622636b6b4463a0b66213aba5613a"
         val ENTITY_TABLES = linkedMapOf(

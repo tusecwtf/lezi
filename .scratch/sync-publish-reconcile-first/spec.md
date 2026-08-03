@@ -107,6 +107,7 @@ This track fixes the **mechanism**, not a single incident bugfix.
   includes old-APK upgrade data safety + push under new mechanism.
 - 2026-08-04: Room 26 / local-data contract 3 retires the table only after
   transferring supported residual identities to Room dirty state. Device
-  migration fixtures preserve care rows and media bytes; JVM fake-backend
-  coverage proves the resulting Room intent is publishable without durable
-  queue state.
+  migration fixtures preserve care rows and media bytes and cover the
+  post-transaction/pre-marker retry window; dual-client fake-backend coverage
+  proves the resulting Room boundary is publishable and peer-visible without
+  durable queue state.

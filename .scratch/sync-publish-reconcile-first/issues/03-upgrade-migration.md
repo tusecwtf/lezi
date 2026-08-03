@@ -44,10 +44,14 @@ new plan after first online cycles.
 - 2026-08-04 device evidence on `lezi_api35`: adjacent contract 1→2→3 opens
   Room 26; contract 2 fixture with a clean Record plus residual outbox migrates
   to dirty Room state, drops outbox, and preserves the exact media bytes.
-- The deterministic public-seam chain is covered in two halves: the device
-  migration proves residual intent becomes Room dirty state; sync JVM tests
-  prove a no-outbox dirty/local-ahead Room entity survives pull, enters the
-  same-cycle plan, and is pushed to the fake backend. Pending count likewise
-  reads Room planner eligibility rather than an outbox row count.
+- The device fixture proves residual intent becomes the exact Room boundary of
+  `outbox` absent + Record dirty. A dual-client JVM acceptance starts at that
+  boundary: Owner reconcile→plan→push commits the Record to one shared fake
+  backend, then a Member pull receives it. Pending count likewise reads Room
+  planner eligibility rather than an outbox row count.
+- Review hardening covers the gate crash window: after the Room 26 transaction
+  commits but before the contract marker advances, rerunning 2→3 validates the
+  complete target and succeeds as a no-op; mixed source/target shapes fail
+  closed without modifying preserved data.
 - Verification: targeted migration/FreshDatabase instrumentation suites and
   `:sync`, `:app`, and `:core:database` JVM suites passed.
