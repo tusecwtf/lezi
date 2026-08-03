@@ -39,6 +39,10 @@ internal fun formatBirthWeightKg(grams: Int): String =
         String.format(Locale.ROOT, "%.2fkg", grams / 1000.0)
     }
 
+internal fun formatBabyBirthday(birthdayEpochDay: Long): String =
+    LocalDate.ofEpochDay(birthdayEpochDay)
+        .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+
 /**
  * Independent baby zone on the account Tab. Device ID / storage / network
  * summaries intentionally stay off this surface (S1 / ticket 03).
@@ -92,9 +96,8 @@ internal fun FamilyOverview(
                             "FEMALE" -> "女宝"
                             else -> ""
                         }
-                        val birth = current?.let {
-                            LocalDate.ofEpochDay(it.birthdayEpochDay).toString()
-                        }.orEmpty()
+                        val birth = current?.let { formatBabyBirthday(it.birthdayEpochDay) }
+                            .orEmpty()
                         val weight = current?.birthWeightGrams
                             ?.let(::formatBirthWeightKg)
                             .orEmpty()
@@ -181,9 +184,11 @@ internal fun FamilyOverview(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            val birth = LocalDate.ofEpochDay(b.birthdayEpochDay)
-                                .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
-                            val weight = b.birthWeightGrams?.let { " · 出生 ${it}g" }.orEmpty()
+                            val birth = formatBabyBirthday(b.birthdayEpochDay)
+                            val weight = b.birthWeightGrams
+                                ?.let(::formatBirthWeightKg)
+                                ?.let { " · 出生体重 $it" }
+                                .orEmpty()
                             Text(
                                 "${babyAgeLabel(b.birthdayEpochDay)} · $birth$weight" +
                                     if (dup) " · 昵称重复" else "",

@@ -36,6 +36,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -57,7 +58,6 @@ import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
-import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
@@ -76,6 +76,8 @@ import com.lezi.babylog.domain.growth.GrowthMeasurementLifecycle
 import com.lezi.babylog.domain.growth.ObserveGrowthMeasurements
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.session.ShallowSyncLine
+import com.lezi.babylog.sync.session.ShallowSyncState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -91,6 +93,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 enum class GrowthMetric { WEIGHT, HEIGHT }
@@ -123,6 +126,7 @@ class GrowthViewModel @Inject constructor(
     private val syncPort: SyncPort,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
+    private val refreshInFlight = MutableStateFlow(false)
     private val writes = GrowthMeasurementWriteCoordinator(
         scope = viewModelScope,
         measurements = measurements,
@@ -132,11 +136,15 @@ class GrowthViewModel @Inject constructor(
 
     val editor = writes.state
 
-    val syncStatus = syncPort.status().stateIn(
+    val shallowSyncStatus = syncPort.shallowStatus().stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
-        SyncStatus.Disabled,
+        ShallowSyncLine(
+            state = ShallowSyncState.Unjoined,
+            text = "尚未加入家庭 · 数据仅保存在本机",
+        ),
     )
+    val isRefreshing = refreshInFlight.asStateFlow()
 
     val timeStepMin = settingsStore.settings
         .map { it.timeStepMin }
@@ -216,7 +224,14 @@ class GrowthViewModel @Inject constructor(
     fun deleteMeasurement(): Boolean = writes.submitDelete()
 
     fun refresh() {
-        viewModelScope.launch { syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh) }
+        if (!refreshInFlight.compareAndSet(expect = false, update = true)) return
+        viewModelScope.launch {
+            try {
+                syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh)
+            } finally {
+                refreshInFlight.value = false
+            }
+        }
     }
 
 }
@@ -234,7 +249,8 @@ fun GrowthRoute(
     vm: GrowthViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
-    val syncStatus by vm.syncStatus.collectAsStateWithLifecycle()
+    val shallowSyncStatus by vm.shallowSyncStatus.collectAsStateWithLifecycle()
+    val isRefreshing by vm.isRefreshing.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
@@ -288,7 +304,7 @@ fun GrowthRoute(
 
     PageScaffoldBackground {
         PullToRefreshBox(
-            isRefreshing = syncStatus == SyncStatus.Syncing,
+            isRefreshing = isRefreshing,
             onRefresh = vm::refresh,
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -307,13 +323,21 @@ fun GrowthRoute(
                 },
             )
 
-            if (syncStatus == SyncStatus.Error) {
-                Text(
-                    "同步遇到问题，本机成长记录仍可使用",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
+            Text(
+                shallowSyncStatus.text,
+                style = LeziTypography.Meta,
+                color = if (
+                    shallowSyncStatus.state in setOf(
+                        ShallowSyncState.Error,
+                        ShallowSyncState.ReauthRequired,
+                    )
+                ) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                modifier = Modifier.testTag("growth_shallow_sync_status"),
+            )
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(

@@ -14,6 +14,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -28,10 +29,40 @@ import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
 import com.lezi.babylog.feature.family.components.FamilyPrimarySurface
 import com.lezi.babylog.feature.family.components.buildFamilyOverviewCard
 import com.lezi.babylog.feature.family.components.familyMembersForDisplay
+import com.lezi.babylog.feature.family.components.familyNameSupportingCopy
+import com.lezi.babylog.feature.family.components.familyRosterEntryPresentation
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.sync.AppUpdateMetadata
+import com.lezi.babylog.sync.session.ShallowSyncState
 import com.lezi.babylog.sync.session.FamilyRole
 internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
+
+internal data class FamilyAccountConnectionPresentation(
+    val showFamilyContext: Boolean,
+    val showRoster: Boolean,
+    val primaryCtaLabel: String?,
+)
+
+internal fun familyAccountConnectionPresentation(
+    isJoined: Boolean,
+    retainedFamilyIdentity: Boolean,
+    shallowState: ShallowSyncState,
+    waitingForApproval: Boolean,
+    showCreateJoin: Boolean,
+): FamilyAccountConnectionPresentation {
+    val requiresReauth = shallowState == ShallowSyncState.ReauthRequired
+    return FamilyAccountConnectionPresentation(
+        showFamilyContext = isJoined || (requiresReauth && retainedFamilyIdentity),
+        showRoster = isJoined,
+        primaryCtaLabel = when {
+            isJoined -> null
+            requiresReauth -> "重新登录或申请"
+            waitingForApproval -> "查看加入申请"
+            showCreateJoin -> FamilyPrimaryCta.CONNECT
+            else -> null
+        },
+    )
+}
 
 /**
  * Account Tab family zone: overview family card + primary CTAs.
@@ -50,7 +81,14 @@ internal fun FamilySharingContent(
     onOpenOptionalAppUpdate: (AppUpdateMetadata) -> Unit = {},
     onDismissOptionalAppUpdate: (versionCode: Int) -> Unit = {},
 ) {
-    val visibleMembers = if (overview.enabled) {
+    val connection = familyAccountConnectionPresentation(
+        isJoined = overview.enabled,
+        retainedFamilyIdentity = overview.retainedFamilyIdentity,
+        shallowState = overview.shallowSyncLine.state,
+        waitingForApproval = overview.pendingMemberLogin != null,
+        showCreateJoin = primary.showCreateJoin,
+    )
+    val visibleMembers = if (connection.showRoster) {
         familyMembersForDisplay(
             members.members,
             overview.displayName,
@@ -62,7 +100,7 @@ internal fun FamilySharingContent(
         emptyList()
     }
     val card = buildFamilyOverviewCard(
-        isJoined = overview.enabled,
+        isJoined = connection.showFamilyContext,
         role = overview.role,
         endpointConfigured = endpointConfigured,
         familyName = overview.familyName,
@@ -70,13 +108,15 @@ internal fun FamilySharingContent(
         localDisplayName = overview.displayName,
         memberCount = visibleMembers.size,
         membersLoaded = members.membersLoaded,
+        membersLoading = members.membersLoading,
+        membersError = members.membersError,
         status = overview.status,
         lastSuccessAt = overview.lastSuccessAt,
         waitingForApproval = overview.pendingMemberLogin != null,
     )
 
     LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
-        if (overview.enabled) {
+        if (connection.showFamilyContext) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -87,11 +127,7 @@ internal fun FamilySharingContent(
                         style = LeziTypography.TitleSm,
                     )
                     Text(
-                        if (overview.role == FamilyRole.Owner) {
-                            "共享家庭名 · 管理员可改"
-                        } else {
-                            "共享家庭名"
-                        },
+                        familyNameSupportingCopy(overview.role),
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -115,14 +151,22 @@ internal fun FamilySharingContent(
                 }
             }
             Spacer(Modifier.height(LeziSpacing.Sm))
-            FamilyMemberRosterEntry(
-                label = card.memberCountLabel,
-                pendingCount = members.pendingMemberRequests.size.takeIf {
-                    overview.role == FamilyRole.Owner
-                } ?: 0,
-                onOpenMembers = onOpenMembers,
-            )
-            Spacer(Modifier.height(LeziSpacing.Xs))
+            if (connection.showRoster) {
+                FamilyMemberRosterEntry(
+                    label = card.memberCountLabel,
+                    isError = familyRosterEntryPresentation(
+                        visibleCount = visibleMembers.size,
+                        loaded = members.membersLoaded,
+                        loading = members.membersLoading,
+                        error = members.membersError,
+                    ).isError,
+                    loginRequestCount = members.pendingMemberRequests.size.takeIf {
+                        overview.role == FamilyRole.Owner
+                    } ?: 0,
+                    onOpenMembers = onOpenMembers,
+                )
+                Spacer(Modifier.height(LeziSpacing.Xs))
+            }
         } else {
             Text(
                 card.familyNameLabel,
@@ -132,8 +176,12 @@ internal fun FamilySharingContent(
         }
 
         FamilySyncStatusEntry(
-            statusLabel = card.syncStatusLabel,
-            isError = overview.status == com.lezi.babylog.core.model.SyncStatus.Error,
+            statusLabel = overview.shallowSyncLine.text,
+            isError = overview.shallowSyncLine.state in setOf(
+                ShallowSyncState.Error,
+                ShallowSyncState.ReauthRequired,
+            ),
+            modifier = Modifier.testTag("account_shallow_sync_status"),
         )
     }
 
@@ -147,9 +195,9 @@ internal fun FamilySharingContent(
     }
 
     // Unauthenticated: enter the probe-driven family wizard from one primary action.
-    if (primary.showCreateJoin) {
+    connection.primaryCtaLabel?.let { ctaLabel ->
         LeziPrimaryButton(
-            if (overview.pendingMemberLogin != null) "查看加入申请" else FamilyPrimaryCta.CONNECT,
+            ctaLabel,
             onClick = onConnectFamily,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -199,7 +247,8 @@ internal fun FamilyAccountActions(
 @Composable
 internal fun FamilyMemberRosterEntry(
     label: String,
-    pendingCount: Int = 0,
+    isError: Boolean = false,
+    loginRequestCount: Int = 0,
     onOpenMembers: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -214,8 +263,8 @@ internal fun FamilyMemberRosterEntry(
             )
             .padding(vertical = LeziSpacing.Xs)
             .semantics {
-                contentDescription = if (pendingCount > 0) {
-                    "家庭成员与设备：$label，$pendingCount 个待确认设备"
+                contentDescription = if (loginRequestCount > 0) {
+                    "家庭成员与设备：$label，$loginRequestCount 个设备登录申请"
                 } else {
                     "家庭成员与设备：$label"
                 }
@@ -226,17 +275,21 @@ internal fun FamilyMemberRosterEntry(
         Text(
             "家庭成员与设备 · $label",
             style = LeziTypography.BodyStrong,
-            color = MaterialTheme.colorScheme.primary,
+            color = if (isError) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
             modifier = Modifier.weight(1f),
         )
-        if (pendingCount > 0) {
+        if (loginRequestCount > 0) {
             Surface(
                 shape = androidx.compose.foundation.shape.CircleShape,
                 color = MaterialTheme.colorScheme.error,
                 contentColor = MaterialTheme.colorScheme.onError,
             ) {
                 Text(
-                    pendingCount.coerceAtMost(99).toString(),
+                    loginRequestCount.coerceAtMost(99).toString(),
                     style = LeziTypography.Label,
                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
                 )

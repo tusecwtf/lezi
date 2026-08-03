@@ -90,6 +90,18 @@ internal fun onboardingCreateBabyBody(source: OnboardingCreateBabySource): Strin
         "离线模式：先在本机创建宝宝并记录。之后可在账户里新建或加入家庭再同步。"
 }
 
+internal data class OnboardingCreateBabyPrimaryPresentation(
+    val label: String,
+    val enabled: Boolean,
+)
+
+internal fun onboardingCreateBabyPrimaryPresentation(
+    busy: Boolean,
+): OnboardingCreateBabyPrimaryPresentation = OnboardingCreateBabyPrimaryPresentation(
+    label = if (busy) "创建中…" else "开始记录",
+    enabled = !busy,
+)
+
 internal fun onboardingCreateBabySource(
     familyWizardState: FamilyWizardState,
 ): OnboardingCreateBabySource {
@@ -131,15 +143,12 @@ internal fun onboardingFamilyWizardTransition(
 ): OnboardingFamilyTransition? = when (state) {
     is FamilyWizardState.Completed -> when (val outcome = state.outcome) {
         is FamilyWizardOutcome.Created -> when (outcome.dataRecovery) {
-            InitialFamilyDataRecovery.Complete -> OnboardingFamilyTransition(
-                finishRecovery = false,
-                nextStep = OnboardingStep.CreateBaby,
-            )
+            InitialFamilyDataRecovery.Complete,
             InitialFamilyDataRecovery.RetryRequired,
             InitialFamilyDataRecovery.NotRequired,
             -> OnboardingFamilyTransition(
                 finishRecovery = false,
-                nextStep = OnboardingStep.RecoveryPending,
+                nextStep = OnboardingStep.CreateBaby,
             )
         }
         is FamilyWizardOutcome.Reclaimed -> when (outcome.dataRecovery) {
@@ -157,8 +166,8 @@ internal fun onboardingFamilyWizardTransition(
             InitialFamilyDataRecovery.RetryRequired,
             InitialFamilyDataRecovery.NotRequired,
             -> OnboardingFamilyTransition(
-                finishRecovery = false,
-                nextStep = OnboardingStep.RecoveryPending,
+                finishRecovery = true,
+                nextStep = OnboardingStep.ChooseFamily,
             )
         }
         is FamilyWizardOutcome.OwnerLoggedIn -> when (outcome.dataRecovery) {
@@ -172,44 +181,34 @@ internal fun onboardingFamilyWizardTransition(
             InitialFamilyDataRecovery.RetryRequired,
             InitialFamilyDataRecovery.NotRequired,
             -> OnboardingFamilyTransition(
-                finishRecovery = false,
-                nextStep = OnboardingStep.RecoveryPending,
+                finishRecovery = true,
+                nextStep = OnboardingStep.ChooseFamily,
             )
         }
         is FamilyWizardOutcome.MemberApproved -> when (outcome.dataRecovery) {
-            InitialFamilyDataRecovery.Complete ->
-                OnboardingFamilyTransition(
-                    finishRecovery = true,
-                    nextStep = OnboardingStep.ChooseFamily,
-                )
+            InitialFamilyDataRecovery.Complete,
             InitialFamilyDataRecovery.RetryRequired,
             InitialFamilyDataRecovery.NotRequired,
             -> OnboardingFamilyTransition(
-                finishRecovery = false,
-                nextStep = OnboardingStep.RecoveryPending,
+                finishRecovery = true,
+                nextStep = OnboardingStep.ChooseFamily,
             )
         }
         is FamilyWizardOutcome.MemberLoginQrClaimed -> when (outcome.dataRecovery) {
-            InitialFamilyDataRecovery.Complete ->
-                OnboardingFamilyTransition(
-                    finishRecovery = true,
-                    nextStep = OnboardingStep.ChooseFamily,
-                )
+            InitialFamilyDataRecovery.Complete,
             InitialFamilyDataRecovery.RetryRequired,
             InitialFamilyDataRecovery.NotRequired,
             -> OnboardingFamilyTransition(
-                finishRecovery = false,
-                nextStep = OnboardingStep.RecoveryPending,
+                finishRecovery = true,
+                nextStep = OnboardingStep.ChooseFamily,
             )
         }
     }
-    is FamilyWizardState.RetryableFailure -> if (state.committedOutcome != null) {
-        OnboardingFamilyTransition(
-            finishRecovery = false,
-            nextStep = OnboardingStep.RecoveryPending,
+    is FamilyWizardState.RetryableFailure -> state.committedOutcome?.let { committed ->
+        onboardingFamilyWizardTransition(
+            FamilyWizardState.Completed(state.snapshot, committed),
+            reclaimedFamilyEmpty,
         )
-    } else {
-        null
     }
     is FamilyWizardState.Editing,
     is FamilyWizardState.CertificateApprovalRequired,

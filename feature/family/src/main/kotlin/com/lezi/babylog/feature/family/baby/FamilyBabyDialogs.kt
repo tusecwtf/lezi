@@ -19,7 +19,9 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.feature.family.components.FamilyDialog
+import com.lezi.babylog.feature.family.components.FamilyDestructiveAction
 import com.lezi.babylog.feature.family.components.FamilyScopeRow
+import com.lezi.babylog.feature.family.components.familyDestructiveConfirmPresentation
 
 internal data class BabyProfileUpdate(
     val nickname: String,
@@ -40,16 +42,27 @@ internal fun FamilyBabyDialog(
     onPreviewMerge: (Long, Long) -> Unit,
     onMerge: (BabyMergePreview) -> Unit,
     onUpdate: (Baby, BabyProfileUpdate, onFinished: () -> Unit) -> Unit,
+    destructiveBusy: Boolean = false,
 ) {
     when (dialog) {
-        is FamilyDialog.DeleteBaby -> DeleteBabyDialog(dialog.baby, onDelete, onDismiss)
+        is FamilyDialog.DeleteBaby -> DeleteBabyDialog(
+            baby = dialog.baby,
+            busy = destructiveBusy,
+            onDelete = onDelete,
+            onDismiss = onDismiss,
+        )
         is FamilyDialog.MergeBaby -> MergeBabyDialog(
             source = dialog.source,
             babies = babies,
             onPreview = onPreviewMerge,
             onDismiss = onDismiss,
         )
-        is FamilyDialog.MergePreview -> MergePreviewDialog(dialog.preview, onMerge, onDismiss)
+        is FamilyDialog.MergePreview -> MergePreviewDialog(
+            preview = dialog.preview,
+            busy = destructiveBusy,
+            onMerge = onMerge,
+            onDismiss = onDismiss,
+        )
         is FamilyDialog.EditBaby -> BabyEditDialog(
             baby = dialog.baby,
             canEditAvatar = canEditAvatar,
@@ -69,19 +82,29 @@ internal fun FamilyBabyDialog(
 @Composable
 private fun DeleteBabyDialog(
     baby: Baby,
+    busy: Boolean,
     onDelete: (Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val presentation = familyDestructiveConfirmPresentation(
+        FamilyDestructiveAction.DeleteBaby,
+        busy,
+    )
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("删除「${baby.nickname}」？") },
         text = { Text("删除后该档案不可恢复。记录仍会留在本机但不再出现在当前宝宝视图中。") },
         confirmButton = {
-            TextButton(onClick = { onDelete(baby.id) }) {
-                Text("删除", color = MaterialTheme.colorScheme.error)
+            TextButton(
+                onClick = { onDelete(baby.id) },
+                enabled = presentation.enabled,
+            ) {
+                Text(presentation.label, color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+        },
     )
 }
 
@@ -122,11 +145,16 @@ private fun MergeBabyDialog(
 @Composable
 private fun MergePreviewDialog(
     preview: BabyMergePreview,
+    busy: Boolean,
     onMerge: (BabyMergePreview) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val presentation = familyDestructiveConfirmPresentation(
+        FamilyDestructiveAction.MergeBaby,
+        busy,
+    )
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("确认合并宝宝档案？") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
@@ -141,11 +169,16 @@ private fun MergePreviewDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onMerge(preview) }) {
-                Text("确认合并", color = MaterialTheme.colorScheme.error)
+            TextButton(
+                onClick = { onMerge(preview) },
+                enabled = presentation.enabled,
+            ) {
+                Text(presentation.label, color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+        },
     )
 }
 

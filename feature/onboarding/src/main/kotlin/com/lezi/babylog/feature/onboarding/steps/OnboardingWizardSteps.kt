@@ -48,6 +48,7 @@ import com.lezi.babylog.feature.onboarding.OnboardingCreateBabySource
 import com.lezi.babylog.feature.onboarding.onboardingChooseFamilyBody
 import com.lezi.babylog.feature.onboarding.onboardingConnectFamilyAction
 import com.lezi.babylog.feature.onboarding.onboardingCreateBabyBody
+import com.lezi.babylog.feature.onboarding.onboardingCreateBabyPrimaryPresentation
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.SetupProbeResult
@@ -263,6 +264,7 @@ internal fun OnboardingCreateFamilyStep(
 @Composable
 internal fun OnboardingCreateBabyStep(
     createBabySource: OnboardingCreateBabySource,
+    creatingBaby: Boolean,
     name: String,
     onNameChange: (String) -> Unit,
     nameError: Boolean,
@@ -278,6 +280,7 @@ internal fun OnboardingCreateBabyStep(
     onSubmit: (themeColorArgb: Int, weightGrams: Int?) -> Unit,
     onBack: () -> Unit,
 ) {
+    val primary = onboardingCreateBabyPrimaryPresentation(creatingBaby)
     Text(
         onboardingCreateBabyBody(createBabySource),
         style = MaterialTheme.typography.bodyMedium,
@@ -360,6 +363,7 @@ internal fun OnboardingCreateBabyStep(
     }
     formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     Button(
+        enabled = primary.enabled,
         onClick = {
             val grams = weightText.toIntOrNull()
             onSubmit(ThemePalette[themeIdx], grams)
@@ -367,9 +371,10 @@ internal fun OnboardingCreateBabyStep(
         modifier = Modifier
             .fillMaxWidth()
             .height(52.dp),
-    ) { Text("开始记录") }
+    ) { Text(primary.label) }
     if (createBabySource == OnboardingCreateBabySource.OfflineMode) {
         TextButton(
+            enabled = !creatingBaby,
             onClick = onBack,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("返回") }

@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -135,6 +136,43 @@ class FamilyHostBehaviorTest {
         assertThat(state.members).containsExactly(member)
         assertThat(state.pendingRequests).containsExactly(pending)
         assertThat(state.error).isNull()
+    }
+
+    @Test
+    fun cancelledRosterRefreshClearsLoadingAndRetainsThePriorRoster() = runTest {
+        val priorMember = FamilyMember("管理员", FamilyRole.Owner, true, "m-owner")
+        val previous = FamilyMembersState(
+            familyId = "fam-1",
+            members = listOf(priorMember),
+            loaded = true,
+        )
+        val cancellation = CancellationException("host unmounted")
+        val sync = object : SyncPort by NoOpSyncPort() {
+            private val sessionState = MutableStateFlow(
+                SyncSession(
+                    familyId = "fam-1",
+                    role = FamilyRole.Owner,
+                    serverHost = "192.168.50.4",
+                    membershipId = "m-owner",
+                    accessToken = "tok",
+                    refreshToken = "ref",
+                ),
+            )
+            override fun session(): Flow<SyncSession> = sessionState
+            override suspend fun listFamilyMembers(): Result<List<FamilyMember>> =
+                throw cancellation
+        }
+        val projections = mutableListOf<FamilyMembersState>()
+        val actions = MembersDevicesActions(sync, projections::add)
+
+        val thrown = runCatching {
+            actions.refreshMembersNow(previous, showErrors = true)
+        }.exceptionOrNull()
+
+        assertThat(thrown).isSameInstanceAs(cancellation)
+        assertThat(projections.first().loading).isTrue()
+        assertThat(projections.last()).isEqualTo(previous)
+        assertThat(projections.last().loading).isFalse()
     }
 
     @Test

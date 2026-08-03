@@ -40,6 +40,7 @@ import com.lezi.babylog.feature.family.components.normalizedFamilyDisplayNameKey
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import java.text.SimpleDateFormat
@@ -108,7 +109,7 @@ internal fun FamilyMembersListSheet(
             }
             if (viewerIsOwner && ui.pendingMemberRequests.isNotEmpty()) {
                 Text(
-                    "待确认设备（${ui.pendingMemberRequests.size}）",
+                    "设备登录申请（${ui.pendingMemberRequests.size}）",
                     style = LeziTypography.BodyStrong,
                     modifier = Modifier.padding(top = LeziSpacing.Sm),
                 )
@@ -234,6 +235,7 @@ private fun PendingMemberLoginRow(
     request: PendingMemberLoginRequest,
     onReview: (() -> Unit)?,
 ) {
+    val awaitingClaim = request.status == MemberLoginStatus.Approved
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -246,8 +248,15 @@ private fun PendingMemberLoginRow(
             style = LeziTypography.Meta,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (awaitingClaim) {
+            Text(
+                "已批准，等待对方领取",
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
         TextButton(onClick = { onReview?.invoke() }, enabled = onReview != null) {
-            Text("处理申请")
+            Text(if (awaitingClaim) "撤销批准" else "处理申请")
         }
     }
 }
@@ -262,6 +271,7 @@ internal fun PendingMemberDecisionDialog(
     onReject: () -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val awaitingClaim = request.status == MemberLoginStatus.Approved
     val existingMembers = members.filter {
         it.role == FamilyRole.Member && it.membershipId.isNotBlank()
     }
@@ -271,7 +281,7 @@ internal fun PendingMemberDecisionDialog(
     }
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("确认这台设备") },
+        title = { Text(if (awaitingClaim) "等待设备领取" else "确认这台设备") },
         text = {
             Column(
                 modifier = Modifier
@@ -281,7 +291,13 @@ internal fun PendingMemberDecisionDialog(
             ) {
                 Text("对方声明称呼：${request.displayName}")
                 Text("设备：${request.deviceName}")
-                if (existingMembers.isEmpty()) {
+                if (awaitingClaim) {
+                    Text(
+                        "对方领取前将保留家庭称呼；如果这台设备无法领取，可撤销批准并释放称呼。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else if (existingMembers.isEmpty()) {
                     Text(
                         "当前没有可绑定的普通成员",
                         style = LeziTypography.Meta,
@@ -297,24 +313,32 @@ internal fun PendingMemberDecisionDialog(
                         }
                     }
                 }
-                TextButton(onClick = onApproveNew, enabled = !busy && !conflictsWithExisting) {
-                    Text("用此称呼添加新成员")
-                }
-                if (conflictsWithExisting) {
-                    Text(
-                        "该家庭称呼已存在，请绑定到现有成员",
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-                TextButton(onClick = onReject, enabled = !busy) {
-                    Text("拒绝")
+                if (awaitingClaim) {
+                    TextButton(onClick = onReject, enabled = !busy) {
+                        Text("撤销批准")
+                    }
+                } else {
+                    TextButton(onClick = onApproveNew, enabled = !busy && !conflictsWithExisting) {
+                        Text("用此称呼添加新成员")
+                    }
+                    if (conflictsWithExisting) {
+                        Text(
+                            "该家庭称呼已存在，请绑定到现有成员",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    TextButton(onClick = onReject, enabled = !busy) {
+                        Text("拒绝")
+                    }
                 }
             }
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !busy) { Text("取消") }
+            TextButton(onClick = onDismiss, enabled = !busy) {
+                Text(if (awaitingClaim) "关闭" else "取消")
+            }
         },
     )
 }
@@ -533,5 +557,4 @@ internal fun RemoveMemberConfirmDialog(
         },
     )
 }
-
 

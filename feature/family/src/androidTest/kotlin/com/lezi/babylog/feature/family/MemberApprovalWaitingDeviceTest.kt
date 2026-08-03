@@ -22,6 +22,7 @@ import com.lezi.babylog.feature.family.FamilyIdentityUi
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
+import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
@@ -47,7 +48,8 @@ class MemberApprovalWaitingDeviceTest {
                         deviceName = "Pixel 10",
                         expiresAtEpochSeconds = 1,
                     ),
-                    checking = false,
+                    busy = false,
+                    cancelling = false,
                     onCheck = { checks += 1 },
                     onCancel = { cancels += 1 },
                     onKeepOffline = { offline += 1 },
@@ -59,7 +61,7 @@ class MemberApprovalWaitingDeviceTest {
         compose.onNodeWithText("已申请：奶奶").assertIsDisplayed()
         compose.onNodeWithText("设备：Pixel 10").assertIsDisplayed()
         compose.onNodeWithText("检查结果").performClick()
-        compose.onNodeWithText("取消申请").performClick()
+        compose.onNodeWithText("在这台设备放弃等待").performClick()
         compose.onNodeWithText("暂不连接，保持离线").performClick()
 
         compose.runOnIdle {
@@ -67,6 +69,31 @@ class MemberApprovalWaitingDeviceTest {
             assertThat(cancels).isEqualTo(1)
             assertThat(offline).isEqualTo(1)
         }
+    }
+
+    @Test
+    fun abandoningWaitShowsBusyFeedbackAndDisablesEveryDialogAction() {
+        compose.setContent {
+            LeziTheme {
+                MemberApprovalWaitingDialog(
+                    request = PendingMemberLogin(
+                        requestId = "request-1",
+                        displayName = "奶奶",
+                        deviceName = "Pixel 10",
+                        expiresAtEpochSeconds = 1,
+                    ),
+                    busy = true,
+                    cancelling = true,
+                    onCheck = {},
+                    onCancel = {},
+                    onKeepOffline = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("正在取消…").assertIsDisplayed().assertIsNotEnabled()
+        compose.onNodeWithText("在这台设备放弃等待").assertIsNotEnabled()
+        compose.onNodeWithText("暂不连接，保持离线").assertIsNotEnabled()
     }
 
     @Test
@@ -98,7 +125,7 @@ class MemberApprovalWaitingDeviceTest {
             }
         }
 
-        compose.onNodeWithText("待确认设备（1）").assertIsDisplayed()
+        compose.onNodeWithText("设备登录申请（1）").assertIsDisplayed()
         compose.onNodeWithText("外婆").assertIsDisplayed()
         compose.onNodeWithText("外婆的平板", substring = true).assertIsDisplayed()
         compose.onNodeWithText("处理申请").performClick()
@@ -149,6 +176,86 @@ class MemberApprovalWaitingDeviceTest {
             assertThat(bound).containsExactly("membership-mom")
             assertThat(approvedNew).isEqualTo(1)
             assertThat(rejected).isEqualTo(1)
+        }
+    }
+
+    @Test
+    fun approvedUnclaimedDeviceStaysVisibleAndCanBeSelectedForWithdrawal() {
+        val request = PendingMemberLoginRequest(
+            requestId = "request-approved",
+            displayName = "外婆",
+            deviceName = "旧手机",
+            createdAtEpochSeconds = 1,
+            expiresAtEpochSeconds = 2,
+            status = MemberLoginStatus.Approved,
+        )
+        var reviewed: PendingMemberLoginRequest? = null
+        compose.setContent {
+            LeziTheme {
+                FamilyMembersListSheet(
+                    ui = MembersDevicesUi(
+                        identity = FamilyIdentityUi(
+                            enabled = true,
+                            role = FamilyRole.Owner,
+                        ),
+                        membersLoaded = true,
+                        pendingMemberRequests = listOf(request),
+                    ),
+                    onRefreshMembers = {},
+                    onEditMyDisplayName = {},
+                    onReviewPending = { reviewed = it },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("已批准，等待对方领取").assertIsDisplayed()
+        compose.onNodeWithText("撤销批准").performClick()
+        compose.runOnIdle { assertThat(reviewed).isEqualTo(request) }
+    }
+
+    @Test
+    fun approvedUnclaimedDeviceDecisionOnlyOffersWithdrawal() {
+        val request = PendingMemberLoginRequest(
+            requestId = "request-approved",
+            displayName = "外婆",
+            deviceName = "旧手机",
+            createdAtEpochSeconds = 1,
+            expiresAtEpochSeconds = 2,
+            status = MemberLoginStatus.Approved,
+        )
+        var approvedNew = 0
+        val bound = mutableListOf<String>()
+        var withdrawn = 0
+        compose.setContent {
+            LeziTheme {
+                PendingMemberDecisionDialog(
+                    request = request,
+                    members = listOf(
+                        FamilyMember("妈妈", FamilyRole.Member, false, "membership-mom"),
+                    ),
+                    busy = false,
+                    onBindExisting = { bound += it },
+                    onApproveNew = { approvedNew += 1 },
+                    onReject = { withdrawn += 1 },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("等待设备领取").assertIsDisplayed()
+        compose.onNodeWithText(
+            "对方领取前将保留家庭称呼",
+            substring = true,
+        ).assertIsDisplayed()
+        compose.onNodeWithText("绑定到现有「妈妈」").assertDoesNotExist()
+        compose.onNodeWithText("用此称呼添加新成员").assertDoesNotExist()
+        compose.onNodeWithText("拒绝").assertDoesNotExist()
+        compose.onNodeWithText("撤销批准").performClick()
+        compose.runOnIdle {
+            assertThat(bound).isEmpty()
+            assertThat(approvedNew).isEqualTo(0)
+            assertThat(withdrawn).isEqualTo(1)
         }
     }
 

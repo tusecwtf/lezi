@@ -426,14 +426,15 @@ internal fun MemberLoginRequestDialog(
 @Composable
 internal fun MemberApprovalWaitingDialog(
     request: PendingMemberLogin,
-    checking: Boolean,
+    busy: Boolean,
+    cancelling: Boolean,
     feedback: String? = null,
     onCheck: () -> Unit,
     onCancel: () -> Unit,
     onKeepOffline: () -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = { if (!checking) onKeepOffline() },
+        onDismissRequest = { if (!busy) onKeepOffline() },
         title = { Text("等待管理员确认") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
@@ -447,15 +448,23 @@ internal fun MemberApprovalWaitingDialog(
                 feedback?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }
-                TextButton(onClick = onCancel, enabled = !checking) { Text("取消申请") }
-                TextButton(onClick = onKeepOffline, enabled = !checking) {
+                TextButton(onClick = onCancel, enabled = !busy) {
+                    Text("在这台设备放弃等待")
+                }
+                TextButton(onClick = onKeepOffline, enabled = !busy) {
                     Text("暂不连接，保持离线")
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onCheck, enabled = !checking) {
-                Text(if (checking) "正在检查…" else "检查结果")
+            TextButton(onClick = onCheck, enabled = !busy) {
+                Text(
+                    when {
+                        cancelling -> "正在取消…"
+                        busy -> "正在检查…"
+                        else -> "检查结果"
+                    },
+                )
             }
         },
     )

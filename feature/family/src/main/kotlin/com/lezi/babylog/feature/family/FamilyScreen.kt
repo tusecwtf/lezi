@@ -37,6 +37,7 @@ import com.lezi.babylog.feature.family.components.accountFamilyWizardSnapshot
 import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
 import com.lezi.babylog.feature.family.components.familyControlVisibility
 import com.lezi.babylog.feature.family.components.familyDialogAfterDismiss
+import com.lezi.babylog.feature.family.components.familySyncError
 import com.lezi.babylog.feature.family.components.familyPrimarySurface
 import com.lezi.babylog.feature.family.components.familyWizardOutcomeCopy
 import com.lezi.babylog.feature.family.components.isEndpointConfigured
@@ -112,6 +113,8 @@ fun FamilyRoute(
     val appUpdateOutcome by overviewHost.appUpdateOutcome.collectAsStateWithLifecycle()
     val checkingAppUpdate by overviewHost.checkingAppUpdate.collectAsStateWithLifecycle()
     val installingAppUpdate by overviewHost.installingAppUpdate.collectAsStateWithLifecycle()
+    val memberDestructiveBusy by membersHost.destructiveBusy.collectAsStateWithLifecycle()
+    val babyDestructiveBusy by overviewHost.destructiveBusy.collectAsStateWithLifecycle()
     val endpointSeed by wizardHost.endpointSeed.collectAsStateWithLifecycle()
     val networkSettings by networkSettingsHost.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -548,7 +551,10 @@ fun FamilyRoute(
                             onSuccess = { dialog = FamilyDialog.MemberLoginQrCode(it) },
                             onFailure = {
                                 showMessage(
-                                    it.message ?: "生成成员登录二维码失败，请稍后重试",
+                                    familySyncError(
+                                        it,
+                                        "生成成员登录二维码失败，请稍后重试",
+                                    ),
                                     resume = FamilyDialog.MembersList,
                                 )
                             },
@@ -629,7 +635,7 @@ fun FamilyRoute(
                 },
                 onReject = {
                     decidingMemberRequest = true
-                    membersHost.rejectMemberLogin(active.request.requestId, ::finishDecision)
+                    membersHost.rejectMemberLogin(active.request, ::finishDecision)
                 },
                 onDismiss = {
                     if (!decidingMemberRequest) dialog = FamilyDialog.MembersList
@@ -665,7 +671,9 @@ fun FamilyRoute(
         is FamilyDialog.Wizard -> if (pendingMemberLogin != null) {
             MemberApprovalWaitingDialog(
                 request = pendingMemberLogin,
-                checking = familyWizardState is FamilyWizardState.Submitting,
+                busy = familyWizardBusy,
+                cancelling = (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
+                    ?.cancelling == true,
                 feedback = (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
                     ?.feedback,
                 onCheck = {
@@ -1119,34 +1127,44 @@ fun FamilyRoute(
         )
         FamilyDialog.ConfirmDeviceLogout -> LogoutCurrentDeviceDialog(
             onConfirm = {
-                dialog = null
-                
-                membersHost.logoutCurrentDevice { _, message -> showMessage(message) }
+                membersHost.logoutCurrentDevice { success, message ->
+                    showMessage(
+                        message,
+                        resume = FamilyDialog.ConfirmDeviceLogout.takeUnless { success },
+                    )
+                }
             
             },
             onDismiss = { dialog = null },
+            busy = memberDestructiveBusy,
         )
         is FamilyDialog.ConfirmDeviceRevoke -> RevokeFamilyDeviceDialog(
             deviceName = active.deviceName,
             isCurrent = active.isCurrent,
             onConfirm = {
-                dialog = null
-                
                 membersHost.revokeFamilyDevice(
                     active.deviceId,
                     active.deviceName,
                     active.isCurrent,
-                ) { _, message -> showMessage(message) }
+                ) { success, message ->
+                    showMessage(message, resume = active.takeUnless { success })
+                }
             
             },
             onDismiss = { dialog = null },
+            busy = memberDestructiveBusy,
         )
         FamilyDialog.ConfirmLeave -> LeaveFamilyDialog(
             onConfirm = {
-                dialog = null
-                 membersHost.leave { showMessage(it) } 
+                membersHost.leave { success, message ->
+                    showMessage(
+                        message,
+                        resume = FamilyDialog.ConfirmLeave.takeUnless { success },
+                    )
+                }
             },
             onDismiss = { dialog = null },
+            busy = memberDestructiveBusy,
         )
         is FamilyDialog.DeleteFamily -> DeleteFamilyDialog(
             stage = active.stage,
@@ -1201,10 +1219,14 @@ fun FamilyRoute(
             dialog = active,
             babies = overview.babies,
             canEditAvatar = canEditFamilyAvatar(overview.role),
-            onDismiss = { dialog = null },
+            onDismiss = { if (!babyDestructiveBusy) dialog = null },
             onDelete = { id ->
-                dialog = null
-                overviewHost.deleteBaby(id) { showMessage(it) }
+                overviewHost.deleteBaby(id) { success, message ->
+                    val resume = overview.babies.firstOrNull { it.id == id }
+                        ?.let(FamilyDialog::DeleteBaby)
+                        ?.takeUnless { success }
+                    showMessage(message, resume = resume)
+                }
             },
             onPreviewMerge = { sourceId, targetId ->
                 overviewHost.previewMerge(sourceId, targetId) { preview ->
@@ -1214,8 +1236,12 @@ fun FamilyRoute(
                 }
             },
             onMerge = { preview ->
-                dialog = null
-                overviewHost.merge(preview) { showMessage(it) }
+                overviewHost.merge(preview) { success, message ->
+                    val resume = overview.babies.firstOrNull { it.id == preview.sourceBabyId }
+                        ?.let(FamilyDialog::MergeBaby)
+                        ?.takeUnless { success }
+                    showMessage(message, resume = resume)
+                }
             },
             onUpdate = { baby, update, onFinished ->
                 overviewHost.updateBaby(
@@ -1235,6 +1261,7 @@ fun FamilyRoute(
                     }
                 }
             },
+            destructiveBusy = babyDestructiveBusy,
         )
         null -> Unit
     }

@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family.components
 
+import com.lezi.babylog.core.common.SingleFlightAction
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
@@ -14,6 +15,7 @@ import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.qr.MemberLoginQrCode as SyncMemberLoginQrCode
 import java.text.Normalizer
 import java.util.Locale
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Local-only display placeholder. Same literal as [LOCAL_DEVICE_DISPLAY_NAME];
@@ -123,6 +125,58 @@ internal sealed interface FamilyDialog {
     data class EditBaby(val baby: Baby) : FamilyDialog
 
     enum class DeleteStage { Warning, Final }
+}
+
+internal enum class FamilyDestructiveAction {
+    LeaveFamily,
+    LogoutDevice,
+    RevokeDevice,
+    DeleteBaby,
+    MergeBaby,
+    DeleteFamily,
+}
+
+internal data class FamilyDestructiveConfirmPresentation(
+    val label: String,
+    val enabled: Boolean,
+    val dismissible: Boolean,
+)
+
+internal fun familyDestructiveConfirmPresentation(
+    action: FamilyDestructiveAction,
+    busy: Boolean,
+): FamilyDestructiveConfirmPresentation = FamilyDestructiveConfirmPresentation(
+    label = if (busy) {
+        when (action) {
+            FamilyDestructiveAction.LeaveFamily,
+            FamilyDestructiveAction.LogoutDevice,
+            -> "退出中…"
+            FamilyDestructiveAction.RevokeDevice -> "撤销中…"
+            FamilyDestructiveAction.DeleteBaby -> "删除中…"
+            FamilyDestructiveAction.MergeBaby -> "合并中…"
+            FamilyDestructiveAction.DeleteFamily -> "正在删除…"
+        }
+    } else {
+        when (action) {
+            FamilyDestructiveAction.LeaveFamily -> "退出家庭"
+            FamilyDestructiveAction.LogoutDevice -> "退出这台设备"
+            FamilyDestructiveAction.RevokeDevice -> "确认撤销"
+            FamilyDestructiveAction.DeleteBaby -> "删除"
+            FamilyDestructiveAction.MergeBaby -> "确认合并"
+            FamilyDestructiveAction.DeleteFamily -> "永久删除家庭"
+        }
+    },
+    enabled = !busy,
+    dismissible = !busy,
+)
+
+/** Feature-owned single-flight seam shared by destructive family hosts. */
+internal class FamilyDestructiveActionGate {
+    private val action = SingleFlightAction()
+
+    val busy: StateFlow<Boolean> = action.busy
+
+    suspend fun run(block: suspend () -> Unit): Boolean = action.run(block)
 }
 
 internal fun normalizedFamilyDisplayNameKey(raw: String): String {
@@ -318,6 +372,26 @@ internal data class FamilyOverviewCard(
     val showRenameFamily: Boolean,
 )
 
+internal data class FamilyRosterEntryPresentation(
+    val label: String,
+    val isError: Boolean,
+)
+
+internal fun familyRosterEntryPresentation(
+    visibleCount: Int,
+    loaded: Boolean,
+    loading: Boolean,
+    error: String?,
+): FamilyRosterEntryPresentation = when {
+    loading -> FamilyRosterEntryPresentation("正在读取家人…", isError = false)
+    error != null -> FamilyRosterEntryPresentation("读取失败，点此重试", isError = true)
+    loaded -> FamilyRosterEntryPresentation("$visibleCount 位家人", isError = false)
+    else -> FamilyRosterEntryPresentation("正在读取家人…", isError = false)
+}
+
+/** Path A: family-name mutation is only offered from the members page. */
+internal fun familyNameSupportingCopy(role: FamilyRole): String = "共享家庭名"
+
 internal fun buildFamilyOverviewCard(
     isJoined: Boolean,
     role: FamilyRole,
@@ -327,6 +401,8 @@ internal fun buildFamilyOverviewCard(
     localDisplayName: String,
     memberCount: Int,
     membersLoaded: Boolean,
+    membersLoading: Boolean = false,
+    membersError: String? = null,
     status: SyncStatus,
     lastSuccessAt: Long? = null,
     waitingForApproval: Boolean = false,
@@ -339,7 +415,12 @@ internal fun buildFamilyOverviewCard(
             "家庭"
         },
         memberCountLabel = if (isJoined) {
-            familyMemberCountLabel(memberCount, membersLoaded)
+            familyRosterEntryPresentation(
+                visibleCount = memberCount,
+                loaded = membersLoaded,
+                loading = membersLoading,
+                error = membersError,
+            ).label
         } else {
             "尚未加入"
         },
@@ -356,7 +437,7 @@ internal fun buildFamilyOverviewCard(
         ),
         showCreateJoin = primary.showCreateJoin,
         showMembersEntry = isJoined,
-        showRenameFamily = isJoined && role == FamilyRole.Owner,
+        showRenameFamily = false,
     )
 }
 

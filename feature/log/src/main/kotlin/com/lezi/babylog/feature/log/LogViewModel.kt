@@ -8,7 +8,6 @@ import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SettingsLocal
-import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.CareLog
@@ -21,6 +20,8 @@ import com.lezi.babylog.domain.timeline.TimelineWindowRepository
 import com.lezi.babylog.domain.timeline.TimelineWindowRequest
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.session.ShallowSyncLine
+import com.lezi.babylog.sync.session.ShallowSyncState
 import com.lezi.babylog.sync.localCarePlanPublishLabel
 import com.lezi.babylog.sync.localRecordPublishLabel
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -69,6 +70,10 @@ data class LogUiState(
     val planMetadata: Map<Long, TimelineCarePlanRow> = emptyMap(),
     val familyJoined: Boolean = false,
     val lastSyncFailed: Boolean = false,
+    val shallowSyncLine: ShallowSyncLine = ShallowSyncLine(
+        state = ShallowSyncState.Unjoined,
+        text = "尚未加入家庭 · 数据仅保存在本机",
+    ),
     /**
      * Whether to render the three-local-day time bar: true when **any** of D−1 / D / D+1
      * has a day-chart type. Summary / list / legend stay on [records] (day D only).
@@ -187,8 +192,14 @@ class LogViewModel @Inject constructor(
         }
     }.combine(refreshing) { state, isRefreshing ->
         state.copy(refreshing = isRefreshing)
-    }.combine(syncPort.status()) { state, status ->
-        state.copy(lastSyncFailed = status == SyncStatus.Error)
+    }.combine(syncPort.shallowStatus()) { state, shallowSyncLine ->
+        state.copy(
+            shallowSyncLine = shallowSyncLine,
+            lastSyncFailed = shallowSyncLine.state in setOf(
+                ShallowSyncState.Error,
+                ShallowSyncState.ReauthRequired,
+            ),
+        )
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(),

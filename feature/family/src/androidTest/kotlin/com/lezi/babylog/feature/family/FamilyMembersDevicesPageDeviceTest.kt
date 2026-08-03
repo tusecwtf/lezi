@@ -105,7 +105,7 @@ class FamilyMembersDevicesPageDeviceTest {
             }
         }
 
-        compose.onNodeWithText("待确认设备（1）").assertIsDisplayed()
+        compose.onNodeWithText("设备登录申请（1）").assertIsDisplayed()
         compose.onNodeWithText("待处理改名（1）").assertIsDisplayed()
         compose.onNodeWithText("妈妈 → 妈咪").assertIsDisplayed()
         compose.onNodeWithText("添加成员").assertIsDisplayed()
@@ -166,7 +166,7 @@ class FamilyMembersDevicesPageDeviceTest {
         }
         compose.onAllNodesWithText("管理员平板").assertCountEquals(0)
         compose.onAllNodesWithText("奶奶手机").assertCountEquals(0)
-        compose.onAllNodesWithText("待确认设备", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithText("设备登录申请", substring = true).assertCountEquals(0)
         compose.onNodeWithText("申请改称呼").assertIsDisplayed()
         compose.onAllNodesWithText("撤销设备").assertCountEquals(0)
     }

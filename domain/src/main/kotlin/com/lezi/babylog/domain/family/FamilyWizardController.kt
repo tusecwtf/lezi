@@ -46,6 +46,7 @@ enum class FamilyWizardStep { Endpoint, Role, Identity }
 enum class FamilyWizardJoinRole { Owner, Member }
 
 private const val MEMBER_LOGIN_REQUEST_TIMEOUT_MILLIS = 20_000L
+private const val SESSION_ESTABLISH_TIMEOUT_MILLIS = 20_000L
 
 /**
  * Process-retainable, non-sensitive wizard state. The bootstrap secret is intentionally absent and
@@ -170,6 +171,7 @@ sealed interface FamilyWizardState {
         override val snapshot: FamilyWizardSnapshot,
         val request: PendingMemberLogin,
         val feedback: String? = null,
+        val cancelling: Boolean = false,
     ) : FamilyWizardState
 
     /** In-flight setup-status check for a scanned member-login QR (does not remember trust). */
@@ -212,7 +214,8 @@ val FamilyWizardState.isBusy: Boolean
     get() = this is FamilyWizardState.Submitting ||
         this is FamilyWizardState.ProbingEndpoint ||
         this is FamilyWizardState.VerifyingMemberLoginQr ||
-        this is FamilyWizardState.ClaimingMemberLoginQr
+        this is FamilyWizardState.ClaimingMemberLoginQr ||
+        (this is FamilyWizardState.WaitingForMemberApproval && cancelling)
 
 /** Side-effect seam kept narrow so the state machine can be exercised without Android or Hilt. */
 interface FamilyWizardGateway {
@@ -876,6 +879,10 @@ class FamilyWizardController(
         try {
             gateway.saveEndpointConfig(config).getOrThrow()
         } catch (cancelled: CancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "创建家庭已取消，请重试",
+            )
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
@@ -886,14 +893,26 @@ class FamilyWizardController(
         }
 
         val result = try {
-            gateway.createFamily(
-                config = config,
-                displayName = snapshot.displayName.trim(),
-                deviceName = snapshot.deviceName.trim(),
-                bootstrapSecret = bootstrapSecret,
-                familyName = snapshot.familyName.trim(),
-            ).getOrThrow()
+            withTimeout(SESSION_ESTABLISH_TIMEOUT_MILLIS) {
+                gateway.createFamily(
+                    config = config,
+                    displayName = snapshot.displayName.trim(),
+                    deviceName = snapshot.deviceName.trim(),
+                    bootstrapSecret = bootstrapSecret,
+                    familyName = snapshot.familyName.trim(),
+                ).getOrThrow()
+            }
+        } catch (_: TimeoutCancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "创建家庭超时，请检查家庭网络后重试",
+            )
+            return
         } catch (cancelled: CancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "创建家庭已取消，请重试",
+            )
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
@@ -936,6 +955,10 @@ class FamilyWizardController(
         try {
             gateway.saveEndpointConfig(config).getOrThrow()
         } catch (cancelled: CancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "申请加入已取消，请重试",
+            )
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
@@ -959,6 +982,10 @@ class FamilyWizardController(
             )
             return
         } catch (cancelled: CancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "申请加入已取消，请重试",
+            )
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
@@ -975,8 +1002,17 @@ class FamilyWizardController(
         if (!submission.tryLock()) return
         try {
             mutableState.value = FamilyWizardState.Submitting(current.snapshot)
-            applyMemberLoginCheck(current.snapshot, gateway.checkMemberLogin().getOrThrow())
+            val result = withTimeout(SESSION_ESTABLISH_TIMEOUT_MILLIS) {
+                gateway.checkMemberLogin().getOrThrow()
+            }
+            applyMemberLoginCheck(current.snapshot, result)
+        } catch (_: TimeoutCancellationException) {
+            mutableState.value = current.copy(
+                feedback = "检查结果超时，请检查家庭网络后重试",
+                cancelling = false,
+            )
         } catch (cancelled: CancellationException) {
+            mutableState.value = current.copy(cancelling = false)
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.WaitingForMemberApproval(
@@ -1000,13 +1036,16 @@ class FamilyWizardController(
         val current = mutableState.value as? FamilyWizardState.WaitingForMemberApproval ?: return
         if (!submission.tryLock()) return
         try {
+            mutableState.value = current.copy(feedback = null, cancelling = true)
             gateway.cancelMemberLogin().getOrThrow()
             mutableState.value = FamilyWizardState.Editing(current.snapshot)
         } catch (cancelled: CancellationException) {
+            mutableState.value = current.copy(cancelling = false)
             throw cancelled
         } catch (_: Throwable) {
             mutableState.value = current.copy(
                 feedback = "取消失败，本机申请仍保留，请重试",
+                cancelling = false,
             )
         } finally {
             submission.unlock()
@@ -1016,8 +1055,24 @@ class FamilyWizardController(
     fun restorePendingMemberApproval(
         snapshot: FamilyWizardSnapshot,
         request: PendingMemberLogin,
+    ) = reconcilePendingMemberApproval(snapshot, request)
+
+    /**
+     * Reconciles the controller projection with the durable pending slot. A null slot retracts
+     * any controller-only waiting state so remounts and concurrent hosts cannot revive a zombie
+     * request after local abandon or successful claim.
+     */
+    fun reconcilePendingMemberApproval(
+        snapshot: FamilyWizardSnapshot,
+        request: PendingMemberLogin?,
     ) {
         val current = mutableState.value
+        if (request == null) {
+            if (current is FamilyWizardState.WaitingForMemberApproval) {
+                mutableState.value = FamilyWizardState.Editing(current.snapshot)
+            }
+            return
+        }
         if (current is FamilyWizardState.WaitingForMemberApproval &&
             current.request.requestId == request.requestId
         ) {
@@ -1092,6 +1147,10 @@ class FamilyWizardController(
         try {
             gateway.saveEndpointConfig(config).getOrThrow()
         } catch (cancelled: CancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "管理员登录已取消，请重试",
+            )
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
@@ -1101,13 +1160,25 @@ class FamilyWizardController(
             return
         }
         val result = try {
-            gateway.ownerLogin(
-                config = config,
-                deviceName = snapshot.deviceName.trim(),
-                rootPassword = rootPassword,
-                takeover = takeover,
-            ).getOrThrow()
+            withTimeout(SESSION_ESTABLISH_TIMEOUT_MILLIS) {
+                gateway.ownerLogin(
+                    config = config,
+                    deviceName = snapshot.deviceName.trim(),
+                    rootPassword = rootPassword,
+                    takeover = takeover,
+                ).getOrThrow()
+            }
+        } catch (_: TimeoutCancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "管理员登录超时，请检查家庭网络后重试",
+            )
+            return
         } catch (cancelled: CancellationException) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = identity,
+                message = "管理员登录已取消，请重试",
+            )
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(

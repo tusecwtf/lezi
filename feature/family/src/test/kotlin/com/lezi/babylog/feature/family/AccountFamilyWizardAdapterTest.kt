@@ -21,7 +21,7 @@ import org.junit.Test
 
 class AccountFamilyWizardAdapterTest {
     @Test
-    fun waitingStateRequestWinsOverTheLaggingOverviewProjection() {
+    fun durableOverviewRequestIsTheOnlyPendingAuthority() {
         val snapshot = accountFamilyWizardSnapshot(
             mode = FamilyWizardMode.Join,
             step = FamilyWizardStep.Identity,
@@ -43,7 +43,8 @@ class AccountFamilyWizardAdapterTest {
         )
         val waiting = FamilyWizardState.WaitingForMemberApproval(snapshot, stateRequest)
 
-        assertEquals(stateRequest, memberApprovalRequestForDisplay(waiting, overviewRequest))
+        assertEquals(overviewRequest, memberApprovalRequestForDisplay(waiting, overviewRequest))
+        assertEquals(null, memberApprovalRequestForDisplay(waiting, null))
         assertEquals(false, memberApprovalCancelSucceeded(waiting))
         assertEquals(true, memberApprovalCancelSucceeded(FamilyWizardState.Editing(snapshot)))
     }

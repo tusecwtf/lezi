@@ -38,6 +38,18 @@ import com.lezi.babylog.sync.session.SetupFamilyState
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
 import java.text.DateFormat
 
+internal fun disasterRecoveryStatusCopy(status: String?): String = when (status) {
+    "summary_ready" -> "恢复摘要已就绪"
+    "started" -> "恢复批次已建立，准备上传本机数据"
+    "manifest_received" -> "正在校验已上传的家庭数据"
+    "ready_to_commit" ->
+        "数据和照片已校验完成，提交前对其他设备不可见。请再次输入根密码。"
+    "committed" -> "家庭恢复已提交"
+    "cancelled" -> "恢复批次已取消"
+    "expired" -> "恢复批次已过期，请重新开始"
+    else -> "恢复状态暂时无法确认，请重试查询"
+}
+
 @Composable
 fun FamilyNetworkSettingsScreen(
     ui: FamilyNetworkSettingsUi,
@@ -103,6 +115,14 @@ fun FamilyNetworkSettingsScreen(
                     enabled = !ui.busy,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (ui.trustRecoveryRequired) {
+                    LeziPrimaryButton(
+                        "核对证书并重新登录",
+                        onClick = onProbeCandidate,
+                        enabled = !ui.busy && ui.pendingMember == null,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
 
                 SectionHeading(title = "更换地址")
                 Text(
@@ -114,7 +134,7 @@ fun FamilyNetworkSettingsScreen(
                     value = ui.endpointDraft,
                     onValueChange = onEndpointDraftChange,
                     label = { Text("候选 HTTPS 地址") },
-                    placeholder = { Text("https://192.168.50.4:8765") },
+                    placeholder = { Text("https://nas.home:8765") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     enabled = !ui.busy && ui.pendingMember == null,
@@ -420,11 +440,7 @@ private fun DisasterRecoveryControls(
         )
     } else {
         Text(
-            if (ui.recoveryStatus == "ready_to_commit") {
-                "数据和照片已校验完成，提交前对其他设备不可见。请再次输入根密码。"
-            } else {
-                "恢复批次状态：${ui.recoveryStatus}"
-            },
+            disasterRecoveryStatusCopy(ui.recoveryStatus),
             style = LeziTypography.Meta,
         )
         RecoveryRootPasswordField(rootPassword, onRootPasswordChange, ui.busy)
@@ -435,10 +451,12 @@ private fun DisasterRecoveryControls(
                 rootPassword.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
         )
+    }
+    if (canCancelDisasterRecovery(ui)) {
         LeziSecondaryButton(
-            "取消恢复批次",
+            if (ui.cancellingRecovery) "正在取消…" else "取消恢复批次",
             onClick = onCancel,
-            enabled = !ui.busy && ui.recoveryStatus != "committed",
+            enabled = !ui.cancellingRecovery,
             modifier = Modifier.fillMaxWidth(),
         )
     }

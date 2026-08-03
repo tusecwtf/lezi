@@ -65,13 +65,6 @@ internal suspend fun saveBabyProfileWithAvatar(
                 ),
             )
             profileCommitted = true
-            if (avatarPath != existing.avatarPath) {
-                try {
-                    avatarFileStore.delete(existing.avatarPath)
-                } catch (_: Throwable) {
-                    // The new profile is durable; stale cleanup is best effort.
-                }
-            }
         }
         currentCoroutineContext().ensureActive()
         null
@@ -88,20 +81,10 @@ internal suspend fun saveBabyProfileWithAvatar(
     }
 }
 
-/** Soft-delete baby profile and best-effort local avatar cleanup. */
+/** Soft-delete baby profile; domain cleanup rechecks every media reference after commit. */
 internal suspend fun deleteBabyProfileWithAvatar(
     careLog: CareLog,
-    avatarFileStore: BabyAvatarFileStore,
     babyId: Long,
-    avatarPath: String?,
 ): Boolean = withContext(NonCancellable) {
-    careLog.deleteBaby(babyId).also { deleted ->
-        if (deleted) {
-            try {
-                avatarFileStore.delete(avatarPath)
-            } catch (_: Throwable) {
-                // The soft-deleted profile no longer references this local file.
-            }
-        }
-    }
+    careLog.deleteBaby(babyId)
 }

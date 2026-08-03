@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.onboarding
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.core.common.SingleFlightAction
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.family.FamilyWizardController
@@ -37,6 +38,7 @@ class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
     private val sync: SyncPort,
 ) : ViewModel() {
+    private val createBabyAction = SingleFlightAction()
     private val familyWizard = FamilyWizardController(
         gateway = SyncFamilyWizardGateway(sync, careLog),
         initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding),
@@ -44,6 +46,7 @@ class OnboardingViewModel @Inject constructor(
     private val mutableReclaimedFamilyEmpty = MutableStateFlow<Boolean?>(null)
     val familyWizardState = familyWizard.state
     val reclaimedFamilyEmpty = mutableReclaimedFamilyEmpty.asStateFlow()
+    val creatingBaby = createBabyAction.busy
     val verifiedEndpoint = sync.verifiedEndpoint()
     val pendingMemberLogin = sync.pendingMemberLogin().stateIn(
         viewModelScope,
@@ -58,19 +61,17 @@ class OnboardingViewModel @Inject constructor(
         viewModelScope.launch {
             combine(pendingMemberLogin, sync.session()) { pending, session -> pending to session }
                 .collect { (pending, session) ->
-                    if (pending != null) {
-                        familyWizard.restorePendingMemberApproval(
-                            FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding).copy(
-                                mode = FamilyWizardMode.Join,
-                                step = FamilyWizardStep.Identity,
-                                host = session.serverHost,
-                                portText = session.serverPort.toString(),
-                                scheme = session.serverScheme,
-                                joinRole = FamilyWizardJoinRole.Member,
-                            ),
-                            pending,
-                        )
-                    }
+                    familyWizard.reconcilePendingMemberApproval(
+                        FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding).copy(
+                            mode = FamilyWizardMode.Join,
+                            step = FamilyWizardStep.Identity,
+                            host = session.serverHost,
+                            portText = session.serverPort.toString(),
+                            scheme = session.serverScheme,
+                            joinRole = FamilyWizardJoinRole.Member,
+                        ),
+                        pending,
+                    )
                 }
         }
     }
@@ -162,21 +163,23 @@ class OnboardingViewModel @Inject constructor(
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            try {
-                careLog.createBaby(
-                    CreateBabyInput(
-                        nickname = nickname.trim(),
-                        sex = sex,
-                        birthdayEpochDay = birthdayEpochDay,
-                        birthWeightGrams = birthWeightGrams,
-                        themeColorArgb = themeColorArgb,
-                    ),
-                )
-                onDone(null)
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (t: Throwable) {
-                onDone(productUiError(t, "创建失败"))
+            createBabyAction.run {
+                try {
+                    careLog.createBaby(
+                        CreateBabyInput(
+                            nickname = nickname.trim(),
+                            sex = sex,
+                            birthdayEpochDay = birthdayEpochDay,
+                            birthWeightGrams = birthWeightGrams,
+                            themeColorArgb = themeColorArgb,
+                        ),
+                    )
+                    onDone(null)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    onDone(productUiError(t, "创建失败"))
+                }
             }
         }
     }

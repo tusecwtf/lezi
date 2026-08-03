@@ -501,6 +501,97 @@ class FamilyWizardControllerTest {
     }
 
     @Test
+    fun createOwnerAndApprovalCheckAllLeaveBusyStateAtTheSessionEstablishDeadline() = runTest {
+        val createGateway = RecordingFamilyWizardGateway().apply {
+            createStarted = CompletableDeferred()
+            createRelease = CompletableDeferred()
+        }
+        val create = FamilyWizardController(createGateway)
+        val createJob = launch {
+            create.submit(snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Create), "once")
+        }
+        createGateway.createStarted!!.await()
+        advanceTimeBy(20_001)
+        runCurrent()
+        assertThat((create.state.value as FamilyWizardState.RetryableFailure).message)
+            .contains("超时")
+        createJob.join()
+
+        val ownerGateway = RecordingFamilyWizardGateway().apply {
+            ownerLoginStarted = CompletableDeferred()
+            ownerLoginRelease = CompletableDeferred()
+        }
+        val owner = FamilyWizardController(ownerGateway)
+        val ownerInput = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Owner,
+        )
+        val ownerJob = launch { owner.submit(ownerInput, "root-password") }
+        ownerGateway.ownerLoginStarted!!.await()
+        advanceTimeBy(20_001)
+        runCurrent()
+        assertThat((owner.state.value as FamilyWizardState.RetryableFailure).message)
+            .contains("超时")
+        ownerJob.join()
+
+        val checkGateway = RecordingFamilyWizardGateway().apply {
+            memberCheckStarted = CompletableDeferred()
+            memberCheckRelease = CompletableDeferred()
+        }
+        val check = FamilyWizardController(checkGateway)
+        val memberInput = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        check.submit(memberInput)
+        val checkJob = launch { check.checkMemberApproval() }
+        checkGateway.memberCheckStarted!!.await()
+        advanceTimeBy(20_001)
+        runCurrent()
+        val waiting = check.state.value as FamilyWizardState.WaitingForMemberApproval
+        assertThat(waiting.feedback).contains("超时")
+        checkJob.join()
+    }
+
+    @Test
+    fun cancellationDuringSubmitOrApprovalCheckRestoresRetryableChromeAndAllowsBegin() = runTest {
+        val submitGateway = RecordingFamilyWizardGateway().apply {
+            createStarted = CompletableDeferred()
+            createRelease = CompletableDeferred()
+        }
+        val submitController = FamilyWizardController(submitGateway)
+        val createInput = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Create)
+        val submitJob = launch { submitController.submit(createInput, "once") }
+        submitGateway.createStarted!!.await()
+        submitJob.cancel()
+        submitJob.join()
+
+        assertThat(submitController.state.value)
+            .isInstanceOf(FamilyWizardState.RetryableFailure::class.java)
+        val fresh = FamilyWizardSnapshot.empty(FamilyWizardEntry.Account)
+        submitController.begin(fresh)
+        assertThat(submitController.state.value).isEqualTo(FamilyWizardState.Editing(fresh))
+
+        val checkGateway = RecordingFamilyWizardGateway().apply {
+            memberCheckStarted = CompletableDeferred()
+            memberCheckRelease = CompletableDeferred()
+        }
+        val checkController = FamilyWizardController(checkGateway)
+        val memberInput = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        checkController.submit(memberInput)
+        val originalWaiting =
+            checkController.state.value as FamilyWizardState.WaitingForMemberApproval
+        val checkJob = launch { checkController.checkMemberApproval() }
+        checkGateway.memberCheckStarted!!.await()
+        checkJob.cancel()
+        checkJob.join()
+
+        assertThat(checkController.state.value).isEqualTo(originalWaiting)
+        checkController.begin(fresh)
+        assertThat(checkController.state.value).isEqualTo(FamilyWizardState.Editing(fresh))
+    }
+
+    @Test
     fun approvedMemberPublishesCommittedSessionAndRetriesOnlyDataRecovery() = runTest {
         val gateway = RecordingFamilyWizardGateway()
         val controller = FamilyWizardController(gateway)
@@ -607,6 +698,32 @@ class FamilyWizardControllerTest {
     }
 
     @Test
+    fun abandoningPendingApprovalIsVisiblyBusyAndSerializesRepeatedTaps() = runTest {
+        val gateway = RecordingFamilyWizardGateway().apply {
+            cancelMemberStarted = CompletableDeferred()
+            cancelMemberRelease = CompletableDeferred()
+        }
+        val controller = FamilyWizardController(gateway)
+        val input = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        controller.submit(input)
+
+        val firstCancel = launch { controller.cancelMemberApproval() }
+        gateway.cancelMemberStarted!!.await()
+
+        val cancelling = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+        assertThat(cancelling.cancelling).isTrue()
+        assertThat(cancelling.isBusy).isTrue()
+        controller.cancelMemberApproval()
+        assertThat(gateway.cancelMemberCalls).isEqualTo(1)
+
+        gateway.cancelMemberRelease!!.complete(Unit)
+        firstCancel.join()
+        assertThat(controller.state.value).isInstanceOf(FamilyWizardState.Editing::class.java)
+    }
+
+    @Test
     fun pendingApprovalRestoreOnlyClaimsIdleOrExistingWaitingState() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
         val gateway = RecordingFamilyWizardGateway(
@@ -632,6 +749,23 @@ class FamilyWizardControllerTest {
         controller.restorePendingMemberApproval(pendingSnapshot, gateway.pendingRequest)
         assertThat(controller.state.value)
             .isInstanceOf(FamilyWizardState.WaitingForMemberApproval::class.java)
+    }
+
+    @Test
+    fun durablePendingSlotRetractsAControllerOnlyWaitingStateWhenItBecomesEmpty() = runTest {
+        val gateway = RecordingFamilyWizardGateway()
+        val controller = FamilyWizardController(gateway)
+        val pendingSnapshot = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        controller.restorePendingMemberApproval(pendingSnapshot, gateway.pendingRequest)
+        val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+
+        controller.reconcilePendingMemberApproval(pendingSnapshot, null)
+
+        assertThat(controller.state.value).isEqualTo(
+            FamilyWizardState.Editing(waiting.snapshot),
+        )
     }
 
     @Test
@@ -1060,6 +1194,8 @@ private class RecordingFamilyWizardGateway(
     var memberRequestCalls = 0
     var cancelMemberCalls = 0
     var cancelMemberResult: Result<Unit> = Result.success(Unit)
+    var cancelMemberStarted: CompletableDeferred<Unit>? = null
+    var cancelMemberRelease: CompletableDeferred<Unit>? = null
     var memberLoginQrClaimCalls = 0
     var lastMemberLoginQrDeviceName: String? = null
     val events = mutableListOf<String>()
@@ -1077,6 +1213,12 @@ private class RecordingFamilyWizardGateway(
     var memberLoginQrClaimRelease: CompletableDeferred<Unit>? = null
     var memberRequestStarted: CompletableDeferred<Unit>? = null
     var memberRequestRelease: CompletableDeferred<Unit>? = null
+    var createStarted: CompletableDeferred<Unit>? = null
+    var createRelease: CompletableDeferred<Unit>? = null
+    var ownerLoginStarted: CompletableDeferred<Unit>? = null
+    var ownerLoginRelease: CompletableDeferred<Unit>? = null
+    var memberCheckStarted: CompletableDeferred<Unit>? = null
+    var memberCheckRelease: CompletableDeferred<Unit>? = null
     val rememberedEndpoints = mutableListOf<TrustedEndpointProfile>()
     var verifiedEndpoint: TrustedEndpointProfile? =
         TrustedEndpointProfile.systemPki("https://nas.home")
@@ -1127,6 +1269,8 @@ private class RecordingFamilyWizardGateway(
         events += "create"
         createCalls += 1
         request = CreateRequest(config, displayName, deviceName, bootstrapSecret, familyName)
+        createStarted?.complete(Unit)
+        createRelease?.await()
         return createResult
     }
 
@@ -1138,6 +1282,8 @@ private class RecordingFamilyWizardGateway(
     ): Result<OwnerLoginResult> {
         events += "owner-login"
         ownerLoginRequest = OwnerLoginRequest(config, deviceName, rootPassword, takeover)
+        ownerLoginStarted?.complete(Unit)
+        ownerLoginRelease?.await()
         return ownerLoginResult
     }
 
@@ -1155,10 +1301,16 @@ private class RecordingFamilyWizardGateway(
         )
     }
 
-    override suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> = memberCheckResult
+    override suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> {
+        memberCheckStarted?.complete(Unit)
+        memberCheckRelease?.await()
+        return memberCheckResult
+    }
 
     override suspend fun cancelMemberLogin(): Result<Unit> {
         cancelMemberCalls++
+        cancelMemberStarted?.complete(Unit)
+        cancelMemberRelease?.await()
         return cancelMemberResult
     }
 

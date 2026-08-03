@@ -8,20 +8,27 @@ import com.lezi.babylog.sync.DisasterRecoverySummary
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.availability.AvailabilityProbeReason
 import com.lezi.babylog.sync.availability.FamilyServerAvailability
+import com.lezi.babylog.sync.availability.FamilyServerUnavailableReason
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.session.SetupFamilyState
 import com.lezi.babylog.sync.session.SetupProbeResult
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+
+private const val FAMILY_NETWORK_ACTION_TIMEOUT_MILLIS = 24_000L
 
 sealed interface FamilyNetworkCandidate {
     data class Ready(
@@ -39,6 +46,7 @@ sealed interface FamilyNetworkCandidate {
 data class NetworkAvailabilityCopy(
     val status: String,
     val lastHealthyAtMillis: Long?,
+    val trustRecoveryRequired: Boolean = false,
 )
 
 fun networkAvailabilityCopy(availability: FamilyServerAvailability): NetworkAvailabilityCopy =
@@ -53,8 +61,14 @@ fun networkAvailabilityCopy(availability: FamilyServerAvailability): NetworkAvai
             availability.lastHealthyAtMillis,
         )
         is FamilyServerAvailability.Unavailable -> NetworkAvailabilityCopy(
-            "当前不可连接，本机护理可继续使用",
+            if (availability.reason == FamilyServerUnavailableReason.TrustChanged) {
+                "服务器安全信息已变化，请核对证书并重新登录"
+            } else {
+                "当前不可连接，本机护理可继续使用"
+            },
             availability.lastHealthyAtMillis,
+            trustRecoveryRequired =
+                availability.reason == FamilyServerUnavailableReason.TrustChanged,
         )
     }
 
@@ -123,6 +137,8 @@ private data class FamilyNetworkActionState(
     val endpointDraft: String = "",
     val candidate: FamilyNetworkCandidate? = null,
     val busy: Boolean = false,
+    val disasterRecoveryBusy: Boolean = false,
+    val cancellingRecovery: Boolean = false,
     val feedback: String? = null,
     val pendingMember: PendingMemberLogin? = null,
     val recoverySummary: DisasterRecoverySummary? = null,
@@ -139,19 +155,33 @@ data class FamilyNetworkSettingsUi(
     val endpointDraft: String = "",
     val candidate: FamilyNetworkCandidate? = null,
     val busy: Boolean = false,
+    val disasterRecoveryBusy: Boolean = false,
+    val cancellingRecovery: Boolean = false,
     val feedback: String? = null,
     val pendingMember: PendingMemberLogin? = null,
     val recoverySummary: DisasterRecoverySummary? = null,
     val recoveryStatus: String? = null,
     val recoveryExpiresAtEpochSeconds: Long? = null,
+    val trustRecoveryRequired: Boolean = false,
 )
 
+internal fun canCancelDisasterRecovery(ui: FamilyNetworkSettingsUi): Boolean =
+    ui.recoveryStatus != null &&
+        ui.recoveryStatus != "committed" &&
+        (ui.recoveryStatus != "summary_ready" || ui.disasterRecoveryBusy)
+
 @HiltViewModel
-class FamilyNetworkSettingsHost @Inject constructor(
+class FamilyNetworkSettingsHost internal constructor(
     private val sync: SyncPort,
+    private val actionTimeoutMillis: Long,
 ) : ViewModel() {
+    @Inject
+    constructor(sync: SyncPort) : this(sync, FAMILY_NETWORK_ACTION_TIMEOUT_MILLIS)
+
     private val actions = FamilyNetworkSettingsActions(sync)
     private val actionState = MutableStateFlow(FamilyNetworkActionState())
+    private var actionGeneration = 0L
+    private var activeBusyJob: Job? = null
     private val availabilitySurface = combine(
         sync.availability(),
         sync.lastServerHealthyAt(),
@@ -176,11 +206,14 @@ class FamilyNetworkSettingsHost @Inject constructor(
             endpointDraft = action.endpointDraft,
             candidate = action.candidate,
             busy = action.busy,
+            disasterRecoveryBusy = action.disasterRecoveryBusy,
+            cancellingRecovery = action.cancellingRecovery,
             feedback = action.feedback,
             pendingMember = action.pendingMember,
             recoverySummary = action.recoverySummary,
             recoveryStatus = action.recoveryStatus,
             recoveryExpiresAtEpochSeconds = action.recoveryExpiresAtEpochSeconds,
+            trustRecoveryRequired = availability.trustRecoveryRequired,
         )
     }.stateIn(
         viewModelScope,
@@ -193,7 +226,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
             actionState.value = actionState.value.copy(endpointDraft = ui.value.currentEndpoint)
         }
         refreshAvailability()
-        launchBusy {
+        launchBusy(bounded = false) {
             actions.resumeDisasterRecovery().getOrNull()?.let { progress ->
                 return@launchBusy actionState.value.copy(
                     recoverySummary = progress.summary,
@@ -299,7 +332,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
         )
     }
 
-    fun prepareDisasterRecovery() = launchBusy {
+    fun prepareDisasterRecovery() = launchBusy(bounded = false) {
         actions.prepareDisasterRecovery().fold(
             onSuccess = { summary ->
                 actionState.value.copy(
@@ -316,7 +349,7 @@ class FamilyNetworkSettingsHost @Inject constructor(
         ownerDisplayName: String,
         deviceName: String,
         rootPassword: String,
-    ) = launchBusy {
+    ) = launchBusy(bounded = false, disasterRecovery = true) {
         val endpoint = (actionState.value.candidate as? FamilyNetworkCandidate.Ready)?.endpoint
             ?: return@launchBusy actionState.value.copy(feedback = "请先检查空服务器地址")
         actions.startDisasterRecovery(
@@ -337,7 +370,10 @@ class FamilyNetworkSettingsHost @Inject constructor(
         )
     }
 
-    fun commitDisasterRecovery(rootPassword: String) = launchBusy {
+    fun commitDisasterRecovery(rootPassword: String) = launchBusy(
+        bounded = false,
+        disasterRecovery = true,
+    ) {
         actions.commitDisasterRecovery(rootPassword).fold(
             onSuccess = { result ->
                 actionState.value.copy(
@@ -353,7 +389,12 @@ class FamilyNetworkSettingsHost @Inject constructor(
         )
     }
 
-    fun cancelDisasterRecovery() = launchBusy {
+    fun cancelDisasterRecovery() = launchBusy(
+        bounded = false,
+        disasterRecovery = true,
+        cancellingRecovery = true,
+        preemptCurrent = actionState.value.disasterRecoveryBusy,
+    ) {
         actions.cancelDisasterRecovery().fold(
             onSuccess = {
                 actionState.value.copy(
@@ -371,21 +412,54 @@ class FamilyNetworkSettingsHost @Inject constructor(
         actionState.value = actionState.value.copy(candidate = null, feedback = null)
     }
 
-    private fun launchBusy(block: suspend () -> FamilyNetworkActionState) {
-        if (actionState.value.busy) return
-        actionState.value = actionState.value.copy(busy = true, feedback = null)
-        viewModelScope.launch {
-            val next = try {
-                block()
+    private fun launchBusy(
+        bounded: Boolean = true,
+        disasterRecovery: Boolean = false,
+        cancellingRecovery: Boolean = false,
+        preemptCurrent: Boolean = false,
+        block: suspend () -> FamilyNetworkActionState,
+    ) {
+        if (actionState.value.busy && !preemptCurrent) return
+        val generation = actionGeneration + 1L
+        actionGeneration = generation
+        if (preemptCurrent) activeBusyJob?.cancel()
+        actionState.value = actionState.value.copy(
+            busy = true,
+            disasterRecoveryBusy = disasterRecovery,
+            cancellingRecovery = cancellingRecovery,
+            feedback = null,
+        )
+        val job = viewModelScope.launch {
+            var next: FamilyNetworkActionState? = null
+            try {
+                next =
+                if (bounded) {
+                    withTimeout(actionTimeoutMillis) { block() }
+                } else {
+                    block()
+                }
+            } catch (_: TimeoutCancellationException) {
+                next = actionState.value.copy(
+                    feedback = "连接检查超时，请检查家庭网络后重试",
+                )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                actionState.value.copy(feedback = familyNetworkFailureCopy(error))
+                next = actionState.value.copy(feedback = familyNetworkFailureCopy(error))
+            } finally {
+                if (actionGeneration == generation) {
+                    actionState.value = (next ?: actionState.value).copy(
+                        busy = false,
+                        disasterRecoveryBusy = false,
+                        cancellingRecovery = false,
+                    )
+                    activeBusyJob = null
+                }
             }
-            actionState.value = next.copy(busy = false)
         }
+        activeBusyJob = job.takeIf(Job::isActive)
     }
 }
 
-private fun familyNetworkFailureCopy(error: Throwable): String =
-    error.message?.takeIf(String::isNotBlank) ?: "操作失败，请稍后重试"
+internal fun familyNetworkFailureCopy(error: Throwable): String =
+    familySyncError(error, "家庭网络操作失败，请稍后重试")

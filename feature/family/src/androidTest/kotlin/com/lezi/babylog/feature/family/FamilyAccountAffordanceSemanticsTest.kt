@@ -1,36 +1,44 @@
 package com.lezi.babylog.feature.family
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
-import com.lezi.babylog.feature.family.overview.FamilySharingContent
-import com.lezi.babylog.feature.family.overview.FamilySyncStatusEntry
-import com.lezi.babylog.feature.family.overview.FamilyMemberRosterEntry
+import com.lezi.babylog.feature.family.components.familyPrimarySurface
+import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.feature.family.overview.AccountBottomActions
 import com.lezi.babylog.feature.family.overview.AccountOverviewUi
 import com.lezi.babylog.feature.family.overview.AccountPageContent
-import com.lezi.babylog.feature.family.members.MembersDevicesUi
-import com.lezi.babylog.feature.family.FamilyIdentityUi
-import com.lezi.babylog.feature.family.components.familyPrimarySurface
+import com.lezi.babylog.feature.family.overview.FamilyMemberRosterEntry
+import com.lezi.babylog.feature.family.overview.FamilySharingContent
+import com.lezi.babylog.feature.family.overview.FamilySyncStatusEntry
 import com.lezi.babylog.feature.family.wizard.FamilyJoinRoleDialog
-import com.lezi.babylog.core.model.SyncStatus
-import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.ShallowSyncLine
+import com.lezi.babylog.sync.session.ShallowSyncState
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -170,16 +178,24 @@ class FamilyAccountAffordanceSemanticsTest {
                             deviceName = "Pixel 9",
                             expiresAtEpochSeconds = 2_000,
                         ),
+                        shallowSyncLine = ShallowSyncLine(
+                            state = ShallowSyncState.WaitingForAdmin,
+                            text = "等待管理员确认",
+                        ),
                     ),
                     members = MembersDevicesUi(),
                     primary = familyPrimarySurface(false, FamilyRole.None, true),
                     endpointConfigured = true,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(LeziSpacing.Page),
                 )
             }
         }
 
-        compose.onNodeWithText("等待管理员确认").assertIsDisplayed()
-        compose.onNodeWithText("查看加入申请").assertIsDisplayed()
+        compose.onNodeWithText("等待管理员确认").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("查看加入申请").performScrollTo().assertIsDisplayed()
         compose.onAllNodesWithText("家人记录已对齐").assertCountEquals(0)
     }
 
@@ -227,20 +243,20 @@ class FamilyAccountAffordanceSemanticsTest {
     }
 
     @Test
-    fun ownerPendingBadgeAnnouncesTheExactRequestCount() {
+    fun ownerLoginRequestBadgeAnnouncesTheExactRequestCount() {
         var opens = 0
         compose.setContent {
             LeziTheme {
                 FamilyMemberRosterEntry(
                     label = "3 位家人",
-                    pendingCount = 2,
+                    loginRequestCount = 2,
                     onOpenMembers = { opens += 1 },
                 )
             }
         }
 
         compose.onNodeWithContentDescription(
-            "家庭成员与设备：3 位家人，2 个待确认设备",
+            "家庭成员与设备：3 位家人，2 个设备登录申请",
         ).assertIsDisplayed().performClick()
         compose.onNodeWithText("2").assertIsDisplayed()
         compose.runOnIdle { assertThat(opens).isEqualTo(1) }
@@ -250,45 +266,58 @@ class FamilyAccountAffordanceSemanticsTest {
     fun joinedAccountOverviewContainsOnlyIdentityResultAndMembersEntry() {
         compose.setContent {
             LeziTheme {
-                FamilySharingContent(
-                    overview = AccountOverviewUi(
-                        identity = FamilyIdentityUi(
-                            displayName = "管理员",
-                            enabled = true,
-                            role = FamilyRole.Owner,
-                            familyName = "乐乐一家",
+                Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(LeziSpacing.Page),
+                ) {
+                    FamilySharingContent(
+                        overview = AccountOverviewUi(
+                            identity = FamilyIdentityUi(
+                                displayName = "管理员",
+                                enabled = true,
+                                role = FamilyRole.Owner,
+                                familyName = "乐乐一家",
+                            ),
+                            hydrated = true,
+                            status = SyncStatus.Idle,
+                            shallowSyncLine = ShallowSyncLine(
+                                state = ShallowSyncState.WaitingForFirstSync,
+                                text = "已加入家庭 · 等待首次同步",
+                            ),
                         ),
-                        hydrated = true,
-                        status = SyncStatus.Idle,
-                    ),
-                    members = MembersDevicesUi(
-                        identity = FamilyIdentityUi(
-                            displayName = "管理员",
-                            enabled = true,
-                            role = FamilyRole.Owner,
-                            familyName = "乐乐一家",
+                        members = MembersDevicesUi(
+                            identity = FamilyIdentityUi(
+                                displayName = "管理员",
+                                enabled = true,
+                                role = FamilyRole.Owner,
+                                familyName = "乐乐一家",
+                            ),
+                            members = listOf(
+                                FamilyMember("管理员", FamilyRole.Owner, true, "membership-owner"),
+                            ),
+                            membersLoaded = true,
                         ),
-                        members = listOf(
-                            FamilyMember("管理员", FamilyRole.Owner, true, "membership-owner"),
-                        ),
-                        membersLoaded = true,
-                    ),
-                    primary = familyPrimarySurface(true, FamilyRole.Owner, true),
-                    endpointConfigured = true,
-                    onOpenMembers = {},
-                    onConnectFamily = {},
-                )
+                        primary = familyPrimarySurface(true, FamilyRole.Owner, true),
+                        endpointConfigured = true,
+                        onOpenMembers = {},
+                        onConnectFamily = {},
+                    )
+                }
             }
         }
 
         for (copy in listOf(
             "乐乐一家",
             "管理员 ★",
-            "尚无成功同步",
+            "已加入家庭 · 等待首次同步",
         )) {
-            compose.onNodeWithText(copy).assertIsDisplayed()
+            compose.onNodeWithText(copy).performScrollTo().assertIsDisplayed()
         }
-        compose.onNodeWithContentDescription("家庭成员与设备：1 位家人").assertIsDisplayed()
+        compose.onNodeWithContentDescription("家庭成员与设备：1 位家人")
+            .performScrollTo()
+            .assertIsDisplayed()
         compose.onAllNodesWithText("退出家庭").assertCountEquals(0)
         for (extra in listOf("改名", "改称呼", "邀请家人", "点同步状态")) {
             compose.onAllNodesWithText(extra, substring = true).assertCountEquals(0)

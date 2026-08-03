@@ -28,8 +28,7 @@ import kotlinx.coroutines.launch
 internal fun memberApprovalRequestForDisplay(
     state: FamilyWizardState,
     overviewRequest: PendingMemberLogin?,
-): PendingMemberLogin? =
-    (state as? FamilyWizardState.WaitingForMemberApproval)?.request ?: overviewRequest
+): PendingMemberLogin? = overviewRequest
 
 internal fun memberApprovalCancelSucceeded(state: FamilyWizardState): Boolean =
     state is FamilyWizardState.Editing
@@ -79,19 +78,17 @@ class AccountFamilyWizardHost @Inject constructor(
             combine(sync.pendingMemberLogin(), sync.session()) { pending, session ->
                 pending to session
             }.collect { (pending, session) ->
-                if (pending != null) {
-                    familyWizard.restorePendingMemberApproval(
-                        FamilyWizardSnapshot.empty(FamilyWizardEntry.Account).copy(
-                            mode = com.lezi.babylog.domain.family.FamilyWizardMode.Join,
-                            step = com.lezi.babylog.domain.family.FamilyWizardStep.Identity,
-                            host = session.serverHost,
-                            portText = session.serverPort.toString(),
-                            scheme = session.serverScheme,
-                            joinRole = com.lezi.babylog.domain.family.FamilyWizardJoinRole.Member,
-                        ),
-                        pending,
-                    )
-                }
+                familyWizard.reconcilePendingMemberApproval(
+                    FamilyWizardSnapshot.empty(FamilyWizardEntry.Account).copy(
+                        mode = com.lezi.babylog.domain.family.FamilyWizardMode.Join,
+                        step = com.lezi.babylog.domain.family.FamilyWizardStep.Identity,
+                        host = session.serverHost,
+                        portText = session.serverPort.toString(),
+                        scheme = session.serverScheme,
+                        joinRole = com.lezi.babylog.domain.family.FamilyWizardJoinRole.Member,
+                    ),
+                    pending,
+                )
             }
         }
     }

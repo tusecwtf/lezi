@@ -40,8 +40,10 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.feature.family.components.FamilyDialog
+import com.lezi.babylog.feature.family.components.FamilyDestructiveAction
 import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
 import com.lezi.babylog.feature.family.components.canConfirmFamilyDeletion
+import com.lezi.babylog.feature.family.components.familyDestructiveConfirmPresentation
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrContentCodec
 @Composable
@@ -205,9 +207,17 @@ internal fun MemberLoginQrCodeDialog(
 
 
 @Composable
-internal fun LeaveFamilyDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun LeaveFamilyDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    busy: Boolean = false,
+) {
+    val presentation = familyDestructiveConfirmPresentation(
+        FamilyDestructiveAction.LeaveFamily,
+        busy,
+    )
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("退出家庭？") },
         text = {
             Text(
@@ -215,19 +225,29 @@ internal fun LeaveFamilyDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text("退出家庭", color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onConfirm, enabled = presentation.enabled) {
+                Text(presentation.label, color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+        },
     )
 }
 
 
 @Composable
-internal fun LogoutCurrentDeviceDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun LogoutCurrentDeviceDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    busy: Boolean = false,
+) {
+    val presentation = familyDestructiveConfirmPresentation(
+        FamilyDestructiveAction.LogoutDevice,
+        busy,
+    )
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("退出这台设备？") },
         text = {
             Text(
@@ -235,11 +255,13 @@ internal fun LogoutCurrentDeviceDialog(onConfirm: () -> Unit, onDismiss: () -> U
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text("退出这台设备", color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onConfirm, enabled = presentation.enabled) {
+                Text(presentation.label, color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+        },
     )
 }
 
@@ -250,9 +272,14 @@ internal fun RevokeFamilyDeviceDialog(
     isCurrent: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
+    busy: Boolean = false,
 ) {
+    val presentation = familyDestructiveConfirmPresentation(
+        FamilyDestructiveAction.RevokeDevice,
+        busy,
+    )
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text(if (isCurrent) "撤销这台设备？" else "撤销「$deviceName」？") },
         text = {
             Text(
@@ -264,11 +291,13 @@ internal fun RevokeFamilyDeviceDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
-                Text("确认撤销", color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = onConfirm, enabled = presentation.enabled) {
+                Text(presentation.label, color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+        },
     )
 }
 
@@ -290,7 +319,7 @@ internal fun DeleteFamilyDialog(
 ) {
     val final = stage == FamilyDialog.DeleteStage.Final
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!deleting) onDismiss() },
         properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
         title = { Text(if (final) "删除整个家庭" else "删除家庭服务器上的全部数据？") },
         text = {
@@ -309,6 +338,7 @@ internal fun DeleteFamilyDialog(
                     )
                 } else if (final) {
                     OutlinedTextField(
+                        enabled = !deleting,
                         value = familyNameInput,
                         onValueChange = onFamilyNameInputChange,
                         label = { Text("输入家庭名：$expectedFamilyName") },
@@ -318,6 +348,7 @@ internal fun DeleteFamilyDialog(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
+                        enabled = !deleting,
                         value = rootPassword,
                         onValueChange = onRootPasswordChange,
                         label = { Text("管理员根密码") },
@@ -368,6 +399,8 @@ internal fun DeleteFamilyDialog(
                 )
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !deleting) { Text("取消") }
+        },
     )
 }

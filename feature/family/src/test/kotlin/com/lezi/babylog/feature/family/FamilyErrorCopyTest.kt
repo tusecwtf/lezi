@@ -390,7 +390,8 @@ class FamilyErrorCopyTest {
         )
         assertFalse(joined.showCreateJoin)
         assertTrue(joined.showMembersEntry)
-        assertTrue(joined.showRenameFamily)
+        // Path A: the overview card is honest/read-only; rename lives in members.
+        assertFalse(joined.showRenameFamily)
         assertFalse(joined.syncStatusLabel.contains("Idle"))
         assertFalse(joined.syncStatusLabel.contains("SSID"))
 

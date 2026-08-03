@@ -49,4 +49,20 @@ class FamilyNetworkSettingsActionsTest {
         assertThat(copy.status).isEqualTo("当前不可连接，本机护理可继续使用")
         assertThat(copy.lastHealthyAtMillis).isEqualTo(1_234L)
     }
+
+    @Test
+    fun trustChangeCopyGuidesCertificateCheckAndReauthentication() {
+        val unavailable = FamilyServerAvailability.Unavailable(
+            reason = FamilyServerUnavailableReason.TrustChanged,
+            lastHealthyAtMillis = 1_234L,
+            nextProbeAtMillis = 31_234L,
+            consecutiveFailures = 1,
+        )
+
+        val copy = networkAvailabilityCopy(unavailable)
+
+        assertThat(copy.status).isEqualTo("服务器安全信息已变化，请核对证书并重新登录")
+        assertThat(copy.lastHealthyAtMillis).isEqualTo(1_234L)
+        assertThat(copy.trustRecoveryRequired).isTrue()
+    }
 }

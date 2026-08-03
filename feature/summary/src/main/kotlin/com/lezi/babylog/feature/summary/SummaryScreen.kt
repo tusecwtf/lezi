@@ -26,6 +26,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -47,6 +48,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziShapes
@@ -59,7 +61,8 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.carelog.WeekSummary
 import com.lezi.babylog.domain.carelog.weekStartFor
-import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.sync.session.ShallowSyncLine
+import com.lezi.babylog.sync.session.ShallowSyncState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -74,6 +77,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 enum class SummaryRange(
@@ -153,6 +157,7 @@ class SummaryViewModel @Inject constructor(
     private val settings: SettingsStore,
     private val syncPort: SyncPort,
 ) : ViewModel() {
+    private val refreshInFlight = MutableStateFlow(false)
     private val zone = ZoneId.systemDefault()
     private val aggregationEngine = SummaryAggregationEngine()
     private val range = MutableStateFlow(SummaryRange.Day)
@@ -229,11 +234,15 @@ class SummaryViewModel @Inject constructor(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), SummaryUi())
 
-    val syncStatus = syncPort.status().stateIn(
+    val shallowSyncStatus = syncPort.shallowStatus().stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
-        SyncStatus.Disabled,
+        ShallowSyncLine(
+            state = ShallowSyncState.Unjoined,
+            text = "尚未加入家庭 · 数据仅保存在本机",
+        ),
     )
+    val isRefreshing = refreshInFlight.asStateFlow()
 
     fun setRange(r: SummaryRange) {
         range.value = r
@@ -244,7 +253,14 @@ class SummaryViewModel @Inject constructor(
     }
 
     fun refresh() {
-        viewModelScope.launch { syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh) }
+        if (!refreshInFlight.compareAndSet(expect = false, update = true)) return
+        viewModelScope.launch {
+            try {
+                syncPort.syncWhenAvailable(SyncTrigger.PullToRefresh)
+            } finally {
+                refreshInFlight.value = false
+            }
+        }
     }
 }
 
@@ -258,7 +274,8 @@ fun SummaryRoute(
         vm.setAnchorDate(anchorDate)
     }
     val ui by vm.ui.collectAsStateWithLifecycle()
-    val syncStatus by vm.syncStatus.collectAsStateWithLifecycle()
+    val shallowSyncStatus by vm.shallowSyncStatus.collectAsStateWithLifecycle()
+    val isRefreshing by vm.isRefreshing.collectAsStateWithLifecycle()
     if (ui.calculating) {
         PageScaffoldBackground {
             Box(
@@ -285,7 +302,7 @@ fun SummaryRoute(
 
     PageScaffoldBackground {
         PullToRefreshBox(
-            isRefreshing = syncStatus == SyncStatus.Syncing,
+            isRefreshing = isRefreshing,
             onRefresh = vm::refresh,
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -307,13 +324,21 @@ fun SummaryRoute(
                         title = "汇总",
                     )
 
-                    if (syncStatus == SyncStatus.Error) {
-                        Text(
-                            "同步遇到问题，本机汇总仍可使用",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
+                    Text(
+                        shallowSyncStatus.text,
+                        style = LeziTypography.Meta,
+                        color = if (
+                            shallowSyncStatus.state in setOf(
+                                ShallowSyncState.Error,
+                                ShallowSyncState.ReauthRequired,
+                            )
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.testTag("summary_shallow_sync_status"),
+                    )
 
                     RangeTabs(
                         selected = ui.range,
@@ -333,7 +358,7 @@ fun SummaryRoute(
                 } else {
                     formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
                 },
-                sleepValue = formatMin(windows.daySleepMin),
+                sleepValue = formatRecordDuration(windows.daySleepMin),
                 sleepDetail = if (windows.daySleepSegments == 0) {
                     "当日 0 段"
                 } else {
@@ -346,7 +371,7 @@ fun SummaryRoute(
             if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
                 val averageSleep = t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
                 Text(
-                    "日均睡眠 ${formatMin(averageSleep)}",
+                    "日均睡眠 ${formatRecordDuration(averageSleep)}",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
@@ -389,8 +414,8 @@ fun SummaryRoute(
                     formatFeedWindowTotal(t.feedMl, t.nursingMin)
             }
             val sleepChartTotal = when (ui.range) {
-                SummaryRange.Day -> formatMin(windows.daySleepMin)
-                SummaryRange.Week, SummaryRange.Month -> formatMin(t.sleepMin)
+                SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
+                SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
             }
             val diaperChartTotal = when (ui.range) {
                 SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
@@ -446,7 +471,7 @@ fun SummaryRoute(
                         metricLabel = "睡眠分钟",
                         color = ext.laneSleep,
                         valueFormatter = { v ->
-                            if (v <= 0f) "" else formatMin(v.toLong())
+                            if (v <= 0f) "" else formatRecordDuration(v.toLong())
                         },
                     )
                 }
@@ -1130,13 +1155,6 @@ private fun chartDescription(
     "${date.monthValue}月${date.dayOfMonth}日 ${"%.1f".format(value)}"
 }
 
-private fun formatMin(min: Long): String {
-    if (min == 0L) return "0m"
-    val h = min / 60
-    val m = min % 60
-    return if (h == 0L) "${m}m" else if (m == 0L) "${h}h" else "${h}h${m}m"
-}
-
 private fun formatSigned(value: Long, unit: String): String =
     "${if (value >= 0) "+" else ""}$value$unit"
 
@@ -1148,7 +1166,7 @@ private fun formatFeedWindowTotal(feedMl: Int, nursingMin: Long): String {
         append(if (feedMl > 0) "${feedMl}ml" else "0ml")
         if (nursingMin > 0L) {
             append(" · 母乳 ")
-            append(formatMin(nursingMin))
+            append(formatRecordDuration(nursingMin))
         }
     }
 }

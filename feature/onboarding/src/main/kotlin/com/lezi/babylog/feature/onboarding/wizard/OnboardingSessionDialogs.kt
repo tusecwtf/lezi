@@ -254,7 +254,7 @@ internal fun OnboardingMemberWaitingDialog(
                 TextButton(
                     onClick = onCancelRequest,
                     enabled = !familyWizardBusy,
-                ) { Text("取消申请") }
+                ) { Text("在这台设备放弃等待") }
                 TextButton(
                     onClick = onKeepOffline,
                     enabled = !familyWizardBusy,
@@ -265,7 +265,16 @@ internal fun OnboardingMemberWaitingDialog(
             TextButton(
                 onClick = onCheckResult,
                 enabled = !familyWizardBusy,
-            ) { Text(if (familyWizardBusy) "正在检查…" else "检查结果") }
+            ) {
+                Text(
+                    when {
+                        (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
+                            ?.cancelling == true -> "正在取消…"
+                        familyWizardBusy -> "正在检查…"
+                        else -> "检查结果"
+                    },
+                )
+            }
         },
     )
 }

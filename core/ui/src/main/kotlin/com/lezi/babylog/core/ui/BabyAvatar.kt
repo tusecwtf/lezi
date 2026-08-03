@@ -29,6 +29,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.readableContentColor
 import java.io.File
@@ -115,5 +116,20 @@ private fun loadPrivateAvatar(context: Context, relativePath: String): android.g
         val candidate = File(root, relativePath).canonicalFile
         val insideFilesDir = candidate.path.startsWith(root.path + File.separator)
         if (!insideFilesDir || !candidate.isFile) return@runCatching null
-        BitmapFactory.decodeFile(candidate.path)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(candidate.path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        val sample = RecordPhotoResourcePolicy.decodeSampleSize(
+            width = bounds.outWidth,
+            height = bounds.outHeight,
+            maxEdge = MAX_AVATAR_DECODE_EDGE,
+            maxPixels = MAX_AVATAR_DECODE_PIXELS,
+        )
+        BitmapFactory.decodeFile(
+            candidate.path,
+            BitmapFactory.Options().apply { inSampleSize = sample },
+        )
     }.getOrNull()
+
+private const val MAX_AVATAR_DECODE_EDGE = 512
+private const val MAX_AVATAR_DECODE_PIXELS = 512L * 512

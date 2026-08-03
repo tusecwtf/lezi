@@ -131,6 +131,7 @@ fun OnboardingRoute(
     val verifiedEndpoint by vm.verifiedEndpoint.collectAsState(initial = null)
     val familyWizardBusy = familyWizardState.isBusy
     val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
+    val creatingBaby by vm.creatingBaby.collectAsState()
     val novice = remember { FamilyEndpointConfig.emptyDraft() }
     var joinDraft by rememberSaveable(stateSaver = FamilyEndpointDraftSaver) {
         mutableStateOf(FamilyEndpointDraft.fromConfig(novice))
@@ -379,6 +380,7 @@ fun OnboardingRoute(
                 val createBabySource = onboardingCreateBabySource(familyWizardState)
                 OnboardingCreateBabyStep(
                     createBabySource = createBabySource,
+                    creatingBaby = creatingBaby,
                     name = name,
                     onNameChange = {
                         name = onboardingLimitNickname(it)
@@ -414,7 +416,7 @@ fun OnboardingRoute(
                             },
                         )
                     },
-                    onBack = { step = OnboardingStep.ChooseFamily },
+                    onBack = { if (!creatingBaby) step = OnboardingStep.ChooseFamily },
                 )
             }
             OnboardingStep.RecoveryPending -> {

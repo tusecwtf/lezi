@@ -10,6 +10,7 @@ import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.database.LocalUserEntity
 import com.lezi.babylog.core.database.MediaAssetDao
+import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
 import com.lezi.babylog.core.database.RecordDao
@@ -45,6 +46,12 @@ private data class BabyMergeWriteResult(
     val reprojectPlanClientUuids: List<String>,
     val discardedNextFeedPlanIds: List<Long>,
     val carePlanIdentityMigrations: List<CarePlanIdentityMigration>,
+    val avatarCleanupClientUuids: Set<String>,
+)
+
+private data class BabyProfileUpdateResult(
+    val changed: Boolean,
+    val avatarCleanupClientUuids: Set<String>,
 )
 
 private data class CarePlanIdentityMigration(
@@ -155,28 +162,65 @@ internal class BabyFamilyProfileCoordinator(
      */
     suspend fun updateBabyProfile(babyId: Long, input: UpdateBabyInput) {
         requireCanManageBabyProfiles()
-        val changed = transactionRunner.run {
-            val existing = babyDao.get(babyId) ?: return@run false
-            val nickname = normalizeNickname(input.nickname)
-            ensureNicknameAvailable(nickname, excludeId = babyId)
-            babyDao.update(
-                existing.copy(
-                    nickname = nickname,
-                    sex = normalizeBabySexForStorage(input.sex),
-                    birthdayEpochDay = input.birthdayEpochDay,
-                    birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
-                    avatarPath = input.avatarPath,
-                    themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
-                    updatedAt = nextSyncUpdatedAt(
-                        existing.updatedAt,
-                        System.currentTimeMillis(),
+        val avatarPaths = buildList {
+            mediaAssetDao.listActiveAvatarsForBaby(babyId)
+                .mapTo(this, MediaAssetEntity::localUri)
+            input.avatarPath?.let(::add)
+        }.filter(String::isNotBlank)
+        val result = mediaPathGate.withLocks(avatarPaths) {
+            transactionRunner.run {
+                val existing = babyDao.get(babyId)
+                    ?: return@run BabyProfileUpdateResult(false, emptySet())
+                val nickname = normalizeNickname(input.nickname)
+                ensureNicknameAvailable(nickname, excludeId = babyId)
+                val updatedAt = nextSyncUpdatedAt(
+                    existing.updatedAt,
+                    System.currentTimeMillis(),
+                )
+                val avatarCleanupClientUuids = linkedSetOf<String>()
+                val retainedAvatar = if (existing.avatarPath != input.avatarPath) {
+                    val activeAvatars = mediaAssetDao.listActiveAvatarsForBaby(babyId)
+                    val retained = input.avatarPath?.let { path ->
+                        activeAvatars.firstOrNull { it.localUri == path }
+                    }
+                    activeAvatars.filterNot { it.clientUuid == retained?.clientUuid }
+                        .forEach { asset ->
+                            val deletedAt = nextSyncUpdatedAt(asset.updatedAt, updatedAt)
+                            mediaAssetDao.update(
+                                asset.copy(
+                                    deletedAt = deletedAt,
+                                    updatedAt = deletedAt,
+                                    syncDirty = true,
+                                ),
+                            )
+                            avatarCleanupClientUuids += asset.clientUuid
+                        }
+                    retained
+                } else {
+                    null
+                }
+                babyDao.update(
+                    existing.copy(
+                        nickname = nickname,
+                        sex = normalizeBabySexForStorage(input.sex),
+                        birthdayEpochDay = input.birthdayEpochDay,
+                        birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
+                        avatarMediaUuid = if (existing.avatarPath != input.avatarPath) {
+                            retainedAvatar?.clientUuid
+                        } else {
+                            existing.avatarMediaUuid
+                        },
+                        avatarPath = input.avatarPath,
+                        themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
+                        updatedAt = updatedAt,
+                        syncDirty = true,
                     ),
-                    syncDirty = true,
-                ),
-            )
-            true
+                )
+                BabyProfileUpdateResult(true, avatarCleanupClientUuids)
+            }
         }
-        if (!changed) return
+        if (!result.changed) return
+        cleanupCommittedPhotoTombstones(result.avatarCleanupClientUuids)
         requestLocalSync()
     }
 
@@ -379,7 +423,8 @@ internal class BabyFamilyProfileCoordinator(
     /**
      * Apply a merge only after the UI has shown [previewBabyMerge].
      * The target profile stays intact; source records and care plans (including
-     * tombstones), plus avatar media rows, are re-bound to the target baby.
+     * tombstones) are re-bound. Source avatar associations are immutable after
+     * publication, so they are tombstoned and reclaimed instead of re-bound.
      */
     suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean =
         mergeBabyProfiles(sourceBabyId, targetBabyId, forceMemberRules = false)
@@ -391,8 +436,12 @@ internal class BabyFamilyProfileCoordinator(
     ): Boolean {
         if (sourceBabyId == targetBabyId) return false
         val now = System.currentTimeMillis()
-        val writeResult = sleepMutationMutex.withLock {
-            transactionRunner.run {
+        val avatarPaths = mediaAssetDao.listActiveAvatarsForBaby(sourceBabyId)
+            .map(MediaAssetEntity::localUri)
+            .filter(String::isNotBlank)
+        val writeResult = mediaPathGate.withLocks(avatarPaths) {
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
                 val source = babyDao.get(sourceBabyId) ?: return@run null
                 val target = babyDao.get(targetBabyId) ?: return@run null
                 if (source.familyId != target.familyId) return@run null
@@ -487,17 +536,18 @@ internal class BabyFamilyProfileCoordinator(
                         }
                     }
                 }
-                mediaAssetDao.listAllIncludingDeleted()
-                    .filter { it.babyId == source.id }
-                    .forEach { asset ->
-                        mediaAssetDao.update(
-                            asset.copy(
-                                babyId = target.id,
-                                updatedAt = nextSyncUpdatedAt(asset.updatedAt, now),
-                                syncDirty = true,
-                            ),
-                        )
-                    }
+                val avatarCleanupClientUuids = linkedSetOf<String>()
+                mediaAssetDao.listActiveAvatarsForBaby(source.id).forEach { asset ->
+                    val deletedAt = nextSyncUpdatedAt(asset.updatedAt, now)
+                    mediaAssetDao.update(
+                        asset.copy(
+                            deletedAt = deletedAt,
+                            updatedAt = deletedAt,
+                            syncDirty = !memberMerge,
+                        ),
+                    )
+                    avatarCleanupClientUuids += asset.clientUuid
+                }
                 healDuplicateOpenSleeps(target.id)
                 babyDao.update(
                     nextSyncUpdatedAt(source.updatedAt, now).let { deletedAt ->
@@ -506,6 +556,8 @@ internal class BabyFamilyProfileCoordinator(
                             updatedAt = deletedAt,
                             // A member-local orphan never becomes a family tombstone.
                             syncDirty = !memberMerge,
+                            avatarMediaUuid = null,
+                            avatarPath = null,
                         )
                     },
                 )
@@ -513,7 +565,9 @@ internal class BabyFamilyProfileCoordinator(
                     reprojectPlanClientUuids = reprojectPlanUuids,
                     discardedNextFeedPlanIds = discardedNextFeedIds,
                     carePlanIdentityMigrations = identityMigrations,
+                    avatarCleanupClientUuids = avatarCleanupClientUuids,
                 )
+                }
             }
         }
         if (writeResult == null) return false
@@ -537,6 +591,7 @@ internal class BabyFamilyProfileCoordinator(
         reminderProjection.reprojectMergedBabySystemCalendarCopies(
             writeResult.reprojectPlanClientUuids,
         )
+        cleanupCommittedPhotoTombstones(writeResult.avatarCleanupClientUuids)
         requestLocalSync()
         return true
     }

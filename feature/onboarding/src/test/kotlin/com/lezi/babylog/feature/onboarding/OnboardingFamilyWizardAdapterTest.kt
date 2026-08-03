@@ -124,7 +124,7 @@ class OnboardingFamilyWizardAdapterTest {
             ),
         )
         assertEquals(
-            OnboardingFamilyTransition(false, OnboardingStep.RecoveryPending),
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
             onboardingFamilyWizardTransition(
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
@@ -150,7 +150,7 @@ class OnboardingFamilyWizardAdapterTest {
             ),
         )
         assertEquals(
-            OnboardingFamilyTransition(false, OnboardingStep.RecoveryPending),
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
             onboardingFamilyWizardTransition(
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
@@ -162,10 +162,23 @@ class OnboardingFamilyWizardAdapterTest {
                 reclaimedFamilyEmpty = null,
             ),
         )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.NotRequired,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
     }
 
     @Test
-    fun committedReclaimFailureStaysOnRecoveryGate() {
+    fun committedRecoveryFailureLeavesOnboardingForTheGlobalSyncOwner() {
         val snapshot = onboardingFamilyWizardSnapshot(
             mode = FamilyWizardMode.Create,
             step = FamilyWizardStep.Identity,
@@ -180,7 +193,7 @@ class OnboardingFamilyWizardAdapterTest {
         )
 
         assertEquals(
-            OnboardingFamilyTransition(false, OnboardingStep.RecoveryPending),
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
             onboardingFamilyWizardTransition(
                 FamilyWizardState.RetryableFailure(
                     snapshot,

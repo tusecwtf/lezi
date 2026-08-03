@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.family.overview
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
@@ -10,12 +11,17 @@ import com.lezi.babylog.feature.family.FamilyIdentityUi
 import com.lezi.babylog.feature.family.baby.BabyAvatarFileStore
 import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
 import com.lezi.babylog.feature.family.components.displayFamilyName
+import com.lezi.babylog.feature.family.components.FamilyDestructiveActionGate
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
 import com.lezi.babylog.sync.PendingMemberLogin
+import com.lezi.babylog.sync.session.ShallowSyncLine
+import com.lezi.babylog.sync.session.ShallowSyncState
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.session.SyncSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,6 +50,12 @@ data class AccountOverviewUi(
     val localOrphanBabies: List<Baby> = emptyList(),
     val lastSuccessAt: Long? = null,
     val pendingMemberLogin: PendingMemberLogin? = null,
+    val shallowSyncLine: ShallowSyncLine = ShallowSyncLine(
+        state = ShallowSyncState.Unjoined,
+        text = "尚未加入家庭 · 数据仅保存在本机",
+    ),
+    /** Family identity is retained while credentials require recovery. */
+    val retainedFamilyIdentity: Boolean = false,
     /**
      * Optional self-hosted app update from handshake/sync discovery.
      * Null when none, not joined, up-to-date, or dismissed for this process session.
@@ -62,6 +74,12 @@ data class AccountOverviewUi(
         get() = displayFamilyName(familyName, current?.nickname)
 }
 
+private data class AccountSyncProjection(
+    val session: SyncSession,
+    val pendingMemberLogin: PendingMemberLogin?,
+    val shallowSyncLine: ShallowSyncLine,
+)
+
 @HiltViewModel
 class AccountOverviewHost @Inject constructor(
     private val sync: SyncPort,
@@ -69,6 +87,7 @@ class AccountOverviewHost @Inject constructor(
     private val avatarFileStore: BabyAvatarFileStore,
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
+    private val destructiveAction = FamilyDestructiveActionGate()
     private val appUpdate = AppUpdateOutcomeMachine(sync)
 
     private val babySurfaces = combine(
@@ -79,7 +98,10 @@ class AccountOverviewHost @Inject constructor(
     private val syncIdentity = combine(
         sync.session(),
         sync.pendingMemberLogin(),
-    ) { session, pending -> session to pending }
+        sync.shallowStatus(),
+    ) { session, pending, shallowSyncLine ->
+        AccountSyncProjection(session, pending, shallowSyncLine)
+    }
 
     private val baseUi = combine(
         sync.status(),
@@ -88,7 +110,8 @@ class AccountOverviewHost @Inject constructor(
         babySurfaces,
         syncIdentity,
     ) { st, hasBaby, current, babyLists, syncState ->
-        val (session, pendingMemberLogin) = syncState
+        val session = syncState.session
+        val pendingMemberLogin = syncState.pendingMemberLogin
         val (babies, localOrphans) = babyLists
         val identity = careLog.localFamilyIdentity()
         AccountOverviewUi(
@@ -108,6 +131,8 @@ class AccountOverviewHost @Inject constructor(
             localOrphanBabies = localOrphans,
             lastSuccessAt = session.lastSuccessAt,
             pendingMemberLogin = pendingMemberLogin,
+            shallowSyncLine = syncState.shallowSyncLine,
+            retainedFamilyIdentity = session.familyId.isNotBlank(),
         )
     }
 
@@ -124,6 +149,7 @@ class AccountOverviewHost @Inject constructor(
     val appUpdateOutcome: StateFlow<AppUpdateUiOutcome?> = appUpdate.outcome
     val checkingAppUpdate: StateFlow<Boolean> = appUpdate.checking
     val installingAppUpdate: StateFlow<Boolean> = appUpdate.installing
+    val destructiveBusy: StateFlow<Boolean> = destructiveAction.busy
 
     /** Open the same optional confirm flow as the settings about path. */
     fun openOptionalAppUpdate(metadata: AppUpdateMetadata) = appUpdate.openOptional(metadata)
@@ -188,18 +214,24 @@ class AccountOverviewHost @Inject constructor(
         }
     }
 
-    fun deleteBaby(babyId: Long, onDone: (String) -> Unit) {
+    fun deleteBaby(babyId: Long, onDone: (success: Boolean, message: String) -> Unit) {
         viewModelScope.launch {
-            val avatarPath = ui.value.babies.firstOrNull { it.id == babyId }?.avatarPath
-            currentCoroutineContext().ensureActive()
-            val ok = deleteBabyProfileWithAvatar(
-                careLog = careLog,
-                avatarFileStore = avatarFileStore,
-                babyId = babyId,
-                avatarPath = avatarPath,
-            )
-            currentCoroutineContext().ensureActive()
-            onDone(if (ok) "已删除宝宝档案" else "至少保留一位宝宝档案")
+            var outcome: Pair<Boolean, String>? = null
+            val accepted = destructiveAction.run {
+                outcome = try {
+                    val deleted = deleteBabyProfileWithAvatar(
+                        careLog = careLog,
+                        babyId = babyId,
+                    )
+                    currentCoroutineContext().ensureActive()
+                    deleted to if (deleted) "已删除宝宝档案" else "至少保留一位宝宝档案"
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    false to productUiError(error, "删除宝宝失败，请稍后重试")
+                }
+            }
+            if (accepted) outcome?.let { (success, message) -> onDone(success, message) }
         }
     }
 
@@ -213,13 +245,27 @@ class AccountOverviewHost @Inject constructor(
         }
     }
 
-    fun merge(preview: BabyMergePreview, onDone: (String) -> Unit) {
+    fun merge(preview: BabyMergePreview, onDone: (success: Boolean, message: String) -> Unit) {
         viewModelScope.launch {
-            val merged = careLog.mergeBabyProfiles(
-                sourceBabyId = preview.sourceBabyId,
-                targetBabyId = preview.targetBabyId,
-            )
-            onDone(if (merged) "宝宝档案已合并" else "档案状态已变化，请重新预览")
+            var outcome: Pair<Boolean, String>? = null
+            val accepted = destructiveAction.run {
+                outcome = try {
+                    val merged = careLog.mergeBabyProfiles(
+                        sourceBabyId = preview.sourceBabyId,
+                        targetBabyId = preview.targetBabyId,
+                    )
+                    merged to if (merged) {
+                        "宝宝档案已合并"
+                    } else {
+                        "档案状态已变化，请重新预览"
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    false to productUiError(error, "合并宝宝失败，请稍后重试")
+                }
+            }
+            if (accepted) outcome?.let { (success, message) -> onDone(success, message) }
         }
     }
 }
