@@ -316,6 +316,11 @@ internal fun restoredRunningDelta(
         // reboot. Its wall pair is the only cross-boot clock available.
         return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
     }
+    if (savedBootCount != null && nowBootCount == null) {
+        // The persisted uptime cannot be trusted when boot identity is no
+        // longer readable; the device may have rebooted since the snapshot.
+        return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
+    }
     if (savedBootCount != null && nowBootCount != null) {
         if (savedBootCount != nowBootCount) {
             return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L

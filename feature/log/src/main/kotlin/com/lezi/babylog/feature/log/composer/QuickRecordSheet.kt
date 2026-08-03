@@ -46,6 +46,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -210,6 +211,11 @@ internal fun QuickRecordSheet(
             confirmChrome,
             ComposerConfirmChromeEvent.BusyChanged(busy),
         )
+        if (busy) {
+            clockTarget = null
+            clockError = null
+            dismissKeyboard()
+        }
     }
     LaunchedEffect(confirmChrome.reasonVisible, confirmChrome.focusField) {
         if (confirmChrome.reasonVisible && confirmChrome.focusField != null) {
@@ -218,6 +224,7 @@ internal fun QuickRecordSheet(
     }
 
     fun update(value: QuickRecordDraft) {
+        if (!actionsEnabled) return
         clockError = null
         isDirty = true
         confirmChrome = reduceConfirmChrome(
@@ -340,6 +347,7 @@ internal fun QuickRecordSheet(
                 intervalPreview = timeFeedback,
                 highlightedField = confirmChrome.focusField,
                 sleepPolicy = sleepPolicy,
+                enabled = actionsEnabled,
             )
 
             SectionLabel("备注")
@@ -348,6 +356,7 @@ internal fun QuickRecordSheet(
                 onValueChange = { update(draft.copy(note = it.take(200))) },
                 modifier = Modifier
                     .fillMaxWidth()
+                    .testTag(RECORD_COMPOSER_NOTE_FIELD_TAG)
                     .then(
                         if (confirmChrome.focusField == ComposerInvalidField.Note) {
                             Modifier.focusRequester(fieldFocusRequester)
@@ -361,6 +370,7 @@ internal fun QuickRecordSheet(
                 minLines = 2,
                 maxLines = 4,
                 supportingText = { Text("${draft.note.length}/200") },
+                enabled = actionsEnabled,
             )
             if (draft.recentNotes.isNotEmpty()) {
                 Text("最近备注", style = LeziTypography.Label)
@@ -370,7 +380,10 @@ internal fun QuickRecordSheet(
                         .horizontalScroll(rememberScrollState()),
                 ) {
                     draft.recentNotes.forEach { candidate ->
-                        TextButton(onClick = { update(draft.copy(note = candidate)) }) {
+                        TextButton(
+                            onClick = { update(draft.copy(note = candidate)) },
+                            enabled = actionsEnabled,
+                        ) {
                             Text(candidate, maxLines = 1)
                         }
                     }
@@ -661,3 +674,5 @@ internal fun QuickRecordSheet(
         )
     }
 }
+
+internal const val RECORD_COMPOSER_NOTE_FIELD_TAG = "record_composer_note_field"

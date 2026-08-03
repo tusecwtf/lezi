@@ -14,6 +14,122 @@ import com.lezi.babylog.feature.log.photo.*
 
 class RecordComposerSavedStateTest {
     @Test
+    fun confirmFreezesFuturePlanDecisionAndEditableCommandAcrossClockFlip() {
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.BATH,
+            timestamp = 2_000L,
+            historical = false,
+        )
+        val confirmedDraft = QuickRecordDraft.create(RecordType.BATH, 2_000L).copy(
+            note = "确认时备注",
+        )
+
+        val frozen = freezeComposerWrite(
+            request = request,
+            babyId = 7L,
+            draft = confirmedDraft,
+            confirmedAtMillis = 1_000L,
+            clientUuid = "composer-plan-identity",
+        )
+
+        assertEquals(ComposerWriteDecision.CreateCarePlan, frozen.writeDecision)
+        assertEquals(2_000L, frozen.command.timestamp)
+        assertEquals("确认时备注", frozen.command.note)
+        assertEquals("composer-plan-identity", frozen.clientUuid)
+        // The same draft would be a fact after the long import crosses its timestamp.
+        assertEquals(
+            ComposerWriteDecision.AddRecord,
+            confirmedDraft.copy(note = "导入期间误改").writeDecision(nowMillis = 3_000L),
+        )
+        assertEquals("确认时备注", frozen.command.note)
+    }
+
+    @Test
+    fun confirmFreezesRecordConversionAcrossClockFlip() {
+        val request = RecordComposerRequest.Edit(recordId = 9L)
+        val confirmedDraft = QuickRecordDraft.create(RecordType.BATH, 2_000L).copy(
+            existingRecordId = 9L,
+            note = "转计划",
+        )
+
+        val frozen = freezeComposerWrite(
+            request = request,
+            babyId = 7L,
+            draft = confirmedDraft,
+            confirmedAtMillis = 1_000L,
+            clientUuid = "composer-convert-identity",
+        )
+
+        assertEquals(ComposerWriteDecision.ConvertRecordToCarePlan, frozen.writeDecision)
+        assertEquals(
+            ComposerWriteDecision.UpdateRecord,
+            confirmedDraft.writeDecision(nowMillis = 3_000L),
+        )
+        assertEquals(ComposerWriteDecision.ConvertRecordToCarePlan, frozen.writeDecision)
+    }
+
+    @Test
+    fun processRecreationRestoresOnePendingWriteIdentityInsteadOfAnEditableDraft() {
+        val handle = SavedStateHandle()
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            historical = false,
+        )
+        val originalDraft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
+            body = "只应写入一次",
+        )
+        val saved = RecordComposerSavedState(handle)
+        saved.initialize(request, originalDraft)
+        val pending = freezeComposerWrite(
+            request = request,
+            babyId = 7L,
+            draft = originalDraft,
+            confirmedAtMillis = 2_000L,
+            clientUuid = "composer-fact-identity",
+        )
+
+        saved.savePendingWrite(pending)
+        // A late editable-field callback cannot mutate an already-confirmed write.
+        saved.update(request, originalDraft.copy(body = "不应覆盖"))
+
+        val recreated = RecordComposerSavedState(handle)
+        assertEquals(pending, recreated.pendingWrite())
+        assertEquals(originalDraft, recreated.pendingWrite()?.draft)
+        assertNull(recreated.restore(request))
+    }
+
+    @Test
+    fun recreatedPendingWriteMapsToLockedAutomaticResumeState() {
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            historical = false,
+        )
+        val draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
+            body = "只写一次",
+        )
+        val pending = freezeComposerWrite(
+            request = request,
+            babyId = 7L,
+            draft = draft,
+            confirmedAtMillis = 2_000L,
+            clientUuid = "composer-resume-identity",
+        )
+
+        val restored = recordComposerPendingWriteUiState(pending)
+
+        assertEquals(request, restored.activeRequest)
+        assertEquals(draft, restored.draft)
+        assertTrue(restored.saving)
+        assertFalse(restored.hasUserChanges)
+        assertNull(restored.error)
+    }
+
+    @Test
     fun recreatedStoreRestoresDraftOnlyForTheSameRequest() {
         val handle = SavedStateHandle()
         val request = RecordComposerRequest.New(
@@ -278,10 +394,20 @@ class RecordComposerSavedStateTest {
             timestamp = 1_000L,
             historical = false,
         )
-        saved.initialize(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
+        val draft = QuickRecordDraft.create(RecordType.FORMULA, 1_000L)
+        saved.initialize(request, draft)
+        saved.savePendingWrite(
+            freezeComposerWrite(
+                request = request,
+                babyId = 7L,
+                draft = draft,
+                confirmedAtMillis = 2_000L,
+                clientUuid = "composer-post-save-identity",
+            ),
+        )
         val openState = RecordComposerUiState(
             activeRequest = request,
-            draft = QuickRecordDraft.create(RecordType.FORMULA, 1_000L),
+            draft = draft,
             babyId = 7L,
             saving = true,
         )
@@ -301,6 +427,7 @@ class RecordComposerSavedStateTest {
         )
 
         assertNull(saved.restore(request))
+        assertNull(saved.pendingWrite())
         assertEquals(
             PendingNextFeed(
                 babyId = 7L,

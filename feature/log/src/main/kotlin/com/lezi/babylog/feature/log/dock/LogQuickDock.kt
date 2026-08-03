@@ -255,7 +255,8 @@ internal sealed class MoreCatalogEntry {
     data class Custom(
         val item: CustomRecordItem,
     ) : MoreCatalogEntry() {
-        override val identity: RecordItemIdentity = RecordItemIdentity.custom(item.id)
+        override val identity: RecordItemIdentity =
+            RecordItemIdentity.custom(item.id, item.clientUuid)
         override val label: String get() = item.name
         override val section: RecordSection = RecordSection.Custom
     }
@@ -273,7 +274,9 @@ internal fun moreSheetCatalog(
         .filter { it.key !in settings.hiddenItems }
         .map { MoreCatalogEntry.BuiltIn(it) }
     val customs = customItems
-        .filter { RecordItemIdentity.customCatalogKey(it.id) !in settings.hiddenItems }
+        .filter {
+            RecordItemIdentity.custom(it.id, it.clientUuid).catalogKey !in settings.hiddenItems
+        }
         .map { MoreCatalogEntry.Custom(it) }
     return sortCatalogByLocalOrder(
         entries = builtIns + customs,

@@ -252,7 +252,7 @@ class QuickRecordDraftTest {
         ).copy(endTimestamp = tappedAt + 125 * 60_000L)
 
         assertEquals(
-            IntervalDurationPreview.Duration("时长 2小时5分"),
+            IntervalDurationPreview.Duration("时长 2h5m"),
             draft.intervalDurationPreview(nowMillis = tappedAt + 180 * 60_000L),
         )
         assertTrue(draft.canConfirm(nowMillis = tappedAt + 180 * 60_000L))
@@ -287,11 +287,11 @@ class QuickRecordDraftTest {
         )
 
         assertEquals(
-            IntervalDurationPreview.Duration("时长 30分"),
+            IntervalDurationPreview.Duration("时长 30m"),
             sleepDown.intervalDurationPreview(nowMillis = tappedAt + 60 * 60_000L),
         )
         assertEquals(
-            IntervalDurationPreview.Duration("时长 45分"),
+            IntervalDurationPreview.Duration("时长 45m"),
             wake.intervalDurationPreview(nowMillis = tappedAt + 60 * 60_000L),
         )
     }
@@ -673,7 +673,7 @@ class QuickRecordDraftTest {
 
         val valid = manual.copy(endTimestamp = tappedAt + 30_000L)
         assertEquals(
-            IntervalDurationPreview.Duration("时长 不足1分"),
+            IntervalDurationPreview.Duration("时长 0m"),
             valid.visibleIntervalDurationPreview(
                 nowMillis = now,
                 isDirty = false,

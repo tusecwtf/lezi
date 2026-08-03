@@ -1,4 +1,11 @@
 package com.lezi.babylog.feature.log.composer
+import androidx.lifecycle.SavedStateHandle
+import com.lezi.babylog.core.model.RecordType
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -111,5 +118,39 @@ class RecordComposerSessionGateTest {
         assertEquals(listOf("/cache/next-draft.jpg"), sourcePhotos)
         assertNull(savedMessage)
         assertEquals(nextSession, gate.current())
+    }
+
+    @Test
+    fun deletePostCommitPublishesAndClearsLockEvenAfterCallerCancellation() = runBlocking {
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            historical = true,
+        )
+        val savedState = RecordComposerSavedState(SavedStateHandle())
+        savedState.initialize(request, QuickRecordDraft.create(RecordType.DIARY, 1_000L))
+        val gate = RecordComposerSessionGate()
+        val session = gate.open()
+        var deliveredMessage: String? = null
+        var commitLocked = true
+
+        val cancelledCaller = launch(start = CoroutineStart.UNDISPATCHED) {
+            currentCoroutineContext().cancel()
+            publishComposerDeleteCommit(
+                savedState = savedState,
+                sessionGate = gate,
+                session = session,
+                message = "已删除记录",
+                onDeleted = { deliveredMessage = it },
+                onCommitLockCleared = { commitLocked = false },
+            )
+        }
+        cancelledCaller.join()
+
+        assertNull(savedState.restore(request))
+        assertNull(savedState.draftForCleanup())
+        assertEquals("已删除记录", deliveredMessage)
+        assertFalse(commitLocked)
     }
 }

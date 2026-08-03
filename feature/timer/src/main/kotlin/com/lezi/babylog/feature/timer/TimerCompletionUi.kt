@@ -40,6 +40,8 @@ internal data class TimerCompletionUiState(
      * Durable until the Host acknowledges navigation so a late composition still exits once.
      */
     val pendingExit: Boolean = false,
+    /** Domain committed, but the durable timer snapshot still needs idempotent clearing. */
+    val timerClearPending: Boolean = false,
     /** Idempotent completeNursing key; kept until post-save stage is published. */
     val completionClientUuid: String? = null,
     /** Session baby for replay when timer DataStore is empty; cleared with submit identity. */
@@ -56,6 +58,10 @@ internal data class TimerCompletionUiState(
 
     val hasPostSaveStage: Boolean
         get() = pendingNextFeed != null || pendingExit
+
+    /** Navigation is safe only after the successful fact cannot restore a ghost timer. */
+    val readyToExit: Boolean
+        get() = pendingExit && !timerClearPending
 
     /** Convenience for hosts that only need the suggested clock time. */
     val pendingNextFeedSuggestedAt: Long?
@@ -158,10 +164,24 @@ internal fun timerCompletionSucceeded(
 ): TimerCompletionUiState {
     if (!current.saving) return current
     return if (pendingNextFeed != null) {
-        TimerCompletionUiState(pendingNextFeed = pendingNextFeed)
+        TimerCompletionUiState(
+            pendingNextFeed = pendingNextFeed,
+            timerClearPending = true,
+        )
     } else {
-        TimerCompletionUiState(pendingExit = true)
+        TimerCompletionUiState(
+            pendingExit = true,
+            timerClearPending = true,
+        )
     }
+}
+
+/** Durable timer JSON is empty; post-save offer/exit may now proceed. */
+internal fun timerCompletionTimerCleared(
+    current: TimerCompletionUiState,
+): TimerCompletionUiState {
+    if (!current.timerClearPending) return current
+    return current.copy(timerClearPending = false)
 }
 
 /** Host acknowledged exit navigation — safe to re-subscribe without re-navigating. */
@@ -181,7 +201,10 @@ internal fun finishTimerNextFeedToExit(
     current: TimerCompletionUiState,
 ): TimerCompletionUiState {
     if (current.pendingNextFeed == null) return current
-    return TimerCompletionUiState(pendingExit = true)
+    return TimerCompletionUiState(
+        pendingExit = true,
+        timerClearPending = current.timerClearPending,
+    )
 }
 
 /**
@@ -227,7 +250,7 @@ internal fun decideTimerCompletionResume(
     timerSessionUuid: String?,
 ): TimerCompletionResumeDecision {
     if (stage.hasPostSaveStage) {
-        return if (hasTimerData) {
+        return if (hasTimerData || stage.timerClearPending) {
             TimerCompletionResumeDecision.FinishClearTimer
         } else {
             TimerCompletionResumeDecision.None
@@ -293,6 +316,7 @@ internal class TimerCompletionSavedState(
             handle.remove<String>(SAVE_ERROR_KEY)
         }
         handle[PENDING_EXIT_KEY] = state.pendingExit
+        handle[TIMER_CLEAR_PENDING_KEY] = state.timerClearPending
         persistPendingNextFeed(state)
         persistCompletionIdentity(state)
         persistCompletionPhotoPaths(state)
@@ -356,13 +380,17 @@ internal class TimerCompletionSavedState(
         val saving = handle.get<Boolean>(SAVING_KEY) ?: false
         val saveError = handle.get<String>(SAVE_ERROR_KEY)
         val pendingExit = handle.get<Boolean>(PENDING_EXIT_KEY) ?: false
+        val timerClearPending = handle.get<Boolean>(TIMER_CLEAR_PENDING_KEY) ?: false
         val pendingNextFeed = pendingNextFeed()
         val completionClientUuid = handle.get<String>(COMPLETION_CLIENT_UUID_KEY)
         val sessionBabyId = handle.get<Long>(SESSION_BABY_ID_KEY)
         val completionPhotoPaths = handle.get<ArrayList<String>>(COMPLETION_PHOTO_PATHS_KEY)
             ?.toList()
         return when {
-            pendingExit && draft == null -> TimerCompletionUiState(pendingExit = true)
+            pendingExit && draft == null -> TimerCompletionUiState(
+                pendingExit = true,
+                timerClearPending = timerClearPending,
+            )
             draft != null -> TimerCompletionUiState(
                 draft = draft,
                 saving = saving,
@@ -371,7 +399,10 @@ internal class TimerCompletionSavedState(
                 sessionBabyId = sessionBabyId,
                 completionPhotoPaths = completionPhotoPaths,
             )
-            pendingNextFeed != null -> TimerCompletionUiState(pendingNextFeed = pendingNextFeed)
+            pendingNextFeed != null -> TimerCompletionUiState(
+                pendingNextFeed = pendingNextFeed,
+                timerClearPending = timerClearPending,
+            )
             else -> TimerCompletionUiState()
         }
     }
@@ -424,6 +455,7 @@ internal class TimerCompletionSavedState(
         const val SAVING_KEY = "timer_completion_saving"
         const val SAVE_ERROR_KEY = "timer_completion_save_error"
         const val PENDING_EXIT_KEY = "timer_completion_pending_exit"
+        const val TIMER_CLEAR_PENDING_KEY = "timer_completion_clear_pending"
         const val PENDING_NEXT_FEED_KEY = "timer_pending_next_feed"
         const val COMPLETION_CLIENT_UUID_KEY = "timer_completion_client_uuid"
         const val SESSION_BABY_ID_KEY = "timer_completion_session_baby"

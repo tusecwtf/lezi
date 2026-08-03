@@ -85,6 +85,11 @@ class RecordComposerViewModel @Inject constructor(
             )
             return
         }
+        savedState.pendingWrite()?.let { pending ->
+            if (current.activeRequest == pending.request && current.saving) return
+            resumePendingWrite(pending)
+            return
+        }
         if (current.activeRequest == request && (current.loading || current.draft != null)) return
         val restoredDraft = savedState.restore(request)
         val restoredInitialDraft = savedState.restoreInitial(request)
@@ -431,6 +436,7 @@ class RecordComposerViewModel @Inject constructor(
     }
 
     internal fun updateDraft(draft: QuickRecordDraft) {
+        if (_state.value.let { it.saving || it.deleting || it.timerHandoffInFlight }) return
         _state.update { cur ->
             val request = cur.activeRequest
             val nextCan = if (request == null) {
@@ -525,6 +531,7 @@ class RecordComposerViewModel @Inject constructor(
         val snapshot = _state.value
         val draftForValidation = snapshot.draft ?: return
         val babyId = snapshot.babyId ?: return
+        val request = snapshot.activeRequest ?: return
         if (snapshot.saving || snapshot.deleting) return
         val nowMillis = RecordTime.currentTimeMillis()
         val validation = draftForValidation.validationError(nowMillis)
@@ -533,9 +540,40 @@ class RecordComposerViewModel @Inject constructor(
             return
         }
         val session = sessionGate.current() ?: return
+        val pending = freezeComposerWrite(
+            request = request,
+            babyId = babyId,
+            draft = draftForValidation,
+            confirmedAtMillis = nowMillis,
+            clientUuid = newClientUuid(),
+        )
+        // Persist identity + exact command before any cancellable import join or domain IO.
+        savedState.savePendingWrite(pending)
         // Save-priority: lock imports, cancel in-flight import, then join+reclaim in the job.
         val (preemptedOrphans, cancelledImport) = beginExclusiveCommit()
         _state.update { it.copy(saving = true, error = null) }
+        launchPendingWrite(pending, session, preemptedOrphans, cancelledImport)
+    }
+
+    private fun resumePendingWrite(pending: ComposerPendingWrite) {
+        val session = sessionGate.open()
+        val (preemptedOrphans, cancelledImport) = beginExclusiveCommit()
+        importJob = null
+        loadJob?.cancel()
+        actionJob?.cancel()
+        settingsObserveJob?.cancel()
+        loadJob = null
+        settingsObserveJob = null
+        _state.value = recordComposerPendingWriteUiState(pending)
+        launchPendingWrite(pending, session, preemptedOrphans, cancelledImport)
+    }
+
+    private fun launchPendingWrite(
+        pending: ComposerPendingWrite,
+        session: RecordComposerSessionToken,
+        preemptedOrphans: List<String>,
+        cancelledImport: Job?,
+    ) {
         actionJob = viewModelScope.launch {
             joinAndReclaimCancelledImport(
                 importSave = importSave,
@@ -544,94 +582,16 @@ class RecordComposerViewModel @Inject constructor(
                 delete = photoStore::delete,
             )
             importJob = null
-            // Re-read draft after import preemption so we never commit a half-applied import.
-            val draft = _state.value.draft
-            if (draft == null) {
-                importSave.endCommit()
-                _state.update { it.copy(saving = false) }
-                return@launch
-            }
-            val writeDecision = draft.writeDecision(RecordTime.currentTimeMillis())
-            val command = draft.toSaveCommand()
             try {
-                when (writeDecision) {
-                    ComposerWriteDecision.UpdateCarePlan -> careLog.updateCarePlan(
-                        carePlanId = requireNotNull(draft.carePlanId),
-                        scheduledAt = command.timestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                        schemaVersion = command.schemaVersion,
-                        photoLocalPaths = draft.photos,
-                        projectToSystemCalendar = draft.projectToSystemCalendar,
-                    )
-                    ComposerWriteDecision.FulfillCarePlan -> careLog.fulfillCarePlan(
-                        carePlanId = requireNotNull(draft.carePlanId),
-                        actualTimestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp.takeIf {
-                            command.type == RecordType.SLEEP
-                        },
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                        schemaVersion = command.schemaVersion,
-                        photoLocalPaths = draft.photos,
-                    )
-                    ComposerWriteDecision.ConvertRecordToCarePlan ->
-                        careLog.convertRecordToCarePlan(
-                            recordId = requireNotNull(command.existingRecordId),
-                            scheduledAt = command.timestamp,
-                            note = command.note,
-                            payloadJson = command.payloadJson,
-                            schemaVersion = command.schemaVersion,
-                            photoLocalPaths = draft.photos,
-                            projectToSystemCalendar = draft.projectToSystemCalendar,
-                        )
-                    ComposerWriteDecision.ConfirmSleep -> careLog.confirmSleep(
-                        babyId = babyId,
-                        expectedOpenSleepId = command.existingRecordId,
-                        timestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                        schemaVersion = command.schemaVersion,
-                        photoLocalPaths = draft.photos,
-                    )
-                    ComposerWriteDecision.UpdateRecord -> careLog.updateRecord(
-                        id = requireNotNull(command.existingRecordId),
-                        timestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                        schemaVersion = command.schemaVersion,
-                        photoLocalPaths = draft.photos,
-                    )
-                    ComposerWriteDecision.CreateCarePlan -> careLog.createCarePlan(
-                        babyId = babyId,
-                        type = command.type,
-                        scheduledAt = command.timestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                        schemaVersion = command.schemaVersion,
-                        customItemId = draft.customItemId,
-                        photoLocalPaths = draft.photos,
-                        projectToSystemCalendar = draft.projectToSystemCalendar,
-                    )
-                    ComposerWriteDecision.AddRecord -> careLog.addRecord(
-                        babyId = babyId,
-                        type = command.type,
-                        timestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                        schemaVersion = command.schemaVersion,
-                        photoLocalPaths = draft.photos,
-                    )
-                }
+                executePendingWrite(pending)
             } catch (cancelled: CancellationException) {
                 importSave.endCommit()
                 throw cancelled
             } catch (error: Throwable) {
                 currentCoroutineContext().ensureActive()
                 importSave.endCommit()
+                savedState.clearPendingWrite()
+                savedState.initialize(pending.request, pending.draft)
                 sessionGate.deliver(session) {
                     _state.update {
                         it.copy(
@@ -645,65 +605,156 @@ class RecordComposerViewModel @Inject constructor(
             // Domain write succeeded. Post-commit cancel must publish durable stage rather than
             // surface save failure / leave restorable request intact (AC3 / dual-master fix).
             withContext(NonCancellable) {
-                // Only discarded draft-owned imports are cleaned here. Persisted source paths
-                // are reclaimed by reference-aware domain cleanup after the Room commit.
-                runCatching { photoLifecycle.cleanupAfterCommit(draft) }
-                val message = composerSaveSuccessMessage(
-                    writeDecision = writeDecision,
-                    draft = draft,
-                    commandType = command.type,
-                )
-                val suggestedNextFeedAt = if (
-                    shouldOfferNextFeedPlanForFact(
-                        type = command.type,
-                        createdNewFact = writeDecision == ComposerWriteDecision.AddRecord,
-                        sourceCarePlanId = draft.carePlanId,
+                try {
+                    // Only discarded draft-owned imports are cleaned here. Persisted source paths
+                    // are reclaimed by reference-aware domain cleanup after the Room commit.
+                    runCatching { photoLifecycle.cleanupAfterCommit(pending.draft) }
+                    val message = composerSaveSuccessMessage(
+                        writeDecision = pending.writeDecision,
+                        draft = pending.draft,
+                        commandType = pending.command.type,
                     )
-                ) {
-                    // Non-cancelling default: CancellationException must not drop the offer.
-                    val intervalMinutes = try {
-                        settingsStore.settings.first().nursingIntervalMin
-                    } catch (_: Throwable) {
-                        180
-                    }
-                    nextFeedSuggestedAt(RecordTime.currentTimeMillis(), intervalMinutes)
-                } else {
-                    null
-                }
-                val postSaveOutcome = composerPostSaveOutcome(
-                    message = message,
-                    suggestedNextFeedAt = suggestedNextFeedAt,
-                    babyId = babyId,
-                    type = command.type,
-                )
-                // Persist durable stage + clear restorable request, then publish observable state.
-                val appliedState = applyComposerPostSaveOutcome(
-                    current = _state.value,
-                    savedState = savedState,
-                    outcome = postSaveOutcome,
-                    committedPhotos = draft.photos,
-                )
-                // Publish while this session is still active. Pending already lives in SavedState
-                // when deliver is skipped; close() / process recreation rehydrate for any composition.
-                if (!sessionGate.deliver(session) { _state.value = appliedState }) {
-                    val durable = rehydrateComposerPostSaveStage(
-                        pendingNextFeedOffer = appliedState.pendingNextFeedOffer,
-                        pendingFinishMessage = appliedState.pendingFinishMessage,
-                        savedState = savedState,
-                    )
-                    _state.update {
-                        it.copy(
-                            saving = false,
-                            activeRequest = null,
-                            pendingNextFeedOffer = durable.pendingNextFeedOffer,
-                            pendingFinishMessage = durable.pendingFinishMessage,
+                    val suggestedNextFeedAt = if (
+                        shouldOfferNextFeedPlanForFact(
+                            type = pending.command.type,
+                            createdNewFact =
+                                pending.writeDecision == ComposerWriteDecision.AddRecord,
+                            sourceCarePlanId = pending.draft.carePlanId,
                         )
+                    ) {
+                        // Non-cancelling default: CancellationException must not drop the offer.
+                        val intervalMinutes = try {
+                            settingsStore.settings.first().nursingIntervalMin
+                        } catch (_: Throwable) {
+                            180
+                        }
+                        nextFeedSuggestedAt(RecordTime.currentTimeMillis(), intervalMinutes)
+                    } else {
+                        null
                     }
+                    val postSaveOutcome = composerPostSaveOutcome(
+                        message = message,
+                        suggestedNextFeedAt = suggestedNextFeedAt,
+                        babyId = pending.babyId,
+                        type = pending.command.type,
+                    )
+                    // Persist durable stage + clear pending command, then publish observable state.
+                    val appliedState = applyComposerPostSaveOutcome(
+                        current = _state.value,
+                        savedState = savedState,
+                        outcome = postSaveOutcome,
+                        committedPhotos = pending.draft.photos,
+                    )
+                    // Publish while this session is still active. Pending already lives in
+                    // SavedState when deliver is skipped; recreation rehydrates it.
+                    if (!sessionGate.deliver(session) { _state.value = appliedState }) {
+                        val durable = rehydrateComposerPostSaveStage(
+                            pendingNextFeedOffer = appliedState.pendingNextFeedOffer,
+                            pendingFinishMessage = appliedState.pendingFinishMessage,
+                            savedState = savedState,
+                        )
+                        _state.update {
+                            it.copy(
+                                saving = false,
+                                activeRequest = null,
+                                pendingNextFeedOffer = durable.pendingNextFeedOffer,
+                                pendingFinishMessage = durable.pendingFinishMessage,
+                            )
+                        }
+                    }
+                } finally {
+                    // Always clear commit lock — sheet close also resets, but a missed deliver
+                    // must not leave import blocked.
+                    importSave.endCommit()
                 }
-                // Always clear commit lock — sheet close also resets, but a missed deliver
-                // must not leave import blocked.
-                importSave.endCommit()
             }
+        }
+    }
+
+    private suspend fun executePendingWrite(pending: ComposerPendingWrite) {
+        val draft = pending.draft
+        val command = pending.command
+        val confirmedAt = pending.confirmedAtMillis
+        when (pending.writeDecision) {
+            ComposerWriteDecision.UpdateCarePlan -> careLog.updateCarePlan(
+                carePlanId = requireNotNull(draft.carePlanId),
+                scheduledAt = command.timestamp,
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+                projectToSystemCalendar = draft.projectToSystemCalendar,
+            )
+            ComposerWriteDecision.FulfillCarePlan -> careLog.fulfillCarePlan(
+                carePlanId = requireNotNull(draft.carePlanId),
+                actualTimestamp = command.timestamp,
+                endTimestamp = command.endTimestamp.takeIf { command.type == RecordType.SLEEP },
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+                clientUuid = pending.clientUuid,
+            )
+            ComposerWriteDecision.ConvertRecordToCarePlan -> careLog.convertRecordToCarePlan(
+                recordId = requireNotNull(command.existingRecordId),
+                scheduledAt = command.timestamp,
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+                projectToSystemCalendar = draft.projectToSystemCalendar,
+                clientUuid = pending.clientUuid,
+            )
+            ComposerWriteDecision.ConfirmSleep -> careLog.confirmSleep(
+                babyId = pending.babyId,
+                expectedOpenSleepId = command.existingRecordId,
+                timestamp = command.timestamp,
+                endTimestamp = command.endTimestamp,
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+                clientUuid = pending.clientUuid,
+            )
+            ComposerWriteDecision.UpdateRecord -> careLog.updateRecord(
+                id = requireNotNull(command.existingRecordId),
+                timestamp = command.timestamp,
+                endTimestamp = command.endTimestamp,
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+            )
+            ComposerWriteDecision.CreateCarePlan -> careLog.createCarePlan(
+                babyId = pending.babyId,
+                type = command.type,
+                scheduledAt = command.timestamp,
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                customItemId = draft.customItemId,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+                projectToSystemCalendar = draft.projectToSystemCalendar,
+                clientUuid = pending.clientUuid,
+            )
+            ComposerWriteDecision.AddRecord -> careLog.addRecord(
+                babyId = pending.babyId,
+                type = command.type,
+                timestamp = command.timestamp,
+                endTimestamp = command.endTimestamp,
+                note = command.note,
+                payloadJson = command.payloadJson,
+                schemaVersion = command.schemaVersion,
+                photoLocalPaths = draft.photos,
+                nowMillis = confirmedAt,
+                clientUuid = pending.clientUuid,
+            )
         }
     }
 
@@ -808,12 +859,14 @@ class RecordComposerViewModel @Inject constructor(
                 }
                 return@launch
             }
-            currentCoroutineContext().ensureActive()
-            sessionGate.deliver(session) {
-                savedState.clear()
-                onDeleted(if (editPlanId != null) "已删除护理计划" else "已删除记录")
-            }
-            importSave.endCommit()
+            publishComposerDeleteCommit(
+                savedState = savedState,
+                sessionGate = sessionGate,
+                session = session,
+                message = if (editPlanId != null) "已删除护理计划" else "已删除记录",
+                onDeleted = onDeleted,
+                onCommitLockCleared = importSave::endCommit,
+            )
         }
     }
 

@@ -21,12 +21,15 @@ import com.lezi.babylog.core.model.runNextFeedPlanReconciliation
 import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
 import com.lezi.babylog.core.model.timerDiscardReclaimPaths
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.localdata.LocalDataEpochInvalidatedException
+import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -39,12 +42,15 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
+private const val TIMER_CLEAR_RETRY_DELAY_MS = 1_000L
+
 @HiltViewModel
 class TimerViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
     private val savedStateHandle: SavedStateHandle,
     private val serviceController: NursingTimerServiceController,
+    private val localDataMutationEpoch: LocalDataMutationEpoch,
     @ApplicationContext private val app: Context,
 ) : ViewModel() {
     private val _state = MutableStateFlow(TimerState())
@@ -57,6 +63,8 @@ class TimerViewModel @Inject constructor(
      */
     internal val completionUi: StateFlow<TimerCompletionUiState> = _completionUi.asStateFlow()
     private val completionInFlight = AtomicBoolean(false)
+    private val timerClearRetryInFlight = AtomicBoolean(false)
+    private val timerSessionGeneration = localDataMutationEpoch.currentGeneration()
     private val serviceStartInFlight = AtomicBoolean(false)
     /** Serializes L/R toggles so concurrent launches cannot clobber either side. */
     private val toggleMutex = Mutex()
@@ -105,6 +113,10 @@ class TimerViewModel @Inject constructor(
                 } catch (cancelled: kotlinx.coroutines.CancellationException) {
                     if (decision.shouldStopService) serviceController.stop()
                     throw cancelled
+                } catch (_: LocalDataEpochInvalidatedException) {
+                    _state.value = TimerState()
+                    serviceController.stop()
+                    return@withLock
                 } catch (_: Exception) {
                     _state.value = decision.state
                 }
@@ -127,7 +139,8 @@ class TimerViewModel @Inject constructor(
                 TimerCompletionResumeDecision.FinishClearTimer -> {
                     // Domain already committed and success was published, but DataStore clear
                     // did not finish — finish the clear without rewriting the Record.
-                    applyTransition(TimerState())
+                    publishCompletion(stage.copy(timerClearPending = true))
+                    ensureCommittedTimerClear()
                 }
                 is TimerCompletionResumeDecision.ReplayInFlightSave -> {
                     // Mid-save: replay is idempotent on durable completionClientUuid
@@ -167,14 +180,16 @@ class TimerViewModel @Inject constructor(
     private suspend fun persistLocal(s: TimerState) {
         // Seed-only / plan-bound sessions must survive process death before L/R start
         // (Ticket 09 AC: handoffSeed DataStore-restored across rebuild).
-        settings.setNursingTimerJson(
-            if (s.shouldPersistTimerSession()) {
-                s.toJson(savedBootCount = currentBootCount(app))
-            } else {
-                null
-            },
-        )
-        _state.value = s
+        localDataMutationEpoch.withMutationInGeneration(timerSessionGeneration) {
+            settings.setNursingTimerJson(
+                if (s.shouldPersistTimerSession()) {
+                    s.toJson(savedBootCount = currentBootCount(app))
+                } else {
+                    null
+                },
+            )
+            _state.value = s
+        }
     }
 
     private fun publishMemoryOnly(s: TimerState) {
@@ -182,11 +197,19 @@ class TimerViewModel @Inject constructor(
     }
 
     private suspend fun applyTransition(next: TimerState) {
+        val capturedSessionToken = next.completionClientUuid ?: _state.value.completionClientUuid
+        val stopCaptured = {
+            if (capturedSessionToken.isNullOrBlank()) {
+                serviceController.stop()
+            } else {
+                serviceController.stopCapturedSession(capturedSessionToken)
+            }
+        }
         if (!next.leftRunning && !next.rightRunning) {
             settleNonRunningTimerTransition(
                 next = next,
                 publish = ::persistLocal,
-                stopService = { serviceController.stop() },
+                stopService = stopCaptured,
                 publishMemoryOnly = ::publishMemoryOnly,
             )
             return
@@ -196,17 +219,18 @@ class TimerViewModel @Inject constructor(
                 candidate = next,
                 publish = ::persistLocal,
                 startService = { serviceController.startAndConfirm(next) },
-                stopService = { serviceController.stop() },
+                stopService = stopCaptured,
                 publishMemoryOnly = ::publishMemoryOnly,
             )
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             // startTimerWithConfirmation already stopped; belt-and-suspenders for outer cancel.
-            serviceController.stop()
+            stopCaptured()
             throw cancelled
         }
     }
 
     fun toggleLeft() {
+        if (_completionUi.value.hasPostSaveStage) return
         val snapshot = _state.value
         if (!snapshot.canRequestServiceStart()) return
         val starting = !snapshot.leftRunning
@@ -237,6 +261,7 @@ class TimerViewModel @Inject constructor(
     }
 
     fun toggleRight() {
+        if (_completionUi.value.hasPostSaveStage) return
         val snapshot = _state.value
         if (!snapshot.canRequestServiceStart()) return
         val starting = !snapshot.rightRunning
@@ -267,6 +292,7 @@ class TimerViewModel @Inject constructor(
     }
 
     fun retryServiceStart() {
+        if (_completionUi.value.hasPostSaveStage) return
         if (!_state.value.canRequestServiceStart()) return
         if (!serviceStartInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
@@ -303,6 +329,7 @@ class TimerViewModel @Inject constructor(
         initialNote: String = "",
         initialAmountMl: String = "",
     ) {
+        if (_completionUi.value.hasPostSaveStage) return
         val draft = freezeCompletion(
             initialNote = initialNote,
             initialAmountMl = initialAmountMl,
@@ -455,11 +482,11 @@ class TimerViewModel @Inject constructor(
                                 pendingNextFeed = pendingNextFeed,
                             ),
                         )
-                        // If the process dies before this commits, replay uses the same
-                        // completionClientUuid and CareLog returns the existing record; init also
-                        // finishes the clear when post-save stage is already published.
-                        applyTransition(TimerState())
                     }
+                    // If the process dies before this commits, SavedState retains the
+                    // clear-pending stage; init clears only timer state and never rewrites
+                    // the idempotent Record.
+                    ensureCommittedTimerClear()
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
@@ -472,6 +499,49 @@ class TimerViewModel @Inject constructor(
                 )
             } finally {
                 completionInFlight.set(false)
+            }
+        }
+    }
+
+    /** Keep retrying the post-commit DataStore clear while navigation remains gated. */
+    private fun ensureCommittedTimerClear() {
+        if (!_completionUi.value.timerClearPending) return
+        if (!timerClearRetryInFlight.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                while (_completionUi.value.timerClearPending) {
+                    val capturedSessionToken = _state.value.completionClientUuid
+                    val cleared = withContext(NonCancellable) {
+                        clearCommittedTimerSnapshot(
+                            clearDurable = {
+                                try {
+                                    localDataMutationEpoch.withMutationInGeneration(
+                                        timerSessionGeneration,
+                                    ) {
+                                        settings.setNursingTimerJson(null)
+                                    }
+                                } catch (_: LocalDataEpochInvalidatedException) {
+                                    // A newer clear generation owns DataStore now. This stale
+                                    // feature must neither recreate nor erase a newer timer.
+                                }
+                            },
+                            stopService = {
+                                capturedSessionToken?.let(serviceController::stopCapturedSession)
+                            },
+                            publishMemoryEmpty = { _state.value = TimerState() },
+                        )
+                    }
+                    if (cleared) {
+                        publishCompletion(timerCompletionTimerCleared(_completionUi.value))
+                        break
+                    }
+                    delay(TIMER_CLEAR_RETRY_DELAY_MS)
+                }
+            } finally {
+                timerClearRetryInFlight.set(false)
+                if (_completionUi.value.timerClearPending) {
+                    ensureCommittedTimerClear()
+                }
             }
         }
     }
@@ -532,6 +602,7 @@ class TimerViewModel @Inject constructor(
     }
 
     fun clear(onCleared: () -> Unit = {}) {
+        if (_completionUi.value.hasPostSaveStage) return
         viewModelScope.launch {
             val reclaim = toggleMutex.withLock {
                 val seed = _state.value.handoffSeed

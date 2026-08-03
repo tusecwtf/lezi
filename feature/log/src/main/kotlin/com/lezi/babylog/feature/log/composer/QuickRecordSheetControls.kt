@@ -129,6 +129,7 @@ internal fun TimeFields(
     intervalPreview: IntervalDurationPreview? = null,
     highlightedField: ComposerInvalidField? = null,
     sleepPolicy: SleepComposerPolicy? = null,
+    enabled: Boolean = true,
 ) {
     val container = accentColor?.copy(alpha = 0.18f)
         ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
@@ -151,6 +152,7 @@ internal fun TimeFields(
                 containerColor = container,
                 accentColor = accent,
                 highlighted = startHighlighted,
+                enabled = enabled,
             )
         }
         draft.sleepAction == SleepDraftAction.WakeUp -> {
@@ -161,6 +163,7 @@ internal fun TimeFields(
                     prompt = "选择醒来时刻",
                     onClick = onOpenEnd,
                     highlighted = endHighlighted,
+                    enabled = enabled,
                 )
             } else {
                 TimeButton(
@@ -171,6 +174,7 @@ internal fun TimeFields(
                     containerColor = container,
                     accentColor = accent,
                     highlighted = endHighlighted,
+                    enabled = enabled,
                 )
             }
         }
@@ -183,6 +187,7 @@ internal fun TimeFields(
                 containerColor = container,
                 accentColor = accent,
                 highlighted = startHighlighted,
+                enabled = enabled,
             )
             val recordWake = draft.endTimestamp != null
             Row(
@@ -202,6 +207,7 @@ internal fun TimeFields(
                 Switch(
                     checked = recordWake,
                     onCheckedChange = { checked -> onToggleRecordWake?.invoke(checked) },
+                    enabled = enabled,
                 )
             }
             if (recordWake) {
@@ -213,6 +219,7 @@ internal fun TimeFields(
                     containerColor = container,
                     accentColor = accent,
                     highlighted = endHighlighted,
+                    enabled = enabled,
                 )
             }
         }
@@ -225,6 +232,7 @@ internal fun TimeFields(
                 containerColor = container,
                 accentColor = accent,
                 highlighted = startHighlighted,
+                enabled = enabled,
             )
             if (draft.endTimestamp == null) {
                 EmptyTimeButton(
@@ -235,6 +243,7 @@ internal fun TimeFields(
                     },
                     onClick = onOpenEnd,
                     highlighted = endHighlighted,
+                    enabled = enabled,
                 )
             } else {
                 TimeButton(
@@ -245,6 +254,7 @@ internal fun TimeFields(
                     containerColor = container,
                     accentColor = accent,
                     highlighted = endHighlighted,
+                    enabled = enabled,
                 )
             }
         }
@@ -256,6 +266,7 @@ internal fun TimeFields(
             containerColor = container,
             accentColor = accent,
             highlighted = startHighlighted,
+            enabled = enabled,
         )
     }
     intervalPreview?.let { preview ->
@@ -278,9 +289,11 @@ private fun EmptyTimeButton(
     prompt: String,
     onClick: () -> Unit,
     highlighted: Boolean = false,
+    enabled: Boolean = true,
 ) {
     Surface(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth(),
         shape = LeziThemeExt.controlShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -312,9 +325,11 @@ private fun TimeButton(
     containerColor: Color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
     accentColor: Color = MaterialTheme.colorScheme.primary,
     highlighted: Boolean = false,
+    enabled: Boolean = true,
 ) {
     Surface(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
             .semantics { contentDescription = "$label，${formatRecordTime(millis, zone)}，选择时间" },

@@ -4,6 +4,7 @@ import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemDao
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
@@ -87,6 +88,7 @@ internal class RecordMutationCoordinator(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
+        clientUuid: String = newClientUuid(),
     ): Long {
         // Create path: zero clock skew (same as updateRecord). Future → schedule plan.
         RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
@@ -100,7 +102,7 @@ internal class RecordMutationCoordinator(
             schemaVersion = schemaVersion,
         )
         val now = System.currentTimeMillis()
-        val clientUuid = newClientUuid()
+        require(clientUuid.isNotBlank()) { "记录写入标识不能为空" }
         val record = RecordEntity(
             clientUuid = clientUuid,
             babyId = babyId,
@@ -120,6 +122,16 @@ internal class RecordMutationCoordinator(
             if (type == RecordType.SLEEP && endTimestamp == null) {
                 sleepMutationMutex.withLock {
                     transactionRunner.run {
+                        val existing = recordDao.getByClientUuid(clientUuid)
+                        if (existing != null) {
+                            check(existing.deletedAt == null) {
+                                "这次记录已删除，请重新填写"
+                            }
+                            require(existing.babyId == babyId && existing.type == type.key) {
+                                "记录写入标识与既有记录冲突"
+                            }
+                            return@run existing.id
+                        }
                         requireActiveBaby(babyId)
                         healDuplicateOpenSleeps(babyId)
                         if (recordDao.findOpenSleep(babyId) != null) {
@@ -136,6 +148,16 @@ internal class RecordMutationCoordinator(
                 }
             } else {
                 transactionRunner.run {
+                    val existing = recordDao.getByClientUuid(clientUuid)
+                    if (existing != null) {
+                        check(existing.deletedAt == null) {
+                            "这次记录已删除，请重新填写"
+                        }
+                        require(existing.babyId == babyId && existing.type == type.key) {
+                            "记录写入标识与既有记录冲突"
+                        }
+                        return@run existing.id
+                    }
                     requireActiveBaby(babyId)
                     val inserted = insertRecord(record)
                     photoAttachmentReconciler.reconcile(
@@ -241,8 +263,22 @@ internal class RecordMutationCoordinator(
         zone: ZoneId = ZoneId.systemDefault(),
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean = true,
+        clientUuid: String = newClientUuid(),
     ): Long {
         require(scheduledAt > nowMillis) { "转为护理计划须选择未来时刻" }
+        require(clientUuid.isNotBlank()) { "转计划写入标识不能为空" }
+        carePlanDao.getByClientUuid(clientUuid)?.let { replay ->
+            check(replay.deletedAt == null) { "这次护理计划已删除，请重新填写" }
+            val source = recordDao.getIncludingDeleted(recordId)
+            require(source != null && replay.sourceRecordClientUuid == source.clientUuid) {
+                "转计划写入标识与既有计划冲突"
+            }
+            requestLocalSync()
+            replay.toModel().let { plan ->
+                projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar)
+            }
+            return replay.id
+        }
         val photos = photoLocalPaths
         val peek = recordDao.get(recordId) ?: error("记录不存在")
         if (peek.deletedAt != null) error("记录已删除")
@@ -319,7 +355,7 @@ internal class RecordMutationCoordinator(
                 // only plan rows stay active after commit.
                 val planId = carePlanDao.upsert(
                     CarePlanEntity(
-                        clientUuid = newClientUuid(),
+                        clientUuid = clientUuid,
                         babyId = existing.babyId,
                         type = resolvedType.key,
                         customItemId = resolvedCustomItemId,
@@ -588,11 +624,13 @@ internal class RecordMutationCoordinator(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
+        clientUuid: String = newClientUuid(),
     ): Long {
         // Create/close path: zero clock skew on start and closed end.
         RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
             throw IllegalArgumentException(it)
         }
+        require(clientUuid.isNotBlank()) { "睡眠写入标识不能为空" }
         val photos = photoLocalPaths
         val persistedPayload = requireCurrentPayloadJson(
             type = RecordType.SLEEP,
@@ -608,6 +646,18 @@ internal class RecordMutationCoordinator(
                 validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
                 transactionRunner.run {
                     requireActiveBaby(babyId)
+                    val replay = recordDao.getByClientUuid(clientUuid)
+                    if (replay != null) {
+                        check(replay.deletedAt == null) {
+                            "这次睡眠记录已删除，请重新填写"
+                        }
+                        require(
+                            replay.babyId == babyId && replay.type == RecordType.SLEEP.key,
+                        ) {
+                            "睡眠写入标识与既有记录冲突"
+                        }
+                        return@run replay.id to emptySet<String>()
+                    }
                     healDuplicateOpenSleeps(babyId)
                     val currentOpen = recordDao.findOpenSleep(babyId)
                     if (expectedOpenSleepId == null) {
@@ -615,7 +665,7 @@ internal class RecordMutationCoordinator(
                         val now = System.currentTimeMillis()
                         val inserted = insertRecord(
                             RecordEntity(
-                                clientUuid = newClientUuid(),
+                                clientUuid = clientUuid,
                                 babyId = babyId,
                                 type = RecordType.SLEEP.key,
                                 timestamp = timestamp,
@@ -634,6 +684,20 @@ internal class RecordMutationCoordinator(
                         inserted to photoMutation.tombstonedClientUuids
                     } else {
                         if (currentOpen?.id != expectedOpenSleepId) {
+                            val committed = recordDao.getIncludingDeleted(expectedOpenSleepId)
+                            if (
+                                committed != null &&
+                                committed.deletedAt == null &&
+                                committed.babyId == babyId &&
+                                committed.type == RecordType.SLEEP.key &&
+                                committed.timestamp == timestamp &&
+                                committed.endTimestamp == endTimestamp &&
+                                committed.note == note &&
+                                committed.payloadJson == persistedPayload &&
+                                committed.schemaVersion == schemaVersion
+                            ) {
+                                return@run committed.id to emptySet<String>()
+                            }
                             throw SleepStateChangedException()
                         }
                         requireCurrentPayloadDocument(
@@ -768,9 +832,24 @@ internal class RecordMutationCoordinator(
     }
 
 
-    internal suspend fun insertRecord(record: RecordEntity): Long {
+    internal suspend fun insertRecord(
+        record: RecordEntity,
+        allowDeletedCustomDefinitionForFulfillment: Boolean = false,
+    ): Long {
         val type = RecordType.fromKey(record.type) ?: error("未知记录类型")
-        requireCurrentPayloadDocument(type, record.payloadJson, record.schemaVersion)
+        val document = requireCurrentPayloadDocument(
+            type,
+            record.payloadJson,
+            record.schemaVersion,
+        )
+        if (type == RecordType.CUSTOM) {
+            val customItemId = (document.payload as CustomPayload).customItemId
+            requireLiveCustomDefinition(
+                document = document,
+                definition = customItemDao.getById(customItemId),
+                allowDeletedForFulfillment = allowDeletedCustomDefinitionForFulfillment,
+            )
+        }
         val membershipId = currentMembershipActorId()
         return recordDao.upsert(
             if (record.createdByMembershipId.isBlank() && membershipId.isNotEmpty()) {
@@ -832,6 +911,22 @@ internal class RecordMutationCoordinator(
     internal suspend fun cleanupCommittedPhotoTombstones(clientUuids: Set<String>) {
         if (clientUuids.isEmpty()) return
         syncPort.cleanupTombstonedMedia(clientUuids)
+    }
+}
+
+internal fun requireLiveCustomDefinition(
+    document: RecordPayloadDocument,
+    definition: CustomItemEntity?,
+    allowDeletedForFulfillment: Boolean = false,
+) {
+    if (document.type != RecordType.CUSTOM) return
+    val customItemId = (document.payload as? CustomPayload)?.customItemId
+        ?: throw IllegalArgumentException("CUSTOM 必须携带具体项目身份")
+    require(
+        definition?.id == customItemId &&
+            (definition.deletedAt == null || allowDeletedForFulfillment),
+    ) {
+        "该自定义项目已删除或不存在，不能新建记录"
     }
 }
 

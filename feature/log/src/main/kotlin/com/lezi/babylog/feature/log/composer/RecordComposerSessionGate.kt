@@ -1,4 +1,6 @@
 package com.lezi.babylog.feature.log.composer
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.timeline.*
 import com.lezi.babylog.feature.log.dock.*
@@ -37,5 +39,27 @@ internal class RecordComposerSessionGate {
         if (activeToken != token) return false
         result()
         return true
+    }
+}
+
+/**
+ * Publish the delete result after the domain commit without letting a host-driven close cancel
+ * SavedState consumption or leave photo import locked. The callback commonly clears the root
+ * request, which cancels the action job that is currently delivering it.
+ */
+internal suspend fun publishComposerDeleteCommit(
+    savedState: RecordComposerSavedState,
+    sessionGate: RecordComposerSessionGate,
+    session: RecordComposerSessionToken,
+    message: String,
+    onDeleted: (String) -> Unit,
+    onCommitLockCleared: () -> Unit,
+): Boolean = withContext(NonCancellable) {
+    try {
+        // The delete is already durable even if this sheet was replaced before publication.
+        savedState.clear()
+        sessionGate.deliver(session) { onDeleted(message) }
+    } finally {
+        onCommitLockCleared()
     }
 }

@@ -86,6 +86,18 @@ internal class CarePlanReminderProjection(
         }
     }
 
+    /** Retire every device-local reminder source owned by a deleted baby. */
+    suspend fun onBabyDeleted(babyId: Long) = calendarReminderMutationGuard.withLock {
+        carePlanDao.listAllIncludingDeleted()
+            .filter { it.babyId == babyId }
+            .forEach { plan ->
+                cancelCarePlanReminderBestEffort(plan.id)
+                runCarePlanReminderBestEffort {
+                    removeSystemCalendarProjectionByClientUuidLocked(plan.clientUuid)
+                }
+            }
+    }
+
     /** Persist and immediately reconcile the device-local Lezi reminder source. */
     suspend fun setCarePlanLocalRemindersEnabled(
         enabled: Boolean,
@@ -137,6 +149,11 @@ internal class CarePlanReminderProjection(
         ) {
             cancelCarePlanReminderBestEffort(plan.id)
             removeSystemCalendarProjectionLocked(plan.id)
+            return false
+        }
+        if (babyDao.get(plan.babyId) == null) {
+            cancelCarePlanReminderBestEffort(plan.id)
+            removeSystemCalendarProjectionByClientUuidLocked(plan.clientUuid)
             return false
         }
         if (!projectToSystemCalendar) {
@@ -540,6 +557,7 @@ internal class CarePlanReminderProjection(
         if (plan.deletedAt != null || plan.status !in setOf("pending", "missed")) {
             return@withLock false
         }
+        if (babyDao.get(plan.babyId) == null) return@withLock false
         if (!settings.settings.first().carePlanLocalRemindersEnabled) {
             return@withLock false
         }

@@ -70,21 +70,40 @@ internal class RecordComposerSavedState(
     }
 
     fun update(request: RecordComposerRequest, draft: QuickRecordDraft) {
+        if (pendingWrite() != null) return
         if (handle.get<RecordComposerRequest>(REQUEST_KEY) != request) return
         handle[DRAFT_KEY] = draft
     }
 
-    fun restore(request: RecordComposerRequest): QuickRecordDraft? =
-        handle.get<RecordComposerRequest>(REQUEST_KEY)
+    fun restore(request: RecordComposerRequest): QuickRecordDraft? {
+        if (pendingWrite() != null) return null
+        return handle.get<RecordComposerRequest>(REQUEST_KEY)
             ?.takeIf { it == request }
             ?.let { handle[DRAFT_KEY] }
+    }
 
     fun restoreInitial(request: RecordComposerRequest): QuickRecordDraft? =
         handle.get<RecordComposerRequest>(REQUEST_KEY)
             ?.takeIf { it == request }
             ?.let { handle[INITIAL_DRAFT_KEY] }
 
-    fun draftForCleanup(): QuickRecordDraft? = handle[DRAFT_KEY]
+    fun draftForCleanup(): QuickRecordDraft? = pendingWrite()?.draft ?: handle[DRAFT_KEY]
+
+    /**
+     * Atomically replace the editable offer with the immutable command identity before domain IO.
+     * A recreated ViewModel resumes this command; it never presents the committed draft as dirty.
+     */
+    fun savePendingWrite(pending: ComposerPendingWrite) {
+        handle[PENDING_WRITE_KEY] = pending
+        handle.remove<QuickRecordDraft>(DRAFT_KEY)
+        handle.remove<QuickRecordDraft>(INITIAL_DRAFT_KEY)
+    }
+
+    fun pendingWrite(): ComposerPendingWrite? = handle[PENDING_WRITE_KEY]
+
+    fun clearPendingWrite() {
+        handle.remove<ComposerPendingWrite>(PENDING_WRITE_KEY)
+    }
 
     /** Persist the whole offer as one Serializable blob (all-or-nothing restore). */
     fun savePendingNextFeed(pending: PendingNextFeed) {
@@ -145,6 +164,7 @@ internal class RecordComposerSavedState(
         handle.remove<RecordComposerRequest>(REQUEST_KEY)
         handle.remove<QuickRecordDraft>(DRAFT_KEY)
         handle.remove<QuickRecordDraft>(INITIAL_DRAFT_KEY)
+        clearPendingWrite()
         clearPendingTimerHandoff()
     }
 
@@ -169,6 +189,7 @@ internal class RecordComposerSavedState(
         const val REQUEST_KEY = "record_composer_saved_request"
         const val DRAFT_KEY = "record_composer_saved_draft"
         const val INITIAL_DRAFT_KEY = "record_composer_saved_initial_draft"
+        const val PENDING_WRITE_KEY = "record_composer_pending_write"
         const val PENDING_NEXT_FEED_KEY = "pending_next_feed"
         const val PENDING_FINISH_MESSAGE_KEY = "pending_finish_message"
         const val TIMER_HANDOFF_PENDING_SEED_JSON_KEY = "timer_handoff_pending_seed_json"
@@ -276,6 +297,52 @@ internal fun QuickRecordDraft.writeDecision(nowMillis: Long): ComposerWriteDecis
     existingRecordId != null -> ComposerWriteDecision.UpdateRecord
     else -> ComposerWriteDecision.AddRecord
 }
+
+/**
+ * Durable, immutable command captured at the user's confirm boundary.
+ *
+ * Photo-import preemption and wall-clock drift may finish after this snapshot is taken, but the
+ * write kind and every editable field still belong to the same explicit confirmation.
+ */
+internal data class ComposerPendingWrite(
+    val request: RecordComposerRequest,
+    val babyId: Long,
+    val draft: QuickRecordDraft,
+    val command: QuickRecordSaveCommand,
+    val writeDecision: ComposerWriteDecision,
+    val confirmedAtMillis: Long,
+    val clientUuid: String,
+) : java.io.Serializable
+
+internal fun freezeComposerWrite(
+    request: RecordComposerRequest,
+    babyId: Long,
+    draft: QuickRecordDraft,
+    confirmedAtMillis: Long,
+    clientUuid: String,
+): ComposerPendingWrite {
+    require(clientUuid.isNotBlank()) { "Composer 写入标识不能为空" }
+    return ComposerPendingWrite(
+        request = request,
+        babyId = babyId,
+        draft = draft,
+        command = draft.toSaveCommand(),
+        writeDecision = draft.writeDecision(confirmedAtMillis),
+        confirmedAtMillis = confirmedAtMillis,
+        clientUuid = clientUuid,
+    )
+}
+
+/** Process recreation resumes the frozen write under busy chrome, never as an editable draft. */
+internal fun recordComposerPendingWriteUiState(
+    pending: ComposerPendingWrite,
+): RecordComposerUiState = RecordComposerUiState(
+    activeRequest = pending.request,
+    draft = pending.draft,
+    initialDraft = pending.draft,
+    babyId = pending.babyId,
+    saving = true,
+)
 
 /**
  * Ticket 16 / Composer S2: nursing timer is a stateful action — only for live

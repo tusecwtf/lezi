@@ -16,14 +16,19 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.isToggleable
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.platform.testTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lezi.babylog.core.model.RecordType
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -145,6 +150,44 @@ class RecordComposerDiscardDeviceTest {
         source.set(null)
         compose.onNodeWithText("取消").performClick()
         assertEquals(ComposerDismissSource.FooterCancel, source.get())
+    }
+
+    @Test
+    fun savingDisablesTimeNoteRecentNoteAndWakeControls() {
+        compose.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = QuickRecordDraft.create(
+                        type = RecordType.SLEEP,
+                        timestamp = 1_000L,
+                        recentNotes = listOf("昨日状态稳定"),
+                    ),
+                    interactionKey = "busy-fields",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = true,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = {},
+                    onDismiss = {},
+                    onDelete = null,
+                    onConfirm = {},
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onRemovePhoto = {},
+                )
+            }
+        }
+
+        val renderedTime = Instant.ofEpochMilli(1_000L)
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
+        compose.onNodeWithContentDescription("睡下，$renderedTime，选择时间")
+            .assertIsNotEnabled()
+        compose.onNodeWithTag(RECORD_COMPOSER_NOTE_FIELD_TAG).assertIsNotEnabled()
+        compose.onNodeWithText("昨日状态稳定").assertIsNotEnabled()
+        compose.onNode(isToggleable()).assertIsNotEnabled()
     }
 
     @OptIn(ExperimentalMaterial3Api::class)

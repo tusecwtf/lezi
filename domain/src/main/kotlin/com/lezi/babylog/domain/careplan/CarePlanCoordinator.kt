@@ -84,7 +84,7 @@ private fun openNextFeedPlans(
             ) &&
             isNextFeedPlanNote(it.note)
     }
-    .sortedWith(compareBy<CarePlanEntity> { it.updatedAt }.thenBy { it.id })
+    .sortedWith(compareBy<CarePlanEntity> { it.updatedAt }.thenBy { it.clientUuid })
 
 internal class CarePlanCoordinator(
     private val recordDao: RecordDao,
@@ -124,6 +124,7 @@ internal class CarePlanCoordinator(
          * reminders are used. Unconfigured / permission deny still saves the plan.
          */
         projectToSystemCalendar: Boolean = true,
+        clientUuid: String = newClientUuid(),
     ): Long {
         require(schemaVersion == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
             "仅支持当前 payload schema"
@@ -132,6 +133,7 @@ internal class CarePlanCoordinator(
             "该项目不可新建护理计划"
         }
         require(scheduledAt > nowMillis) { "安排护理须选择未来时刻" }
+        require(clientUuid.isNotBlank()) { "护理计划写入标识不能为空" }
         requireActiveBaby(babyId)
         val resolvedCustomItemId: Long?
         val stampedPayload: String
@@ -166,9 +168,19 @@ internal class CarePlanCoordinator(
             additionalPaths = photos,
         ) {
             transactionRunner.run {
+                val existing = carePlanDao.getByClientUuid(clientUuid)
+                if (existing != null) {
+                    check(existing.deletedAt == null) {
+                        "这次护理计划已删除，请重新填写"
+                    }
+                    require(existing.babyId == babyId && existing.type == type.key) {
+                        "护理计划写入标识与既有计划冲突"
+                    }
+                    return@run existing.id
+                }
                 val planId = carePlanDao.upsert(
                     CarePlanEntity(
-                        clientUuid = newClientUuid(),
+                        clientUuid = clientUuid,
                         babyId = babyId,
                         type = type.key,
                         customItemId = resolvedCustomItemId,
@@ -343,6 +355,7 @@ internal class CarePlanCoordinator(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
+        clientUuid: String = newClientUuid(),
     ): Long {
         // Fulfill actual times (start + closed sleep end) allow device-now + 5 minutes.
         RecordTime.intervalError(
@@ -351,6 +364,7 @@ internal class CarePlanCoordinator(
             now = nowMillis,
             maxFutureSkewMillis = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS,
         )?.let { throw IllegalArgumentException(it) }
+        require(clientUuid.isNotBlank()) { "护理计划履行标识不能为空" }
         val photos = photoLocalPaths
         // Freeze confirm time once for the candidate; wall clock for writer bookkeeping.
         val confirmedAt = System.currentTimeMillis()
@@ -376,6 +390,28 @@ internal class CarePlanCoordinator(
                 val plan = carePlanDao.get(carePlanId)
                     ?: error("护理计划不存在")
                 if (plan.deletedAt != null) error("护理计划已删除")
+                val existingRecord = recordDao.getByClientUuid(clientUuid)
+                if (existingRecord != null) {
+                    check(existingRecord.deletedAt == null) {
+                        "这次履行记录已删除，请重新填写"
+                    }
+                    require(
+                        existingRecord.babyId == plan.babyId &&
+                            existingRecord.type == plan.type,
+                    ) {
+                        "护理计划履行标识与既有记录冲突"
+                    }
+                    require(plan.fulfilledRecordClientUuid == clientUuid) {
+                        "该护理计划已由其他记录完成"
+                    }
+                    ensureFulfillmentCandidate(
+                        carePlanClientUuid = plan.clientUuid,
+                        recordClientUuid = clientUuid,
+                        actualTimestamp = existingRecord.timestamp,
+                        confirmedAt = plan.fulfilledAt ?: confirmedAt,
+                    )
+                    return@run existingRecord.id
+                }
                 val status = CarePlanStatus.fromStorage(plan.status)
                 require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
                     "该护理计划不可履行"
@@ -416,7 +452,7 @@ internal class CarePlanCoordinator(
                     schemaVersion,
                     plan.customItemId,
                 )
-                val recordClientUuid = newClientUuid()
+                val recordClientUuid = clientUuid
                 // Next-feed plans store an internal protocol marker on the plan row. The
                 // fulfilled care-record fact must never carry that prefix: omit note derives
                 // the visible part; explicit notes are still fail-closed stripped when the
@@ -438,7 +474,10 @@ internal class CarePlanCoordinator(
                     schemaVersion = schemaVersion,
                     updatedAt = now,
                 )
-                val inserted = recordMutations.insertRecord(record)
+                val inserted = recordMutations.insertRecord(
+                    record = record,
+                    allowDeletedCustomDefinitionForFulfillment = true,
+                )
                 photoAttachmentReconciler.reconcile(
                     PhotoAttachmentOwner.Record(inserted),
                     photos,
@@ -938,6 +977,10 @@ internal class CarePlanCoordinator(
                             syncDirty = true,
                             systemCalendarProjectionEnabled = desiredProjection,
                             systemCalendarReminderReady = false,
+                            systemCalendarProjectionPending =
+                                plan.systemCalendarProjectionPending ||
+                                    plan.systemCalendarReminderReady ||
+                                    plan.systemCalendarEventId != null,
                         ),
                     )
                 } else if (desiredProjection != plan.systemCalendarProjectionEnabled) {
@@ -1031,6 +1074,8 @@ internal class CarePlanCoordinator(
         planClientUuids: List<String>,
         nowMillis: Long = System.currentTimeMillis(),
     ) = reminderProjection.onFamilyCarePlansApplied(planClientUuids, nowMillis)
+
+    suspend fun onBabyDeleted(babyId: Long) = reminderProjection.onBabyDeleted(babyId)
 
     suspend fun setCarePlanLocalRemindersEnabled(
         enabled: Boolean,

@@ -106,7 +106,6 @@ internal class DeviceLayoutSnapshotWriter(
                         } catch (failure: Throwable) {
                             Result.failure(failure)
                         }
-                        command.result.complete(result)
                         lastCompletedSequence = command.sequence
                         lastCompletedResult = result
                         if (command.sequence == latestRequestedSequence) {
@@ -121,6 +120,9 @@ internal class DeviceLayoutSnapshotWriter(
                                 },
                             )
                         }
+                        // A completed receipt promises that callers can already observe the
+                        // terminal UI state for this write; publish state before waking waiters.
+                        command.result.complete(result)
                     }
                     is Command.Barrier -> {
                         val result = if (command.targetSequence == 0L) {

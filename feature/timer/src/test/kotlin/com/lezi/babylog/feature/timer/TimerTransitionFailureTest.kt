@@ -229,6 +229,33 @@ class TimerTransitionFailureTest {
     }
 
     @Test
+    fun committedClearFailureKeepsRetryPendingButAlwaysStopsMemoryTimer() = runBlocking {
+        var stops = 0
+        var emptyPublications = 0
+        var attempts = 0
+
+        val first = clearCommittedTimerSnapshot(
+            clearDurable = {
+                attempts += 1
+                throw IOException("clear failed")
+            },
+            stopService = { stops += 1 },
+            publishMemoryEmpty = { emptyPublications += 1 },
+        )
+        val second = clearCommittedTimerSnapshot(
+            clearDurable = { attempts += 1 },
+            stopService = { stops += 1 },
+            publishMemoryEmpty = { emptyPublications += 1 },
+        )
+
+        assertFalse(first)
+        assertTrue(second)
+        assertEquals(2, attempts)
+        assertEquals(2, stops)
+        assertEquals(2, emptyPublications)
+    }
+
+    @Test
     fun carePlanBindShapedPublishFailureStaysPausedWithoutInventedSide() = runBlocking {
         var memory: TimerState? = null
         var stops = 0

@@ -205,6 +205,20 @@ class TimerCompletionUiTest {
     }
 
     @Test
+    fun postSaveExitWaitsForDurableTimerClearAndThenBecomesConsumable() {
+        val saving = beginTimerCompletionSave(openWithIdentity(), sampleDraft())
+        val committed = timerCompletionSucceeded(saving, pendingNextFeed = null)
+
+        assertTrue(committed.timerClearPending)
+        assertFalse(committed.readyToExit)
+
+        val cleared = timerCompletionTimerCleared(committed)
+        assertFalse(cleared.timerClearPending)
+        assertTrue(cleared.readyToExit)
+        assertEquals(cleared, timerCompletionTimerCleared(cleared))
+    }
+
+    @Test
     fun successIgnoredWhenNotSaving() {
         val open = openWithIdentity()
         assertEquals(open, timerCompletionSucceeded(open, pendingNextFeed = null))
@@ -557,9 +571,11 @@ class TimerCompletionUiTest {
 
     @Test
     fun resumeAfterClearBeforeHostAck_restoresOfferOrExitWithoutReplay() {
-        val offer = timerCompletionSucceeded(
-            beginTimerCompletionSave(openWithIdentity(), sampleDraft()),
-            pendingNextFeed = TimerPendingNextFeed(3L, 4L),
+        val offer = timerCompletionTimerCleared(
+            timerCompletionSucceeded(
+                beginTimerCompletionSave(openWithIdentity(), sampleDraft()),
+                pendingNextFeed = TimerPendingNextFeed(3L, 4L),
+            ),
         )
         assertEquals(
             TimerCompletionResumeDecision.None,
@@ -569,9 +585,11 @@ class TimerCompletionUiTest {
                 timerSessionUuid = null,
             ),
         )
-        val exit = timerCompletionSucceeded(
-            beginTimerCompletionSave(openWithIdentity(), sampleDraft()),
-            pendingNextFeed = null,
+        val exit = timerCompletionTimerCleared(
+            timerCompletionSucceeded(
+                beginTimerCompletionSave(openWithIdentity(), sampleDraft()),
+                pendingNextFeed = null,
+            ),
         )
         assertEquals(
             TimerCompletionResumeDecision.None,

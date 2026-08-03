@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -21,11 +22,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -35,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,8 +57,10 @@ import com.lezi.babylog.core.model.TimerHandoffAcceptResult
 import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
+import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 internal enum class TimerViewportMode {
     Spacious,
@@ -79,6 +84,8 @@ internal fun timerViewportMode(
 @Composable
 fun TimerRoute(
     onDone: () -> Unit,
+    onLeaveRunning: () -> Unit = onDone,
+    onLeavePaused: () -> Unit = onDone,
     initialNote: String = "",
     initialAmountMl: String = "",
     /** When set, bind this open nursing care plan to the timer session (ticket 16). */
@@ -133,19 +140,44 @@ fun TimerRoute(
         fontScale = LocalDensity.current.fontScale,
     )
     val timerScrollState = rememberScrollState()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun requestBack() {
+        when (timerBackDecision(state, completionUi)) {
+            TimerBackDecision.Leave -> onDone()
+            TimerBackDecision.LeaveRunningInBackground -> onLeaveRunning()
+            TimerBackDecision.LeavePaused -> onLeavePaused()
+            TimerBackDecision.BlockSaving -> scope.launch {
+                snackbarHostState.showSnackbar("正在保存，完成后会自动退出")
+            }
+            TimerBackDecision.BlockNextFeed -> scope.launch {
+                snackbarHostState.showSnackbar("请先完成下次喂养安排")
+            }
+        }
+    }
+
+    BackHandler(enabled = true, onBack = ::requestBack)
 
     // Consumable exit after success without next-feed: navigate first, then acknowledge so a
     // process death mid-exit still rehydrates pendingExit; re-subscribe after ack does not re-fire.
-    LaunchedEffect(completionUi.pendingExit) {
-        if (completionUi.pendingExit) {
+    LaunchedEffect(completionUi.readyToExit) {
+        if (completionUi.readyToExit) {
             onDone()
             vm.acknowledgeCompletionExit()
         }
     }
 
+    LaunchedEffect(completionUi.timerClearPending) {
+        if (completionUi.timerClearPending) {
+            snackbarHostState.showSnackbar("记录已保存，正在完成计时清理")
+        }
+    }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            LeziDetailTopBar(title = "喂奶计时", onBack = onDone)
+            LeziDetailTopBar(title = "喂奶计时", onBack = ::requestBack)
         },
     ) { padding ->
         Column(
@@ -220,6 +252,7 @@ fun TimerRoute(
                         color = MaterialTheme.colorScheme.primary,
                         runningContentColor = MaterialTheme.colorScheme.onPrimary,
                         size = buttonSize,
+                        enabled = !completionUi.hasPostSaveStage,
                         onClick = vm::toggleLeft,
                     )
                     SideButton(
@@ -229,13 +262,16 @@ fun TimerRoute(
                         color = MaterialTheme.colorScheme.tertiary,
                         runningContentColor = MaterialTheme.colorScheme.onTertiary,
                         size = buttonSize,
+                        enabled = !completionUi.hasPostSaveStage,
                         onClick = vm::toggleRight,
                     )
                 }
             }
 
             Column(Modifier.fillMaxWidth()) {
-                Button(
+                LeziPrimaryButton(
+                    label = "完成并记录",
+                    enabled = !completionUi.hasPostSaveStage,
                     onClick = {
                         vm.openCompletion(
                             initialNote = initialNote,
@@ -245,8 +281,9 @@ fun TimerRoute(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp),
-                ) { Text("完成并记录") }
+                )
                 TextButton(
+                    enabled = !completionUi.hasPostSaveStage,
                     onClick = {
                         if (state.hasTimerData()) {
                             showDiscardConfirmation = true
@@ -313,7 +350,9 @@ fun TimerRoute(
         }
     }
 
-    completionUi.pendingNextFeedSuggestedAt?.let { suggestedAt ->
+    completionUi.pendingNextFeedSuggestedAt
+        ?.takeUnless { completionUi.timerClearPending }
+        ?.let { suggestedAt ->
         val permissionGranted =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                 ContextCompat.checkSelfPermission(
@@ -335,7 +374,7 @@ fun TimerRoute(
             onFinishedScheduled = { vm.dismissNextFeedPlan() },
             onFinishedWithoutPlan = { vm.dismissNextFeedPlan() },
         )
-    }
+        }
 }
 
 @Composable
@@ -346,6 +385,7 @@ private fun SideButton(
     color: Color,
     runningContentColor: Color,
     size: androidx.compose.ui.unit.Dp,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -354,7 +394,7 @@ private fun SideButton(
                 .size(size)
                 .clip(CircleShape)
                 .background(if (running) color else color.copy(alpha = 0.18f))
-                .clickable(onClick = onClick),
+                .clickable(enabled = enabled, onClick = onClick),
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {

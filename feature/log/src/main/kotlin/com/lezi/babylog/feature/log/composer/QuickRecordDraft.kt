@@ -117,7 +117,7 @@ internal data class QuickRecordSaveCommand(
     val note: String?,
     val payloadJson: String,
     val schemaVersion: Int,
-)
+) : java.io.Serializable
 
 /**
  * One draft model shared by every quick-record sheet.

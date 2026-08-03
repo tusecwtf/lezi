@@ -114,6 +114,21 @@ class TimerStateRestorationTest {
     }
 
     @Test
+    fun restore_usesWallWhenPersistedBootIdentityBecomesUnavailable() {
+        assertEquals(
+            90_000L,
+            restoredRunningDelta(
+                savedElapsed = 120_000L,
+                savedWall = 1_700_000_000_000L,
+                nowElapsed = 900_000L,
+                nowWall = 1_700_000_090_000L,
+                savedBootCount = 12L,
+                nowBootCount = null,
+            ),
+        )
+    }
+
+    @Test
     fun restore_neverAddsNegativeWallOrUnknownTime() {
         assertEquals(
             0L,

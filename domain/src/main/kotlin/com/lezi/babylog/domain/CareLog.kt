@@ -54,6 +54,7 @@ import com.lezi.babylog.domain.careplan.ReminderCleanupPort
 import com.lezi.babylog.domain.catalog.CustomItemCatalog
 import com.lezi.babylog.domain.family.BabyFamilyProfileCoordinator
 import com.lezi.babylog.domain.localdata.CalendarReminderMutationGuard
+import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
 
 data class CreateBabyInput(
     val nickname: String,
@@ -154,6 +155,7 @@ class CareLog @Inject constructor(
     private val clock: PolicyClock,
     /** Process-wide path gate shared with reference-aware media reclaim (Hilt singleton). */
     private val mediaPathGate: MediaLocalPathGate,
+    private val localDataMutationEpoch: LocalDataMutationEpoch,
 ) {
     private val queries = CareLogQueries(
         babyDao = babyDao,
@@ -296,16 +298,30 @@ class CareLog @Inject constructor(
 
     fun observeCurrentBaby(): Flow<Baby?> = babyProfiles.observeCurrentBaby()
 
-    suspend fun createBaby(input: CreateBabyInput): Long = babyProfiles.createBaby(input)
+    suspend fun createBaby(input: CreateBabyInput): Long = localDataMutationEpoch.withMutation {
+        babyProfiles.createBaby(input)
+    }
 
-    suspend fun ensureFamilyScaffold() = babyProfiles.ensureFamilyScaffold()
+    suspend fun ensureFamilyScaffold() = localDataMutationEpoch.withMutation {
+        babyProfiles.ensureFamilyScaffold()
+    }
 
-    suspend fun addBaby(input: CreateBabyInput): Long = babyProfiles.addBaby(input)
+    suspend fun addBaby(input: CreateBabyInput): Long = localDataMutationEpoch.withMutation {
+        babyProfiles.addBaby(input)
+    }
 
     suspend fun updateBabyProfile(babyId: Long, input: UpdateBabyInput) =
-        babyProfiles.updateBabyProfile(babyId, input)
+        localDataMutationEpoch.withMutation {
+            babyProfiles.updateBabyProfile(babyId, input)
+        }
 
-    suspend fun deleteBaby(babyId: Long): Boolean = babyProfiles.deleteBaby(babyId)
+    suspend fun deleteBaby(babyId: Long): Boolean = localDataMutationEpoch.withMutation {
+        val deleted = babyProfiles.deleteBaby(babyId)
+        if (deleted) {
+            carePlans.onBabyDeleted(babyId)
+        }
+        deleted
+    }
 
     suspend fun getCurrentBaby(): Baby? = babyProfiles.getCurrentBaby()
 
@@ -314,18 +330,26 @@ class CareLog @Inject constructor(
     suspend fun localFamilyIdentity(): LocalFamilyIdentity = babyProfiles.localFamilyIdentity()
 
     suspend fun updateLocalDisplayName(displayName: String?) =
-        babyProfiles.updateLocalDisplayName(displayName)
+        localDataMutationEpoch.withMutation {
+            babyProfiles.updateLocalDisplayName(displayName)
+        }
 
-    suspend fun setCurrentBaby(babyId: Long) = babyProfiles.setCurrentBaby(babyId)
+    suspend fun setCurrentBaby(babyId: Long) = localDataMutationEpoch.withMutation {
+        babyProfiles.setCurrentBaby(babyId)
+    }
 
     suspend fun updateBabyLocalPreferences(
         babyId: Long,
         themeColorArgb: Int? = null,
         sortOrder: Int? = null,
-    ) = babyProfiles.updateBabyLocalPreferences(babyId, themeColorArgb, sortOrder)
+    ) = localDataMutationEpoch.withMutation {
+        babyProfiles.updateBabyLocalPreferences(babyId, themeColorArgb, sortOrder)
+    }
 
     suspend fun updateBabyLocalOrder(orderedBabyIds: List<Long>) =
-        babyProfiles.updateBabyLocalOrder(orderedBabyIds)
+        localDataMutationEpoch.withMutation {
+            babyProfiles.updateBabyLocalOrder(orderedBabyIds)
+        }
 
     /**
      * Observe records inside the half-open local-date range. Sleep records that
@@ -363,16 +387,24 @@ class CareLog @Inject constructor(
         customItemCatalog.observeCustomItems()
 
     suspend fun addCustomItem(name: String, iconSlot: Int): Long =
-        customItemCatalog.addCustomItem(name, iconSlot)
+        localDataMutationEpoch.withMutation {
+            customItemCatalog.addCustomItem(name, iconSlot)
+        }
 
     suspend fun updateCustomItem(item: CustomRecordItem) =
-        customItemCatalog.updateCustomItem(item)
+        localDataMutationEpoch.withMutation {
+            customItemCatalog.updateCustomItem(item)
+        }
 
     suspend fun moveCustomItem(id: Long, delta: Int) =
-        customItemCatalog.moveCustomItem(id, delta)
+        localDataMutationEpoch.withMutation {
+            customItemCatalog.moveCustomItem(id, delta)
+        }
 
     suspend fun deleteCustomItem(id: Long) =
-        customItemCatalog.deleteCustomItem(id)
+        localDataMutationEpoch.withMutation {
+            customItemCatalog.deleteCustomItem(id)
+        }
 
     fun canManageCustomItem(
         item: CustomRecordItem,
@@ -406,17 +438,21 @@ class CareLog @Inject constructor(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.addRecord(
-        babyId,
-        type,
-        timestamp,
-        endTimestamp,
-        note,
-        payloadJson,
-        schemaVersion,
-        photoLocalPaths,
-        nowMillis,
-    )
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.addRecord(
+            babyId,
+            type,
+            timestamp,
+            endTimestamp,
+            note,
+            payloadJson,
+            schemaVersion,
+            photoLocalPaths,
+            nowMillis,
+            clientUuid,
+        )
+    }
 
     suspend fun updateRecord(
         id: Long,
@@ -427,16 +463,18 @@ class CareLog @Inject constructor(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
-    ) = recordMutations.updateRecord(
-        id,
-        timestamp,
-        endTimestamp,
-        note,
-        payloadJson,
-        schemaVersion,
-        photoLocalPaths,
-        nowMillis,
-    )
+    ) = localDataMutationEpoch.withMutation {
+        recordMutations.updateRecord(
+            id,
+            timestamp,
+            endTimestamp,
+            note,
+            payloadJson,
+            schemaVersion,
+            photoLocalPaths,
+            nowMillis,
+        )
+    }
 
     suspend fun convertRecordToCarePlan(
         recordId: Long,
@@ -448,19 +486,25 @@ class CareLog @Inject constructor(
         zone: ZoneId = ZoneId.systemDefault(),
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean = true,
-    ): Long = recordMutations.convertRecordToCarePlan(
-        recordId,
-        scheduledAt,
-        note,
-        payloadJson,
-        schemaVersion,
-        photoLocalPaths,
-        zone,
-        nowMillis,
-        projectToSystemCalendar,
-    )
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.convertRecordToCarePlan(
+            recordId,
+            scheduledAt,
+            note,
+            payloadJson,
+            schemaVersion,
+            photoLocalPaths,
+            zone,
+            nowMillis,
+            projectToSystemCalendar,
+            clientUuid,
+        )
+    }
 
-    suspend fun deleteRecord(id: Long): Boolean = recordMutations.deleteRecord(id)
+    suspend fun deleteRecord(id: Long): Boolean = localDataMutationEpoch.withMutation {
+        recordMutations.deleteRecord(id)
+    }
 
     /**
      * Whether the actor may edit/delete/convert this nursing record.
@@ -502,21 +546,23 @@ class CareLog @Inject constructor(
          */
         photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.completeNursing(
-        babyId,
-        leftMin,
-        rightMin,
-        order,
-        amountMl,
-        note,
-        startedAt,
-        endedAt,
-        recordMode,
-        completionClientUuid,
-        carePlanId,
-        photoLocalPaths,
-        nowMillis,
-    )
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.completeNursing(
+            babyId,
+            leftMin,
+            rightMin,
+            order,
+            amountMl,
+            note,
+            startedAt,
+            endedAt,
+            recordMode,
+            completionClientUuid,
+            carePlanId,
+            photoLocalPaths,
+            nowMillis,
+        )
+    }
 
     suspend fun confirmSleep(
         babyId: Long,
@@ -528,29 +574,37 @@ class CareLog @Inject constructor(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.confirmSleep(
-        babyId,
-        expectedOpenSleepId,
-        timestamp,
-        endTimestamp,
-        note,
-        payloadJson,
-        schemaVersion,
-        photoLocalPaths,
-        nowMillis,
-    )
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.confirmSleep(
+            babyId,
+            expectedOpenSleepId,
+            timestamp,
+            endTimestamp,
+            note,
+            payloadJson,
+            schemaVersion,
+            photoLocalPaths,
+            nowMillis,
+            clientUuid,
+        )
+    }
 
     suspend fun sleepDown(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.sleepDown(babyId, at, nowMillis)
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.sleepDown(babyId, at, nowMillis)
+    }
 
     suspend fun sleepUp(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.sleepUp(babyId, at, nowMillis)
+    ): Long = localDataMutationEpoch.withMutation {
+        recordMutations.sleepUp(babyId, at, nowMillis)
+    }
 
 
     suspend fun getRecord(id: Long): Record? = queries.getRecord(id)
@@ -593,22 +647,28 @@ class CareLog @Inject constructor(
         zone: ZoneId = ZoneId.systemDefault(),
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean = true,
-    ): Long = carePlans.createCarePlan(
-        babyId,
-        type,
-        scheduledAt,
-        note,
-        payloadJson,
-        schemaVersion,
-        customItemId,
-        photoLocalPaths,
-        zone,
-        nowMillis,
-        projectToSystemCalendar,
-    )
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        carePlans.createCarePlan(
+            babyId,
+            type,
+            scheduledAt,
+            note,
+            payloadJson,
+            schemaVersion,
+            customItemId,
+            photoLocalPaths,
+            zone,
+            nowMillis,
+            projectToSystemCalendar,
+            clientUuid,
+        )
+    }
 
     suspend fun reconcileNextFeedPlan(babyId: Long): NextFeedPlanReconciliation =
-        carePlans.reconcileNextFeedPlan(babyId)
+        localDataMutationEpoch.withMutation {
+            carePlans.reconcileNextFeedPlan(babyId)
+        }
 
     suspend fun scheduleNextFeedCarePlan(
         babyId: Long,
@@ -616,7 +676,9 @@ class CareLog @Inject constructor(
         scheduledAt: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = carePlans.scheduleNextFeedCarePlan(babyId, feedType, scheduledAt, zone, nowMillis)
+    ): Long = localDataMutationEpoch.withMutation {
+        carePlans.scheduleNextFeedCarePlan(babyId, feedType, scheduledAt, zone, nowMillis)
+    }
 
     suspend fun fulfillCarePlan(
         carePlanId: Long,
@@ -627,19 +689,25 @@ class CareLog @Inject constructor(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = carePlans.fulfillCarePlan(
-        carePlanId,
-        actualTimestamp,
-        endTimestamp,
-        note,
-        payloadJson,
-        schemaVersion,
-        photoLocalPaths,
-        nowMillis,
-    )
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        carePlans.fulfillCarePlan(
+            carePlanId,
+            actualTimestamp,
+            endTimestamp,
+            note,
+            payloadJson,
+            schemaVersion,
+            photoLocalPaths,
+            nowMillis,
+            clientUuid,
+        )
+    }
 
     suspend fun resolveFulfillmentAuthorityForPlan(carePlanClientUuid: String) =
-        carePlans.resolveFulfillmentAuthorityForPlan(carePlanClientUuid)
+        localDataMutationEpoch.withMutation {
+            carePlans.resolveFulfillmentAuthorityForPlan(carePlanClientUuid)
+        }
 
     suspend fun listFulfillmentCandidatesForPlan(
         carePlanClientUuid: String,
@@ -668,7 +736,9 @@ class CareLog @Inject constructor(
     suspend fun convertConflictNotAdoptedToIndependentRecord(
         candidateClientUuid: String,
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long = carePlans.convertConflictNotAdoptedToIndependentRecord(candidateClientUuid, nowMillis)
+    ): Long = localDataMutationEpoch.withMutation {
+        carePlans.convertConflictNotAdoptedToIndependentRecord(candidateClientUuid, nowMillis)
+    }
 
     fun canManageCarePlan(
         plan: CarePlan,
@@ -689,56 +759,73 @@ class CareLog @Inject constructor(
         zone: ZoneId? = null,
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean? = null,
-    ) = carePlans.updateCarePlan(
-        carePlanId,
-        scheduledAt,
-        note,
-        payloadJson,
-        schemaVersion,
-        photoLocalPaths,
-        zone,
-        nowMillis,
-        projectToSystemCalendar,
-    )
+    ) = localDataMutationEpoch.withMutation {
+        carePlans.updateCarePlan(
+            carePlanId,
+            scheduledAt,
+            note,
+            payloadJson,
+            schemaVersion,
+            photoLocalPaths,
+            zone,
+            nowMillis,
+            projectToSystemCalendar,
+        )
+    }
 
     suspend fun skipCarePlan(
         carePlanId: Long,
         nowMillis: Long = System.currentTimeMillis(),
-    ) = carePlans.skipCarePlan(carePlanId, nowMillis)
+    ) = localDataMutationEpoch.withMutation {
+        carePlans.skipCarePlan(carePlanId, nowMillis)
+    }
 
     suspend fun deleteCarePlan(
         carePlanId: Long,
         nowMillis: Long = System.currentTimeMillis(),
-    ): Boolean = carePlans.deleteCarePlan(carePlanId, nowMillis)
+    ): Boolean = localDataMutationEpoch.withMutation {
+        carePlans.deleteCarePlan(carePlanId, nowMillis)
+    }
 
     suspend fun onFamilyCarePlansApplied(
         planClientUuids: List<String>,
         nowMillis: Long = System.currentTimeMillis(),
-    ) = carePlans.onFamilyCarePlansApplied(planClientUuids, nowMillis)
+    ) = localDataMutationEpoch.withMutation {
+        carePlans.onFamilyCarePlansApplied(planClientUuids, nowMillis)
+    }
 
     suspend fun setCarePlanLocalRemindersEnabled(
         enabled: Boolean,
         nowMillis: Long = System.currentTimeMillis(),
-    ) = carePlans.setCarePlanLocalRemindersEnabled(enabled, nowMillis)
+    ) = localDataMutationEpoch.withMutation {
+        carePlans.setCarePlanLocalRemindersEnabled(enabled, nowMillis)
+    }
 
     suspend fun projectOrScheduleCarePlanReminder(
         plan: CarePlan,
         projectToSystemCalendar: Boolean = plan.systemCalendarProjectionEnabled,
-    ): Boolean = carePlans.projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar)
+    ): Boolean = localDataMutationEpoch.withMutation {
+        carePlans.projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar)
+    }
 
     suspend fun reprojectOpenFutureSystemCalendarCopies(
         nowMillis: Long = System.currentTimeMillis(),
-    ) = carePlans.reprojectOpenFutureSystemCalendarCopies(nowMillis)
+    ) = localDataMutationEpoch.withMutation {
+        carePlans.reprojectOpenFutureSystemCalendarCopies(nowMillis)
+    }
 
     suspend fun isCarePlanSystemCalendarUnsynced(carePlanId: Long): Boolean =
         carePlans.isCarePlanSystemCalendarUnsynced(carePlanId)
 
-    suspend fun disableSystemCalendarProjection() =
+    suspend fun disableSystemCalendarProjection() = localDataMutationEpoch.withMutation {
         carePlans.disableSystemCalendarProjection()
+    }
 
     suspend fun rescheduleCarePlanReminders(
         nowMillis: Long = System.currentTimeMillis(),
-    ) = carePlans.rescheduleCarePlanReminders(nowMillis)
+    ) = localDataMutationEpoch.withMutation {
+        carePlans.rescheduleCarePlanReminders(nowMillis)
+    }
 
     suspend fun shouldDeliverCarePlanReminder(
         carePlanId: Long,
@@ -787,19 +874,27 @@ class CareLog @Inject constructor(
     ): List<String> = queries.recentNotes(babyId, type, limit)
 
     suspend fun renameBaby(babyId: Long, nickname: String) =
-        babyProfiles.renameBaby(babyId, nickname)
+        localDataMutationEpoch.withMutation {
+            babyProfiles.renameBaby(babyId, nickname)
+        }
 
     suspend fun previewBabyMerge(sourceBabyId: Long, targetBabyId: Long): BabyMergePreview? =
         babyProfiles.previewBabyMerge(sourceBabyId, targetBabyId)
 
     suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean =
-        babyProfiles.mergeBabyProfiles(sourceBabyId, targetBabyId)
+        localDataMutationEpoch.withMutation {
+            babyProfiles.mergeBabyProfiles(sourceBabyId, targetBabyId)
+        }
 
     suspend fun reconcileMemberLocalBabies(): Int =
-        babyProfiles.reconcileMemberLocalBabies()
+        localDataMutationEpoch.withMutation {
+            babyProfiles.reconcileMemberLocalBabies()
+        }
 
     internal suspend fun reconcileMemberLocalBabiesAfterFamilyApply(): Int =
-        babyProfiles.reconcileMemberLocalBabiesAfterFamilyApply()
+        localDataMutationEpoch.withMutation {
+            babyProfiles.reconcileMemberLocalBabiesAfterFamilyApply()
+        }
 
 
     private fun requestLocalSync() {
