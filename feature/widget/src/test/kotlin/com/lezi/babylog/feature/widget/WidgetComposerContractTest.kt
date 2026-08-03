@@ -32,4 +32,38 @@ class WidgetComposerContractTest {
         assertNull(WidgetComposerContract.decodeTarget(-1, "formula"))
         assertNull(WidgetComposerContract.decodeTarget(42, "future"))
     }
+
+    @Test
+    fun untrustedIntentDecoderRequiresCanonicalRouteToMatchExtras() {
+        val canonical = WidgetComposerIntentSnapshot(
+            action = WidgetComposerContract.ACTION_OPEN_RECORD_COMPOSER,
+            scheme = "lezi",
+            host = "composer",
+            pathSegments = listOf("new"),
+            queryBabyId = "42",
+            queryRecordTypeKey = "formula",
+            extraBabyId = 42,
+            extraRecordTypeKey = "formula",
+        )
+
+        assertEquals(
+            WidgetComposerTarget(42, RecordType.FORMULA),
+            WidgetComposerContract.decodeUntrustedTarget(canonical),
+        )
+        assertNull(
+            WidgetComposerContract.decodeUntrustedTarget(
+                canonical.copy(queryBabyId = "43"),
+            ),
+        )
+        assertNull(
+            WidgetComposerContract.decodeUntrustedTarget(
+                canonical.copy(pathSegments = listOf("edit")),
+            ),
+        )
+        assertNull(
+            WidgetComposerContract.decodeUntrustedTarget(
+                canonical.copy(action = "attacker.action.OPEN"),
+            ),
+        )
+    }
 }

@@ -4,9 +4,33 @@ import com.lezi.babylog.domain.calendar.SystemCalendarEventState
 import com.lezi.babylog.domain.calendar.SystemCalendarOwnedEventLookup
 import com.lezi.babylog.domain.calendar.SystemCalendarUpsertOutcome
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SystemCalendarProviderLookupTest {
+    @Test
+    fun orphanReminderCleanupRequiresBothOwnedAndGlobalEventAbsence() {
+        assertTrue(
+            shouldScrubOrphanSystemCalendarReminder(
+                ownedEventState = SystemCalendarEventState.ABSENT,
+                anyEventState = SystemCalendarEventState.ABSENT,
+            ),
+        )
+        assertFalse(
+            shouldScrubOrphanSystemCalendarReminder(
+                ownedEventState = SystemCalendarEventState.ABSENT,
+                anyEventState = SystemCalendarEventState.PRESENT,
+            ),
+        )
+        assertFalse(
+            shouldScrubOrphanSystemCalendarReminder(
+                ownedEventState = SystemCalendarEventState.UNAVAILABLE,
+                anyEventState = SystemCalendarEventState.ABSENT,
+            ),
+        )
+    }
+
     @Test
     fun extraProviderReminderIsNotAnExactBeginAlertSet() {
         assertEquals(

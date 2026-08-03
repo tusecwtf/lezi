@@ -331,6 +331,17 @@ class AndroidSystemCalendarPortSmokeTest {
 
         assertThat(port.eventState(eventId.toString())).isEqualTo(SystemCalendarEventState.ABSENT)
         assertThat(port.findOwnedEvent(planUuid)).isEqualTo(SystemCalendarOwnedEventLookup.Absent)
+
+        if (!readAnyReminder(eventId)) {
+            val orphanRestored = runCatching {
+                rawInsertReminder(eventId, minutes = 15)
+            }.isSuccess
+            assumeTrue("Calendar provider cannot retain an orphan reminder", orphanRestored)
+        }
+        assertThat(readAnyReminder(eventId)).isTrue()
+
+        assertThat(port.deleteEvent(eventId.toString(), planUuid)).isTrue()
+        assertThat(readAnyReminder(eventId)).isFalse()
     }
 
     @Test

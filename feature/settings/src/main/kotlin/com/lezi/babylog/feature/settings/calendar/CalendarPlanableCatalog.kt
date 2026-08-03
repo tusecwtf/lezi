@@ -14,11 +14,12 @@ import com.lezi.babylog.domain.CustomRecordItem
 data class CalendarPlanableItem(
     val type: RecordType,
     val customItemId: Long? = null,
+    val customItemClientUuid: String? = null,
     val label: String,
 ) {
     val catalogKey: String
         get() = if (type == RecordType.CUSTOM && customItemId != null) {
-            RecordItemIdentity.customCatalogKey(customItemId)
+            RecordItemIdentity.custom(customItemId, customItemClientUuid).catalogKey
         } else {
             type.key
         }
@@ -39,11 +40,14 @@ fun calendarPlanableItems(
         .filter { it.isPlanableCarePlanType && it.key !in hiddenItems }
         .map { CalendarPlanableItem(type = it, label = it.businessLabel()) }
     val customs = customItems
-        .filter { RecordItemIdentity.customCatalogKey(it.id) !in hiddenItems }
+        .filter {
+            RecordItemIdentity.custom(it.id, it.clientUuid).catalogKey !in hiddenItems
+        }
         .map {
             CalendarPlanableItem(
                 type = RecordType.CUSTOM,
                 customItemId = it.id,
+                customItemClientUuid = it.clientUuid,
                 label = it.name.ifBlank { "自定义" },
             )
         }

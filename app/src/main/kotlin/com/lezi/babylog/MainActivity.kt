@@ -114,8 +114,6 @@ import com.lezi.babylog.feature.summary.SummaryRoute
 import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.feature.timer.TimerRoute
 import com.lezi.babylog.feature.widget.CareWidgetRefreshController
-import com.lezi.babylog.feature.widget.WidgetComposerContract
-import com.lezi.babylog.feature.widget.WidgetComposerTarget
 import com.lezi.babylog.sync.AppUpdateCheckResult
 import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
@@ -155,8 +153,8 @@ import kotlinx.coroutines.launch
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     @Inject lateinit var localDataGate: LocalDataGate
-    private val pendingWidgetComposer = mutableStateOf<WidgetComposerTarget?>(null)
-    private val pendingFulfillPlan = mutableStateOf<PendingFulfillPlan?>(null)
+    private val pendingExternalNavigation =
+        mutableStateOf<UntrustedExternalNavigation?>(null)
 
     override fun attachBaseContext(newBase: Context) {
         val chineseLocale = Locale.forLanguageTag("zh-CN")
@@ -169,8 +167,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        pendingWidgetComposer.value = WidgetComposerContract.parse(intent)
-        pendingFulfillPlan.value = parseFulfillPlanIntent(intent)
+        pendingExternalNavigation.value = parseUntrustedExternalNavigation(intent)
         enableEdgeToEdge()
         setContent {
             val localDataState by localDataGate.state.collectAsStateWithLifecycle()
@@ -209,10 +206,12 @@ class MainActivity : ComponentActivity() {
                     LeziRoot(
                         vm = vm,
                         dark = dark,
-                        widgetComposerTarget = pendingWidgetComposer.value,
-                        onWidgetComposerConsumed = { pendingWidgetComposer.value = null },
-                        fulfillPlanTarget = pendingFulfillPlan.value,
-                        onFulfillPlanConsumed = { pendingFulfillPlan.value = null },
+                        externalNavigationRequest = pendingExternalNavigation.value,
+                        onExternalNavigationConsumed = { consumed ->
+                            if (pendingExternalNavigation.value == consumed) {
+                                pendingExternalNavigation.value = null
+                            }
+                        },
                     )
                 }
             } else {
@@ -238,32 +237,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        pendingWidgetComposer.value = WidgetComposerContract.parse(intent)
-        pendingFulfillPlan.value = parseFulfillPlanIntent(intent)
-    }
-
-    private fun parseFulfillPlanIntent(intent: Intent?): PendingFulfillPlan? {
-        if (intent == null) return null
-        // System-calendar L3 deep link: lezi://care-plan/{clientUuid}
-        val data = intent.data
-        if (data != null &&
-            data.scheme == "lezi" &&
-            data.host == "care-plan"
-        ) {
-            val uuid = data.pathSegments?.firstOrNull().orEmpty()
-            if (uuid.isNotBlank()) {
-                return PendingFulfillPlan(planId = null, clientUuid = uuid)
-            }
-        }
-        val id = intent.getLongExtra(
-            com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_ID,
-            0L,
-        )
-        val uuid = intent.getStringExtra(
-            com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_UUID,
-        ).orEmpty()
-        if (id <= 0L && uuid.isBlank()) return null
-        return PendingFulfillPlan(planId = id.takeIf { it > 0L }, clientUuid = uuid)
+        pendingExternalNavigation.value = parseUntrustedExternalNavigation(intent)
     }
 }
 
@@ -695,13 +669,11 @@ internal fun rootSnackbarBottomInset(
 }
 
 @Composable
-fun LeziRoot(
+internal fun LeziRoot(
     vm: RootViewModel = hiltViewModel(),
     dark: Boolean = false,
-    widgetComposerTarget: WidgetComposerTarget? = null,
-    fulfillPlanTarget: PendingFulfillPlan? = null,
-    onFulfillPlanConsumed: () -> Unit = {},
-    onWidgetComposerConsumed: () -> Unit = {},
+    externalNavigationRequest: UntrustedExternalNavigation? = null,
+    onExternalNavigationConsumed: (UntrustedExternalNavigation) -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     // Force shell is above onboarding so a joined device still under baby setup cannot
@@ -715,10 +687,8 @@ fun LeziRoot(
                 vm = vm,
                 ui = ui,
                 dark = dark,
-                widgetComposerTarget = widgetComposerTarget,
-                fulfillPlanTarget = fulfillPlanTarget,
-                onFulfillPlanConsumed = onFulfillPlanConsumed,
-                onWidgetComposerConsumed = onWidgetComposerConsumed,
+                externalNavigationRequest = externalNavigationRequest,
+                onExternalNavigationConsumed = onExternalNavigationConsumed,
             )
         }
         RootForcedAppUpdateLayer(vm)
@@ -748,10 +718,8 @@ private fun LeziMainScaffold(
     vm: RootViewModel,
     ui: RootUi,
     dark: Boolean,
-    widgetComposerTarget: WidgetComposerTarget?,
-    fulfillPlanTarget: PendingFulfillPlan?,
-    onFulfillPlanConsumed: () -> Unit,
-    onWidgetComposerConsumed: () -> Unit,
+    externalNavigationRequest: UntrustedExternalNavigation?,
+    onExternalNavigationConsumed: (UntrustedExternalNavigation) -> Unit,
 ) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
@@ -781,43 +749,48 @@ private fun LeziMainScaffold(
     /** Monotonic reject / leave-before-accept signal for Host cancelTimerHandoff. */
     var timerHandoffRejectEpoch by rememberSaveable { mutableIntStateOf(0) }
 
-    LaunchedEffect(widgetComposerTarget) {
-        val target = widgetComposerTarget ?: return@LaunchedEffect
-        // Never replace an in-progress draft without an explicit discard action.
-        if (composerRequest != null) {
-            onWidgetComposerConsumed()
-            return@LaunchedEffect
-        }
-        if (ui.babies.none { it.id == target.babyId }) {
-            onWidgetComposerConsumed()
-            return@LaunchedEffect
-        }
-        vm.openWidgetBaby(target.babyId)
-        vm.openComposer(
-            RecordComposerRequest.New(
-                babyId = target.babyId,
-                type = target.type,
-                timestamp = System.currentTimeMillis(),
-                historical = false,
-            ),
+    externalNavigationRequest?.let { request ->
+        UntrustedExternalNavigationConfirmationDialog(
+            request = request,
+            onDismiss = { onExternalNavigationConsumed(request) },
+            onConfirm = confirm@{
+                val authorized = authorizeExternalNavigation(
+                    request = request,
+                    userConfirmed = true,
+                ) ?: return@confirm
+                // Consume before any navigation so repeated taps cannot replay the request.
+                onExternalNavigationConsumed(request)
+                // Never replace an in-progress draft without its explicit discard action.
+                if (composerRequest != null) return@confirm
+                when (authorized) {
+                    is AuthorizedExternalNavigation.WidgetComposer -> {
+                        val target = authorized.target
+                        if (ui.babies.none { it.id == target.babyId }) return@confirm
+                        vm.openWidgetBaby(target.babyId)
+                        vm.openComposer(
+                            RecordComposerRequest.New(
+                                babyId = target.babyId,
+                                type = target.type,
+                                timestamp = System.currentTimeMillis(),
+                                historical = false,
+                            ),
+                        )
+                    }
+                    is AuthorizedExternalNavigation.Fulfill -> {
+                        val target = authorized.target
+                        scope.launch {
+                            val planId = target.planId
+                                ?: target.clientUuid.takeIf { it.isNotBlank() }?.let { uuid ->
+                                    vm.resolveCarePlanId(uuid)
+                                }
+                            if (planId != null && planId > 0L) {
+                                vm.openComposer(RecordComposerRequest.Fulfill(planId))
+                            }
+                        }
+                    }
+                }
+            },
         )
-        onWidgetComposerConsumed()
-    }
-
-    LaunchedEffect(fulfillPlanTarget) {
-        val target = fulfillPlanTarget ?: return@LaunchedEffect
-        if (composerRequest != null) {
-            onFulfillPlanConsumed()
-            return@LaunchedEffect
-        }
-        val planId = target.planId
-            ?: target.clientUuid.takeIf { it.isNotBlank() }?.let { uuid ->
-                vm.resolveCarePlanId(uuid)
-            }
-        if (planId != null && planId > 0L) {
-            vm.openComposer(RecordComposerRequest.Fulfill(planId))
-        }
-        onFulfillPlanConsumed()
     }
     val chrome = rootChromeVisibility(current, logLayoutEditActive)
     val showContextHeader = current in setOf(
@@ -1085,6 +1058,24 @@ private fun LeziMainScaffold(
                             snackbar.showSnackbar("当前已有进行中的计时，草稿仍可编辑")
                         }
                         nav.popBackStack()
+                    },
+                    onLeaveRunning = {
+                        timerHandoffSession = null
+                        timerHandoffRejectEpoch += 1
+                        source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
+                        nav.popBackStack()
+                        scope.launch {
+                            snackbar.showSnackbar("计时仍在后台继续")
+                        }
+                    },
+                    onLeavePaused = {
+                        timerHandoffSession = null
+                        timerHandoffRejectEpoch += 1
+                        source?.remove<String>(TIMER_HANDOFF_SEED_JSON_KEY)
+                        nav.popBackStack()
+                        scope.launch {
+                            snackbar.showSnackbar("计时已暂停，稍后可从喂奶计时继续")
+                        }
                     },
                     onDone = {
                         // Pop / discard before accept: unlock Composer without releasing files.

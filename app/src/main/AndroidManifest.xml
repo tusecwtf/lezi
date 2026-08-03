@@ -89,10 +89,12 @@
         </service>
 
         <receiver
-            android:name="com.lezi.babylog.feature.settings.calendar.BootReceiver"
+            android:name=".PersistentSideEffectRehydrateReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.lezi.babylog.sync.APP_UPDATE_REHYDRATE" />
             </intent-filter>
         </receiver>
         <receiver

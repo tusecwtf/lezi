@@ -35,11 +35,48 @@ object WidgetComposerContract {
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
 
-    fun parse(intent: Intent?): WidgetComposerTarget? {
-        if (intent?.action != ACTION_OPEN_RECORD_COMPOSER) return null
+    /**
+     * Decodes an external widget launch request without granting it any navigation authority.
+     * The canonical route must agree with the duplicated extras so malformed/spoofed requests
+     * fail closed before the app asks the user for confirmation.
+     */
+    fun parseUntrusted(intent: Intent?): WidgetComposerTarget? {
+        val data = intent?.data
+        return decodeUntrustedTarget(
+            WidgetComposerIntentSnapshot(
+                action = intent?.action,
+                scheme = data?.scheme,
+                host = data?.host,
+                pathSegments = data?.pathSegments.orEmpty(),
+                queryBabyId = data?.getQueryParameters("babyId")?.singleOrNull(),
+                queryRecordTypeKey = data?.getQueryParameters("type")?.singleOrNull(),
+                extraBabyId = intent
+                    ?.takeIf { it.hasExtra(EXTRA_BABY_ID) }
+                    ?.getLongExtra(EXTRA_BABY_ID, -1L),
+                extraRecordTypeKey = intent?.getStringExtra(EXTRA_RECORD_TYPE),
+            ),
+        )
+    }
+
+    @Deprecated(
+        message = "External widget intents are untrusted; use parseUntrusted",
+        replaceWith = ReplaceWith("parseUntrusted(intent)"),
+    )
+    fun parse(intent: Intent?): WidgetComposerTarget? = parseUntrusted(intent)
+
+    internal fun decodeUntrustedTarget(
+        snapshot: WidgetComposerIntentSnapshot,
+    ): WidgetComposerTarget? {
+        if (snapshot.action != ACTION_OPEN_RECORD_COMPOSER) return null
+        if (snapshot.scheme != "lezi" || snapshot.host != "composer") return null
+        if (snapshot.pathSegments != listOf("new")) return null
+        val extraBabyId = snapshot.extraBabyId ?: return null
+        val queryBabyId = snapshot.queryBabyId?.toLongOrNull() ?: return null
+        if (queryBabyId != extraBabyId) return null
+        if (snapshot.queryRecordTypeKey != snapshot.extraRecordTypeKey) return null
         return decodeTarget(
-            babyId = intent.getLongExtra(EXTRA_BABY_ID, -1L),
-            recordTypeKey = intent.getStringExtra(EXTRA_RECORD_TYPE),
+            babyId = extraBabyId,
+            recordTypeKey = snapshot.extraRecordTypeKey,
         )
     }
 
@@ -52,6 +89,17 @@ object WidgetComposerContract {
         return WidgetComposerTarget(babyId, type)
     }
 }
+
+internal data class WidgetComposerIntentSnapshot(
+    val action: String?,
+    val scheme: String?,
+    val host: String?,
+    val pathSegments: List<String>,
+    val queryBabyId: String?,
+    val queryRecordTypeKey: String?,
+    val extraBabyId: Long?,
+    val extraRecordTypeKey: String?,
+)
 
 data class WidgetComposerTarget(
     val babyId: Long,

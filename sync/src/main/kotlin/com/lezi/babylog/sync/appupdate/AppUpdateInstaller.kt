@@ -7,6 +7,7 @@ import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import com.lezi.babylog.core.common.PERSISTENT_SIDE_EFFECT_REHYDRATE_ACTION
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.security.MessageDigest
@@ -31,6 +32,11 @@ internal const val APP_UPDATE_STAGING_DIR = "app-update"
 internal const val APP_UPDATE_STAGING_APK_NAME = "pending-update.apk"
 internal const val APP_UPDATE_INSTALL_ACTION =
     "com.lezi.babylog.sync.APP_UPDATE_INSTALL_STATUS"
+
+internal fun appUpdateInstallCompletionBroadcastAction(status: Int): String? =
+    PERSISTENT_SIDE_EFFECT_REHYDRATE_ACTION.takeIf {
+        status == PackageInstaller.STATUS_SUCCESS
+    }
 
 /** Digests [bytes] as lowercase hex sha256 (matches wire metadata). */
 internal fun sha256Hex(bytes: ByteArray): String {
@@ -141,6 +147,9 @@ class AppUpdateInstallStatusReceiver : BroadcastReceiver() {
             else -> {
                 // Success and failure: no private staging left to clear here; the
                 // install path deletes the cache APK after session commit.
+                appUpdateInstallCompletionBroadcastAction(status)?.let { action ->
+                    context.sendBroadcast(Intent(action).setPackage(context.packageName))
+                }
             }
         }
     }

@@ -33,6 +33,8 @@ internal fun RecordSettingsDialog(
     settings: SettingsLocal,
     carePlanRemindersEnabled: Boolean,
     onCarePlanRemindersEnabled: (Boolean) -> Unit,
+    notificationPermissionWarning: String?,
+    onOpenNotificationSettings: () -> Unit,
     systemCalendarEnabled: Boolean,
     systemCalendarSummary: String,
     systemCalendarDisclosureSummary: String,
@@ -70,6 +72,8 @@ internal fun RecordSettingsDialog(
                 PlanCalendarSettingsBody(
                     carePlanRemindersEnabled = carePlanRemindersEnabled,
                     onCarePlanRemindersEnabled = onCarePlanRemindersEnabled,
+                    notificationPermissionWarning = notificationPermissionWarning,
+                    onOpenNotificationSettings = onOpenNotificationSettings,
                     systemCalendarEnabled = systemCalendarEnabled,
                     systemCalendarSummary = systemCalendarSummary,
                     systemCalendarDisclosureSummary = systemCalendarDisclosureSummary,
@@ -172,6 +176,8 @@ internal fun PerItemSettingsBody(
 internal fun PlanCalendarSettingsBody(
     carePlanRemindersEnabled: Boolean,
     onCarePlanRemindersEnabled: (Boolean) -> Unit,
+    notificationPermissionWarning: String?,
+    onOpenNotificationSettings: () -> Unit,
     systemCalendarEnabled: Boolean,
     systemCalendarSummary: String,
     systemCalendarDisclosureSummary: String,
@@ -195,6 +201,18 @@ internal fun PlanCalendarSettingsBody(
             checked = carePlanRemindersEnabled,
             onCheckedChange = onCarePlanRemindersEnabled,
         )
+    }
+    if (notificationPermissionWarning != null) {
+        Column(Modifier.fillMaxWidth()) {
+            Text(
+                notificationPermissionWarning,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.error,
+            )
+            TextButton(onClick = onOpenNotificationSettings) {
+                Text("去通知设置")
+            }
+        }
     }
     Column(Modifier.fillMaxWidth()) {
         Text("同步到系统日历", style = LeziTypography.Body)

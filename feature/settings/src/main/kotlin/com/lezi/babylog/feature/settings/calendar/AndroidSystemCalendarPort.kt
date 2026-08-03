@@ -147,6 +147,20 @@ class AndroidSystemCalendarPort @Inject constructor(
             else -> Unit
         }
 
+        if (
+            target == SystemCalendarUpsertTarget.Insert &&
+            knownEventId != null &&
+            existingState == SystemCalendarEventState.ABSENT
+        ) {
+            val orphanReminderState = releaseAbsentOwnedEventReminder(knownEventId.toLong())
+            if (orphanReminderState != SystemCalendarEventState.ABSENT) {
+                return SystemCalendarUpsertResult(
+                    eventId = knownEventId,
+                    outcome = SystemCalendarUpsertOutcome.ProviderStillOwnsStale,
+                )
+            }
+        }
+
         val calendarId = request.calendarId.toLongOrNull()
         if (calendarId == null || !isWritableCalendar(request.calendarId)) {
             return releaseProviderRemindersForFallback(request, target, ownedLookup)
@@ -232,7 +246,8 @@ class AndroidSystemCalendarPort @Inject constructor(
     ): Boolean {
         if (!hasCalendarPermission()) return false
         val id = eventId.toLongOrNull() ?: return false
-        when (eventState(eventId, carePlanClientUuid)) {
+        val ownedState = eventState(eventId, carePlanClientUuid)
+        when (ownedState) {
             SystemCalendarEventState.PRESENT -> {
                 // Remove the notification source before the event row. Some OEM
                 // providers do not cascade an Events delete into Reminders.
@@ -247,9 +262,15 @@ class AndroidSystemCalendarPort @Inject constructor(
                     return false
                 }
             }
-            // ABSENT may mean the id belongs to another package/UID. Without a
-            // live owned row, neither mutation nor a successful delete claim is safe.
-            SystemCalendarEventState.ABSENT -> return false
+            SystemCalendarEventState.ABSENT -> {
+                // A stale id can now belong to another package/UID. Its reminder
+                // is not ours, but that also means we must not claim deletion.
+                if (queryAnyEventState(id) != SystemCalendarEventState.ABSENT) {
+                    return false
+                }
+                val reminderState = releaseAbsentOwnedEventReminder(id)
+                return strictOwnedEventDeleteSucceeded(ownedState, reminderState)
+            }
             SystemCalendarEventState.UNAVAILABLE -> return false
         }
         val ownership = ownedEventSelection(
@@ -316,6 +337,7 @@ class AndroidSystemCalendarPort @Inject constructor(
         val eventIds = linkedSetOf<String>().apply {
             if (lookup is SystemCalendarOwnedEventLookup.Found) addAll(lookup.eventIds)
             if (target is SystemCalendarUpsertTarget.Update) add(target.eventId)
+            request.existingEventId?.toLongOrNull()?.toString()?.let(::add)
         }
         if (eventIds.isEmpty()) {
             return SystemCalendarUpsertResult(
@@ -343,10 +365,10 @@ class AndroidSystemCalendarPort @Inject constructor(
                     }
                     queryAnyReminderState(eventId.toLong())
                 }
-                // Do not infer reminder absence from event absence. A failed or
-                // non-cascading provider delete may leave an orphan reminder row.
+                // Only a globally absent event makes EVENT_ID reminder deletion safe;
+                // a foreign event row with the same id must remain untouched.
                 SystemCalendarEventState.ABSENT ->
-                    queryAnyReminderState(eventId.toLong())
+                    releaseAbsentOwnedEventReminder(eventId.toLong())
                 SystemCalendarEventState.UNAVAILABLE -> SystemCalendarEventState.UNAVAILABLE
             }
         }
@@ -560,6 +582,51 @@ class AndroidSystemCalendarPort @Inject constructor(
         }
         return (result as? SystemCalendarProviderResult.Success)?.value
             ?: SystemCalendarEventState.UNAVAILABLE
+    }
+
+    private suspend fun queryAnyEventState(eventId: Long): SystemCalendarEventState {
+        val result = queryProvider<Boolean> { cancellationSignal ->
+            val cursor = context.contentResolver.query(
+                CalendarContract.Events.CONTENT_URI,
+                arrayOf(CalendarContract.Events._ID),
+                "${CalendarContract.Events._ID}=? AND ${CalendarContract.Events.DELETED}=0",
+                arrayOf(eventId.toString()),
+                null,
+                cancellationSignal,
+            ) ?: return@queryProvider null
+            cursor.use { it.moveToFirst() }
+        }
+        return when ((result as? SystemCalendarProviderResult.Success)?.value) {
+            true -> SystemCalendarEventState.PRESENT
+            false -> SystemCalendarEventState.ABSENT
+            null -> SystemCalendarEventState.UNAVAILABLE
+        }
+    }
+
+    /** Scrub an orphan only after proving the provider has no live event with this id. */
+    private suspend fun releaseAbsentOwnedEventReminder(eventId: Long): SystemCalendarEventState {
+        val anyEventState = queryAnyEventState(eventId)
+        if (
+            !shouldScrubOrphanSystemCalendarReminder(
+                ownedEventState = SystemCalendarEventState.ABSENT,
+                anyEventState = anyEventState,
+            )
+        ) {
+            return if (anyEventState == SystemCalendarEventState.PRESENT) {
+                // The row is foreign, so its reminder cannot belong to this plan.
+                SystemCalendarEventState.ABSENT
+            } else {
+                SystemCalendarEventState.UNAVAILABLE
+            }
+        }
+        writeProvider {
+            context.contentResolver.delete(
+                CalendarContract.Reminders.CONTENT_URI,
+                "${CalendarContract.Reminders.EVENT_ID}=?",
+                arrayOf(eventId.toString()),
+            )
+        }
+        return queryAnyReminderState(eventId)
     }
 
     private suspend fun queryReminderSetState(
@@ -813,6 +880,13 @@ internal fun strictOwnedEventDeleteSucceeded(
     reminderState: SystemCalendarEventState,
 ): Boolean = eventState == SystemCalendarEventState.ABSENT &&
     reminderState == SystemCalendarEventState.ABSENT
+
+/** An EVENT_ID reminder row is an orphan only when no owned or foreign live event remains. */
+internal fun shouldScrubOrphanSystemCalendarReminder(
+    ownedEventState: SystemCalendarEventState,
+    anyEventState: SystemCalendarEventState,
+): Boolean = ownedEventState == SystemCalendarEventState.ABSENT &&
+    anyEventState == SystemCalendarEventState.ABSENT
 
 /** Duplicate convergence includes orphan-reminder verification, not only the UID event set. */
 internal fun strictOwnedDuplicatesConverged(

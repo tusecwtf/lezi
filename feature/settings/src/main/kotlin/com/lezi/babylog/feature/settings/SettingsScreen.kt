@@ -1,8 +1,13 @@
 package com.lezi.babylog.feature.settings
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,6 +48,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,10 +62,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.core.common.SingleFlightAction
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordItemIdentity
@@ -83,6 +91,11 @@ import com.lezi.babylog.domain.localdata.LocalDataClearScope
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.feature.settings.calendar.*
+import com.lezi.babylog.feature.settings.command.CustomItemSaveKind
+import com.lezi.babylog.feature.settings.command.SettingsClearRecordsController
+import com.lezi.babylog.feature.settings.command.SettingsClearRecordsStep
+import com.lezi.babylog.feature.settings.command.SettingsCustomItemCommandGate
+import com.lezi.babylog.feature.settings.command.projectSettingsInstallOutcome
 import com.lezi.babylog.feature.settings.record.*
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
@@ -102,6 +115,7 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -123,6 +137,20 @@ internal fun clearRecordsFailureCopy(error: Throwable): String = when {
     error is LocalRecordsClearCommittedException -> "本机记录可能已部分清理，请重试"
     else -> productUiError(error, "清除失败，请重试")
 }
+
+internal data class SettingsAddBabyPrimaryPresentation(
+    val label: String,
+    val enabled: Boolean,
+    val dismissible: Boolean,
+)
+
+internal fun settingsAddBabyPrimaryPresentation(
+    busy: Boolean,
+): SettingsAddBabyPrimaryPresentation = SettingsAddBabyPrimaryPresentation(
+    label = if (busy) "添加中…" else "添加",
+    enabled = !busy,
+    dismissible = !busy,
+)
 
 data class SettingsUi(
     val settings: SettingsLocal = SettingsLocal(),
@@ -160,6 +188,14 @@ class SettingsViewModel @Inject constructor(
     private val localDataClearCoordinator: LocalDataClearCoordinator,
     private val clientAppVersion: ClientAppVersion,
 ) : ViewModel() {
+    private val addBabyAction = SingleFlightAction()
+    private val customItemCommands = SettingsCustomItemCommandGate()
+    private val clearRecordsController = SettingsClearRecordsController(
+        clearRecords = {
+            localDataClearCoordinator.clear(LocalDataClearScope.RecordsOnly)
+        },
+        failureCopy = ::clearRecordsFailureCopy,
+    )
     private val settingsWithCalendarTarget = settingsStore.settings.map { settings ->
         val hasPermission = systemCalendarPort.hasCalendarPermission()
         val targets = if (hasPermission) {
@@ -213,11 +249,21 @@ class SettingsViewModel @Inject constructor(
     val checkingAppUpdate: StateFlow<Boolean> = _checkingAppUpdate.asStateFlow()
     private val _installingAppUpdate = MutableStateFlow(false)
     val installingAppUpdate: StateFlow<Boolean> = _installingAppUpdate.asStateFlow()
+    private val _appUpdateInstallFeedback = MutableStateFlow<String?>(null)
+    val appUpdateInstallFeedback: StateFlow<String?> = _appUpdateInstallFeedback.asStateFlow()
+    private val _forcedInstallPermissionRequired = MutableStateFlow(false)
+    val forcedInstallPermissionRequired: StateFlow<Boolean> =
+        _forcedInstallPermissionRequired.asStateFlow()
+    val addingBaby: StateFlow<Boolean> = addBabyAction.busy
+    internal val customItemCommandState = customItemCommands.state
+    internal val clearRecordsState = clearRecordsController.state
 
     fun checkAppUpdate() {
         if (_checkingAppUpdate.value || _installingAppUpdate.value) return
         viewModelScope.launch {
             _checkingAppUpdate.value = true
+            _appUpdateInstallFeedback.value = null
+            _forcedInstallPermissionRequired.value = false
             try {
                 val result = syncPort.checkAppUpdate()
                 // Pass live force shell so secondary dialog never claims Optional/UpToDate
@@ -247,6 +293,8 @@ class SettingsViewModel @Inject constructor(
             syncPort.dismissOptionalAppUpdate(current.metadata.versionCode)
         }
         _appUpdateOutcome.value = null
+        _appUpdateInstallFeedback.value = null
+        _forcedInstallPermissionRequired.value = false
     }
 
     /**
@@ -257,19 +305,35 @@ class SettingsViewModel @Inject constructor(
         if (_installingAppUpdate.value) return
         viewModelScope.launch {
             _installingAppUpdate.value = true
-            _appUpdateOutcome.value = AppUpdateUiOutcome.Message(
-                title = "正在下载",
-                body = "正在从家庭服务器下载更新包…",
-            )
+            val activeOutcome = _appUpdateOutcome.value
+                ?: AppUpdateUiOutcome.OptionalUpdate(metadata)
+            _appUpdateInstallFeedback.value = null
+            _forcedInstallPermissionRequired.value = false
+            if (activeOutcome is AppUpdateUiOutcome.ForcedUpdate) {
+                _appUpdateInstallFeedback.value = "正在从家庭服务器下载更新包…"
+            } else {
+                _appUpdateOutcome.value = AppUpdateUiOutcome.Message(
+                    title = "正在下载",
+                    body = "正在从家庭服务器下载更新包…",
+                )
+            }
             try {
                 val result = syncPort.installAvailableAppUpdate(metadata)
-                _appUpdateOutcome.value = appUpdateInstallUiOutcome(result) { error ->
+                val installOutcome = appUpdateInstallUiOutcome(result) { error ->
                     productUiError(error, "下载或安装失败，请稍后重试")
                 }
+                val projection = projectSettingsInstallOutcome(activeOutcome, installOutcome)
+                _appUpdateOutcome.value = projection.outcome
+                _appUpdateInstallFeedback.value = projection.feedback
+                _forcedInstallPermissionRequired.value = projection.requiresInstallPermission
             } finally {
                 _installingAppUpdate.value = false
             }
         }
+    }
+
+    fun markForcedInstallPermissionOpened() {
+        _forcedInstallPermissionRequired.value = false
     }
 
     fun setDark(mode: String) = viewModelScope.launch { settingsStore.setDarkMode(mode) }
@@ -324,16 +388,19 @@ class SettingsViewModel @Inject constructor(
     fun setComparePrevWeek(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setComparePrevWeek(enabled) }
     fun toggleHiddenItem(typeKey: String) = viewModelScope.launch {
-        val current = ui.value.settings.deviceLayoutSnapshot()
-        settingsStore.setDeviceLayoutSnapshot(
-            current.copy(
-                hiddenItems = if (typeKey in current.hiddenItems) {
-                    current.hiddenItems - typeKey
-                } else {
-                    current.hiddenItems + typeKey
-                },
-            ),
-        )
+        customItemCommands.runLayout {
+            // Read inside the serialized command, not from a potentially stale UI projection.
+            val current = settingsStore.settings.first().deviceLayoutSnapshot()
+            settingsStore.setDeviceLayoutSnapshot(
+                current.copy(
+                    hiddenItems = if (typeKey in current.hiddenItems) {
+                        current.hiddenItems - typeKey
+                    } else {
+                        current.hiddenItems + typeKey
+                    },
+                ),
+            )
+        }
     }
 
     fun addBaby(
@@ -345,42 +412,74 @@ class SettingsViewModel @Inject constructor(
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val result = runCatching {
-                careLog.addBaby(
-                    CreateBabyInput(
-                        nickname = nickname,
-                        sex = sex,
-                        birthdayEpochDay = birthdayEpochDay,
-                        birthWeightGrams = birthWeightGrams,
-                        themeColorArgb = themeColorArgb,
-                    ),
-                )
+            var failure: String? = null
+            val accepted = addBabyAction.run {
+                failure = try {
+                    careLog.addBaby(
+                        CreateBabyInput(
+                            nickname = nickname,
+                            sex = sex,
+                            birthdayEpochDay = birthdayEpochDay,
+                            birthWeightGrams = birthWeightGrams,
+                            themeColorArgb = themeColorArgb,
+                        ),
+                    )
+                    null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    productUiError(error, "添加失败")
+                }
             }
-            onDone(
-                result.exceptionOrNull()?.let { e ->
-                    productUiError(e, "添加失败")
-                },
-            )
+            if (accepted) onDone(failure)
         }
     }
 
     fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {
         viewModelScope.launch {
-            val result = runCatching { careLog.addCustomItem(name, iconSlot) }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "添加失败") })
+            var failure: String? = null
+            val accepted = customItemCommands.runSave(CustomItemSaveKind.Add) {
+                failure = try {
+                    careLog.addCustomItem(name, iconSlot)
+                    null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    productUiError(error, "添加失败")
+                }
+            }
+            onDone(if (accepted) failure else "正在保存，请稍候")
         }
     }
 
     fun updateCustomItem(item: CustomRecordItem, onDone: (String?) -> Unit) {
         viewModelScope.launch {
-            val result = runCatching { careLog.updateCustomItem(item) }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "保存失败") })
+            var failure: String? = null
+            val accepted = customItemCommands.runSave(CustomItemSaveKind.Update) {
+                failure = try {
+                    careLog.updateCustomItem(item)
+                    null
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    productUiError(error, "保存失败")
+                }
+            }
+            onDone(if (accepted) failure else "正在保存，请稍候")
         }
     }
 
     fun moveCustomItem(id: Long, delta: Int) =
         viewModelScope.launch {
-            runCatching { careLog.moveCustomItem(id, delta) }
+            customItemCommands.runLayout {
+                try {
+                    careLog.moveCustomItem(id, delta)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    // Existing row order remains authoritative; the next projection restores it.
+                }
+            }
         }
 
     fun deleteCustomItem(id: Long, onDone: (String?) -> Unit = {}) {
@@ -394,13 +493,14 @@ class SettingsViewModel @Inject constructor(
         careLog.canManageCustomItem(item)
 
     /** Clears records only — babies are never deleted from settings. */
-    fun clearRecords(onDone: (String?) -> Unit) {
-        viewModelScope.launch {
-            val result = runCatching {
-                localDataClearCoordinator.clear(LocalDataClearScope.RecordsOnly)
-            }
-            onDone(result.exceptionOrNull()?.let(::clearRecordsFailureCopy))
-        }
+    fun requestClearRecords() = clearRecordsController.request()
+
+    fun continueClearRecords() = clearRecordsController.continueToFinal()
+
+    fun dismissClearRecords() = clearRecordsController.dismiss()
+
+    fun confirmClearRecords() {
+        viewModelScope.launch { clearRecordsController.confirm() }
     }
 }
 
@@ -418,12 +518,15 @@ fun SettingsRoute(
     val appUpdateOutcome by vm.appUpdateOutcome.collectAsStateWithLifecycle()
     val checkingAppUpdate by vm.checkingAppUpdate.collectAsStateWithLifecycle()
     val installingAppUpdate by vm.installingAppUpdate.collectAsStateWithLifecycle()
+    val appUpdateInstallFeedback by vm.appUpdateInstallFeedback.collectAsStateWithLifecycle()
+    val forcedInstallPermissionRequired by
+        vm.forcedInstallPermissionRequired.collectAsStateWithLifecycle()
+    val addingBaby by vm.addingBaby.collectAsStateWithLifecycle()
+    val customItemCommandState by vm.customItemCommandState.collectAsStateWithLifecycle()
+    val clearRecordsState by vm.clearRecordsState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val clearRecordsCopy = clearRecordsConfirmationCopy(ui.isFamilyJoined)
     var showAdd by remember(initiallyShowAddBaby) { mutableStateOf(initiallyShowAddBaby) }
-    var clearStep by remember { mutableIntStateOf(0) }
-    var clearingRecords by remember { mutableStateOf(false) }
-    var clearRecordsError by remember { mutableStateOf<String?>(null) }
     var newName by remember { mutableStateOf("") }
     var newSex by remember { mutableStateOf<String?>(null) }
     var newBirthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
@@ -433,17 +536,40 @@ fun SettingsRoute(
     var showAddDate by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
     var showRecordSettings by remember { mutableStateOf(false) }
-    var showCustomItems by remember { mutableStateOf(false) }
+    var showCustomItems by rememberSaveable { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
+    var notificationPermissionGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> notificationPermissionGranted = granted }
     var localPreferenceBabyId by remember { mutableStateOf<Long?>(null) }
     var localPreferenceError by remember { mutableStateOf<String?>(null) }
     fun finishAddBabyDialog() {
+        if (addingBaby) return
         showAdd = false
         addError = null
         if (initiallyShowAddBaby) onInitialAddBabyFinished()
     }
-    LaunchedEffect(ui.canManageBabyProfiles, showAdd) {
+    LaunchedEffect(ui.canManageBabyProfiles, showAdd, addingBaby) {
         if (!ui.canManageBabyProfiles && showAdd) finishAddBabyDialog()
+    }
+    LaunchedEffect(showRecordSettings) {
+        if (showRecordSettings) {
+            notificationPermissionGranted =
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+        }
     }
 
     PageScaffoldBackground {
@@ -549,10 +675,7 @@ fun SettingsRoute(
                 subtitle = "不删除宝宝档案",
                 icon = "!",
                 actionLabel = "清除全部记录",
-                onClick = {
-                    clearRecordsError = null
-                    clearStep = 1
-                },
+                onClick = vm::requestClearRecords,
                 danger = true,
             )
 
@@ -632,13 +755,44 @@ fun SettingsRoute(
                     dismissOnClickOutside = false,
                 ),
                 title = { Text(forcedUpdateTitle()) },
-                text = { Text(forcedUpdateDialogBody(outcome.metadata)) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                        Text(forcedUpdateDialogBody(outcome.metadata))
+                        appUpdateInstallFeedback?.let { feedback ->
+                            Text(
+                                feedback,
+                                color = if (installingAppUpdate) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                },
+                            )
+                        }
+                    }
+                },
                 confirmButton = {
                     TextButton(
-                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        onClick = {
+                            if (forcedInstallPermissionRequired) {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:${context.packageName}"),
+                                )
+                                runCatching { context.startActivity(intent) }
+                                vm.markForcedInstallPermissionOpened()
+                            } else {
+                                vm.installOptionalUpdate(outcome.metadata)
+                            }
+                        },
                         enabled = !installingAppUpdate,
                     ) {
-                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
+                        Text(
+                            when {
+                                installingAppUpdate -> "安装中…"
+                                forcedInstallPermissionRequired -> "去授权安装"
+                                else -> "立即更新"
+                            },
+                        )
                     }
                 },
             )
@@ -704,7 +858,26 @@ fun SettingsRoute(
         RecordSettingsDialog(
             settings = ui.settings,
             carePlanRemindersEnabled = ui.settings.carePlanLocalRemindersEnabled,
-            onCarePlanRemindersEnabled = vm::setCarePlanLocalReminders,
+            onCarePlanRemindersEnabled = { enabled ->
+                vm.setCarePlanLocalReminders(enabled)
+                if (
+                    enabled &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    !notificationPermissionGranted
+                ) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
+            notificationPermissionWarning = carePlanNotificationPermissionWarning(
+                remindersEnabled = ui.settings.carePlanLocalRemindersEnabled,
+                sdkInt = Build.VERSION.SDK_INT,
+                permissionGranted = notificationPermissionGranted,
+            ),
+            onOpenNotificationSettings = {
+                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                runCatching { context.startActivity(intent) }
+            },
             systemCalendarEnabled = ui.settings.systemCalendarEnabled &&
                 !ui.settings.systemCalendarId.isNullOrBlank(),
             systemCalendarSummary = ui.systemCalendarTargetSummary,
@@ -954,16 +1127,20 @@ fun SettingsRoute(
     }
 
     if (showAdd) {
+        val addBabyPrimary = settingsAddBabyPrimaryPresentation(addingBaby)
         val dateLabel = LocalDate.ofEpochDay(newBirthday)
             .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
         AlertDialog(
-            onDismissRequest = ::finishAddBabyDialog,
+            onDismissRequest = {
+                if (addBabyPrimary.dismissible) finishAddBabyDialog()
+            },
             modifier = Modifier.imePadding(),
             properties = DialogProperties(decorFitsSystemWindows = false),
             title = { Text("添加宝宝") },
             text = {
                 ScrollableDialogColumn {
                     OutlinedTextField(
+                        enabled = !addingBaby,
                         value = newName,
                         onValueChange = {
                             newName = limitBabyNicknameInput(it)
@@ -987,6 +1164,7 @@ fun SettingsRoute(
                             null to "未设置",
                         ).forEach { (key, label) ->
                             FilterChip(
+                                enabled = !addingBaby,
                                 selected = newSex == key,
                                 onClick = { newSex = key },
                                 label = { Text(label) },
@@ -995,10 +1173,12 @@ fun SettingsRoute(
                     }
                     Text("出生日期", style = LeziTypography.Label)
                     OutlinedButton(
+                        enabled = !addingBaby,
                         onClick = { showAddDate = true },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(dateLabel) }
                     OutlinedTextField(
+                        enabled = !addingBaby,
                         value = newWeight,
                         onValueChange = { newWeight = it.filter { ch -> ch.isDigit() || ch == '.' } },
                         label = { Text("出生体重（kg，可选）") },
@@ -1014,6 +1194,7 @@ fun SettingsRoute(
                     ) {
                         BabyThemePalette.forEachIndexed { index, argb ->
                             FilterChip(
+                                enabled = !addingBaby,
                                 selected = newThemeIndex == index,
                                 onClick = { newThemeIndex = index },
                                 modifier = Modifier.semantics {
@@ -1034,6 +1215,7 @@ fun SettingsRoute(
             },
             confirmButton = {
                 TextButton(
+                    enabled = addBabyPrimary.enabled,
                     onClick = {
                         if (newName.isBlank()) {
                             addError = "请填写昵称"
@@ -1068,10 +1250,13 @@ fun SettingsRoute(
                             }
                         }
                     },
-                ) { Text("添加") }
+                ) { Text(addBabyPrimary.label) }
             },
             dismissButton = {
-                TextButton(onClick = ::finishAddBabyDialog) { Text("取消") }
+                TextButton(
+                    enabled = addBabyPrimary.dismissible,
+                    onClick = ::finishAddBabyDialog,
+                ) { Text("取消") }
             },
         )
     }
@@ -1117,13 +1302,23 @@ fun SettingsRoute(
         CustomItemSettingsDialog(
             items = ui.customItems,
             hiddenItems = ui.settings.hiddenItems,
+            saveBusyLabel = when (customItemCommandState.saveKind) {
+                CustomItemSaveKind.Add -> "添加中…"
+                CustomItemSaveKind.Update -> "保存中…"
+                null -> null
+            },
+            layoutBusy = customItemCommandState.layoutBusy,
             onDismiss = { showCustomItems = false },
             onAdd = vm::addCustomItem,
             onUpdate = vm::updateCustomItem,
             onMove = vm::moveCustomItem,
             onDelete = vm::deleteCustomItem,
             onToggleLocalHidden = { id ->
-                vm.toggleHiddenItem(RecordItemIdentity.customCatalogKey(id))
+                ui.customItems.firstOrNull { it.id == id }?.let { item ->
+                    vm.toggleHiddenItem(
+                        RecordItemIdentity.custom(item.id, item.clientUuid).catalogKey,
+                    )
+                }
             },
             canManage = { item -> item.id in manageableIds },
         )
@@ -1131,63 +1326,52 @@ fun SettingsRoute(
 
     // Layout (常用/所有记录) is edited on the record page; no parallel settings dialogs.
 
-    if (clearStep == 1) {
+    if (clearRecordsState.step == SettingsClearRecordsStep.FirstConfirm) {
         AlertDialog(
-            onDismissRequest = { clearStep = 0 },
+            onDismissRequest = vm::dismissClearRecords,
             title = { Text("确认清除记录？") },
             text = {
                 Text(clearRecordsCopy.firstPrompt)
             },
             confirmButton = {
-                TextButton(onClick = { clearStep = 2 }) {
+                TextButton(onClick = vm::continueClearRecords) {
                     Text("继续", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { clearStep = 0 }) { Text("取消") }
+                TextButton(onClick = vm::dismissClearRecords) { Text("取消") }
             },
         )
     }
-    if (clearStep == 2) {
+    if (clearRecordsState.step == SettingsClearRecordsStep.FinalConfirm) {
         AlertDialog(
-            onDismissRequest = { if (!clearingRecords) clearStep = 0 },
+            onDismissRequest = vm::dismissClearRecords,
             title = { Text("最后确认") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                     Text(
                         clearRecordsCopy.finalPrompt,
                     )
-                    clearRecordsError?.let {
+                    clearRecordsState.error?.let {
                         Text(it, color = MaterialTheme.colorScheme.error)
                     }
                 }
             },
             confirmButton = {
                 TextButton(
-                    enabled = !clearingRecords,
-                    onClick = {
-                        clearingRecords = true
-                        clearRecordsError = null
-                        vm.clearRecords { error ->
-                            clearingRecords = false
-                            if (error == null) {
-                                clearStep = 0
-                            } else {
-                                clearRecordsError = error
-                            }
-                        }
-                    },
+                    enabled = !clearRecordsState.clearing,
+                    onClick = vm::confirmClearRecords,
                 ) {
                     Text(
-                        if (clearingRecords) "清除中…" else "清除记录",
+                        if (clearRecordsState.clearing) "清除中…" else "清除记录",
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
             },
             dismissButton = {
                 TextButton(
-                    enabled = !clearingRecords,
-                    onClick = { clearStep = 0 },
+                    enabled = !clearRecordsState.clearing,
+                    onClick = vm::dismissClearRecords,
                 ) { Text("取消") }
             },
         )

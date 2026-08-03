@@ -11,6 +11,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -53,6 +54,38 @@ fun carePlanReminderEligible(
 fun carePlanReminderPermissionDeniedStatus(): String =
     "护理计划已保存；通知权限未开启，本机提醒已降级"
 
+internal fun carePlanNotificationPermissionWarning(
+    remindersEnabled: Boolean,
+    sdkInt: Int,
+    permissionGranted: Boolean,
+): String? = if (
+    remindersEnabled &&
+    sdkInt >= Build.VERSION_CODES.TIRAMISU &&
+    !permissionGranted
+) {
+    "通知权限未开启，本机不会显示到点通知。"
+} else {
+    null
+}
+
+internal data class CarePlanReminderPlatformIdentity(
+    val pendingIntentData: String,
+    val notificationTag: String,
+)
+
+/** Extras are not part of PendingIntent identity, so retain the full Long id in URI/tag. */
+internal fun carePlanReminderPlatformIdentity(carePlanId: Long) =
+    CarePlanReminderPlatformIdentity(
+        pendingIntentData = "lezi://local-reminder/care-plan/$carePlanId",
+        notificationTag = "care-plan:$carePlanId",
+    )
+
+private const val CARE_PLAN_REQUEST_CODE_BASE = 0x4C5A_0000
+
+/** Identity used before the full-id data URI shipped; retained only for upgrade cleanup. */
+internal fun legacyCarePlanReminderRequestCode(carePlanId: Long): Int =
+    CARE_PLAN_REQUEST_CODE_BASE + (carePlanId % 0x0000_FFFF).toInt()
+
 /**
  * Device-local non-exact AlarmManager reminders for open care plans.
  * Request codes are namespaced away from calendar projection identities.
@@ -68,6 +101,7 @@ class CarePlanReminderAlarm @Inject constructor(
         if (!carePlanReminderEligible(plan, enabled, now)) return false
         CarePlanReminderScheduler.ensureChannel(context)
         val alarm = context.getSystemService(AlarmManager::class.java)
+        cancelLegacyIdentity(alarm, plan.id)
         // Non-exact: never request SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM.
         alarm.setAndAllowWhileIdle(
             AlarmManager.RTC_WAKEUP,
@@ -78,8 +112,20 @@ class CarePlanReminderAlarm @Inject constructor(
     }
 
     fun cancel(carePlanId: Long) {
-        context.getSystemService(AlarmManager::class.java)
-            .cancel(pendingIntent(context, carePlanId, "", ""))
+        val alarm = context.getSystemService(AlarmManager::class.java)
+        alarm.cancel(pendingIntent(context, carePlanId, "", ""))
+        cancelLegacyIdentity(alarm, carePlanId)
+        val identity = carePlanReminderPlatformIdentity(carePlanId)
+        NotificationManagerCompat.from(context).cancel(identity.notificationTag, 0)
+    }
+
+    private fun cancelLegacyIdentity(alarm: AlarmManager, carePlanId: Long) {
+        legacyPendingIntent(context, carePlanId)?.let { pendingIntent ->
+            alarm.cancel(pendingIntent)
+            pendingIntent.cancel()
+        }
+        NotificationManagerCompat.from(context)
+            .cancel(legacyCarePlanReminderRequestCode(carePlanId))
     }
 
     companion object {
@@ -87,11 +133,21 @@ class CarePlanReminderAlarm @Inject constructor(
         const val EXTRA_PLAN_UUID = "care_plan_client_uuid"
         const val EXTRA_TITLE = "care_plan_title"
         const val EXTRA_SCHEDULED_AT = "care_plan_scheduled_at"
-        /** Namespace request codes away from calendar event hashCodes and feed REQ=77. */
-        private const val REQUEST_CODE_BASE = 0x4C5A_0000 // 'LZ' nibble prefix
+        fun requestCode(carePlanId: Long): Int {
+            var mixed = carePlanId
+            mixed = (mixed xor (mixed ushr 33)) * -49064778989728563L
+            mixed = (mixed xor (mixed ushr 33)) * -4265267296055464877L
+            mixed = mixed xor (mixed ushr 33)
+            return CARE_PLAN_REQUEST_CODE_BASE xor mixed.toInt()
+        }
 
-        fun requestCode(carePlanId: Long): Int =
-            REQUEST_CODE_BASE + (carePlanId % 0x0000_FFFF).toInt()
+        private fun legacyPendingIntent(context: Context, carePlanId: Long): PendingIntent? =
+            PendingIntent.getBroadcast(
+                context,
+                legacyCarePlanReminderRequestCode(carePlanId),
+                Intent(context, CarePlanReminderReceiver::class.java),
+                PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE,
+            )
 
         fun pendingIntent(context: Context, plan: CarePlan): PendingIntent =
             pendingIntent(
@@ -112,6 +168,7 @@ class CarePlanReminderAlarm @Inject constructor(
             context,
             requestCode(carePlanId),
             Intent(context, CarePlanReminderReceiver::class.java)
+                .setData(Uri.parse(carePlanReminderPlatformIdentity(carePlanId).pendingIntentData))
                 .putExtra(EXTRA_PLAN_ID, carePlanId)
                 .putExtra(EXTRA_PLAN_UUID, clientUuid)
                 .putExtra(EXTRA_TITLE, title)
@@ -194,6 +251,9 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
             ?.apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                data = Uri.parse(
+                    "${carePlanReminderPlatformIdentity(planId).pendingIntentData}/fulfill",
+                )
                 putExtra(EXTRA_FULFILL_PLAN_ID, planId)
                 putExtra(EXTRA_FULFILL_PLAN_UUID, planUuid)
             }
@@ -224,8 +284,9 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
     @SuppressLint("MissingPermission")
     private fun notifyGranted(context: Context, planId: Long, notification: Notification) {
         runCatching {
+            val identity = carePlanReminderPlatformIdentity(planId)
             NotificationManagerCompat.from(context)
-                .notify(CarePlanReminderAlarm.requestCode(planId), notification)
+                .notify(identity.notificationTag, 0, notification)
         }
     }
 
@@ -233,30 +294,5 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
         private const val TAG = "CarePlanReminder"
         const val EXTRA_FULFILL_PLAN_ID = "lezi_fulfill_care_plan_id"
         const val EXTRA_FULFILL_PLAN_UUID = "lezi_fulfill_care_plan_uuid"
-    }
-}
-
-@AndroidEntryPoint
-class BootReceiver : BroadcastReceiver() {
-    @Inject lateinit var localDataGate: LocalDataGate
-    @Inject lateinit var carePlanScheduler: Lazy<CarePlanReminderScheduler>
-
-    override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
-        val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
-            runBroadcastWork(
-                finish = pending::finish,
-                reportFailure = { failure ->
-                    Log.e(TAG, "Care-plan reminder reschedule after boot failed", failure)
-                },
-            ) {
-                if (localDataGate.ensureReady()) carePlanScheduler.get().rescheduleAll()
-            }
-        }
-    }
-
-    private companion object {
-        const val TAG = "ReminderBoot"
     }
 }
