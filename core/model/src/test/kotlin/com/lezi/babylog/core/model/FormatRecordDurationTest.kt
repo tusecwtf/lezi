@@ -5,11 +5,12 @@ import org.junit.Test
 
 class FormatRecordDurationTest {
     @Test
-    fun formatsCompactChineseDurations() {
-        assertEquals("不足1分", formatRecordDuration(0))
-        assertEquals("不足1分", formatRecordDuration(-3))
-        assertEquals("45分", formatRecordDuration(45))
-        assertEquals("2小时", formatRecordDuration(120))
-        assertEquals("1小时5分", formatRecordDuration(65))
+    fun formatsCompactDurationsWithoutWhitespace() {
+        assertEquals("0m", formatRecordDuration(0))
+        assertEquals("0m", formatRecordDuration(-3))
+        assertEquals("45m", formatRecordDuration(45))
+        assertEquals("2h", formatRecordDuration(120))
+        assertEquals("1h5m", formatRecordDuration(65))
+        assertEquals("2h10m", formatRecordDuration(130))
     }
 }

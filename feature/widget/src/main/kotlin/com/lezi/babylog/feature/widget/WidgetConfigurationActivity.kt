@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +37,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.designsystem.LeziPrimaryButton
 import dagger.Lazy
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -228,12 +228,11 @@ private fun WidgetConfigurationScreen(
                 )
             }
         }
-        Button(
+        LeziPrimaryButton(
+            label = "保存小组件",
             onClick = { onSave(state) },
             enabled = state.canSave,
             modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("保存小组件")
-        }
+        )
     }
 }

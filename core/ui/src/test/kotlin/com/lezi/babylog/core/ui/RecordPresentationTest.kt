@@ -68,8 +68,8 @@ class RecordPresentationTest {
 
     @Test
     fun recordDurationFormatterBoundaryCases() {
-        assertEquals("不足1分", formatRecordDuration(0L))
-        assertEquals("2小时5分", formatRecordDuration(125L))
+        assertEquals("0m", formatRecordDuration(0L))
+        assertEquals("2h5m", formatRecordDuration(125L))
     }
 
     private fun record(

@@ -213,10 +213,11 @@ Owner。详细页面、错误和删除恢复见
 - 底部“完成并记录”只冻结点击时的左右时长与结束时刻，再打开确认面板；面板可调整时长、仅左（`L`）/仅右（`R`）/先左后右（`LR`）/先右后左（`RL`）顺序、可选奶量、备注和圆盘时间，确认后才写入。
 - 从带图护理计划启动计时时，完成写入会在 domain 事务内把计划当前照片按序继承到护理记录（独立媒体行、共享本机路径）；不依赖确认面板上的照片草稿。计划侧照片与顺序保持不变。
 - 计时中可进其它页；状态持久。  
+- **返回策略采用后台继续（B）**：顶部返回与系统返回共用同一决策；已有累计或正在运行时离开详情页，并明确提示“计时仍在后台继续，可从通知返回”，不停止 FGS。只有页面内“丢弃”及其确认会销毁本次会话。Saving、保存后的 timer clear，以及未完成的下次喂养流程期间返回均被门禁并说明原因。
 - 左右圆钮发起计时后，系统真实确认前台服务才显示运行；通知权限开启时还须确认通知已发布，通知权限关闭不伪造失败。系统拒绝时保留累计值和目标侧，明确显示已暂停并提供“重试启动”。
 - 重开 App 不把未确认或已失联的服务伪装成运行中；这类会话显示为可恢复暂停态，由用户显式重试。
 - 设置关闭后：记录页不显示计时入口。
-- **计时完成态恢复（VM/`SavedState` 单主）**：确认面板的 draft、Saving/error 与提交身份（`completionClientUuid` + baby）由 `TimerViewModel.completionUi` 驱动并写入 `SavedState`（与 timer DataStore 解耦，避免 fail-closed 空会话与 Saving 脱节）；配置重建后任意新 composition 只订阅该状态恢复 sheet 与 busy，不依赖旧 composition 的 `remember` 或一次性 `onDone`/`onError` 回调。保存进行中再次确认保持同一 Saving，不启动第二个 coroutine/Record。domain 成功后立刻发布可消费的 next-feed offer（单 blob）或 pendingExit；next-feed 结束后同样发布 pendingExit 由 Host 消费导航。失败回到可重试 sheet（含会话失效）。进程死亡后靠 durable `completionClientUuid` 幂等恢复，不重复 Record、候选、照片或 next-feed offer。Host 确认消费 exit 后重新订阅不得重复导航。
+- **计时完成态恢复（VM/`SavedState` 单主）**：确认面板的 draft、Saving/error 与提交身份（`completionClientUuid` + baby）由 `TimerViewModel.completionUi` 驱动并写入 `SavedState`（与 timer DataStore 解耦，避免 fail-closed 空会话与 Saving 脱节）；配置重建后任意新 composition 只订阅该状态恢复 sheet 与 busy，不依赖旧 composition 的 `remember` 或一次性 `onDone`/`onError` 回调。保存进行中再次确认保持同一 Saving，不启动第二个 coroutine/Record。domain 成功后立刻发布 next-feed offer（单 blob）或 pendingExit，并同时持久化 `timerClearPending`；按稳定 session token 停服和清空 timer DataStore 成功后，offer 才可交互、exit 才可消费。清空失败自动重试且返回/新计时保持锁定。失败回到可重试 sheet（含会话失效）。进程死亡后靠 durable `completionClientUuid` 幂等恢复，不重复 Record、候选、照片或 next-feed offer。Host 确认消费 exit 后重新订阅不得重复导航。
 
 #### 事实后的下次喂养安排（唯一权威流程）
 
@@ -281,7 +282,7 @@ Owner。详细页面、错误和删除恢复见
 | 区块 | 行为 |
 |------|------|
 | 家庭 | 家庭名、我的家庭称呼（Owner 标 ★）、一句浅同步结果 |
-| 成员入口 | 「家庭成员与设备」；Owner 同行显示待确认设备数量角标 |
+| 成员入口 | 「家庭成员与设备」；Owner 同行显示开放设备登录申请数量角标 |
 | 宝宝区 | 保持独立；Owner 管理家庭权威宝宝，member 只读/切换 |
 | 未连接 | 「连接家庭服务器」；进入 §5.1 的 probe 驱动流程，可随时保持离线 |
 | 页面底部 | member：退出这台设备 / 退出家庭；Owner：退出这台设备 / 删除家庭 |
@@ -305,10 +306,13 @@ Owner。详细页面、错误和删除恢复见
 
 #### 家庭成员与设备
 
+- 账户概览的家庭名是只读展示；Owner 只从本页修改共享家庭名，概览卡不提供伪可点击改名入口。
+- 成员入口在读取时显示加载状态；读取失败保留既有名单并提供点按重试，不以永久「查看家人」掩盖状态。
 - 按 membership/家庭称呼分组；一个 membership 可有多台独立凭证设备。
 - 所有成员看见成员称呼；普通成员只展开自己的设备并可改设备称呼、申请改家庭称呼。
-- Owner 查看全部设备和最近使用，处理待确认设备/改名申请，添加/改名/删除成员，生成目标
-  membership 单次 QR，重命名或撤销设备。
+- Owner 查看全部设备和最近使用，处理开放设备登录申请/改名申请，添加/改名/删除成员，生成
+  目标 membership 单次 QR，重命名或撤销设备；已批准未领取的申请显示「等待设备领取」，
+  并只提供撤销批准以释放称呼保留。
 - 家庭称呼规范化后在当前家庭内唯一；新设备同名只能由 Owner 明确绑定，不能自动登录。
 - 设备名默认 Android 设备名，只在同一 membership 中唯一。
 

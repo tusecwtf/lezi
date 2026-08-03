@@ -92,7 +92,11 @@ fun Record.itemIdentity(): RecordItemIdentity? = when (type) {
 }
 
 fun Record.payloadSummary(): String = when (val value = payload.payload) {
-    is MilkPayload -> "${value.amountMl}ml"
+    is MilkPayload -> listOf(
+        "${value.amountMl}ml",
+        value.preparedMl?.let { "冲调量${it}ml" },
+        value.durationMinutes?.let { "耗时${it}分" },
+    ).filterNotNull().joinToString(" · ")
     is NursingPayload -> listOf(
         "左${value.leftMinutes}分",
         "右${value.rightMinutes}分",
@@ -193,16 +197,16 @@ private fun stoolSummary(amount: Int, consistency: Int, color: Int): String =
 
 /**
  * Compact duration copy shared by saved-record summaries, draft previews, and day chips.
- * Single source for "不足1分" / "N分" / "N小时" / "N小时M分".
+ * Single source for "0m" / "Nm" / "Nh" / "NhNm".
  */
 fun formatRecordDuration(minutes: Long): String {
-    if (minutes <= 0) return "不足1分"
+    if (minutes <= 0) return "0m"
     val hours = minutes / 60
     val remaining = minutes % 60
     return when {
-        hours == 0L -> "${remaining}分"
-        remaining == 0L -> "${hours}小时"
-        else -> "${hours}小时${remaining}分"
+        hours == 0L -> "${remaining}m"
+        remaining == 0L -> "${hours}h"
+        else -> "${hours}h${remaining}m"
     }
 }
 

@@ -575,7 +575,7 @@ private fun SleepActionAnimation(
                 center = center + androidx.compose.ui.geometry.Offset(8.dp.toPx(), -5.dp.toPx()),
             )
             drawCircle(
-                Color(0xFFF5C451),
+                sun,
                 radius = 2.5.dp.toPx(),
                 center = center + androidx.compose.ui.geometry.Offset(18.dp.toPx(), -16.dp.toPx()),
             )

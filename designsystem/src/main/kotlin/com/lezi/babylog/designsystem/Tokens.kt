@@ -234,8 +234,10 @@ object LeziTypography {
     fun material(journal: Boolean = false): Typography = Typography(
         displayLarge = if (journal) Display.copy(fontFamily = BodyFamily) else Display,
         headlineMedium = if (journal) Title.copy(fontFamily = BodyFamily) else Title,
+        headlineSmall = if (journal) Title.copy(fontFamily = BodyFamily) else Title,
         titleLarge = TitleSm,
         titleMedium = TitleSm,
+        titleSmall = Label,
         bodyLarge = Body,
         bodyMedium = Body,
         bodySmall = Meta,

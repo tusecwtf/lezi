@@ -176,6 +176,10 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 规则本身不读数据库和系统时间。本地适配仍在原事务中走本地更新、dirty 与 Outbox 语义；
 pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语义，不伪造本地 Outbox。
 
+家庭 wake 是宝宝级事实，而不是只作用于某个 sleep UUID：pull 到任一已闭合睡眠后，所有开始
+时间不晚于该 wake 的开放睡眠都在本机闭合到同一 wake，标记 anomaly 并以更高修订发布；时钟
+偏斜导致开始晚于 wake 的开放行保留为唯一 residual，禁止生成负区间。
+
 已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 atomic commit
 与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次
 作者。Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止
@@ -185,7 +189,7 @@ pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语�
 `systemCalendarProjectionsJson`、可空的 `currentBabyId`、哺乳计时 epoch，以及
 `familyServerRetained`。`nextFeedAt` 仍是冻结的旧 schema 列（生产始终写空）；
 `nextFeedEpoch` 复用为可恢复的 nursing timer epoch JSON（空串表示未捕获计时），
-避免抬高 Room v24。下次喂养已统一为普通 CarePlan，不再有独立提醒状态。
+不为 reminder cleanup 单独增加 schema。下次喂养已统一为普通 CarePlan，不再有独立提醒状态。
 `systemCalendarProjectionsJson` 是稳定护理计划 UUID 到 provider event ID（可空，表示只可按
 UID 查找）的精确映射。清除记录（RecordsOnly）或全部本地数据（AllLocalData）时，领域事务
 按 scope 分别写入 pending 行，持久保存护理计划提醒 ID、系统日历投影身份、当前宝宝设置
@@ -197,9 +201,20 @@ UID 查找）的精确映射。清除记录（RecordsOnly）或全部本地数�
 
 当前清除只删除仍与捕获 UUID + event ID 精确相等的系统日历映射、已捕获 CarePlan
 对应的应用内提醒，以及仍等于捕获 epoch 的 timer JSON；只对捕获的 session token 停止 FGS。
+计时服务在请求启动、尚未 ack RUNNING 时即登记 STARTING token；清空留下 token-scoped stop，
+服务稍后物化仍会先自停。不同 token 的新 STARTING/RUNNING 会话不受旧清空影响。
 清除提交后新写入的设置、映射、护理计划提醒与**新 session 计时器**必须保留（session epoch
 防 ABA）。设备撤销、成员删除、家庭删除与设置页本机清空复用同一 `LocalDataClearCoordinator`，
 不得旁路清 Room 后留下计时器。
+
+本机清空还覆盖尚未建立 `MediaAsset` 行的草稿/导入文件：`RecordsOnly` 在最终归属重读后清扫
+`files/record-media`，`AllLocalData` 额外清扫 `files/baby_avatars`；其它 app-private 目录不在此
+删除域内，仍有 active 本机引用的路径必须保留。领域事实、计划、宝宝、自定义项目与两类媒体
+文件写入共享进程级清空 epoch；清空与写入同时竞争时，未取得 epoch 的一侧在任何 Room/文件
+修改前失败，不排队形成 `syncMutex ↔ path gate` 反向等待。清空后置 sweep、widget 状态和其它
+外部清理任一失败都保留 durable pending marker，重启或重试继续完成后才向界面宣告成功。
+长寿命 feature 会话还须携带进入时的 generation；清空完成后旧 Timer/ViewModel 不得重新写回
+已捕获 timer JSON 或旧宝宝会话，用户必须从当前 generation 重新进入。
 
 atomic commit 在 `record_authors` 回执中返回本次请求涉及的
 canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
@@ -380,15 +395,23 @@ Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和�
 本机暂存无权限 request ID、pending secret 与过期时间；管理员签发的成员登录授权十分钟、
 单次使用，服务端只存哈希。两者都不得进入家庭业务 Outbox、系统备份或日志。
 
+成员申请在 `pending` 与 `approved` 且尚未领取时都属于开放申请。批准不会提前创建新
+membership；`approved` 申请保留家庭称呼并继续对 Owner 可见，直至申请设备领取、Owner
+撤销批准或 24 小时到期。撤销批准与到期都会释放该称呼保留。
+
 ### 3.10 CustomItemDef
 
-最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `client_uuid`,
+每个家庭最多 10 条未删除定义：`id`, `family_id`, `name`, `icon_slot` (0–7), `client_uuid`,
 `created_by_membership_id`, `updated_at`, `deleted_at`，本机 `syncDirty`。
 图标固定模板，不支持自定义图标资源；排序、显隐和常用槽位属于 SettingsLocal，
 不进入共享定义。家庭同步实体类型为 `custom_item`（空媒体 atomic bundle），服务端在首次
 写入时从认证 membership 盖章创建者，普通成员仅可改自己的定义，管理员可改全部，
 tombstone 不可复活。删除目录项不级联删除或改写已存在的 `custom` 记录，也不会重新进入
 可选择目录；其 UUID 继续作为同家庭历史记录/计划的引用完整性证据。
+Room 对 `client_uuid` 建唯一索引；NAS commit 与 Android full-page apply 都先计算包含同包
+tombstone/LWW 后的家庭 live 集，若超过 10 条则整包失败且不暴露第 11 条。设备布局只保存
+`custom:<client_uuid>`，Room v24→v25 升级把可解析的 legacy `custom:<local_id>` 映射成该
+稳定键；无法解析的旧本机 id 留空/移除，绝不在 row id 重用后误绑到另一家庭定义。
 
 ### 3.11 CarePlan（本机、NAS wire/ACL 与客户端家庭 apply 已落地）
 
@@ -450,6 +473,12 @@ CarePlan → 关联 Record（含 0–3 张照片）→ FulfillmentCandidate，�
 只有 Absent 才开放同稳定身份重试或“不安排”；查询错误保持歧义并只能重试查询。不可管理的
 家庭 winner 仍属于 Found，读取真相不得借 creator ACL 隐藏它；`completed`、`skipped` 与
 tombstone marker 不属于开放计划。
+
+不同设备离线完成旧 marker 后可能用分叉 generation seed 建出不同 UUID。家庭 pull/apply
+按 `(updated_at, client_uuid)` 升序保留唯一开放 winner；本 principal 可管理的 loser 写更高
+修订 tombstone 供家庭收敛，不可管理的 foreign loser 只在本机派生为 clean `skipped`，立即
+取消闹钟/系统日历且不伪造 ACL 写入。loser 创建者或 Owner 上线后发布 durable tombstone。
+同 UUID 的并发 create 仍沿用 NAS canonical no-op，不进入本规则。
 
 **Next-feed note 协议 marker（内部版本化，非用户备注格式）：** CarePlan `note` 以
 `[[lezi:next-feed:v1]]` 为前缀时表示家庭共享的下次喂养意图（`startsWith` 识别；可见备注
@@ -716,7 +745,9 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 ## 8. 当前数据层
 
-Android 本地数据契约 v1（0.3.0 / versionCode 6 起）的 Room schema 为 v24，包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
+Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；当前契约
+v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
+相邻升级。数据域包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
 SettingsLocal、ShareInvite、Outbox、CustomItemDef、CarePlan 与 FulfillmentCandidate，
 并使用真实 `SyncPort` 和 Record/计划媒体原子包。后续本地数据契约必须通过相邻迁移链保留
 Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前无破坏阻断。

@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -33,6 +34,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.displayLabel
+import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
 import com.lezi.babylog.core.ui.RecordTypeIcon
@@ -41,6 +43,7 @@ import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTone
+import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
@@ -53,6 +56,7 @@ import com.lezi.babylog.domain.carelog.DayChartCategory
 import com.lezi.babylog.domain.carelog.formatClock
 import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import com.lezi.babylog.sync.localCarePlanPublishDetail
+import com.lezi.babylog.sync.session.ShallowSyncState
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -163,6 +167,23 @@ internal fun LogTimelineList(
                         horizontal = if (journal) 0.dp else LeziSpacing.Page,
                     ),
                 ) {
+                    Text(
+                        text = state.shallowSyncLine.text,
+                        style = LeziTypography.Meta,
+                        color = if (
+                            state.shallowSyncLine.state in setOf(
+                                ShallowSyncState.Error,
+                                ShallowSyncState.ReauthRequired,
+                            )
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier
+                            .testTag("log_shallow_sync_status")
+                            .padding(bottom = LeziSpacing.Sm),
+                    )
                     if (journal) {
                         RecordSummaryStrip(
                             values = listOf(
@@ -178,7 +199,7 @@ internal fun LogTimelineList(
                                 ),
                                 RecordSummaryValue(
                                     RecordType.SLEEP,
-                                    formatMinutes(state.summary.sleepMinutes),
+                                    formatRecordDuration(state.summary.sleepMinutes),
                                     "睡眠",
                                 ),
                                 RecordSummaryValue(
@@ -226,13 +247,13 @@ internal fun LogTimelineList(
                                 } else null,
                             )
                             SummaryMetric(
-                                value = formatMinutes(state.summary.sleepMinutes),
+                                value = formatRecordDuration(state.summary.sleepMinutes),
                                 label = "睡眠",
                                 tone = LeziTone.Yellow,
                                 modifier = Modifier.weight(1f),
                                 icon = { RecordTypeIcon(RecordType.SLEEP) },
                                 selected = selectedSummaryType == RecordType.SLEEP,
-                                selectionLabel = "睡眠 ${formatMinutes(state.summary.sleepMinutes)}，${if (selectedSummaryType == RecordType.SLEEP) "已筛选" else "点按筛选"}",
+                                selectionLabel = "睡眠 ${formatRecordDuration(state.summary.sleepMinutes)}，${if (selectedSummaryType == RecordType.SLEEP) "已筛选" else "点按筛选"}",
                                 onClick = if (RecordType.SLEEP in selectableSummaryTypes) {
                                     { onSelectSummary(RecordType.SLEEP) }
                                 } else null,
@@ -613,13 +634,6 @@ internal fun LogTimelineList(
             }
         }
     }
-}
-
-private fun formatMinutes(min: Long): String {
-    if (min <= 0) return "0m"
-    val h = min / 60
-    val m = min % 60
-    return if (h == 0L) "${m}m" else if (m == 0L) "${h}h" else "${h}h ${m}m"
 }
 
 internal fun recordSummaryLine(record: Record): String = record.presentationSummary()

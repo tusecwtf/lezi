@@ -34,7 +34,7 @@
 | targetSdk | 35 |
 | versionName | `0.3.5` |
 | versionCode | `12`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
-| 本地数据契约 | `v1`（最低可迁移 `v1`；永久基线为 0.3.0 / versionCode 6 / Room v24） |
+| 本地数据契约 | 当前 `v2` / Room v25（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
 ---
@@ -178,7 +178,9 @@ LocalWrite 事件只合并 pending，不突破退避。回前台、网络恢复�
        有序照片+borrowed|composer_owned）写入 TimerState 并随 DataStore 恢复；Timer accept 后
        Composer 才 close 且不删除已转移 owned 文件；完成时 merge seed 路径与 Ticket 08 直播
        plan media（去重 0–3）经 photoLocalPaths 写入 Record；丢弃只回收 composer_owned
-     → 成功：先 durable 发布 next-feed offer 或 pendingExit，再清空 TimerState / 停服；
+     → 成功：先 durable 发布 next-feed offer 或 pendingExit + `timerClearPending`，再按 session
+       token 清空 TimerState / 停服；DataStore 失败时保持 pending、禁止退出并自动重试，成功后
+       才开放 next-feed 或消费 pendingExit，绝不恢复“事实已保存但计时仍在”的 ghost session；
        失败：Saving→可重试 sheet + error（结果不经旧 composition 回调唯一交付）
      → 完成 / 暂停 / 清空：先持久化非运行快照再停服；持久化失败同样停服；
        仅当存在真实可重试侧别（lastSide / 曾运行侧）时内存 `FAILED`；
@@ -188,7 +190,8 @@ LocalWrite 事件只合并 pending，不突破退避。回前台、网络恢复�
      → 完成态 SavedState：submit 身份（completionClientUuid + baby）与 draft/Saving 同写；
        Saving+draft 且有 durable uuid → 幂等 resume completeNursing（timer DataStore 空亦可）；
        Saving 但身份全失 → 可重试 sheet（「会话已失效」），不得伪造成功 pendingExit；
-       已发布 post-save 但 TimerState 未清 → 只补 clear；已有 next-feed/exit → 只恢复 UI；
+       已发布 post-save 但 TimerState 未清/clear ack 丢失 → 只补幂等 clear；已有
+       next-feed/exit → 恢复 UI，但 clear 成功前仍门禁退出与新计时；
        next-feed 结束后再发 pendingExit，与无 offer 成功路径同可消费退出
 CancellationException / Error → 先停服再原样重抛，不得吞成产品错误
 ```
@@ -208,6 +211,7 @@ CancellationException / Error → 先停服再原样重抛，不得吞成产品�
 | saveError | 可重试失败 | 恢复 error + draft（含会话失效 fail-closed） |
 | next-feed offer | 事实已落，待安排 | 恢复单 blob（baby+suggestedAt）；不重复写事实 |
 | pendingExit | 无 offer 或 offer 已结束，待 Host 退出 | 可确认消费一次；再订阅不重复导航 |
+| timerClearPending | 事实已落，计时快照待清 | token-scoped 停服 + DataStore clear 自动重试；清完才展示 offer/退出 |
 
 绑定护理计划的计时完成以事务内 plan media 为准（不是打开计时/Composer 时的 UI 快照）；
 计划照片所有权与顺序不变，Record 行独立 `client_uuid`、可共享 `local_uri`；幂等
