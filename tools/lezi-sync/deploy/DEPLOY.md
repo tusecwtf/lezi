@@ -1,6 +1,18 @@
-# lezi-sync NAS CD (SSH + zdocker)
+# lezi-sync backend deployment runbook (NAS SSH + zdocker)
 
-## Decisions
+## Scope
+
+This runbook defines the production backend delivery path from a developer-machine source checkout
+to a validated NAS container. The release identifier is derived from `Cargo.toml` and is used only to
+bind the image, package, APK metadata, health response, and remote directory to one release. This
+document intentionally does not pin a particular release identifier or describe release-specific
+product changes.
+
+Ordinary deployment never compiles on the NAS, never migrates the database, never rotates the
+bootstrap secret or TLS identity, and never exposes the service to the public internet. The only
+operator entrypoint that may replace the production container is `push-and-deploy.sh`.
+
+## Deployment invariants
 
 | Item | Choice |
 |---|---|
@@ -13,23 +25,34 @@
 | TLS identity | Ordinary CD never rotates it; generate once only on a verified fresh data root, then validate and reuse the exact pair on every replace |
 | System `docker compose` | Not required / not installed |
 
-## 0.3.5 deployment note
+## Production script inventory
 
-`0.3.5` narrows atomic-media locking so request-body validation and upload streaming no longer hold
-the per-family mutex; a stalled upload therefore cannot indefinitely block pull or commit for the
-same family. The sync wire remains compatible with supported Android clients (`min_supported_version_code = 6`).
-This release also publishes the isolated LAN invite-install listener on HTTP 8767; HTTPS sync stays
-on 8765 and container-only readiness stays on 8766. Ordinary CD must reuse the existing TLS identity,
-use the live bootstrap secret as authority, and require its persistent NAS copy to match exactly.
+| Component | Runs on | Invocation | Responsibility |
+|---|---|---|---|
+| `../build-image.sh` | Developer machine | Operator | Build and verify the release image as `linux/amd64`; the release identifier comes from `Cargo.toml`. |
+| `package-nas.sh` | Developer machine | Operator or push wrapper | Verify image/APK identity, render Compose, create one closed-inventory package, and write manifest/checksums. It does not contact the NAS. |
+| `push-and-deploy.sh` | Developer machine | **Production operator entrypoint** | Re-attest the package, acquire the NAS lease, upload to fresh staging, create the encrypted credential backup, invoke remote replacement, and promote the package. |
+| `backup-nas-credentials.sh` / `restore-nas-credentials.sh` | Developer machine | Push wrapper or authorized recovery | Stream live credentials into off-repository `age` ciphertext, or decrypt and validate them into a new local recovery staging directory. Restore never modifies the NAS. |
+| `remote-deploy.sh` | NAS release staging | Push wrapper only | Validate secret/TLS state, load the exact image, replace the container, and prove image, health, readiness, and TLS continuity. Direct production execution is forbidden. |
+| `validate-nas-package.sh` | Developer machine and NAS | Internal/read-only | Enforce the exact package inventory, manifest contract, Compose rendering, and SHA-256 closure. |
+| `credential-deploy-lock.sh` | NAS | Internal | Own and validate the data-bind-derived lease shared by credential export and deployment. |
+| `export-nas-credentials.sh` | NAS | Internal | Read the live secret and TLS pair from the authoritative container/data view and emit one validated pipe-only bundle. |
+| `promote-nas-package.sh` | NAS | Internal | Atomically replace the stable release directory only after staging and the prior package are validated. |
+| `init-tls.sh`, `tls-certificate-sha256.sh`, `tls-spki.sh` | NAS or isolated developer fixture | Internal/read-only except authorized bootstrap | Distinguish absent/present/unsafe TLS state, validate the pair, and measure exact certificate/SPKI identity. |
+| `copy-out-nas-data.sh`, `copy-back-nas-data.sh`, `live-cutover-probe.sh` | Maintenance workflow | Authorized maintenance window only | Prepare or execute the separately governed offline-migration cutover; they are never part of ordinary CD. |
+| `backup-pre-tls-cutover-state.sh`, `restore-pre-tls-cutover-state.sh`, `validate-pre-tls-cutover-state.py` | Developer machine | Authorized maintenance preparation | Capture and validate the pre-cutover container start contract for rollback staging; they do not make the incomplete live rollback executable. |
+| `validate-credential-bundle.sh` | Developer machine | Internal/read-only | Validate the pipe-only credential bundle before encryption or recovery staging. |
+| `docker-compose.nas.yml.tpl`, `.env.example`, `app-update.json` | Package inputs | Never executed directly | Define the rendered runtime shape, a deliberately empty local secret example, and the APK update metadata contract. |
 
-## One-shot (from repo root)
+## Standard operator workflow
 
 ```bash
 # One-time prerequisite: install age and create the public recipients file
 # described in "Credential backup and restore" below. Keep the identity offline.
 
-# Build/rebuild the locally inspectable linux/amd64 image first
-cd tools/lezi-sync && LEZI_SYNC_VERSION=0.3.5 ./build-image.sh
+# Build/rebuild the locally inspectable linux/amd64 image first.
+# build-image.sh and all downstream scripts derive the release identifier from Cargo.toml.
+cd tools/lezi-sync && ./build-image.sh
 
 # Package + scp + remote deploy
 ./deploy/push-and-deploy.sh
@@ -58,7 +81,7 @@ Environment overrides:
 | `LEZI_AGE_RECIPIENTS_FILE` | Public age recipients file; default `~/.config/lezi/age-recipients.txt`. Required by `push-and-deploy.sh`; it is not a decrypt key. |
 | `LEZI_CREDENTIAL_BACKUP_DIR` | Encrypted backup directory; default `~/.config/lezi/backups/`, must be absolute, mode `700`, and outside the repository. |
 | `LEZI_AGE_IDENTITY_FILE` | Absolute offline/private age identity used only by restore staging; must be a non-symlink mode-`600` file outside this repository. |
-| `LEZI_EXPECTED_CERTIFICATE_SHA256` / `LEZI_EXPECTED_SPKI_SHA256` | Independent production identity pins required by restore. Use the separately verified values recorded under “TLS identity”, never values copied only from the candidate backup. |
+| `LEZI_EXPECTED_CERTIFICATE_SHA256` / `LEZI_EXPECTED_SPKI_SHA256` | Independent production identity pins required by restore. Use values from an independently authenticated deployment/backup record, never values copied only from the candidate backup. |
 | `LEZI_RELEASE_APK` | signed release APK path (default repo `app/build/outputs/apk/release/app-release.apk`) |
 | `LEZI_APP_UPDATE_JSON` | app-update metadata JSON (default `deploy/app-update.json`) |
 | `LEZI_APK_SIGNER` | Optional absolute/local `apksigner` executable override. Otherwise the Android SDK build-tools path is discovered. |
@@ -88,7 +111,7 @@ stable package that is mode `775`, contains `.env`, or lacks the current closed 
 silently overwritten: first prove no deploy is active, restrict it to mode `700`, and move that exact
 directory to a separately named legacy archive. Do not copy its `.env` into the new package.
 
-## Stages
+## Production deployment pipeline
 
 1. **package-nas.sh** — require a locally inspectable image and measure `.Os=linux` + `.Architecture=amd64` → verify the APK signature against tracked public pin `config/release-apk-signer-sha256.txt` → record Docker's complete `config.digest` (the identity produced by `docker load` and reported by the running container, not a local OCI manifest-list digest) → `docker save` the exact tar → render `docker-compose.yml` → add fail-closed app-update artifacts/current helpers → write `MANIFEST.json` + exact-inventory `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`.
 2. **push-and-deploy.sh** — fresh-package by default (reuse only with explicit `LEZI_SKIP_PACKAGE=1`) → repeat local helper/inventory/checksum and APK-signer attestation → acquire the stable data-bind-derived NAS lease → create a new mode-`700` random-suffixed staging directory → scp and validate there before execution → stream/validate/encrypt the live credential snapshot → replace while retaining the lease. On success promote staging to the stable `NAS_REMOTE_DIR`; a prior exact package is removed only after the promotion validates. Failed staging is left for deliberate inspection/cleanup.
@@ -143,16 +166,13 @@ application/version, local-data-contract metadata, metadata JSON, and file hash�
 
 Metadata contract (`app-update.json`, snake_case):
 
-```json
-{
-  "package_name": "com.lezi.babylog",
-  "version_code": 12,
-  "version_name": "0.3.5",
-  "min_supported_version_code": 6,
-  "sha256": "<64 lowercase hex of the APK file>",
-  "release_notes": "可选"
-}
-```
+| Field | Contract |
+|---|---|
+| `package_name` | Release application ID; must be `com.lezi.babylog`. |
+| `version_code` / `version_name` | Must exactly match the signed APK manifest. The deployment process does not carry a hard-coded release value. |
+| `min_supported_version_code` | Compatibility floor; raise only for a deliberate breaking client contract. |
+| `sha256` | Exactly the lowercase SHA-256 of the packaged APK bytes. |
+| `release_notes` | Optional user-facing release description. |
 
 - `package_name` must be `com.lezi.babylog` (release applicationId only; **not** debug suffix).
 - `version_code` must be a positive 32-bit integer (`1..=2147483647`); `min_supported_version_code`
@@ -179,24 +199,17 @@ same SHA-256 as metadata. Never use 8767 as a health probe, and never publish it
 
 Optional path overrides on the server process: `LEZI_APP_UPDATE_METADATA_PATH`, `LEZI_APP_UPDATE_APK_PATH`.
 
-Quick local checks (from `tools/lezi-sync`):
+Production package preflight (from `tools/lezi-sync`):
 
 ```bash
-# Lightweight CI smoke (no docker save): missing APK / wrong sha fail; matching inputs pass
-./deploy/test-package-nas-app-update.sh
-
-# App-update inputs only (set LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 on package-nas.sh)
+# Verify the signed APK and metadata contract without exporting the image tar.
 LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
-  LEZI_RELEASE_APK=/nonexistent/app-release.apk \
+  LEZI_RELEASE_APK=../../app/build/outputs/apk/release/app-release.apk \
   LEZI_APP_UPDATE_JSON=deploy/app-update.json \
   ./deploy/package-nas.sh
-# expect non-zero exit
 
-# fail-closed: missing APK (full package path still aborts early)
-LEZI_RELEASE_APK=/nonexistent/app-release.apk ./deploy/package-nas.sh
-# expect non-zero exit
-
-# success path (the exact local Docker image must be inspectable; tar-only reuse is refused)
+# Create the complete production package. The exact local Docker image must be inspectable;
+# tar-only reuse is refused.
 LEZI_RELEASE_APK=../../app/build/outputs/apk/release/app-release.apk \
   LEZI_APP_UPDATE_JSON=deploy/app-update.json \
   ./deploy/package-nas.sh
@@ -343,16 +356,10 @@ the operator's approved secure cleanup procedure.
 
 ## TLS identity
 
-Last recorded public production identity after the accepted `0.3.5` CD (update only from a verified
-post-CD read; this table is evidence/pinning, not a substitute for the encrypted key-pair backup):
-
-| Field | Recorded value |
-|---|---|
-| TLS SAN host | `192.168.50.4` |
-| Exact `server.crt` SHA-256 | `75023c71d8ca918a42fe4f058aab8faf85db3f02b9a69bfb6522951ce362da9e` |
-| SPKI SHA-256 | `bd07d8645ed3b7adead162eca454373aee4007b0a35aa7c62caf7d8ac0cb3215` |
-| Recorded release | `lezi-sync:0.3.5` |
-| Recorded date | `2026-08-03` |
+This engineering runbook does not embed mutable production fingerprints. Every accepted deployment
+record must independently capture the TLS SAN, exact `server.crt` SHA-256, SPKI SHA-256, image id,
+package identity, and observation time. Credential restore requires those independently authenticated
+values; fingerprints carried only inside the candidate ciphertext are not a trust anchor.
 
 - Ordinary CD, rollback, container replacement, and restart are **not certificate-rotation paths**.
   They must preserve `/data/tls/server.crt` byte-for-byte and retain the same matching mode-`600`
@@ -374,7 +381,7 @@ post-CD read; this table is evidence/pinning, not a substitute for the encrypted
   exporter streams it directly from the live container and never writes a plaintext local backup.
 - Deployment prints only the public SPKI SHA-256 fingerprint so it can be compared with the Android TOFU screen.
 
-### Certificate tests
+### Certificate validation boundary
 
 - Do **not** run certificate creation, replacement, expiry, mismatch, TOFU-change, or reconnect-
   certificate tests against a real family NAS, its live `lezi-sync` container, or its data bind.

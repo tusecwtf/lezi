@@ -57,12 +57,12 @@ SSH 自动部署（打包 + scp + 极空间 **zdocker 自带 compose**；普通 
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)：
 
 ```bash
-# 可选：先构建镜像
-LEZI_SYNC_VERSION=0.3.5 ./build-image.sh
+# 可选：先构建镜像；镜像标识默认读取 Cargo.toml
+./build-image.sh
 ./deploy/push-and-deploy.sh
 ```
 
-默认镜像为 `lezi-sync:0.3.5`。**默认安全基线：**
+默认镜像为 `lezi-sync:<Cargo.toml package version>`。**默认安全基线：**
 
 | 项 | 默认 | 说明 |
 |---|---|---|
@@ -80,6 +80,7 @@ LEZI_SYNC_VERSION=0.3.5 ./build-image.sh
 
 ```bash
 cd tools/lezi-sync
+release_id="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
 ./build-image.sh
 
 # 数据目录需可被 uid 10001 写；示例：
@@ -92,7 +93,7 @@ export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
 
 # 仅首次、已确认全新空数据根：显式授权生成；以后不设置该变量，只验证并复用。
 LEZI_ALLOW_TLS_BOOTSTRAP=1 \
-  ./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.5 nas.example.lan
+  ./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" "lezi-sync:${release_id}" nas.example.lan
 
 docker compose up -d
 docker compose ps
@@ -147,9 +148,10 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 NAS 生产路径禁止本机编译；只在开发机生成并导出已验证的 `linux/amd64` 镜像：
 
 ```bash
-docker save lezi-sync:0.3.5 | gzip > lezi-sync-0.3.5.tar.gz
+release_id="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+docker save "lezi-sync:${release_id}" | gzip > "lezi-sync-${release_id}.tar.gz"
 # 把 tar.gz 复制到 NAS 后：
-gzip -dc lezi-sync-0.3.5.tar.gz | docker load
+gzip -dc "lezi-sync-${release_id}.tar.gz" | docker load
 ```
 
 构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
@@ -161,10 +163,11 @@ gzip -dc lezi-sync-0.3.5.tar.gz | docker load
 `linux/amd64` 镜像，并经 `package-nas.sh` 实测 `.Os/.Architecture`：
 
 ```bash
+experiment_id="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
 docker buildx build \
   --platform linux/arm64 \
-  --build-arg LEZI_SYNC_VERSION=0.3.5 \
-  -t your-registry/lezi-sync:0.3.5 \
+  --build-arg "LEZI_SYNC_VERSION=${experiment_id}" \
+  -t "your-registry/lezi-sync:${experiment_id}" \
   --push .
 ```
 
@@ -181,7 +184,7 @@ docker buildx build \
 | `LEZI_INTERNAL_PORT` | `8766` | 仅监听 `127.0.0.1` 的容器内 HTTP readiness 端口，不发布到宿主 |
 | `LEZI_TLS_CERTFILE` | 必填 | PEM certificate；NAS 包固定为 `/data/tls/server.crt` |
 | `LEZI_TLS_KEYFILE` | 必填 | PEM private key；NAS 包固定为 `/data/tls/server.key` |
-| `LEZI_SYNC_VERSION` | `0.3.5` | `/health` 返回的版本 |
+| `LEZI_SYNC_VERSION` | `Cargo.toml` package version | `/health` 返回的发布标识；生产构建默认自动推导 |
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 未设置 | 可选 `http://<同一 IPv4 或解析到 IPv4 的 DNS 主机>:8767`；设置后成员登录 QR 包装为邀请安装页 URL，本版不支持 IPv6 分发 |
 | `LEZI_LAN_APK_DOWNLOAD_PUBLISH` | `127.0.0.1:8767` | local compose 宿主侧发布地址；NAS 包固定 LAN `0.0.0.0:8767` |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
