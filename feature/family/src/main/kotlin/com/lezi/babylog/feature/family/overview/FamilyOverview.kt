@@ -23,14 +23,12 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeLarge
 import com.lezi.babylog.core.ui.BabyAvatarSizeMedium
-import com.lezi.babylog.core.ui.babyMetaLine
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.LeziTextButton
-import com.lezi.babylog.domain.carelog.babyAgeLabel
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.feature.family.components.FamilyDestructiveButton
 import com.lezi.babylog.feature.family.components.canManageFamilyBabies
@@ -54,16 +52,11 @@ internal fun FamilyOverview(
     val nickCounts = ui.babies.groupingBy { it.nickname.trim() }.eachCount()
     Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
         val currentMeta = current?.let { baby ->
-            val sex = when (baby.sex?.name) {
-                "MALE" -> "男宝"
-                "FEMALE" -> "女宝"
-                else -> ""
-            }
-            listOfNotNull(
-                babyMetaLine(baby.birthdayEpochDay, baby.birthWeightGrams),
-                sex.takeIf { it.isNotBlank() },
-                babyAgeLabel(baby.birthdayEpochDay).takeIf { it.isNotBlank() },
-            ).joinToString(" · ")
+            familyCurrentBabyMeta(
+                birthdayEpochDay = baby.birthdayEpochDay,
+                birthWeightGrams = baby.birthWeightGrams,
+                sex = baby.sex,
+            )
         }.orEmpty()
         BabyProfileCard(
             nickname = current?.nickname.orEmpty(),
@@ -122,9 +115,11 @@ internal fun FamilyOverview(
                 fallbackStyle = LeziTypography.TitleSm,
                 title = b.nickname + if (selected) "（当前）" else "",
                 titleStyle = LeziTypography.BodyStrong,
-                meta = "${babyAgeLabel(b.birthdayEpochDay)} · " +
-                    babyMetaLine(b.birthdayEpochDay, b.birthWeightGrams) +
-                    if (dup) " · 昵称重复" else "",
+                meta = familyListBabyMeta(
+                    birthdayEpochDay = b.birthdayEpochDay,
+                    birthWeightGrams = b.birthWeightGrams,
+                    nicknameDuplicate = dup,
+                ),
                 metaColor = if (dup) MaterialTheme.colorScheme.error else null,
             ) {
                 if (!selected) {

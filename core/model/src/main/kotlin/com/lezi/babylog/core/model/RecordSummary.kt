@@ -95,9 +95,13 @@ fun Record.payloadSummary(): String = when (val value = payload.payload) {
     is MilkPayload -> listOf(
         "${value.amountMl}ml",
         value.preparedMl?.let { "冲调量${it}ml" },
-        value.durationMinutes?.let { "耗时${it}分" },
+        // Total elapsed minutes share formatRecordDuration with sleep/day totals.
+        value.durationMinutes?.let { "耗时 ${formatRecordDuration(it.toLong())}" },
     ).filterNotNull().joinToString(" · ")
     is NursingPayload -> listOf(
+        // Per-side minutes keep Chinese 「分」 so side-split copy stays searchable
+        // ("左10分") and readable next to L/R labels; day/total minutes use
+        // formatRecordDuration instead (see logDaySummaryDuration).
         "左${value.leftMinutes}分",
         "右${value.rightMinutes}分",
         when (value.order) {

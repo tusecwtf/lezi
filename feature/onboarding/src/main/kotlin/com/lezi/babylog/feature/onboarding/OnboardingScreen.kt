@@ -45,6 +45,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.core.ui.formatBabyBirthday
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziDatePickerDialog
 import com.lezi.babylog.designsystem.LeziMotion
@@ -82,7 +83,6 @@ import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
 
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     save = {
@@ -258,9 +258,7 @@ fun OnboardingRoute(
             }
         }
     }
-    val dateLabel = remember(birthday) {
-        LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
-    }
+    val dateLabel = remember(birthday) { formatBabyBirthday(birthday) }
     val stepEnterMs = leziMotionMillis(LeziMotion.Emphasized)
     val stepExitMs = leziMotionMillis(LeziMotion.Fast)
 

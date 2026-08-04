@@ -18,6 +18,12 @@ fun babyMetaLine(
     birthWeightGrams?.let { "出生体重 ${formatBirthWeightKg(it)}" },
 ).joinToString(" · ")
 
+/** Settings baby row subtitle: shared meta + local-only chrome note. */
+fun settingsBabyLocalSubtitle(
+    birthdayEpochDay: Long,
+    birthWeightGrams: Int?,
+): String = babyMetaLine(birthdayEpochDay, birthWeightGrams) + " · 本机外观与顺序"
+
 fun formatBabyBirthday(birthdayEpochDay: Long): String =
     LocalDate.ofEpochDay(birthdayEpochDay)
         .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))

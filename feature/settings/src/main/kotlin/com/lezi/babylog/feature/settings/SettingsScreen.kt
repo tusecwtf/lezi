@@ -82,7 +82,7 @@ import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeMedium
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
-import com.lezi.babylog.core.ui.babyMetaLine
+import com.lezi.babylog.core.ui.settingsBabyLocalSubtitle
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import com.lezi.babylog.designsystem.LeziFilterChip
 import com.lezi.babylog.designsystem.LeziMenuIcon
@@ -1146,7 +1146,7 @@ internal fun SettingsBabyRow(
 ) {
     SettingsMenuRow(
         title = baby.nickname + if (selected) "（当前）" else "",
-        subtitle = babyMetaLine(baby.birthdayEpochDay, baby.birthWeightGrams) + " · 本机外观与顺序",
+        subtitle = settingsBabyLocalSubtitle(baby.birthdayEpochDay, baby.birthWeightGrams),
         modifier = modifier,
         actionLabel = "打开${baby.nickname}的本机设置",
         onClick = onOpenLocalSettings,

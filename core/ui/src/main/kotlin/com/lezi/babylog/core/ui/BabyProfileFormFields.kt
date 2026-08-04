@@ -25,7 +25,6 @@ import com.lezi.babylog.designsystem.LeziTextField
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
 
 /**
  * Shared 昵称/性别/出生日期/出生体重 field group for baby-profile dialogs
@@ -46,8 +45,7 @@ fun BabyProfileFormFields(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val dateLabel = LocalDate.ofEpochDay(birthdayEpochDay)
-        .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+    val dateLabel = formatBabyBirthday(birthdayEpochDay)
     Column(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),

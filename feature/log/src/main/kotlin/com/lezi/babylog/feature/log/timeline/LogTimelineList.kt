@@ -36,7 +36,6 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.displayLabel
-import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
 import com.lezi.babylog.core.ui.RecordTypeIcon
@@ -209,12 +208,12 @@ internal fun LogTimelineList(
                                 ),
                                 RecordSummaryValue(
                                     RecordType.NURSING,
-                                    "${state.summary.nursingMinutes}m",
+                                    logDaySummaryDuration(state.summary.nursingMinutes),
                                     "母乳",
                                 ),
                                 RecordSummaryValue(
                                     RecordType.SLEEP,
-                                    formatRecordDuration(state.summary.sleepMinutes),
+                                    logDaySummaryDuration(state.summary.sleepMinutes),
                                     "睡眠",
                                 ),
                                 RecordSummaryValue(
@@ -245,16 +244,17 @@ internal fun LogTimelineList(
                                 type = RecordType.NURSING,
                                 tone = LeziTone.Blue,
                                 label = "母乳",
-                                value = "${state.summary.nursingMinutes}min",
-                                spokenValue = "母乳 ${state.summary.nursingMinutes}分钟",
+                                value = logDaySummaryDuration(state.summary.nursingMinutes),
+                                spokenValue =
+                                    logDaySummaryNursingSpoken(state.summary.nursingMinutes),
                             ),
                             SummaryMetricSpec(
                                 type = RecordType.SLEEP,
                                 tone = LeziTone.Yellow,
                                 label = "睡眠",
-                                value = formatRecordDuration(state.summary.sleepMinutes),
+                                value = logDaySummaryDuration(state.summary.sleepMinutes),
                                 spokenValue =
-                                    "睡眠 ${formatRecordDuration(state.summary.sleepMinutes)}",
+                                    logDaySummarySleepSpoken(state.summary.sleepMinutes),
                             ),
                             SummaryMetricSpec(
                                 type = RecordType.PEE,

@@ -7,13 +7,23 @@ class RecordSummaryTest {
     @Test
     fun milkSummaryIncludesOptionalPreparedAmountAndDuration() {
         assertEquals(
-            "120ml · 冲调量150ml · 耗时8分",
+            "120ml · 冲调量150ml · 耗时 8m",
             milkRecord(
                 MilkPayload(
                     type = RecordType.FORMULA,
                     amountMl = 120,
                     preparedMl = 150,
                     durationMinutes = 8,
+                ),
+            ).payloadSummary(),
+        )
+        assertEquals(
+            "120ml · 耗时 1h5m",
+            milkRecord(
+                MilkPayload(
+                    type = RecordType.FORMULA,
+                    amountMl = 120,
+                    durationMinutes = 65,
                 ),
             ).payloadSummary(),
         )

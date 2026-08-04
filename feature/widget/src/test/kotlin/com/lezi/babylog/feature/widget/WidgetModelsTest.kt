@@ -30,7 +30,7 @@ class WidgetModelsTest {
         val model = configuredWidgetDisplayModel(configuration, snapshot)
 
         assertEquals("年年", model.title)
-        assertEquals("喂养 180ml · 睡眠 2时15分", model.primarySummary)
+        assertEquals("喂养 180ml · 睡眠 2h15m", model.primarySummary)
         assertEquals("排泄 尿4/便2 · 最近 配方奶 · 12:30", model.secondarySummary)
         assertEquals(listOf(RecordType.PEE, RecordType.FORMULA), model.quickActions.map { it.type })
         assertFalse(model.isStale)
@@ -54,7 +54,7 @@ class WidgetModelsTest {
         val model = configuredWidgetDisplayModel(configuration, wrongBaby)
 
         assertEquals("乐记", model.title)
-        assertEquals("喂养 0ml · 睡眠 0分", model.primarySummary)
+        assertEquals("喂养 0ml · 睡眠 0m", model.primarySummary)
         assertTrue(model.isStale)
     }
 

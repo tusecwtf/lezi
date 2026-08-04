@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.widget
 
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
+import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.model.recordTypeLabel
 
 const val MAX_WIDGET_QUICK_TYPES: Int = 4
@@ -93,10 +94,7 @@ internal fun configuredWidgetDisplayModel(
         it.widgetId == configuration.widgetId && it.babyId == configuration.babyId
     }
     val sleep = matchingSnapshot?.sleepMinutes?.coerceAtLeast(0) ?: 0L
-    val sleepText = when {
-        sleep >= 60 -> "${sleep / 60}时${sleep % 60}分"
-        else -> "${sleep}分"
-    }
+    val sleepText = formatRecordDuration(sleep)
     val feedMl = matchingSnapshot?.feedMl?.coerceAtLeast(0) ?: 0
     val pee = matchingSnapshot?.peeCount?.coerceAtLeast(0) ?: 0
     val poop = matchingSnapshot?.poopCount?.coerceAtLeast(0) ?: 0

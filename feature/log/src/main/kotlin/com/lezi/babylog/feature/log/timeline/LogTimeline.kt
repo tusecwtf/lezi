@@ -4,6 +4,7 @@ import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepPayload
+import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.TimelineLaneSegment
@@ -87,7 +88,7 @@ internal fun buildTimelineLanes(
                         append("–")
                         append(if (open) "进行中" else clock(rawEnd))
                         append(" · ")
-                        append(formatDurationMinutes(durationMin))
+                        append(formatRecordDuration(durationMin))
                         if (open) append("（未结束）")
                     }
                     sleep += TimelineLaneSegment(
@@ -313,5 +314,3 @@ internal fun dayChartLegendColorRole(
     DayChartCategory.POOP -> LeziRecordColorRole.Poop
 }
 
-private fun formatDurationMinutes(minutes: Long): String =
-    com.lezi.babylog.core.model.formatRecordDuration(minutes)

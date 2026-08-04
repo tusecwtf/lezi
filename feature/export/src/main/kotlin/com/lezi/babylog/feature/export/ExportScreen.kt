@@ -52,11 +52,11 @@ import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.export.ExportPort
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.lezi.babylog.core.ui.formatBabyBirthday
 import java.time.LocalDate
 import java.time.Instant
 import java.time.YearMonth
 import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -349,5 +349,4 @@ fun ExportRoute(
 
 private enum class ExportDateTarget { From, To }
 
-private fun LocalDate.exportLabel(): String =
-    format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+private fun LocalDate.exportLabel(): String = formatBabyBirthday(toEpochDay())
