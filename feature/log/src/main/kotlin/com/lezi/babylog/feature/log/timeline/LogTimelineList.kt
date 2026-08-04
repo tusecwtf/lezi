@@ -162,7 +162,10 @@ internal fun LogTimelineList(
     }
 
     val density = LeziThemeExt.density
-    val pageHorizontal = if (journal) 0.dp else density.panelContent
+    // Journal: 16dp page gutter so timeline/panels align as a content column
+    // (dock stays full-bleed via density.dockOuterHorizontal = 0). Warm keeps
+    // panelContent inset for soft card breathing room.
+    val pageHorizontal = if (journal) LeziSpacing.Page else density.panelContent
 
     PullToRefreshBox(
         isRefreshing = state.refreshing,

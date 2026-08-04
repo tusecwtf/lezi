@@ -2,11 +2,13 @@ package com.lezi.babylog.feature.family.overview
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.SingleFlightAction
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.feature.family.FamilyIdentityUi
 import com.lezi.babylog.feature.family.baby.BabyAvatarFileStore
 import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
@@ -88,7 +90,10 @@ class AccountOverviewHost @Inject constructor(
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
     private val destructiveAction = FamilyDestructiveActionGate()
+    private val addBabyAction = SingleFlightAction()
     private val appUpdate = AppUpdateOutcomeMachine(sync)
+
+    val addingBaby: StateFlow<Boolean> = addBabyAction.busy
 
     private val babySurfaces = combine(
         careLog.observeBabies(),
@@ -177,6 +182,83 @@ class AccountOverviewHost @Inject constructor(
 
     fun setCurrent(id: Long) {
         viewModelScope.launch { careLog.setCurrentBaby(id) }
+    }
+
+    fun setBabyLocalTheme(id: Long, argb: Int, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                careLog.updateBabyLocalPreferences(id, themeColorArgb = argb)
+            }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机主题保存失败") })
+        }
+    }
+
+    fun moveBabyLocal(id: Long, delta: Int, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val ordered = ui.value.babies.toMutableList()
+            val from = ordered.indexOfFirst { it.id == id }
+            val to = (from + delta).coerceIn(0, ordered.lastIndex)
+            val result = runCatching {
+                require(from >= 0 && from != to) { "宝宝已在该位置" }
+                val moved = ordered.removeAt(from)
+                ordered.add(to, moved)
+                careLog.updateBabyLocalOrder(ordered.map(Baby::id))
+            }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机顺序保存失败") })
+        }
+    }
+
+    fun addBaby(
+        nickname: String,
+        sex: String?,
+        birthdayEpochDay: Long,
+        birthWeightGrams: Int?,
+        themeColorArgb: Int,
+        avatarJpeg: ByteArray?,
+        onDone: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            var failure: String? = null
+            val accepted = addBabyAction.run {
+                failure = try {
+                    profileSaveMutex.withLock {
+                        val id = careLog.addBaby(
+                            CreateBabyInput(
+                                nickname = nickname,
+                                sex = sex,
+                                birthdayEpochDay = birthdayEpochDay,
+                                birthWeightGrams = birthWeightGrams,
+                                themeColorArgb = themeColorArgb,
+                            ),
+                        )
+                        if (avatarJpeg != null) {
+                            val created = careLog.listBabies().firstOrNull { it.id == id }
+                            if (created != null) {
+                                val avatarError = saveBabyProfileWithAvatar(
+                                    careLog = careLog,
+                                    avatarFileStore = avatarFileStore,
+                                    existing = created,
+                                    nickname = nickname,
+                                    sex = sex,
+                                    birthdayEpochDay = birthdayEpochDay,
+                                    birthWeightGrams = birthWeightGrams,
+                                    avatarJpeg = avatarJpeg,
+                                    removeAvatar = false,
+                                    mayEditAvatar = true,
+                                )
+                                if (avatarError != null) return@withLock avatarError
+                            }
+                        }
+                        null
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    productUiError(error, "添加失败")
+                }
+            }
+            if (accepted) onDone(failure)
+        }
     }
 
     fun updateBaby(

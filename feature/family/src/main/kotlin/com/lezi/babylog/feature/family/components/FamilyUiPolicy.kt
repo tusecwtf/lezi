@@ -123,6 +123,7 @@ internal sealed interface FamilyDialog {
     data class MergeBaby(val source: Baby) : FamilyDialog
     data class MergePreview(val preview: BabyMergePreview) : FamilyDialog
     data class EditBaby(val baby: Baby) : FamilyDialog
+    data object AddBaby : FamilyDialog
 
     enum class DeleteStage { Warning, Final }
 }

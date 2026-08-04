@@ -518,8 +518,6 @@ fun SettingsRoute(
     onOpenExport: () -> Unit = {},
     onOpenSearch: () -> Unit = {},
     onOpenCalendar: () -> Unit = {},
-    initiallyShowAddBaby: Boolean = false,
-    onInitialAddBabyFinished: () -> Unit = {},
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -529,19 +527,10 @@ fun SettingsRoute(
     val appUpdateInstallFeedback by vm.appUpdateInstallFeedback.collectAsStateWithLifecycle()
     val forcedInstallPermissionRequired by
         vm.forcedInstallPermissionRequired.collectAsStateWithLifecycle()
-    val addingBaby by vm.addingBaby.collectAsStateWithLifecycle()
     val customItemCommandState by vm.customItemCommandState.collectAsStateWithLifecycle()
     val clearRecordsState by vm.clearRecordsState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val clearRecordsCopy = clearRecordsConfirmationCopy(ui.isFamilyJoined)
-    var showAdd by remember(initiallyShowAddBaby) { mutableStateOf(initiallyShowAddBaby) }
-    var newName by remember { mutableStateOf("") }
-    var newSex by remember { mutableStateOf<String?>(null) }
-    var newBirthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
-    var newWeight by remember { mutableStateOf("") }
-    var newThemeIndex by remember { mutableIntStateOf(0) }
-    var addError by remember { mutableStateOf<String?>(null) }
-    var showAddDate by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
     var showRecordSettings by remember { mutableStateOf(false) }
     var showCustomItems by rememberSaveable { mutableStateOf(false) }
@@ -558,17 +547,6 @@ fun SettingsRoute(
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> notificationPermissionGranted = granted }
-    var localPreferenceBabyId by remember { mutableStateOf<Long?>(null) }
-    var localPreferenceError by remember { mutableStateOf<String?>(null) }
-    fun finishAddBabyDialog() {
-        if (addingBaby) return
-        showAdd = false
-        addError = null
-        if (initiallyShowAddBaby) onInitialAddBabyFinished()
-    }
-    LaunchedEffect(ui.canManageBabyProfiles, showAdd, addingBaby) {
-        if (!ui.canManageBabyProfiles && showAdd) finishAddBabyDialog()
-    }
     LaunchedEffect(showRecordSettings) {
         if (showRecordSettings) {
             notificationPermissionGranted =
@@ -650,29 +628,6 @@ fun SettingsRoute(
                 actionLabel = "打开显示设置",
                 onClick = { showDisplay = true },
             )
-
-            SectionHeading(title = "宝宝")
-            ui.babies.forEach { b ->
-                SettingsBabyRow(
-                    baby = b,
-                    selected = ui.current?.id == b.id,
-                    onOpenLocalSettings = {
-                        localPreferenceError = null
-                        localPreferenceBabyId = b.id
-                    },
-                )
-            }
-            if (ui.canManageBabyProfiles) {
-                SettingsMenuRow(
-                    "添加宝宝",
-                    "新建本机宝宝档案",
-                    icon = Icons.Outlined.PersonAdd,
-                    actionLabel = "添加宝宝",
-                    onClick = { showAdd = true },
-                )
-            } else {
-                SettingsMenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = Icons.Outlined.ChildCare)
-            }
 
             SectionHeading(title = "数据")
             SettingsMenuRow(
@@ -885,158 +840,6 @@ fun SettingsRoute(
                 }
             },
             confirmButton = { LeziTextButton(label = "完成", onClick = { showDisplay = false }) },
-        )
-    }
-
-    localPreferenceBabyId?.let { babyId ->
-        val baby = ui.babies.firstOrNull { it.id == babyId }
-        if (baby == null) {
-            LaunchedEffect(babyId) { localPreferenceBabyId = null }
-        } else {
-            val position = ui.babies.indexOfFirst { it.id == babyId }
-            LeziAlertDialog(
-                onDismissRequest = { localPreferenceBabyId = null },
-                title = { Text("${baby.nickname}的本机设置") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("主题色与宝宝顺序只影响这台设备，不会修改家庭档案。")
-                        if (ui.current?.id == baby.id) {
-                            Text("当前宝宝", style = LeziTypography.Label)
-                        } else {
-                            LeziSecondaryButton(label = "设为当前宝宝", onClick = { vm.setCurrent(baby.id) })
-                        }
-                        Text("主题色", style = LeziTypography.Label)
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            maxItemsInEachRow = 4,
-                        ) {
-                            BabyThemePalette.forEachIndexed { index, argb ->
-                                BabyThemeColorSwatch(
-                                    argb = argb,
-                                    selected = com.lezi.babylog.designsystem.normalizeBabyThemeArgb(
-                                        baby.themeColorArgb,
-                                    ) == argb,
-                                    actionLabel = "本机主题色：${BabyThemePaletteLabels[index]}",
-                                    onClick = {
-                                        vm.setBabyLocalTheme(baby.id, argb) {
-                                            localPreferenceError = it
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            LeziSecondaryButton(label = "前移", onClick = {
-                                    vm.moveBabyLocal(baby.id, -1) { localPreferenceError = it }
-                                }, enabled = position > 0)
-                            LeziSecondaryButton(label = "后移", onClick = {
-                                    vm.moveBabyLocal(baby.id, 1) { localPreferenceError = it }
-                                }, enabled = position in 0 until ui.babies.lastIndex)
-                        }
-                        localPreferenceError?.let {
-                            Text(it, color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                },
-                confirmButton = {
-                    LeziTextButton(label = "完成", onClick = { localPreferenceBabyId = null })
-                },
-            )
-        }
-    }
-
-    if (showAdd) {
-        val addBabyPrimary = settingsAddBabyPrimaryPresentation(addingBaby)
-        LeziAlertDialog(
-            onDismissRequest = {
-                if (addBabyPrimary.dismissible) finishAddBabyDialog()
-            },
-            modifier = Modifier.imePadding(),
-            properties = DialogProperties(decorFitsSystemWindows = false),
-            title = { Text("添加宝宝") },
-            text = {
-                ScrollableDialogColumn {
-                    BabyProfileFormFields(
-                        nickname = newName,
-                        onNicknameChange = {
-                            newName = it
-                            addError = null
-                        },
-                        nicknameError = addError,
-                        sex = newSex,
-                        onSexChange = { newSex = it },
-                        birthdayEpochDay = newBirthday,
-                        onPickBirthday = { showAddDate = true },
-                        weightText = newWeight,
-                        onWeightTextChange = { newWeight = it },
-                        enabled = !addingBaby,
-                    )
-                    Text("主题色", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                        maxItemsInEachRow = 4,
-                    ) {
-                        BabyThemePalette.forEachIndexed { index, argb ->
-                            BabyThemeColorSwatch(
-                                argb = argb,
-                                selected = newThemeIndex == index,
-                                actionLabel = "主题色：${BabyThemePaletteLabels[index]}",
-                                enabled = !addingBaby,
-                                onClick = { newThemeIndex = index },
-                            )
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                LeziTextButton(label = addBabyPrimary.label, onClick = {
-                        if (newName.isBlank()) {
-                            addError = "请填写昵称"
-                            return@LeziTextButton
-                        }
-                        val grams = newWeight.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()
-                            ?.let { (it * 1000).toInt() }
-                        if (newWeight.isNotBlank() && grams == null) {
-                            addError = "出生体重格式不正确"
-                            return@LeziTextButton
-                        }
-                        birthWeightValidationError(grams)?.let {
-                            addError = it
-                            return@LeziTextButton
-                        }
-                        vm.addBaby(
-                            nickname = newName.trim(),
-                            sex = newSex,
-                            birthdayEpochDay = newBirthday,
-                            birthWeightGrams = grams,
-                            themeColorArgb = BabyThemePalette[newThemeIndex],
-                        ) { err ->
-                            if (err == null) {
-                                newName = ""
-                                newSex = null
-                                newWeight = ""
-                                newBirthday = LocalDate.now().toEpochDay()
-                                newThemeIndex = 0
-                                finishAddBabyDialog()
-                            } else {
-                                addError = err
-                            }
-                        }
-                    }, enabled = addBabyPrimary.enabled)
-            },
-            dismissButton = {
-                LeziTextButton(label = "取消", onClick = { }, enabled = addBabyPrimary.dismissible)
-            },
-        )
-    }
-
-    if (showAddDate) {
-        BabyBirthdayDatePickerDialog(
-            birthdayEpochDay = newBirthday,
-            onDismiss = { showAddDate = false },
-            onSelect = { newBirthday = it },
         )
     }
 

@@ -37,12 +37,27 @@ internal data class BabyProfileUpdate(
 internal fun FamilyBabyDialog(
     dialog: FamilyDialog,
     babies: List<Baby>,
+    currentBabyId: Long?,
+    canEditProfile: Boolean,
     canEditAvatar: Boolean,
+    createBusy: Boolean,
     onDismiss: () -> Unit,
     onDelete: (Long) -> Unit,
     onPreviewMerge: (Long, Long) -> Unit,
     onMerge: (BabyMergePreview) -> Unit,
     onUpdate: (Baby, BabyProfileUpdate, onFinished: () -> Unit) -> Unit,
+    onCreate: (
+        nickname: String,
+        sex: String?,
+        birthdayEpochDay: Long,
+        birthWeightGrams: Int?,
+        themeColorArgb: Int,
+        avatarJpeg: ByteArray?,
+        onFinished: (String?) -> Unit,
+    ) -> Unit,
+    onLocalTheme: (babyId: Long, argb: Int, onDone: (String?) -> Unit) -> Unit,
+    onMoveLocal: (babyId: Long, delta: Int, onDone: (String?) -> Unit) -> Unit,
+    onSetCurrent: (Long) -> Unit,
     destructiveBusy: Boolean = false,
 ) {
     when (dialog) {
@@ -64,17 +79,33 @@ internal fun FamilyBabyDialog(
             onMerge = onMerge,
             onDismiss = onDismiss,
         )
-        is FamilyDialog.EditBaby -> BabyEditDialog(
-            baby = dialog.baby,
-            canEditAvatar = canEditAvatar,
+        is FamilyDialog.EditBaby -> {
+            val baby = dialog.baby
+            val position = babies.indexOfFirst { it.id == baby.id }
+            BabyEditDialog(
+                baby = baby,
+                canEditProfile = canEditProfile,
+                canEditAvatar = canEditAvatar,
+                isCurrent = baby.id == currentBabyId,
+                canMoveEarlier = position > 0,
+                canMoveLater = position in 0 until babies.lastIndex,
+                onDismiss = onDismiss,
+                onSaveProfile = { nickname, sex, birthday, grams, avatar, removeAvatar, onFinished ->
+                    onUpdate(
+                        baby,
+                        BabyProfileUpdate(nickname, sex, birthday, grams, avatar, removeAvatar),
+                        onFinished,
+                    )
+                },
+                onLocalTheme = { argb, onDone -> onLocalTheme(baby.id, argb, onDone) },
+                onMoveLocal = { delta, onDone -> onMoveLocal(baby.id, delta, onDone) },
+                onSetCurrent = { onSetCurrent(baby.id) },
+            )
+        }
+        is FamilyDialog.AddBaby -> BabyCreateDialog(
+            busy = createBusy,
             onDismiss = onDismiss,
-            onSave = { nickname, sex, birthday, grams, avatar, removeAvatar, onFinished ->
-                onUpdate(
-                    dialog.baby,
-                    BabyProfileUpdate(nickname, sex, birthday, grams, avatar, removeAvatar),
-                    onFinished,
-                )
-            },
+            onCreate = onCreate,
         )
         else -> Unit
     }

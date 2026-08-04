@@ -345,9 +345,8 @@ private fun SummaryContent(
     val rangeEnterMs = leziMotionMillis(LeziMotion.Base)
     val rangeExitMs = leziMotionMillis(LeziMotion.Fast)
 
-    // Journal panels bleed to the screen edge, so the page inset is applied
-    // once to the header block instead of per-section conditional padding.
-    val contentHorizontal = if (journal) LeziSpacing.Page else 0.dp
+    // Journal and warm share a 16dp page content column so KPI/charts/header
+    // stay the same width (journal dock remains full-bleed elsewhere).
     PageScaffoldBackground {
         PullToRefreshBox(
             isRefreshing = isRefreshing,
@@ -359,42 +358,38 @@ private fun SummaryContent(
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
                     .padding(
-                        horizontal = LeziSpacing.Page - contentHorizontal,
+                        horizontal = LeziSpacing.Page,
                         vertical = LeziSpacing.Page,
                     ),
                 verticalArrangement = Arrangement.spacedBy(density.sectionGap),
             ) {
-                Column(
-                    Modifier.padding(horizontal = contentHorizontal),
-                ) {
-                    PageHero(
-                        eyebrow = "",
-                        title = "汇总",
-                    )
+                PageHero(
+                    eyebrow = "",
+                    title = "汇总",
+                )
 
-                    Text(
-                        shallowSyncStatus.text,
-                        style = LeziTypography.Meta,
-                        color = if (
-                            shallowSyncStatus.state in setOf(
-                                ShallowSyncState.Error,
-                                ShallowSyncState.ReauthRequired,
-                            )
-                        ) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier.testTag("summary_shallow_sync_status"),
-                    )
+                Text(
+                    shallowSyncStatus.text,
+                    style = LeziTypography.Meta,
+                    color = if (
+                        shallowSyncStatus.state in setOf(
+                            ShallowSyncState.Error,
+                            ShallowSyncState.ReauthRequired,
+                        )
+                    ) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.testTag("summary_shallow_sync_status"),
+                )
 
-                    LeziRangeTabs(
-                        items = SummaryRange.entries,
-                        selected = ui.range,
-                        onSelect = onSelectRange,
-                        label = { it.label },
-                    )
-                }
+                LeziRangeTabs(
+                    items = SummaryRange.entries,
+                    selected = ui.range,
+                    onSelect = onSelectRange,
+                    label = { it.label },
+                )
 
                 AnimatedContent(
                     targetState = ui.range,

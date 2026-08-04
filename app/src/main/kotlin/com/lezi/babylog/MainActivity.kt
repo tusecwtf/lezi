@@ -1180,22 +1180,13 @@ private fun LeziMainScaffold(
             composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
             composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
             composable(TopDest.Family.route) {
-                FamilyRoute(onAddBaby = { nav.navigate("settings/add-baby") })
+                FamilyRoute()
             }
             composable(TopDest.Settings.route) {
                 SettingsRoute(
                     onOpenExport = { nav.navigate("export") },
                     onOpenSearch = { nav.navigate("search") },
                     onOpenCalendar = { nav.navigate("calendar") },
-                )
-            }
-            composable("settings/add-baby") {
-                SettingsRoute(
-                    onOpenExport = { nav.navigate("export") },
-                    onOpenSearch = { nav.navigate("search") },
-                    onOpenCalendar = { nav.navigate("calendar") },
-                    initiallyShowAddBaby = true,
-                    onInitialAddBabyFinished = { nav.popBackStack() },
                 )
             }
             composable("search") {

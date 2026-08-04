@@ -39,6 +39,7 @@ import com.lezi.babylog.feature.family.components.FamilyWizardStep
 import com.lezi.babylog.feature.family.components.LOCAL_FAMILY_DISPLAY_NAME
 import com.lezi.babylog.feature.family.components.accountFamilyWizardSnapshot
 import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
+import com.lezi.babylog.feature.family.components.canManageFamilyBabies
 import com.lezi.babylog.feature.family.components.familyControlVisibility
 import com.lezi.babylog.feature.family.components.familyDialogAfterDismiss
 import com.lezi.babylog.feature.family.components.familySyncError
@@ -106,7 +107,6 @@ private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
  */
 @Composable
 fun FamilyRoute(
-    onAddBaby: () -> Unit = {},
     overviewHost: AccountOverviewHost = hiltViewModel(),
     membersHost: MembersDevicesHost = hiltViewModel(),
     wizardHost: AccountFamilyWizardHost = hiltViewModel(),
@@ -119,6 +119,7 @@ fun FamilyRoute(
     val installingAppUpdate by overviewHost.installingAppUpdate.collectAsStateWithLifecycle()
     val memberDestructiveBusy by membersHost.destructiveBusy.collectAsStateWithLifecycle()
     val babyDestructiveBusy by overviewHost.destructiveBusy.collectAsStateWithLifecycle()
+    val addingBaby by overviewHost.addingBaby.collectAsStateWithLifecycle()
     val endpointSeed by wizardHost.endpointSeed.collectAsStateWithLifecycle()
     val networkSettings by networkSettingsHost.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -441,7 +442,7 @@ fun FamilyRoute(
                     primary = primary,
                     endpointConfigured = endpointConfigured,
                     babyActions = AccountBabyActions(
-                        add = onAddBaby,
+                        add = { dialog = FamilyDialog.AddBaby },
                         setCurrent = overviewHost::setCurrent,
                         edit = { dialog = FamilyDialog.EditBaby(it) },
                         merge = { dialog = FamilyDialog.MergeBaby(it) },
@@ -1226,54 +1227,79 @@ fun FamilyRoute(
         is FamilyDialog.MergeBaby,
         is FamilyDialog.MergePreview,
         is FamilyDialog.EditBaby,
-        -> FamilyBabyDialog(
-            dialog = active,
-            babies = overview.babies,
-            canEditAvatar = canEditFamilyAvatar(overview.role),
-            onDismiss = { if (!babyDestructiveBusy) dialog = null },
-            onDelete = { id ->
-                overviewHost.deleteBaby(id) { success, message ->
-                    val resume = overview.babies.firstOrNull { it.id == id }
-                        ?.let(FamilyDialog::DeleteBaby)
-                        ?.takeUnless { success }
-                    showMessage(message, resume = resume)
-                }
-            },
-            onPreviewMerge = { sourceId, targetId ->
-                overviewHost.previewMerge(sourceId, targetId) { preview ->
-                    dialog = if (preview == null) {
-                        FamilyDialog.Message("无法生成合并预览，请刷新后重试")
-                    } else FamilyDialog.MergePreview(preview)
-                }
-            },
-            onMerge = { preview ->
-                overviewHost.merge(preview) { success, message ->
-                    val resume = overview.babies.firstOrNull { it.id == preview.sourceBabyId }
-                        ?.let(FamilyDialog::MergeBaby)
-                        ?.takeUnless { success }
-                    showMessage(message, resume = resume)
-                }
-            },
-            onUpdate = { baby, update, onFinished ->
-                overviewHost.updateBaby(
-                    baby.id,
-                    update.nickname,
-                    update.sex,
-                    update.birthdayEpochDay,
-                    update.birthWeightGrams,
-                    update.avatarJpeg,
-                    update.removeAvatar,
-                ) { error ->
-                    onFinished()
-                    if (error == null) {
-                        showMessage("宝宝档案已保存")
-                    } else {
-                        showMessage(error, resume = FamilyDialog.EditBaby(baby))
+        is FamilyDialog.AddBaby,
+        -> {
+            FamilyBabyDialog(
+                dialog = active,
+                babies = overview.babies,
+                currentBabyId = overview.current?.id,
+                canEditProfile = canManageFamilyBabies(overview.role),
+                canEditAvatar = canEditFamilyAvatar(overview.role),
+                createBusy = addingBaby,
+                onDismiss = { if (!babyDestructiveBusy && !addingBaby) dialog = null },
+                onDelete = { id ->
+                    overviewHost.deleteBaby(id) { success, message ->
+                        val resume = overview.babies.firstOrNull { it.id == id }
+                            ?.let(FamilyDialog::DeleteBaby)
+                            ?.takeUnless { success }
+                        showMessage(message, resume = resume)
                     }
-                }
-            },
-            destructiveBusy = babyDestructiveBusy,
-        )
+                },
+                onPreviewMerge = { sourceId, targetId ->
+                    overviewHost.previewMerge(sourceId, targetId) { preview ->
+                        dialog = if (preview == null) {
+                            FamilyDialog.Message("无法生成合并预览，请刷新后重试")
+                        } else FamilyDialog.MergePreview(preview)
+                    }
+                },
+                onMerge = { preview ->
+                    overviewHost.merge(preview) { success, message ->
+                        val resume = overview.babies.firstOrNull { it.id == preview.sourceBabyId }
+                            ?.let(FamilyDialog::MergeBaby)
+                            ?.takeUnless { success }
+                        showMessage(message, resume = resume)
+                    }
+                },
+                onUpdate = { baby, update, onFinished ->
+                    overviewHost.updateBaby(
+                        baby.id,
+                        update.nickname,
+                        update.sex,
+                        update.birthdayEpochDay,
+                        update.birthWeightGrams,
+                        update.avatarJpeg,
+                        update.removeAvatar,
+                    ) { error ->
+                        onFinished()
+                        if (error == null) {
+                            showMessage("宝宝档案已保存")
+                        } else {
+                            showMessage(error, resume = FamilyDialog.EditBaby(baby))
+                        }
+                    }
+                },
+                onCreate = { nickname, sex, birthday, grams, theme, avatar, onFinished ->
+                    overviewHost.addBaby(
+                        nickname = nickname,
+                        sex = sex,
+                        birthdayEpochDay = birthday,
+                        birthWeightGrams = grams,
+                        themeColorArgb = theme,
+                        avatarJpeg = avatar,
+                    ) { error ->
+                        onFinished(error)
+                        if (error == null) {
+                            dialog = null
+                            showMessage("已添加宝宝")
+                        }
+                    }
+                },
+                onLocalTheme = overviewHost::setBabyLocalTheme,
+                onMoveLocal = overviewHost::moveBabyLocal,
+                onSetCurrent = overviewHost::setCurrent,
+                destructiveBusy = babyDestructiveBusy,
+            )
+        }
         null -> Unit
     }
 
