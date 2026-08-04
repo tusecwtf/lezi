@@ -75,7 +75,7 @@
 | Base | `LeziMotion.Base` | 200 | 默认进入/退出与内容交叉淡入 |
 | Emphasized | `LeziMotion.Emphasized` | 300 | 较大结构转场（布局编辑、多步） |
 
-系统「减少动态效果」开启时（Compose `MotionDurationScale` ≤ 0），非必要转场经 `LeziMotion.nonEssentialMillis` / `leziMotionMillis` 瞬时（0ms）；状态切换仍立即完成且可读。主导航、顶/底栏、布局编辑与引导步进已接线（票 10）。
+系统「减少动态效果」开启时，产品以 `Settings.Global.ANIMATOR_DURATION_SCALE` 为 reduce-motion 源（Compose 侧经 `leziMotionDurationScale` / `LeziMotion.systemAnimatorDurationScale` 读取），非必要转场经 `LeziMotion.nonEssentialMillis` / `leziMotionMillis` 瞬时（0ms）；状态切换仍立即完成且可读。协程上下文上的 Compose `MotionDurationScale` 是同一系统信号的关联平台时钟，**不是** call-site API——布局拖动等路径已刻意走 `ANIMATOR_DURATION_SCALE` → `nonEssentialMillis`，禁止并行第二套时长表。主导航、顶/底栏、布局编辑与引导步进已接线（票 10）。
 
 **结构密度（`LeziDensity`，4/8 网格；垫值引用 `LeziSpacing` Xs/Sm/Md）** — 同一结构角色 warm 更开敞、journal 更紧凑；触控下限仍为 `LeziSpacing.Touch`（48dp），密度表不缩小可点热区。`LeziSpacing.CardPad` / `TopBarHorizontal` / `SectionGap` 为单模板遗留值，结构角色迁移后以密度表为准：
 

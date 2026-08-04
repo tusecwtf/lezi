@@ -1,5 +1,6 @@
 package com.lezi.babylog.designsystem
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -101,4 +102,52 @@ class MotionDensityTokensTest {
         assertEquals(LeziDensity.Warm, LeziDensity.forStyle(LeziVisualStyle.Warm))
         assertEquals(LeziDensity.Journal, LeziDensity.forStyle(LeziVisualStyle.Journal))
     }
+
+    @Test
+    fun `design tokens json density snapshot keeps dockOuterHorizontal parity with LeziDensity`() {
+        // Dual-write contract (design/README): structural density roles live in both
+        // Tokens.kt (Compose authority) and design/tokens.json (OD/agent snapshot).
+        val json = repositoryRoot().resolve("design/tokens.json").readText()
+        val densityBlock = json
+            .substringAfter("\"density\"")
+            .substringBefore("\"radius\"")
+        val warmBlock = densityBlock
+            .substringAfter("\"warm\"")
+            .substringBefore("\"journal\"")
+        val journalBlock = densityBlock
+            .substringAfter("\"journal\"")
+            .substringBeforeLast("}")
+
+        val densityFields = listOf(
+            "cardPad",
+            "topBarHorizontal",
+            "sectionGap",
+            "panelContent",
+            "dockOuterHorizontal",
+        )
+        for (field in densityFields) {
+            assertTrue(
+                "density.warm must declare $field (JSON↔LeziDensityScale parity)",
+                warmBlock.contains("\"$field\""),
+            )
+            assertTrue(
+                "density.journal must declare $field (JSON↔LeziDensityScale parity)",
+                journalBlock.contains("\"$field\""),
+            )
+        }
+        // Product literals — match LeziDensity.Warm/Journal dockOuterHorizontal.
+        assertTrue(
+            "warm dockOuterHorizontal is space.sm (LeziSpacing.Sm)",
+            Regex(""""dockOuterHorizontal"\s*:\s*"space\.sm"""").containsMatchIn(warmBlock),
+        )
+        assertTrue(
+            "journal dockOuterHorizontal is full-bleed 0",
+            Regex(""""dockOuterHorizontal"\s*:\s*0\b""").containsMatchIn(journalBlock),
+        )
+    }
+
+    private fun repositoryRoot(): File = generateSequence(
+        seed = File(requireNotNull(System.getProperty("user.dir"))),
+        nextFunction = { it.parentFile },
+    ).first { candidate -> candidate.resolve("settings.gradle.kts").isFile }
 }
