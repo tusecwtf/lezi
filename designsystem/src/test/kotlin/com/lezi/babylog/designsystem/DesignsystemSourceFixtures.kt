@@ -13,8 +13,13 @@ import java.io.File
  * Phase A ban set (spec §Phase A / ticket 05): Button, TextButton, OutlinedButton,
  * FilterChip, OutlinedTextField, Switch, IconButton, DatePickerDialog, AlertDialog.
  * Sibling M3 chrome still outside this gate (e.g. Checkbox/RadioButton on widget
- * config, TimePicker/dropdowns on dial) is intentional residual — follow-on polish
- * (tracker ticket 11 / weak surfaces), not a hole in this Phase A contract.
+ * config and calendar, TimePicker/dropdowns on dial) is intentional residual —
+ * deferred / unowned polish (not owned by closed ticket 11 weak surfaces), not a
+ * hole in this Phase A contract.
+ *
+ * Cross-module product source contracts (widget CareWidget/config consumption)
+ * live in [WeakSurfacesContractTest] so they reuse this resolver instead of
+ * reimplementing a repository-root walk in feature tests.
  */
 internal object DesignsystemSourceFixtures {
     /**

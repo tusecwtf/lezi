@@ -2,14 +2,15 @@ package com.lezi.babylog.feature.widget
 
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
-import java.io.File
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Ticket 11 — widget chrome spacing/type align with Lezi tokens within Glance limits.
+ *
+ * Source-level CareWidget/config consumption is owned by designsystem
+ * [com.lezi.babylog.designsystem.WeakSurfacesContractTest] so product tests do not
+ * reimplement [com.lezi.babylog.designsystem.DesignsystemSourceFixtures] path walk.
  */
 class WidgetChromeTest {
 
@@ -37,43 +38,5 @@ class WidgetChromeTest {
         )) {
             assertEquals(0f, value.value % grid, 0.001f)
         }
-    }
-
-    @Test
-    fun careWidgetAndConfigConsumeWidgetChrome() {
-        val widget = read(
-            "feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/CareWidget.kt",
-        )
-        val config = read(
-            "feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/WidgetConfigurationActivity.kt",
-        )
-        assertTrue(widget.contains("WidgetChrome.padHorizontal"))
-        assertTrue(widget.contains("WidgetChrome.padVertical"))
-        assertTrue(widget.contains("WidgetChrome.titleFontSize"))
-        assertTrue(widget.contains("WidgetChrome.bodyFontSize"))
-        assertFalse(
-            "Glance content must not hard-code 12.dp horizontal pad",
-            widget.contains("horizontal = 12.dp"),
-        )
-        assertFalse(
-            "Glance title must not hard-code 14.sp (use Label token size)",
-            widget.contains("fontSize = 14.sp"),
-        )
-        assertTrue(
-            "config titles use LeziTypography",
-            config.contains("LeziTypography.Title") || config.contains("LeziTypography.TitleSm"),
-        )
-        assertTrue(config.contains("WidgetChrome.configRowMinHeight") || config.contains("LeziSpacing.Touch"))
-        assertTrue(config.contains("LeziPrimaryButton"))
-    }
-
-    private fun read(relative: String): String {
-        var dir = File(System.getProperty("user.dir") ?: ".").canonicalFile
-        repeat(8) {
-            val f = File(dir, relative)
-            if (f.isFile) return f.readText()
-            dir = dir.parentFile ?: error("missing $relative")
-        }
-        error("missing $relative")
     }
 }

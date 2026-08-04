@@ -13,10 +13,12 @@ like leftovers.
 - [x] Widget / widget config spacing and type token-aligned where platform allows
 - [x] Export action hierarchy + busy/preview behavior match Lezi patterns
 - [x] No new widget product features; no export domain changes
-- [x] `./gradlew :feature:settings:test :feature:export:test :feature:widget:test :app:assembleDebug` as applicable
+- [x] `./gradlew :designsystem:test :feature:export:test :feature:widget:test`
+  (menu icon contracts live in designsystem `WeakSurfacesContractTest`, not settings)
 
 **Done notes:** `LeziMenuIcon` well/glyph tokens + Outlined menu glyphs; `WidgetChrome`
 maps Glance/config pads/type to `LeziSpacing`/`LeziTypography`; `exportActionChrome`
 gives PDF primary / TXT secondary busy ownership; export preview uses
-`leziMotionMillis` Base/Fast. Focused JVM tests green; `:app:compileDebugKotlin` green
-(assemble not required for this UI-only slice).
+`leziMotionMillis` Base enter / Fast exit. Focused JVM gates above green.
+Post-prep chrome clears generate-busy when preview/pendingShare land (controls stay
+locked via sharePending).

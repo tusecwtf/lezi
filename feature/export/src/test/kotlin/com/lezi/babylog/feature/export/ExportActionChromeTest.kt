@@ -40,4 +40,14 @@ class ExportActionChromeTest {
         assertFalse(chrome.pdfBusy)
         assertFalse(chrome.controlsEnabled)
     }
+
+    @Test
+    fun sharePendingLocksControlsWithoutGenerateBusyLabels() {
+        val chrome = exportActionChrome(busyFormat = null, sharePending = true)
+        assertEquals("导出 TXT 并分享", chrome.txtLabel)
+        assertEquals("导出 PDF 并分享", chrome.pdfLabel)
+        assertFalse(chrome.txtBusy)
+        assertFalse(chrome.pdfBusy)
+        assertFalse(chrome.controlsEnabled)
+    }
 }

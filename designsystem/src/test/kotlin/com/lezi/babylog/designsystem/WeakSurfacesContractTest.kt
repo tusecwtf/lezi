@@ -62,13 +62,65 @@ class WeakSurfacesContractTest {
         val export = read(
             "feature/export/src/main/kotlin/com/lezi/babylog/feature/export/ExportScreen.kt",
         )
-        assertTrue(export.contains("leziMotionMillis"))
-        assertTrue(export.contains("LeziMotion.Base") || export.contains("LeziMotion.Fast"))
         assertTrue(export.contains("AnimatedVisibility"))
         assertTrue(
             "export busy presentation must be pure chrome helper, not inline dual busy",
             export.contains("exportActionChrome"),
         )
+        // Design notes: enter Base, exit Fast — both tiers required; tween durations
+        // must close over the two leziMotionMillis captures (not a bare ms exit).
+        assertTrue(
+            "preview enter must capture leziMotionMillis(LeziMotion.Base)",
+            export.contains("previewEnterMs = leziMotionMillis(LeziMotion.Base)"),
+        )
+        assertTrue(
+            "preview exit must capture leziMotionMillis(LeziMotion.Fast)",
+            export.contains("previewExitMs = leziMotionMillis(LeziMotion.Fast)"),
+        )
+        assertTrue(
+            "enter tweens must use previewEnterMs",
+            export.contains("durationMillis = previewEnterMs"),
+        )
+        assertTrue(
+            "exit tweens must use previewExitMs",
+            export.contains("durationMillis = previewExitMs"),
+        )
+        assertTrue(export.contains("LeziMotion.Base") && export.contains("LeziMotion.Fast"))
+    }
+
+    @Test
+    fun `care widget and config consume WidgetChrome via shared source fixtures`() {
+        val widget = read(
+            "feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/CareWidget.kt",
+        )
+        val config = read(
+            "feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/WidgetConfigurationActivity.kt",
+        )
+        assertTrue(widget.contains("WidgetChrome.padHorizontal"))
+        assertTrue(widget.contains("WidgetChrome.padVertical"))
+        assertTrue(widget.contains("WidgetChrome.stackGap"))
+        assertTrue(widget.contains("WidgetChrome.actionGap"))
+        assertTrue(widget.contains("WidgetChrome.actionPadHorizontal"))
+        assertTrue(widget.contains("WidgetChrome.actionPadVertical"))
+        assertTrue(widget.contains("WidgetChrome.titleFontSize"))
+        assertTrue(widget.contains("WidgetChrome.bodyFontSize"))
+        assertFalse(
+            "Glance content must not hard-code 12.dp horizontal pad",
+            widget.contains("horizontal = 12.dp"),
+        )
+        assertFalse(
+            "Glance title must not hard-code 14.sp (use Label token size)",
+            widget.contains("fontSize = 14.sp"),
+        )
+        assertTrue(
+            "config titles use LeziTypography",
+            config.contains("LeziTypography.Title") || config.contains("LeziTypography.TitleSm"),
+        )
+        assertTrue(
+            config.contains("WidgetChrome.configRowMinHeight") ||
+                config.contains("LeziSpacing.Touch"),
+        )
+        assertTrue(config.contains("LeziPrimaryButton"))
     }
 
     private fun read(relativePath: String): String =

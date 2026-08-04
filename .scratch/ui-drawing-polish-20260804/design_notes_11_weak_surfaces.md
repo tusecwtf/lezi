@@ -29,12 +29,15 @@ shared `LeziSpacing` + `LeziTypography` + `LeziMotion` product literals.
    - No new widget product features (still summary + configurable quick actions).
 
 3. **Export action hierarchy + busy / preview motion**
-   - Pure `exportActionChrome(busyFormat)` presentation:
+   - Pure `exportActionChrome(busyFormat, sharePending)` presentation:
      - PDF = primary busy owner; TXT = secondary
-     - Only the active format shows “正在生成…” + `busy=true`
-     - Controls disabled while any export is in flight
-   - Preview `AnimatedVisibility` uses `leziMotionMillis(LeziMotion.Base|Fast)`
-     enter/exit (respects reduce-motion from ticket 10).
+     - Only the active format shows “正在生成…” + `busy=true` while generating
+     - On successful prepare, clear generate-busy; keep controls locked via
+       `sharePending` until sharesheet launch settles (honest post-prep chrome)
+     - Controls disabled while generating or share is pending
+   - Preview `AnimatedVisibility` uses `leziMotionMillis(LeziMotion.Base)` enter
+     and `leziMotionMillis(LeziMotion.Fast)` exit (respects reduce-motion from
+     ticket 10).
    - No export domain / FileProvider / format generator changes.
 
 ## Out of scope

@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.widget
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -11,6 +12,7 @@ import com.lezi.babylog.designsystem.LeziTypography
  * Glance cannot host Compose [androidx.compose.ui.text.TextStyle]; call sites
  * use the token **sizes** only. All structural pads land on [LeziSpacing] steps.
  */
+@Immutable
 object WidgetChrome {
     /** Outer horizontal pad on the Glance surface. */
     val padHorizontal: Dp = LeziSpacing.Sm

@@ -68,7 +68,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * Primary (PDF) / secondary (TXT) action chrome for the export surface.
- * Only the active format owns busy label + spinner; the other stays idle but disabled.
+ * Only the active format owns busy label + spinner while generating; the other
+ * stays idle but disabled. After prepare succeeds, [sharePending] keeps controls
+ * locked without lying about "正在生成…".
  */
 internal data class ExportActionChrome(
     val txtLabel: String,
@@ -79,14 +81,16 @@ internal data class ExportActionChrome(
 )
 
 /** Pure presentation seam — no domain/export IO. */
-internal fun exportActionChrome(busyFormat: ExportFormat?): ExportActionChrome {
-    val busy = busyFormat != null
+internal fun exportActionChrome(
+    busyFormat: ExportFormat?,
+    sharePending: Boolean = false,
+): ExportActionChrome {
     return ExportActionChrome(
         txtLabel = if (busyFormat == ExportFormat.Txt) "正在生成…" else "导出 TXT 并分享",
         pdfLabel = if (busyFormat == ExportFormat.Pdf) "正在生成…" else "导出 PDF 并分享",
         txtBusy = busyFormat == ExportFormat.Txt,
         pdfBusy = busyFormat == ExportFormat.Pdf,
-        controlsEnabled = !busy,
+        controlsEnabled = busyFormat == null && !sharePending,
     )
 }
 
@@ -96,7 +100,11 @@ internal data class ExportUiState(
     val pendingShare: PreparedExport? = null,
     val error: String? = null,
 ) {
+    /** True while file generation is running (not while sharesheet is pending). */
     val busy: Boolean get() = busyFormat != null
+
+    /** Double-submit / control lock: generating or waiting for sharesheet launch. */
+    val inFlight: Boolean get() = busyFormat != null || pendingShare != null
 }
 
 @HiltViewModel
@@ -114,7 +122,7 @@ class ExportViewModel @Inject constructor(
         format: ExportFormat,
         includePhotos: Boolean,
     ) {
-        if (_state.value.busy) return
+        if (_state.value.inFlight) return
         _state.update {
             it.copy(busyFormat = format, preview = null, pendingShare = null, error = null)
         }
@@ -142,8 +150,11 @@ class ExportViewModel @Inject constructor(
                 }
                 return@launch
             }
+            // Clear generate-busy when preview is ready; keep controls locked via pendingShare
+            // until shareLaunched / shareFailed so chrome is honest post-prep.
             _state.update {
                 it.copy(
+                    busyFormat = null,
                     preview = result.first,
                     pendingShare = result.second,
                     error = null,
@@ -210,7 +221,10 @@ fun ExportRoute(
         vm.exportRange(fromDate, toDate, format, includePhotos)
     }
 
-    val actions = exportActionChrome(state.busyFormat)
+    val actions = exportActionChrome(
+        busyFormat = state.busyFormat,
+        sharePending = state.pendingShare != null,
+    )
     val previewEnterMs = leziMotionMillis(LeziMotion.Base)
     val previewExitMs = leziMotionMillis(LeziMotion.Fast)
 

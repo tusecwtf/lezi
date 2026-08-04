@@ -41,8 +41,6 @@ import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Upload
-import com.lezi.babylog.designsystem.LeziAlertDialog
-import com.lezi.babylog.designsystem.LeziMenuIcon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -84,18 +82,20 @@ import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeMedium
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
-import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.core.ui.babyMetaLine
+import com.lezi.babylog.designsystem.LeziAlertDialog
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziMenuIcon
+import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziSurfacePanel
+import com.lezi.babylog.designsystem.LeziSwitch
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import com.lezi.babylog.designsystem.LeziTextButton
-import com.lezi.babylog.designsystem.LeziTextButtonTone
-import com.lezi.babylog.designsystem.LeziFilterChip
-import com.lezi.babylog.designsystem.LeziSecondaryButton
-import com.lezi.babylog.designsystem.LeziSwitch
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
@@ -603,7 +603,7 @@ fun SettingsRoute(
             )
             SettingsMenuRow(
                 "导出数据",
-                "TXT 文本预览与分享",
+                "PDF / TXT 导出与分享",
                 icon = Icons.Outlined.Upload,
                 actionLabel = "打开数据导出",
                 onClick = onOpenExport,
