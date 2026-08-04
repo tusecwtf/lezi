@@ -15,7 +15,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.NURSING_ORDER_CHOICES
 import com.lezi.babylog.core.model.NursingConfirmField
 import com.lezi.babylog.core.model.NursingConfirmInput
@@ -48,7 +47,8 @@ fun LeziNursingConfirmFields(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            // Sm (12dp) nearest named step to the prior 10.dp field gap (off-grid).
+            horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             NursingIntegerField(
                 value = input.leftMinutes,
@@ -70,13 +70,13 @@ fun LeziNursingConfirmFields(
             )
         }
 
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs)) {
             Text("喂养顺序", style = LeziTypography.Label)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
             ) {
                 NURSING_ORDER_CHOICES.forEachIndexed { index, (value, label) ->
                     LeziFilterChip(

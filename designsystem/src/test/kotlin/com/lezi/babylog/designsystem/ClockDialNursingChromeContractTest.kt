@@ -117,8 +117,13 @@ class ClockDialNursingChromeContractTest {
         assertTrue(fields.contains("KeyboardType.Number"))
     }
 
+    /**
+     * Match bare Material calls the same way as [UiAuditPathContractTest]:
+     * `(?<![A-Za-z])` so fully-qualified `material3.TextButton(` is banned too.
+     * Use a stronger form only when Lezi* prefixes collide (e.g. Button vs LeziPrimaryButton).
+     */
     private fun bareCall(name: String): Regex =
-        Regex("""(?<![A-Za-z.])$name\(""")
+        Regex("""(?<![A-Za-z])$name\(""")
 
     private fun read(relativePath: String): String =
         repositoryRoot().resolve(relativePath).readText()

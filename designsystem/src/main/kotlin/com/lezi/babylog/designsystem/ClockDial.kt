@@ -49,7 +49,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -478,7 +480,10 @@ private fun TimeSelectorBox(
             .clip(shape)
             .background(container)
             .clickable(onClick = onClick)
-            .semantics { this.contentDescription = contentDescription },
+            .semantics {
+                role = Role.Button
+                this.contentDescription = contentDescription
+            },
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -548,7 +553,11 @@ private fun PeriodToggleHalf(
     Box(
         modifier = modifier
             .background(if (selected) selectedContainer else Color.Transparent)
-            .clickable(onClick = onClick),
+            .clickable(onClick = onClick)
+            .semantics {
+                role = Role.Button
+                contentDescription = label
+            },
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -646,18 +655,6 @@ private fun formatClockDate(date: LocalDate): String =
 
 private fun formatClockTime(hour: Int, minute: Int): String =
     "%02d:%02d".format(hour.coerceIn(0, 23), minute.coerceIn(0, 59))
-
-/** Display helper with Chinese 上午/下午 for dial mode. */
-internal fun formatClockTime12h(hour: Int, minute: Int): String {
-    val h24 = hour.coerceIn(0, 23)
-    val period = if (h24 < 12) "上午" else "下午"
-    val h12 = when {
-        h24 == 0 -> 12
-        h24 > 12 -> h24 - 12
-        else -> h24
-    }
-    return "$period %d:%02d".format(h12, minute.coerceIn(0, 59))
-}
 
 @Preview(name = "Time dial right hand", widthDp = 390, heightDp = 844, showBackground = true)
 @Composable
