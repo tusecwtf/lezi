@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 可信 HTTPS、每设备会话、仅前台 reconcile/临时 plan/push |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.7：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push；见 ADR-0017 |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.6` |
-| versionCode | `13`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
+| versionName | `0.3.7` |
+| versionCode | `14`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
 | 本地数据契约 | 当前 `v3` / Room v26（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
@@ -148,9 +148,18 @@ UI 事件
 
 Owner 与 Member 使用同一对账优先次序。跨进程只持久化 Room 实体、媒体与修订回执，不持久化
 待发送 payload 队列；进程终止后丢弃临时 plan，下次成功对账后由当前 `syncDirty`/回执重新生成。
-浅层待同步数量来自仍需发布的 Room 实体，而不是历史请求残留。
+0.3.7 浅层待同步数量按 Baby+avatar、Record+photos、CarePlan+photos、CustomItem 与
+FulfillmentCandidate 原子单元投影，不再直接求和六类 Room dirty 行。
 升级完成后能在本机看到记录只证明数据保留；家庭侧可见性仍须等待首次成功的
 `pull/reconcile → plan → push`，运营验收不得把“本机可见”误报为“已发布到家庭”。
+
+### 3.1 已实现的权威收敛周期
+
+ADR-0017 在现有写路径之后执行：pull → 冻结 atomic units → 批量
+head-by-UUID 裁决 → 终结 confirmed/adopt/local-only/technical residue → 仅 publish verdict
+进入临时 plan → atomic bundle push。普通路径按本机待对账 UUID 取存在/缺失证明；
+generation/cursor 证明失效时才走全量实体快照。浅层待同步数量按未终态 atomic units 投影，
+静止且完整落库的周期必须把冻结集收敛到零；健康探测成功本身不能清状态。
 
 `FamilyServerAvailability` 是协调器私有网络门闩和家庭网络设置的结果态，不替代浅层
 `SyncStatus`。匿名客户端在可信 TLS 下并行检查 `/health`、`/ready` 与 setup capability，
@@ -284,7 +293,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
 | 服务端 API | 鉴权 `GET /v1/app-update`（JSON）与 `GET /v1/app-update/apk`（APK 字节）；与同步共用会话与 TLS/信任。**两者**仅在元数据 + APK sha256 已验证时返回成功体：半通道（仅元数据 / 哈希不符）对元数据路由诚实 404/5xx，避免客户端 dual-tier 把无包可装的 `min_supported` 当成强制升级 floor |
 | 门槛 | 仅当已验证更新通道（元数据 + APK sha256）存在时生效：头缺失或 `< minSupported` 时权威 sync 写/拉（pull / bundle / media 等）**以及灾难恢复写路径**（restore start / manifest / media / commit）返回 `code=client_update_required`；**仍放行**已验证通道上的更新元数据与 APK 下载。从未验证过、元数据缺失、或通道文件消失时同步/restore fail-open。原子 promote 中途（新 APK + 旧元数据哈希暂不符）保留 **last-known-good** floor 直至新 pair 验证成功，避免短暂降级到零门槛；负向 stamp 缓存避免半部署下每请求重哈希 APK |
-| 诚实客户端闸 | `X-Lezi-Client-Version-Code` / `minSupported` 是对**诚实官方 App** 的兼容闸：阻止半兼容旧客户端脏写，**不是**防篡改安全根。头可被非官方客户端伪造；**真协议硬闸**仍靠 setup-status **capabilities**、wire schema/payload 校验与已验证会话。服务端不对「伪造高 version 头」做强绑定证明（权威叙述；同步合同见 [sync-trusted-endpoint.md §7.4](./sync-trusted-endpoint.md)） |
+| 诚实客户端闸 | `X-Lezi-Client-Version-Code` / `minSupported` 是对**诚实官方 App** 的兼容闸：阻止半兼容旧客户端脏写，**不是**防篡改安全根。头可被非官方客户端伪造；**真协议硬闸**仍靠 setup-status **capabilities**、wire schema/payload 校验与已验证会话。服务端不对「伪造高 version 头」做强绑定证明（权威叙述；同步合同见 [sync-trusted-endpoint.md §7.5](./sync-trusted-endpoint.md)） |
 | 强制壳兜底 | `client_update_required` 后：元数据成功且 **versionCode &gt; local** → `ForcedAppUpdateState.WithPackage`（可安装 CTA，即使双档会判 optional）；元数据/通道失败或无更高 versionCode → **`PackageUnknown` 强制壳**（说明 +「重试检查更新」），`SyncStatus` 保持 Idle，**不得**呈现为泛同步/NAS 故障或「假正常」无强制层。已有强制态时，手动 `checkAppUpdate` 与同步 CUR 恢复共用：`versionCode &gt; local` 一律升为可安装 Forced；否则不得拆壳/刷 optional 横幅；`checkAppUpdate` **Result** 在壳保留时返回 `ForcedUpdate`/`ForcedPackageUnknown`（不得 bare UpToDate/Optional）；失败非 CUR 同步 **不** piggyback 拆壳；权威同步成功后的 piggyback 才可清壳；未加入家庭才清 surface。壳内可恢复会话（reauth）与 401 下载单次 refresh 重试；鉴权更新不可用且 origin 已知时给出 **8767** 局域网邀请安装引导；**无**「稍后」绕过主功能 |
 | wire 破坏纪律 | 封闭 wire / `schema_version` / allowlist 的破坏性变更 **必须先** 抬 `min_supported_version_code` 并发布已验证可安装包，再让新 shape 入站；**不**做 dual-read / skip-unknown 协议。当前 floor 与「支持范围内 wire 冻结」关系见下方 §4.2.1 与 [DEPLOY.md](../../tools/lezi-sync/deploy/DEPLOY.md) wire-break checklist |
 | 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；鉴权 `/v1/app-update*` 不设匿名旁路，同一已验证 APK 可由 §4.3 的隔离邀请安装页提供首装 |
@@ -297,8 +306,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 13,
-  "version_name": "0.3.6",
+  "version_code": 14,
+  "version_name": "0.3.7",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"

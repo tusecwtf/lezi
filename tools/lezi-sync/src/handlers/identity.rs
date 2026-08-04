@@ -28,9 +28,10 @@ use crate::store::{CreateFamilyInput, CreateMemberLoginRequestInput, StoreError}
 use crate::{
     authenticate, json_body, require_bootstrap_secret, require_owner, require_owner_root_password,
     run_blocking, secure_session_token, sync_directory, ApiError, AppState,
-    CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_DEVICE_SESSIONS, CAPABILITY_DISASTER_RESTORE,
-    CAPABILITY_MEMBERSHIP_DEVICES, CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
-    CAPABILITY_TRUSTED_HTTPS_ENDPOINT, MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
+    CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_AUTHORITATIVE_RECONCILE, CAPABILITY_DEVICE_SESSIONS,
+    CAPABILITY_DISASTER_RESTORE, CAPABILITY_MEMBERSHIP_DEVICES,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR, CAPABILITY_TRUSTED_HTTPS_ENDPOINT,
+    MEMBER_LOGIN_GRANT_TTL_SECONDS, SETUP_PROTOCOL_VERSION,
 };
 
 const REFRESH_REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-lezi-refresh-request-id");
@@ -58,6 +59,7 @@ pub(crate) async fn setup_status(State(state): State<Arc<AppState>>) -> Result<R
             CAPABILITY_ATOMIC_BUNDLE,
             CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
             CAPABILITY_DISASTER_RESTORE,
+            CAPABILITY_AUTHORITATIVE_RECONCILE,
         ],
         "family_state": family_state,
     }))

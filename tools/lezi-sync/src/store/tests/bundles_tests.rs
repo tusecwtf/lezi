@@ -2,9 +2,96 @@
 
 use super::super::*;
 use super::test_support::*;
+use crate::model::MAX_BUNDLE_MEDIA_ENTITIES;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[test]
+fn atomic_root_rejects_a_ninth_cumulative_live_media_item() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("lezi.db")).unwrap();
+    let family_id = family(&store);
+    let principal = owner_principal(&family_id);
+    let baby_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let record_payload = || {
+        json!({
+            "baby_client_uuid":baby_id,"type":"formula","timestamp":100,
+            "end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},
+            "schema_version":2
+        })
+    };
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "baby",
+            baby_id,
+            1,
+            json!({
+                "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                "avatar_media_uuid":null,"birth_weight_grams":3200
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+    let initial_media = (0..MAX_BUNDLE_MEDIA_ENTITIES)
+        .map(|_| {
+            entity(
+                "media",
+                Uuid::new_v4(),
+                2,
+                json!({
+                    "kind":"log","record_client_uuid":record_id,
+                    "mime":"image/jpeg","byte_size":3
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    publish_bundle(
+        &store,
+        &principal,
+        entity("record", record_id, 2, record_payload()),
+        initial_media,
+        10,
+    )
+    .unwrap();
+
+    let ninth_bundle_id = Uuid::new_v4().to_string();
+    let ninth = entity(
+        "media",
+        Uuid::new_v4(),
+        3,
+        json!({
+            "kind":"log","record_client_uuid":record_id,
+            "mime":"image/jpeg","byte_size":3
+        }),
+    );
+    let result = store.stage_bundle(
+        &principal,
+        &ninth_bundle_id,
+        entity("record", record_id, 3, record_payload()),
+        vec![ninth],
+        1_700_000_000,
+    );
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnresolvedReference(message))
+            if message == "atomic root supports at most 8 live media items"
+    ));
+    let pulled = store.pull(&family_id, 0).unwrap();
+    assert_eq!(
+        pulled
+            .entities
+            .iter()
+            .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+            .count(),
+        MAX_BUNDLE_MEDIA_ENTITIES
+    );
+}
 
 #[test]
 fn family_rejects_an_eleventh_live_custom_item() {

@@ -23,6 +23,7 @@ PY
 )"
 current_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '1p')"
 minimum_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '2p')"
+expected_signer_sha256="$(tr -d '\r\n' <"${REPO_ROOT}/config/release-apk-signer-sha256.txt")"
 
 apk_path="${test_root}/app-release.apk"
 printf 'lezi-fake-release-apk-bytes-for-gate-test\n' >"${apk_path}"
@@ -50,7 +51,8 @@ apk_signer="${test_root}/apksigner"
 cat >"${apk_signer}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" != "verify" || "${2:-}" != "--verbose" || "$#" -ne 3 ]]; then
+if [[ "${1:-}" != "verify" || "${2:-}" != "--verbose" \
+    || "${3:-}" != "--print-certs" || "$#" -ne 4 ]]; then
   echo "unexpected apksigner invocation: $*" >&2
   exit 64
 fi
@@ -59,6 +61,7 @@ if [[ "${LEZI_FAKE_APK_SIGNATURE_INVALID:-0}" == "1" ]]; then
   exit 1
 fi
 echo "Verifies"
+echo "Signer #1 certificate SHA-256 digest: ${LEZI_TEST_EXPECTED_SIGNER_SHA256:?}"
 EOF
 chmod +x "${apk_signer}"
 
@@ -86,6 +89,7 @@ write_meta "${bad_sha_json}" "${wrong_sha}" "wrong hash"
 run_check() {
   LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT="${current_local_data_contract}" \
     LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT="${minimum_local_data_contract}" \
+    LEZI_TEST_EXPECTED_SIGNER_SHA256="${expected_signer_sha256}" \
   LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
     LEZI_APK_ANALYZER="${apk_analyzer}" \
     LEZI_APK_SIGNER="${LEZI_TEST_APK_SIGNER:-${apk_signer}}" \

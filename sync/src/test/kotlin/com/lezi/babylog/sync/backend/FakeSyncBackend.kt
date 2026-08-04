@@ -137,6 +137,57 @@ class FakeSyncBackend : SyncBackend {
 
     override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
 
+    override suspend fun reconcile(
+        session: SyncSession,
+        units: List<ReconcileUnitDraft>,
+    ): ReconcileResult {
+        val family = rows[session.familyId].orEmpty()
+        return ReconcileResult(
+            generation = session.pullGeneration,
+            cursor = revision,
+            results = units.map { unit ->
+                val remote = family["${unit.root.type}:${unit.root.clientUuid}"]?.entity
+                val remoteMedia = family.values.map(Row::entity).filter { media ->
+                    if (media.type != "media") return@filter false
+                    when (unit.root.type) {
+                        "record" -> payloadString(media, "record_client_uuid") == unit.root.clientUuid
+                        "care_plan" ->
+                            payloadString(media, "care_plan_client_uuid") == unit.root.clientUuid
+                        "baby" -> payloadString(media, "baby_client_uuid") == unit.root.clientUuid &&
+                            mediaKind(media) == "avatar"
+                        else -> false
+                    }
+                }.sortedBy(SyncEntity::clientUuid)
+                val exact = remote == unit.root && remoteMedia == unit.media.sortedBy(
+                    SyncEntity::clientUuid,
+                )
+                val disposition = when {
+                    exact -> AuthorityDisposition.Confirmed
+                    remote != null && remote.updatedAt >= unit.root.updatedAt ->
+                        AuthorityDisposition.AdoptRemote
+                    remote == null && session.role == FamilyRole.Member &&
+                        unit.root.type == "baby" -> AuthorityDisposition.RemoteAbsentRejected
+                    else -> AuthorityDisposition.Publish
+                }
+                AuthorityResult(
+                    type = unit.root.type,
+                    clientUuid = unit.root.clientUuid,
+                    requestContentHash = unit.contentHash,
+                    disposition = disposition,
+                    reason = when (disposition) {
+                        AuthorityDisposition.Confirmed -> "canonical_equivalent"
+                        AuthorityDisposition.AdoptRemote -> "server_lww_winner"
+                        AuthorityDisposition.RemoteAbsentRejected -> "forbidden_baby"
+                        AuthorityDisposition.Publish -> "authoritative_absence"
+                        AuthorityDisposition.RetryAuthority -> "dependency_unresolved"
+                    },
+                    remoteRoot = remote,
+                    remoteMedia = remoteMedia,
+                )
+            },
+        )
+    }
+
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         require(session.membershipId.isNotBlank()) {
             "current session membershipId is required"

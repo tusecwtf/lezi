@@ -5,8 +5,8 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::{
-    AppState, CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_DISASTER_RESTORE,
-    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    AppState, CAPABILITY_ATOMIC_BUNDLE, CAPABILITY_AUTHORITATIVE_RECONCILE,
+    CAPABILITY_DISASTER_RESTORE, CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
 };
 
 /// HTTP route entrypoint — `pub(crate)` so crate-root `build_apps` can bind via
@@ -21,6 +21,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
             CAPABILITY_ATOMIC_BUNDLE,
             CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
             CAPABILITY_DISASTER_RESTORE,
+            CAPABILITY_AUTHORITATIVE_RECONCILE,
         ],
     }))
 }

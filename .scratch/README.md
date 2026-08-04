@@ -7,6 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
+| [`sync-authoritative-reconciliation`](./sync-authoritative-reconciliation/) | **implementation-complete** — 批量 head-by-UUID 权威裁决、dirty 终态收敛、local-only/技术清理与诚实 pending；等待双端真实服务与 NAS CD 验收 |
 | [`ui-drawing-polish-20260804`](./ui-drawing-polish-20260804/) | **complete** — designsystem chrome 清零、warm/journal 密度表、Lazy 列表、motion/稳定性、有界照片 LRU、空态与截图矩阵（01–13；smoke 矩阵见 tracker `smoke/`） |
 | [`sync-publish-reconcile-first`](./sync-publish-reconcile-first/) | **complete** — 客户端发表计划改为对账优先、临时 plan；Room 26 迁移保留旧 APK 数据与发布意图 |
 | [`family-sync-hang-and-account-fidelity`](./family-sync-hang-and-account-fidelity/) | **implementation-complete** — 0.3.5 已从 `149b7ae6` 部署；7 项保留 live/NAS/多设备验收 |

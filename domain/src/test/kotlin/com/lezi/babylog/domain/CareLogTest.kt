@@ -7489,6 +7489,14 @@ private class FakeFulfillmentCandidateDao : FulfillmentCandidateDao {
         }
     }
 
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = items.value.size
+        items.value = items.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - items.value.size
+    }
+
     override suspend fun markAllPendingSync() {
         items.value = items.value.map { it.copy(syncDirty = true) }
     }
@@ -7604,6 +7612,14 @@ private class FakeCarePlanDao : CarePlanDao {
                 it
             }
         }
+    }
+
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = items.value.size
+        items.value = items.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - items.value.size
     }
 
     override suspend fun markAllPendingSync() {
@@ -7723,6 +7739,14 @@ private class FakeCustomItemDao : CustomItemDao {
                 it
             }
         }
+    }
+
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = items.value.size
+        items.value = items.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - items.value.size
     }
 
     override suspend fun markAllPendingSync() {
@@ -8016,6 +8040,14 @@ private class FakeBabyDao : BabyDao {
         }
     }
 
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = items.value.size
+        items.value = items.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - items.value.size
+    }
+
     override suspend fun markAllPendingSync() {
         items.update { values -> values.map { it.copy(syncDirty = true) } }
     }
@@ -8213,6 +8245,14 @@ private class FakeRecordDao(
                 }
             }
         }
+    }
+
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = items.value.size
+        items.value = items.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - items.value.size
     }
 
     override suspend fun mergeCanonicalAuthor(

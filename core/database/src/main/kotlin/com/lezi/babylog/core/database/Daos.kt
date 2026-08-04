@@ -81,6 +81,14 @@ interface BabyDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    @Query(
+        """
+        DELETE FROM babies
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt AND deletedAt IS NOT NULL
+        """,
+    )
+    suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int
+
     /**
      * After an avatar (or baby+avatar) atomic package publishes elevated
      * [publishedUpdatedAt] for content epoch [expectedLocalUpdatedAt], CAS-align
@@ -308,6 +316,14 @@ interface RecordDao {
         """,
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Query(
+        """
+        DELETE FROM records
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt AND deletedAt IS NOT NULL
+        """,
+    )
+    suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int
 
     /**
      * Persist a successful atomic root commit without letting an old acknowledgement
@@ -643,6 +659,14 @@ interface CarePlanDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    @Query(
+        """
+        DELETE FROM care_plans
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt AND deletedAt IS NOT NULL
+        """,
+    )
+    suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int
+
     /** Record only successful atomic root commits; stale receipts never clean a newer edit. */
     @Transaction
     suspend fun acknowledgeFamilyPublishedVersion(
@@ -834,6 +858,14 @@ interface FulfillmentCandidateDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    @Query(
+        """
+        DELETE FROM fulfillment_candidates
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt AND deletedAt IS NOT NULL
+        """,
+    )
+    suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int
+
     @Query("UPDATE fulfillment_candidates SET syncDirty = 1")
     suspend fun markAllPendingSync()
 
@@ -912,6 +944,33 @@ interface MediaAssetDao {
         """,
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Query(
+        """
+        DELETE FROM media_assets
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt AND deletedAt IS NOT NULL
+        """,
+    )
+    suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int
+
+    @Query(
+        """
+        DELETE FROM media_assets
+        WHERE clientUuid = :clientUuid
+          AND updatedAt = :expectedUpdatedAt
+          AND localUri = :expectedLocalUri
+          AND (
+              (deletedAt IS NULL AND :expectedDeletedAt IS NULL)
+              OR deletedAt = :expectedDeletedAt
+          )
+        """,
+    )
+    suspend fun deleteExactRevision(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+    ): Int
 
     @Query(
         """

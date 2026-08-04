@@ -8,6 +8,8 @@ internal data class PublishCandidate(
     val payloadJson: String,
     val updatedAt: Long,
     val deletedAt: Long? = null,
+    /** Exact captured media path for reference-aware orphan CAS cleanup. */
+    val localMediaUri: String? = null,
 )
 
 /** In-memory only. Process death discards it; the next cycle rebuilds from Room. */

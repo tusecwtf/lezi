@@ -69,6 +69,14 @@ interface CustomItemDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    @Query(
+        """
+        DELETE FROM custom_items
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt AND deletedAt IS NOT NULL
+        """,
+    )
+    suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int
+
     @Query("UPDATE custom_items SET syncDirty = 1")
     suspend fun markAllPendingSync()
 

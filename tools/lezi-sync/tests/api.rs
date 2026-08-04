@@ -551,7 +551,8 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
         json!([
             "atomic_bundle",
             "record_membership_author",
-            "device_disaster_restore_v1"
+            "device_disaster_restore_v1",
+            "authoritative_reconcile_v1"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -877,6 +878,7 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "atomic_bundle",
                 "record_membership_author",
                 "device_disaster_restore_v1",
+                "authoritative_reconcile_v1",
             ],
             "family_state": "empty",
         })
@@ -908,6 +910,7 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "atomic_bundle",
                 "record_membership_author",
                 "device_disaster_restore_v1",
+                "authoritative_reconcile_v1",
             ],
             "family_state": "configured",
         })
@@ -9174,6 +9177,280 @@ async fn health_advertises_atomic_bundle_capability() {
         .unwrap()
         .iter()
         .any(|c| c == "atomic_bundle"));
+}
+
+#[tokio::test]
+async fn authoritative_reconcile_is_authenticated_bounded_and_generation_scoped() {
+    let rig = Rig::new();
+    let joined = create_family(
+        &rig.app,
+        "reconcile-owner-device",
+        "reconcile-owner-request-000000001",
+    )
+    .await;
+    let token = joined["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let unit = json!({
+        "content_hash": "frozen-local-hash",
+        "root": {
+            "type": "baby",
+            "client_uuid": baby_id,
+            "updated_at": 1000,
+            "deleted_at": null,
+            "payload": baby_payload("年年", None),
+        },
+        "media": [],
+    });
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({"generation": "generation-a", "units": [unit.clone()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["generation"], "generation-a");
+    assert_eq!(body["results"][0]["disposition"], "publish");
+    assert_eq!(body["results"][0]["reason"], "authoritative_absence");
+    assert_eq!(
+        body["results"][0]["request_content_hash"],
+        "frozen-local-hash"
+    );
+
+    let (unauthenticated, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        None,
+        json!({"generation": "generation-a", "units": [unit.clone()]}),
+    )
+    .await;
+    assert_eq!(unauthenticated, StatusCode::UNAUTHORIZED);
+
+    let (duplicate, duplicate_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({"generation": "generation-a", "units": [unit.clone(), unit]}),
+    )
+    .await;
+    assert_eq!(
+        duplicate,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{duplicate_body}"
+    );
+
+    let (drift, drift_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({"generation": "generation-old", "units": [{
+            "content_hash": "other",
+            "root": {
+                "type": "baby",
+                "client_uuid": Uuid::new_v4(),
+                "updated_at": 1000,
+                "deleted_at": null,
+                "payload": baby_payload("小宝", None),
+            },
+            "media": [],
+        }]}),
+    )
+    .await;
+    assert_eq!(drift, StatusCode::CONFLICT, "{drift_body}");
+    assert_eq!(drift_body["detail"]["code"], "generation_changed");
+}
+
+#[tokio::test]
+async fn authoritative_reconcile_is_rate_limited_per_authenticated_device() {
+    let rig = Rig::with_config(|config| {
+        config.reconcile_rate_limit = RateLimitConfig {
+            max_attempts: 1,
+            window_seconds: 60,
+        };
+    });
+    let joined = create_family(
+        &rig.app,
+        "reconcile-rate-device",
+        "reconcile-rate-request-0000000001",
+    )
+    .await;
+    let token = joined["access_token"].as_str().unwrap();
+    let request_body = json!({
+        "generation": "generation-a",
+        "units": [{
+            "content_hash": "rate-limited-frozen-hash",
+            "root": {
+                "type": "baby",
+                "client_uuid": Uuid::new_v4(),
+                "updated_at": 1000,
+                "deleted_at": null,
+                "payload": baby_payload("年年", None),
+            },
+            "media": [],
+        }],
+    });
+
+    let (first, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        request_body.clone(),
+    )
+    .await;
+    assert_eq!(first, StatusCode::OK);
+    let (limited, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        request_body,
+    )
+    .await;
+    assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS, "{body}");
+}
+
+#[tokio::test]
+async fn oversized_authoritative_reconcile_returns_a_structured_full_resync_checkpoint() {
+    let rig = Rig::with_config(|config| config.max_reconcile_response_bytes = 64);
+    let joined = create_family(
+        &rig.app,
+        "reconcile-size-device",
+        "reconcile-size-request-0000000001",
+    )
+    .await;
+    let token = joined["access_token"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "units": [{
+                "content_hash": "response-too-large",
+                "root": {
+                    "type": "baby",
+                    "client_uuid": Uuid::new_v4(),
+                    "updated_at": 1000,
+                    "deleted_at": null,
+                    "payload": baby_payload("年年", None),
+                },
+                "media": [],
+            }],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["detail"]["code"], "authority_response_too_large");
+    assert_eq!(body["detail"]["action"], "full_resync");
+    assert_eq!(body["detail"]["reset_cursor"], 0);
+    assert_eq!(body["detail"]["server_generation"], "generation-a");
+}
+
+#[tokio::test]
+async fn authoritative_reconcile_dependency_cycle_confirms_and_is_visible_to_peer() {
+    let rig = Rig::new();
+    let joined = create_family(
+        &rig.app,
+        "reconcile-cycle-owner",
+        "reconcile-cycle-request-00000001",
+    )
+    .await;
+    let token = joined["access_token"].as_str().unwrap();
+    let membership_id = joined["membership_id"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let baby_root = entity_wire("baby", &baby_id, 100, baby_payload("年年", None), None);
+    let mut record_body = record_payload(&baby_id);
+    record_body["created_by_membership_id"] = json!(membership_id);
+    let record_root = entity_wire("record", &record_id, 120, record_body, None);
+    let unit = |hash: &str, root: Value| json!({"content_hash": hash, "root": root, "media": []});
+
+    let (first_status, first) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "units": [
+                unit("baby-hash", baby_root.clone()),
+                unit("record-hash", record_root.clone()),
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::OK, "{first}");
+    assert_eq!(first["results"][0]["disposition"], "publish");
+    assert_eq!(first["results"][1]["disposition"], "retry_authority");
+    assert_eq!(first["results"][1]["reason"], "dependency_unresolved");
+
+    let (baby_status, baby_commit) = publish_root_bundle(&rig.app, token, baby_root.clone()).await;
+    assert_eq!(baby_status, StatusCode::OK, "{baby_commit}");
+
+    let (second_status, second) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "units": [unit("record-hash", record_root.clone())],
+        }),
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::OK, "{second}");
+    assert_eq!(second["results"][0]["disposition"], "publish");
+
+    let (record_status, record_commit) =
+        publish_root_bundle(&rig.app, token, record_root.clone()).await;
+    assert_eq!(record_status, StatusCode::OK, "{record_commit}");
+
+    let (confirmed_status, confirmed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "units": [
+                unit("baby-hash", baby_root),
+                unit("record-hash", record_root),
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(confirmed_status, StatusCode::OK, "{confirmed}");
+    assert!(confirmed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result["disposition"] == "confirmed"));
+
+    let peer = approve_new_member(&rig.app, token, "reconcile-cycle-peer").await;
+    let peer_token = peer["access_token"].as_str().unwrap();
+    let (pull_status, pulled) = get_json(
+        &rig.app,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(peer_token),
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::OK, "{pulled}");
+    let visible = pulled["entities"].as_array().unwrap();
+    assert!(visible
+        .iter()
+        .any(|entity| entity["type"] == "baby" && entity["client_uuid"] == baby_id));
+    assert!(visible
+        .iter()
+        .any(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id));
 }
 
 #[tokio::test]

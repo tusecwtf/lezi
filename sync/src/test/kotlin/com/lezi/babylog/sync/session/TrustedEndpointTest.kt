@@ -209,7 +209,7 @@ private fun currentSetupStatus(
     familyState: String,
     protocolVersion: Int = SETUP_PROTOCOL_VERSION,
 ): String =
-    """{"protocol_version":$protocolVersion,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author","device_disaster_restore_v1"],"family_state":"$familyState"}"""
+    """{"protocol_version":$protocolVersion,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author","device_disaster_restore_v1","authoritative_reconcile_v1"],"family_state":"$familyState"}"""
 
 private class RecordingSetupHttpTransport(
     var response: SetupHttpResponse = SetupHttpResponse(statusCode = 500, body = byteArrayOf()),

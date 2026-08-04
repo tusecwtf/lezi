@@ -19,7 +19,8 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0013](./0013-offline-migrate-is-maintenance-window-cutover.md) | offline-migrate 是已授权维护窗中的离线切割工具 | accepted |
 | [0014](./0014-owner-device-restores-only-empty-family-servers.md) | 只允许旧 Owner 设备恢复空家庭服务器 | accepted |
 | [0015](./0015-isolate-lan-invite-install-distribution.md) | 隔离家庭 LAN 邀请首装分发与可信同步 | accepted |
-| [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | accepted |
+| [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | partially superseded by ADR-0017（保留先对账/临时 plan，取代无 head 协议限制） |
+| [0017](./0017-authoritative-reconcile-settles-local-deltas.md) | 家庭服务器权威裁决必须终结本机待对账修改 | accepted |
 
 ## Numbering
 

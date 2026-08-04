@@ -30,6 +30,7 @@ const val CAPABILITY_TRUSTED_HTTPS_ENDPOINT = "trusted_https_endpoint_v1"
 const val CAPABILITY_DEVICE_SESSIONS = "device_sessions_v1"
 const val CAPABILITY_MEMBERSHIP_DEVICES = "membership_devices_v1"
 const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
+const val CAPABILITY_AUTHORITATIVE_RECONCILE = "authoritative_reconcile_v1"
 const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
 const val CAPABILITY_DISASTER_RESTORE = "device_disaster_restore_v1"
 
@@ -449,4 +450,5 @@ private val REQUIRED_SETUP_CAPABILITIES = setOf(
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
+    CAPABILITY_AUTHORITATIVE_RECONCILE,
 )

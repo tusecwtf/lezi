@@ -51,4 +51,4 @@ See [ISSUES.md](./ISSUES.md). Dependency order: **01 → 02**; **03–06** indep
 ## Source audit
 
 - `docs/reviews/2026-08-04-apk-upgrade-gate-and-sync-compat-audit.md` (local)
-- PRD: `docs/prd/tech.md` §4.2, `docs/prd/sync-trusted-endpoint.md` §7.4
+- PRD: `docs/prd/tech.md` §4.2, `docs/prd/sync-trusted-endpoint.md` §7.5

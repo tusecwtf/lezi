@@ -191,9 +191,10 @@ docker buildx build \
 | `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | 唯一 Owner 根密码；create、Owner 登录/接管要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
 | `LEZI_MEMBER_REQUEST_RATE_LIMIT` | `10` | 每个来源地址每窗口的成员申请上限 |
+| `LEZI_RECONCILE_RATE_LIMIT` | `120` | 每个家庭成员设备每窗口的权威对账请求上限 |
 | `LEZI_MEMBER_REQUEST_TTL_HOURS` | `24` | 成员申请有效期；当前协议固定为 24 |
 | `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多开放的 pending + approved-unclaimed 成员申请数 |
-| `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/成员申请限流窗口秒数 |
+| `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/成员申请/权威对账限流窗口秒数 |
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
 

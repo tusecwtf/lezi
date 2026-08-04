@@ -96,6 +96,30 @@ internal class FakeMediaAssetDao : MediaAssetDao {
         }
     }
 
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = items.size
+        items.removeAll {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - items.size
+    }
+
+    override suspend fun deleteExactRevision(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+    ): Int {
+        val before = items.size
+        items.removeAll {
+            it.clientUuid == clientUuid &&
+                it.updatedAt == expectedUpdatedAt &&
+                it.localUri == expectedLocalUri &&
+                it.deletedAt == expectedDeletedAt
+        }
+        return before - items.size
+    }
+
     override suspend fun listMissingLocalBytes(): List<MediaAssetEntity> =
         items.filter {
             it.deletedAt == null && it.remoteUri != null && it.localUri.isEmpty()

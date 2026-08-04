@@ -4,18 +4,41 @@ import androidx.room.Dao
 import androidx.room.Query
 import kotlinx.coroutines.flow.Flow
 
-/** Projects publication work directly from the authoritative Room replicas. */
+/** Projects unresolved family work as atomic units, never as raw dirty rows. */
 @Dao
 interface PendingPublishDao {
     @Query(
         """
-        SELECT
-            (SELECT COUNT(*) FROM babies WHERE syncDirty = 1) +
-            (SELECT COUNT(*) FROM records WHERE syncDirty = 1) +
-            (SELECT COUNT(*) FROM care_plans WHERE syncDirty = 1) +
-            (SELECT COUNT(*) FROM fulfillment_candidates WHERE syncDirty = 1) +
-            (SELECT COUNT(*) FROM media_assets WHERE syncDirty = 1) +
-            (SELECT COUNT(*) FROM custom_items WHERE syncDirty = 1)
+        SELECT COUNT(*) FROM (
+            SELECT 'baby:' || b.clientUuid AS unitKey
+            FROM babies b
+            WHERE b.syncDirty = 1 OR EXISTS (
+                SELECT 1 FROM media_assets m
+                WHERE m.babyId = b.id AND m.kind = 'avatar' AND m.syncDirty = 1
+            )
+            UNION ALL
+            SELECT 'record:' || r.clientUuid
+            FROM records r
+            WHERE r.syncDirty = 1 OR EXISTS (
+                SELECT 1 FROM media_assets m
+                WHERE m.recordId = r.id AND m.kind = 'log' AND m.syncDirty = 1
+            )
+            UNION ALL
+            SELECT 'care_plan:' || p.clientUuid
+            FROM care_plans p
+            WHERE p.syncDirty = 1 OR EXISTS (
+                SELECT 1 FROM media_assets m
+                WHERE m.carePlanId = p.id AND m.kind = 'log' AND m.syncDirty = 1
+            )
+            UNION ALL
+            SELECT 'custom_item:' || c.clientUuid
+            FROM custom_items c
+            WHERE c.syncDirty = 1
+            UNION ALL
+            SELECT 'fulfillment_candidate:' || f.clientUuid
+            FROM fulfillment_candidates f
+            WHERE f.syncDirty = 1
+        )
         """,
     )
     fun observeCount(): Flow<Int>

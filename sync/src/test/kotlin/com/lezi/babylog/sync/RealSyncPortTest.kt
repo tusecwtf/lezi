@@ -71,6 +71,8 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
+import com.lezi.babylog.sync.backend.AuthorityDisposition
+import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
@@ -86,6 +88,8 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
+import com.lezi.babylog.sync.backend.ReconcileResult
+import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -2758,7 +2762,7 @@ class RealSyncPortTest {
         assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.backend.pullCursors).containsExactly(0L)
         assertThat(rig.backend.syncOrder)
-            .containsExactly("pull:0", "stage:baby")
+            .containsExactly("pull:0", "reconcile:1", "stage:baby")
             .inOrder()
         assertThat(rig.port.session().first().pullCursor).isEqualTo(7L)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
@@ -3976,7 +3980,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun deletedBabyPackageOmitsLiveOrphanAvatarAndForcesNullPointer() = runTest {
+    fun deletedBabyPackageRepairsLiveOrphanAvatarAndForcesNullPointer() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.babies.seed(
             localBaby().copy(
@@ -4036,15 +4040,18 @@ class RealSyncPortTest {
         assertThat(babyBundle.root.deletedAt).isEqualTo(deletedAt)
         val rootPayload = Json.parseToJsonElement(babyBundle.root.payloadJson).jsonObject
         assertThat(rootPayload["avatar_media_uuid"]).isEqualTo(JsonNull)
-        assertThat(babyBundle.media.map(SyncEntity::clientUuid)).containsExactly(tombstoneUuid)
-        assertThat(babyBundle.media.single().deletedAt).isEqualTo(deletedAt)
-        // Live orphan stays local and dirty until a later domain repair tombstones it.
-        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.deletedAt).isNull()
-        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.syncDirty).isTrue()
+        assertThat(babyBundle.media.map(SyncEntity::clientUuid))
+            .containsExactly(liveOrphanUuid, tombstoneUuid)
+        assertThat(babyBundle.media.single { it.clientUuid == liveOrphanUuid }.deletedAt)
+            .isEqualTo(200)
+        // The invalid live avatar is deterministically repaired as a technical
+        // tombstone; the deleted Baby never regains a live pointer.
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.deletedAt).isEqualTo(200)
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.syncDirty).isFalse()
     }
 
     @Test
-    fun liveOrphanAvatarIsSkippedWithoutAbortingLaterPublishCandidates() = runTest {
+    fun liveOrphanAvatarIsTombstonedWithoutAbortingLaterPublishCandidates() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val liveOrphanUuid = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
         val deletedAt = 450L
@@ -4087,15 +4094,12 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        // Media stays local dirty for domain repair.
-        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.deletedAt).isNull()
-        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.syncDirty).isTrue()
-        assertThat(
-            rig.backend.stagedBundles.none { draft ->
-                draft.media.any { it.clientUuid == liveOrphanUuid } ||
-                    draft.root.clientUuid == liveOrphanUuid
-            },
-        ).isTrue()
+        // A deleted-Baby live avatar is technical residue: publish its
+        // tombstone atomically, then clear it from pending.
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.deletedAt).isEqualTo(200)
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.syncDirty).isFalse()
+        assertThat(rig.backend.stagedBundles.flatMap { it.media }.map(SyncEntity::clientUuid))
+            .contains(liveOrphanUuid)
         // Later residual (custom_item) still pushes; poison row did not abort the batch.
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .contains("custom-after-orphan")
@@ -5319,8 +5323,8 @@ class RealSyncPortTest {
         assertThat(baby.syncDirty).isFalse()
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .contains("baby-local")
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
-            .isEqualTo("downloaded/$mediaUuid")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri).isEmpty()
+        assertThat(rig.mediaFiles.deleted).contains("downloaded/$mediaUuid")
     }
 
     @Test
@@ -5804,7 +5808,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun memberNeverPushesLocalAvatarMetadataOrBytes() = runTest {
+    fun memberNeverPushesLocalAvatarBytesAndSettlesRejectedMetadata() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(role = FamilyRole.Member),
         )
@@ -5831,7 +5835,7 @@ class RealSyncPortTest {
 
         assertThat(rig.backend.pushes).isEmpty()
         assertThat(rig.backend.mediaUploads).isEmpty()
-        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isTrue()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
     }
 
     @Test
@@ -8889,6 +8893,9 @@ internal class RecordingSyncBackend : SyncBackend {
     val pullFailures = ArrayDeque<Throwable>()
     val pushFailures = ArrayDeque<Throwable>()
     val pullCursors = mutableListOf<Long>()
+    val reconciledUnits = mutableListOf<List<ReconcileUnitDraft>>()
+    var nextReconcile: ReconcileResult? = null
+    var onReconcile: (suspend (List<ReconcileUnitDraft>) -> Unit)? = null
     var afterPush: (() -> Unit)? = null
     var afterCommit: (suspend () -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
@@ -8981,6 +8988,7 @@ internal class RecordingSyncBackend : SyncBackend {
             "atomic_bundle",
             "record_membership_author",
             "device_disaster_restore_v1",
+            "authoritative_reconcile_v1",
         ),
     )
     var anonymousReadyResult = AnonymousReadiness(version = "0.3.3")
@@ -9341,6 +9349,38 @@ internal class RecordingSyncBackend : SyncBackend {
             cursor = session.pullCursor,
             generation = session.pullGeneration,
             hasMore = false,
+        )
+    }
+
+    override suspend fun reconcile(
+        session: SyncSession,
+        units: List<ReconcileUnitDraft>,
+    ): ReconcileResult {
+        reconciledUnits += units
+        syncOrder += "reconcile:${units.size}"
+        onReconcile?.invoke(units)
+        return nextReconcile ?: ReconcileResult(
+            generation = session.pullGeneration,
+            cursor = session.pullCursor,
+            results = units.map { unit ->
+                val isMemberLocalBaby = session.role == FamilyRole.Member &&
+                    unit.root.type == "baby"
+                AuthorityResult(
+                    type = unit.root.type,
+                    clientUuid = unit.root.clientUuid,
+                    requestContentHash = unit.contentHash,
+                    disposition = if (isMemberLocalBaby) {
+                        AuthorityDisposition.RemoteAbsentRejected
+                    } else {
+                        AuthorityDisposition.Publish
+                    },
+                    reason = if (isMemberLocalBaby) {
+                        "member_local_baby"
+                    } else {
+                        "authoritative_absence"
+                    },
+                )
+            },
         )
     }
 
@@ -9950,13 +9990,15 @@ private class TestRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
 internal open class TestMediaFileStore : SyncMediaFileStore {
     val deleted = mutableListOf<String>()
     val existing = linkedSetOf<String>()
+    val missing = linkedSetOf<String>()
     val sweepCalls = mutableListOf<Pair<LocalDataClearScope, Set<String>>>()
     val deleteFailures = ArrayDeque<Throwable>()
     var afterInspect: (suspend () -> Unit)? = null
     var afterSaveDownloaded: (suspend () -> Unit)? = null
 
-    override suspend fun inspect(localUri: String): LocalMediaInfo {
+    override suspend fun inspect(localUri: String): LocalMediaInfo? {
         afterInspect?.also { afterInspect = null }?.invoke()
+        if (localUri in missing) return null
         return LocalMediaInfo(byteSize = 12, mime = "image/jpeg", width = 10, height = 10)
     }
 
@@ -10254,6 +10296,14 @@ internal class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
         }
     }
 
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = rows.value.size
+        rows.value = rows.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - rows.value.size
+    }
+
     override suspend fun markAllPendingSync() {
         rows.value = rows.value.map { it.copy(syncDirty = true) }
     }
@@ -10360,6 +10410,14 @@ internal class MemoryCarePlanDao : CarePlanDao {
         }
     }
 
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = rows.value.size
+        rows.value = rows.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - rows.value.size
+    }
+
     override suspend fun markAllPendingSync() {
         rows.value = rows.value.map { it.copy(syncDirty = true) }
     }
@@ -10457,6 +10515,14 @@ internal class MemoryCustomItemDao : CustomItemDao {
                 it
             }
         }
+    }
+
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = rows.size
+        rows.removeAll {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - rows.size
     }
 
     override suspend fun markAllPendingSync() {
@@ -10593,6 +10659,14 @@ internal class MemoryBabyDao : BabyDao {
                 it
             }
         }
+    }
+
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = rows.value.size
+        rows.value = rows.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - rows.value.size
     }
 
     override suspend fun markAllPendingSync() {
@@ -10753,6 +10827,14 @@ internal class MemoryRecordDao : RecordDao {
         }
     }
 
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        val before = rows.value.size
+        rows.value = rows.value.filterNot {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - rows.value.size
+    }
+
     override suspend fun mergeCanonicalAuthor(
         clientUuid: String,
         expectedUpdatedAt: Long,
@@ -10860,6 +10942,7 @@ internal class MemoryRecordDao : RecordDao {
 internal class MemoryMediaDao : MediaAssetDao {
     private val rows = mutableListOf<MediaAssetEntity>()
     private val ids = AtomicLong(1)
+    var failNextTombstoneDelete: Boolean = false
 
     fun seed(entity: MediaAssetEntity): Long {
         val id = entity.id.takeIf { it != 0L } ?: ids.getAndIncrement()
@@ -10904,6 +10987,36 @@ internal class MemoryMediaDao : MediaAssetDao {
                 it
             }
         }
+    }
+
+    override suspend fun deleteTombstoneRevision(clientUuid: String, updatedAt: Long): Int {
+        if (failNextTombstoneDelete) {
+            failNextTombstoneDelete = false
+            return 0
+        }
+        val before = rows.size
+        rows.removeAll {
+            it.clientUuid == clientUuid && it.updatedAt == updatedAt && it.deletedAt != null
+        }
+        return before - rows.size
+    }
+
+    override suspend fun deleteExactRevision(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+    ): Int {
+        val before = rows.size
+        rows.removeAll {
+            it.matchesPublishedRevision(
+                expectedClientUuid = clientUuid,
+                expectedUpdatedAt = expectedUpdatedAt,
+                expectedLocalUri = expectedLocalUri,
+                expectedDeletedAt = expectedDeletedAt,
+            )
+        }
+        return before - rows.size
     }
 
     override suspend fun listMissingLocalBytes(): List<MediaAssetEntity> =

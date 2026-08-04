@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,6 +15,53 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class FreshDatabaseTest {
+    @Test
+    fun pendingProjectionCountsAtomicRootsInsteadOfPhotoRows() = runBlocking {
+        val db = openDatabase("pending-atomic-units")
+        val babyId = db.babyDao().upsert(
+            BabyEntity(
+                familyId = 1,
+                nickname = "年年",
+                birthdayEpochDay = 20_000,
+                themeColorArgb = 0,
+                clientUuid = "baby-pending-count",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        val recordId = db.recordDao().upsert(
+            RecordEntity(
+                clientUuid = "record-pending-count",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        repeat(2) { index ->
+            db.mediaAssetDao().upsert(
+                MediaAssetEntity(
+                    recordId = recordId,
+                    clientUuid = "media-pending-count-$index",
+                    kind = "log",
+                    localUri = "photos/$index.jpg",
+                    createdAt = 100,
+                    updatedAt = 100,
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertEquals(1, db.pendingPublishDao().observeCount().first())
+
+        db.recordDao().markSynced("record-pending-count", 100)
+        db.mediaAssetDao().listForRecord(recordId).forEach {
+            db.mediaAssetDao().markSynced(it.clientUuid, it.updatedAt)
+        }
+        assertEquals(0, db.pendingPublishDao().observeCount().first())
+    }
+
     private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
     private var database: LeziDatabase? = null
     private val databaseNames = mutableSetOf<String>()

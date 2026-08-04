@@ -25,6 +25,43 @@ data class PullResult(
     val familyName: String? = null,
 )
 
+enum class AuthorityDisposition {
+    Confirmed,
+    Publish,
+    AdoptRemote,
+    RemoteAbsentRejected,
+    RetryAuthority,
+}
+
+data class ReconcileUnitDraft(
+    val contentHash: String,
+    val root: SyncEntity,
+    val media: List<SyncEntity> = emptyList(),
+)
+
+data class AuthorityResult(
+    val type: String,
+    val clientUuid: String,
+    val requestContentHash: String,
+    val disposition: AuthorityDisposition,
+    val reason: String,
+    val remoteContentHash: String? = null,
+    val remoteRoot: SyncEntity? = null,
+    val remoteMedia: List<SyncEntity> = emptyList(),
+)
+
+data class ReconcileResult(
+    val generation: String,
+    val cursor: Long,
+    val results: List<AuthorityResult>,
+)
+
+/** A syntactically successful response that cannot prove every frozen authority key. */
+class AuthorityProofException(
+    val serverGeneration: String,
+    cause: IllegalArgumentException,
+) : IllegalStateException("家庭服务器权威裁决证明无效，必须全量重建", cause)
+
 /** Server-owned Record author returned after an accepted atomic commit. */
 data class CanonicalRecordAuthor(
     val clientUuid: String,
@@ -406,6 +443,10 @@ interface SyncBackend {
     ): SessionBootstrapResult = throw UnsupportedOperationException("Member login grant claim is not implemented")
 
     suspend fun pull(session: SyncSession): PullResult
+    suspend fun reconcile(
+        session: SyncSession,
+        units: List<ReconcileUnitDraft>,
+    ): ReconcileResult = throw UnsupportedOperationException("Authoritative reconcile is not implemented")
     suspend fun members(session: SyncSession): List<FamilyMember>
     /** Owner updates immediately; ordinary Member receives a pending approval request. */
     suspend fun updateMyDisplayName(

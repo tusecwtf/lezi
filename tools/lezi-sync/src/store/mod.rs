@@ -20,6 +20,7 @@ mod bundles;
 mod identity;
 mod media;
 mod pull;
+mod reconciliation;
 mod restore;
 mod schema;
 
@@ -163,6 +164,42 @@ pub struct PullPage {
     pub family_name: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReconcileUnit {
+    pub root: Entity,
+    pub media: Vec<Entity>,
+    /// Opaque client-computed identity for the frozen local package.
+    pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileDisposition {
+    Confirmed,
+    Publish,
+    AdoptRemote,
+    RemoteAbsentRejected,
+    RetryAuthority,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReconcileResult {
+    pub entity_type: String,
+    pub client_uuid: String,
+    pub request_content_hash: String,
+    pub disposition: ReconcileDisposition,
+    pub reason: String,
+    pub remote_content_hash: Option<String>,
+    pub remote_root: Option<Entity>,
+    pub remote_media: Vec<Entity>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReconcileBatch {
+    pub cursor: i64,
+    pub results: Vec<ReconcileResult>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RecordAuthor {
     pub client_uuid: String,
@@ -287,6 +324,8 @@ pub enum StoreError {
     BundleMediaIncomplete,
     #[error("bundle root is not newer than the published version")]
     BundleRootNotNewer,
+    #[error("authoritative reconcile batch is invalid")]
+    InvalidReconcileBatch,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

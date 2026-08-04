@@ -236,11 +236,68 @@ class LocalDataContractMigrationDeviceTest {
         retry.verify()
     }
 
+    @Test
+    fun released036Room26DirtyShapeOpensIn037WithoutWipingCareOrMedia() = runBlocking {
+        migrationHelper.createDatabase(DATABASE_NAME, 26).apply {
+            execSQL(
+                """
+                INSERT INTO babies(
+                    id, familyId, nickname, birthdayEpochDay, themeColorArgb, sortOrder,
+                    clientUuid, updatedAt, syncDirty, familyAuthority
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(1L, 7L, "本机宝宝", 20_000L, 0L, 0L, BABY_UUID, 100L, 1, 0),
+            )
+            execSQL(
+                """
+                INSERT INTO records(
+                    id, clientUuid, babyId, type, timestamp, payloadJson, schemaVersion,
+                    updatedAt, syncDirty, createdByMembershipId
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(1L, RECORD_UUID, 1L, "formula", 100L, "{\"amount_ml\":80}", 2, 120L, 1, ""),
+            )
+            execSQL(
+                """
+                INSERT INTO media_assets(
+                    id, recordId, clientUuid, kind, localUri, byteSize,
+                    createdAt, updatedAt, syncDirty
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(1L, 1L, MEDIA_UUID, "log", "retained-036.jpg", 4L, 120L, 120L, 1),
+            )
+            close()
+        }
+        val retainedMedia = File(storage.recordMedia, "retained-036.jpg").apply {
+            parentFile?.mkdirs()
+            writeBytes(byteArrayOf(1, 2, 3, 4))
+        }
+
+        val room = Room.databaseBuilder(
+            context,
+            LeziDatabase::class.java,
+            DATABASE_NAME,
+        ).build()
+        openedDatabase = room
+
+        assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.familyAuthority).isFalse()
+        assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.syncDirty).isTrue()
+        assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.payloadJson)
+            .isEqualTo("{\"amount_ml\":80}")
+        assertThat(room.mediaAssetDao().getByClientUuid(MEDIA_UUID)?.localUri)
+            .isEqualTo("retained-036.jpg")
+        assertThat(room.pendingPublishDao().observeCount().first()).isEqualTo(2)
+        assertThat(retainedMedia.readBytes().toList())
+            .containsExactlyElementsIn(byteArrayOf(1, 2, 3, 4).toList())
+            .inOrder()
+    }
+
     private companion object {
         const val DATABASE_NAME = "local-data-contract-migration.db"
         const val SETTINGS_STORE_NAME = "local_data_contract_migration_settings"
         const val CLIENT_UUID = "11111111-1111-4111-8111-111111111111"
         const val BABY_UUID = "22222222-2222-4222-8222-222222222222"
         const val RECORD_UUID = "33333333-3333-4333-8333-333333333333"
+        const val MEDIA_UUID = "44444444-4444-4444-8444-444444444444"
     }
 }

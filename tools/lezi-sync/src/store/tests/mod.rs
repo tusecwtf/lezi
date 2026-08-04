@@ -3,5 +3,6 @@
 mod bundles_tests;
 mod identity_login_tests;
 mod pull_tests;
+mod reconciliation_tests;
 mod schema_tests;
 mod test_support;

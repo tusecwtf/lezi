@@ -31,6 +31,257 @@ import com.lezi.babylog.sync.session.requireMemberDisplayName
 
 class HttpSyncBackendTest {
     @Test
+    fun reconcilePostsFrozenUnitsAndParsesCompleteTypedVerdicts() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-reconcile-test-server") {
+            server.accept().use { socket ->
+                captured.complete(readRequest(socket))
+                val body =
+                    """{"generation":"generation-a","cursor":9,"results":[{"entity_type":"record","client_uuid":"r1","request_content_hash":"hash-r1","disposition":"adopt_remote","reason":"server_lww_winner","remote_content_hash":"remote-hash","remote_root":{"type":"record","client_uuid":"r1","updated_at":2,"deleted_at":null,"payload":{"baby_client_uuid":"b1"}},"remote_media":[]}]}"""
+                        .toByteArray(Charsets.UTF_8)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+
+        try {
+            val result = loopbackBackend().reconcile(
+                testSession(server),
+                listOf(
+                    ReconcileUnitDraft(
+                        contentHash = "hash-r1",
+                        root = SyncEntity(
+                            type = "record",
+                            clientUuid = "r1",
+                            payloadJson = """{"baby_client_uuid":"b1"}""",
+                            updatedAt = 1,
+                        ),
+                    ),
+                ),
+            )
+
+            assertThat(result.cursor).isEqualTo(9)
+            assertThat(result.results.single().disposition)
+                .isEqualTo(AuthorityDisposition.AdoptRemote)
+            assertThat(result.results.single().remoteRoot?.updatedAt).isEqualTo(2)
+            val request = captured.get(2, TimeUnit.SECONDS)
+            assertThat(request).startsWith("POST /v1/reconcile ")
+            assertThat(request).contains("Authorization: Bearer family-token")
+            assertThat(request.substringAfter("\n\n")).contains("\"generation\":\"generation-a\"")
+            assertThat(request.substringAfter("\n\n")).doesNotContain("media_bytes")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun reconcileRejectsACursorOlderThanThePulledCheckpoint() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-reconcile-stale-cursor-test-server") {
+            server.accept().use { socket ->
+                readRequest(socket)
+                val body =
+                    """{"generation":"generation-a","cursor":8,"results":[{"entity_type":"record","client_uuid":"r1","request_content_hash":"hash-r1","disposition":"confirmed","reason":"canonical_equivalent","remote_root":null,"remote_media":[]}]}"""
+                        .toByteArray(Charsets.UTF_8)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+
+        try {
+            val failure = runCatching {
+                loopbackBackend().reconcile(
+                    testSession(server).copy(pullCursor = 9),
+                    listOf(
+                        ReconcileUnitDraft(
+                            contentHash = "hash-r1",
+                            root = SyncEntity(
+                                type = "record",
+                                clientUuid = "r1",
+                                payloadJson = """{"baby_client_uuid":"b1"}""",
+                                updatedAt = 1,
+                            ),
+                        ),
+                    ),
+                )
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(AuthorityProofException::class.java)
+            assertThat(failure).hasCauseThat().hasMessageThat().contains("游标")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun reconcileRejectsANonMediaEntitySmuggledInsideRemoteMedia() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-reconcile-smuggled-media-test-server") {
+            server.accept().use { socket ->
+                readRequest(socket)
+                val body =
+                    """{"generation":"generation-a","cursor":9,"results":[{"entity_type":"record","client_uuid":"r1","request_content_hash":"hash-r1","disposition":"adopt_remote","reason":"server_lww_winner","remote_root":{"type":"record","client_uuid":"r1","updated_at":2,"deleted_at":null,"payload":{"baby_client_uuid":"b1"}},"remote_media":[{"type":"record","client_uuid":"r2","updated_at":2,"deleted_at":null,"payload":{"baby_client_uuid":"b1"}}]}]}"""
+                        .toByteArray(Charsets.UTF_8)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+
+        try {
+            val failure = runCatching {
+                loopbackBackend().reconcile(
+                    testSession(server),
+                    listOf(
+                        ReconcileUnitDraft(
+                            contentHash = "hash-r1",
+                            root = SyncEntity(
+                                type = "record",
+                                clientUuid = "r1",
+                                payloadJson = """{"baby_client_uuid":"b1"}""",
+                                updatedAt = 1,
+                            ),
+                        ),
+                    ),
+                )
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(AuthorityProofException::class.java)
+            assertThat(failure).hasCauseThat().hasMessageThat().contains("必须是 media")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun reconcileRejectsConfirmedWithoutCompleteCanonicalEvidence() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-reconcile-incomplete-confirmed-test-server") {
+            server.accept().use { socket ->
+                readRequest(socket)
+                val body =
+                    """{"generation":"generation-a","cursor":9,"results":[{"entity_type":"record","client_uuid":"r1","request_content_hash":"hash-r1","disposition":"confirmed","reason":"canonical_equivalent","remote_root":null,"remote_media":[]}]}"""
+                        .toByteArray(Charsets.UTF_8)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+
+        try {
+            val failure = runCatching {
+                loopbackBackend().reconcile(
+                    testSession(server),
+                    listOf(
+                        ReconcileUnitDraft(
+                            contentHash = "hash-r1",
+                            root = SyncEntity(
+                                type = "record",
+                                clientUuid = "r1",
+                                payloadJson = """{"baby_client_uuid":"b1"}""",
+                                updatedAt = 1,
+                            ),
+                        ),
+                    ),
+                )
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(AuthorityProofException::class.java)
+            assertThat(failure).hasCauseThat().hasMessageThat().contains("canonical root")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun reconcileRejectsBabyManifestThatDoesNotMatchTheAvatarPointer() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-reconcile-avatar-pointer-test-server") {
+            server.accept().use { socket ->
+                readRequest(socket)
+                val body =
+                    """{"generation":"generation-a","cursor":9,"results":[{"entity_type":"baby","client_uuid":"b1","request_content_hash":"hash-b1","disposition":"adopt_remote","reason":"server_lww_winner","remote_content_hash":"remote-hash","remote_root":{"type":"baby","client_uuid":"b1","updated_at":2,"deleted_at":null,"payload":{"avatar_media_uuid":"a1"}},"remote_media":[{"type":"media","client_uuid":"a2","updated_at":2,"deleted_at":null,"payload":{"kind":"avatar","baby_client_uuid":"b1"}}]}]}"""
+                        .toByteArray(Charsets.UTF_8)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+
+        try {
+            val failure = runCatching {
+                loopbackBackend().reconcile(
+                    testSession(server),
+                    listOf(
+                        ReconcileUnitDraft(
+                            contentHash = "hash-b1",
+                            root = SyncEntity(
+                                type = "baby",
+                                clientUuid = "b1",
+                                payloadJson = """{"avatar_media_uuid":null}""",
+                                updatedAt = 1,
+                            ),
+                        ),
+                    ),
+                )
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(AuthorityProofException::class.java)
+            assertThat(failure).hasCauseThat().hasMessageThat().contains("avatar_media_uuid")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun stalledMediaUploadDisconnectsAndFailsWithIOException() = runTest {
         val connection = BlockingUploadConnection()
         val backend = HttpSyncBackend(

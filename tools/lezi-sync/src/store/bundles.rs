@@ -291,6 +291,40 @@ fn load_family_custom_items(
     Ok(existing)
 }
 
+fn load_family_media(
+    transaction: &Transaction<'_>,
+    family_id: &str,
+) -> Result<HashMap<EntityKey, ExistingEntity>, StoreError> {
+    let mut statement = transaction.prepare(
+        "
+        SELECT client_uuid, updated_at, deleted_at, payload_json
+        FROM entities
+        WHERE family_id = ?1 AND entity_type = 'media'
+        ",
+    )?;
+    let rows = statement.query_map(params![family_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut existing = HashMap::new();
+    for row in rows {
+        let (client_uuid, updated_at, deleted_at, payload_json) = row?;
+        existing.insert(
+            ("media".to_owned(), client_uuid),
+            ExistingEntity {
+                updated_at,
+                deleted_at,
+                payload: parse_payload(&payload_json)?,
+            },
+        );
+    }
+    Ok(existing)
+}
+
 /// Rewrite or drop `sync_bundles` rows that still reference a departed membership.
 ///
 /// Called from membership hard-delete inside the same SQLite transaction. Staging
@@ -1188,6 +1222,39 @@ fn validate_push(
         }
     }
 
+    let bounded_roots = entities
+        .iter()
+        .filter(|entity| matches!(entity.entity_type.as_str(), "baby" | "record" | "care_plan"))
+        .map(|entity| (entity.entity_type.clone(), entity.client_uuid.clone()))
+        .chain(
+            entities
+                .iter()
+                .filter(|entity| entity.entity_type == "media")
+                .map(|entity| media_association(&entity.payload))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter_map(|association| media_root_key(&association)),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut live_media_counts = HashMap::<EntityKey, usize>::new();
+    for (association, deleted_at, _) in effective_media.values() {
+        if deleted_at.is_none() {
+            if let Some(root_key) = media_root_key(association) {
+                if bounded_roots.contains(&root_key) {
+                    *live_media_counts.entry(root_key).or_default() += 1;
+                }
+            }
+        }
+    }
+    if live_media_counts
+        .values()
+        .any(|count| *count > MAX_BUNDLE_MEDIA_ENTITIES)
+    {
+        return Err(StoreError::UnresolvedReference(format!(
+            "atomic root supports at most {MAX_BUNDLE_MEDIA_ENTITIES} live media items"
+        )));
+    }
+
     for entity in entities
         .iter()
         .filter(|entity| entity.entity_type == "baby")
@@ -1222,6 +1289,102 @@ fn validate_push(
         }
     }
     Ok(())
+}
+
+/// Dry-run the same canonicalization, ACL, immutable-evidence, reference, and
+/// atomic-package rules that commit applies. Reconciliation calls this while
+/// holding its own Store transaction; no staging or entity row is written.
+pub(in crate::store) fn validate_reconcile_package(
+    transaction: &Transaction<'_>,
+    principal: &Principal,
+    mut package: Vec<Entity>,
+    max_updated_at: i64,
+    now: i64,
+) -> Result<(), StoreError> {
+    let Principal {
+        family_id,
+        role,
+        membership_id,
+        ..
+    } = principal;
+    let root = package
+        .iter()
+        .find(|entity| entity.entity_type != "media")
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    if role != "owner" && root.entity_type == "baby" {
+        return Err(StoreError::ForbiddenBaby);
+    }
+    if package
+        .iter()
+        .any(|entity| entity.updated_at > max_updated_at)
+    {
+        return Err(StoreError::TimestampOutOfRange);
+    }
+    let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
+    let mut existing = load_existing_entities(transaction, family_id, &incoming_keys)?;
+    existing.extend(load_family_custom_items(transaction, family_id)?);
+    existing.extend(load_family_media(transaction, family_id)?);
+    stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
+    let noop_care_plan_ids =
+        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
+    discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
+    canonicalize_equal_lww_bundle_root(&mut package, &existing);
+    canonicalize_record_authors(role, membership_id, &mut package, &existing)?;
+    let confirmed_at = package
+        .iter()
+        .find(|entity| entity.entity_type == "fulfillment_candidate")
+        .and_then(|entity| entity.payload.get("confirmed_at"))
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| confirmed_at_millis(now));
+    stamp_and_authorize_fulfillment_candidates(
+        role,
+        membership_id,
+        confirmed_at,
+        &mut package,
+        &existing,
+    )?;
+    let mut effective = effective_lww_winners(package.clone(), &existing);
+    stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
+    let noop_care_plan_ids =
+        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+    discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
+    stamp_and_authorize_fulfillment_candidates(
+        role,
+        membership_id,
+        confirmed_at,
+        &mut effective,
+        &existing,
+    )?;
+    let reference_keys = validation_reference_keys(&effective);
+    let missing_references = reference_keys
+        .difference(&incoming_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    existing.extend(load_existing_entities(
+        transaction,
+        family_id,
+        &missing_references,
+    )?);
+    let persisted = existing.clone();
+    let fulfillment_custom_references =
+        load_fulfillment_custom_references(transaction, family_id, &effective)?;
+    for entity in &package {
+        existing
+            .entry(entity_key(entity))
+            .or_insert_with(|| ExistingEntity {
+                updated_at: entity.updated_at,
+                deleted_at: entity.deleted_at,
+                payload: entity.payload.clone(),
+            });
+    }
+    validate_push(
+        role,
+        membership_id,
+        &effective,
+        &existing,
+        &persisted,
+        &fulfillment_custom_references,
+    )
 }
 
 fn validate_custom_item_reference(
@@ -1302,6 +1465,26 @@ fn media_association(payload: &Map<String, Value>) -> Result<MediaAssociation, S
         .and_then(Value::as_str)
         .map(str::to_owned);
     Ok((kind, record, baby, care_plan))
+}
+
+fn media_root_key(association: &MediaAssociation) -> Option<EntityKey> {
+    match association.0.as_str() {
+        "avatar" => association
+            .2
+            .as_ref()
+            .map(|uuid| ("baby".to_owned(), uuid.clone())),
+        "log" => association
+            .1
+            .as_ref()
+            .map(|uuid| ("record".to_owned(), uuid.clone()))
+            .or_else(|| {
+                association
+                    .3
+                    .as_ref()
+                    .map(|uuid| ("care_plan".to_owned(), uuid.clone()))
+            }),
+        _ => None,
+    }
 }
 
 impl Store {
@@ -1387,6 +1570,7 @@ impl Store {
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         existing.extend(load_family_custom_items(&transaction, family_id)?);
+        existing.extend(load_family_media(&transaction, family_id)?);
         stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // CarePlan collision authorization must inspect the caller's creator
         // claim before equal-LWW canonicalization replaces it with the published
@@ -1740,6 +1924,7 @@ impl Store {
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         existing.extend(load_family_custom_items(&transaction, family_id)?);
+        existing.extend(load_family_media(&transaction, family_id)?);
         stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // A competing CarePlan can publish after this bundle was staged. Inspect
         // the complete staged package before LWW removes an equal/stale root so a

@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 13,
-  "version_name": "0.3.6",
+  "version_code": 14,
+  "version_name": "0.3.7",
   "min_supported_version_code": 6,
-  "sha256": "63b0354c1083d4a761a0bc8207b794e0d7d5ad1132a8f689f3f71929a8ae3ebe",
-  "release_notes": "0.3.6 将家庭发布改为先对账再生成临时计划，并在升级时安全转交旧待发布记录"
+  "sha256": "39583b85646806b56762bf42d486b73721f0932615db86f22aafbb8eacc368ea",
+  "release_notes": "0.3.7 引入服务端权威对账，原子收敛待同步记录与照片，并安全保留 0.3.6 本地数据"
 }

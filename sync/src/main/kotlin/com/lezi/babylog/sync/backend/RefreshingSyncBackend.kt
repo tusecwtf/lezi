@@ -40,6 +40,11 @@ internal class RefreshingSyncBackend(
     override suspend fun pull(session: SyncSession): PullResult =
         authenticated(session, delegate::pull)
 
+    override suspend fun reconcile(
+        session: SyncSession,
+        units: List<ReconcileUnitDraft>,
+    ): ReconcileResult = authenticated(session) { delegate.reconcile(it, units) }
+
     override suspend fun members(session: SyncSession): List<FamilyMember> =
         authenticated(session, delegate::members)
 

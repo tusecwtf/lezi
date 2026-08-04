@@ -3,10 +3,14 @@
 > 决策锁定：2026-07-31（连续 grilling，用户逐项确认）
 > 实现基线：`39426a037986df574d16b0512a3db10f7c225382`
 > 架构决策：[ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)、
-> [ADR-0014](../adr/0014-owner-device-restores-only-empty-family-servers.md)
+> [ADR-0014](../adr/0014-owner-device-restores-only-empty-family-servers.md)、
+> [ADR-0017](../adr/0017-authoritative-reconcile-settles-local-deltas.md)
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
-本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选由 ADR-0016 的 reconcile-first 临时计划生成。
+> 权威裁决扩展状态：0.3.7 已实现批量 head-by-UUID 裁决、Android 冻结/CAS 终结与
+> atomic pending 投影；发布验收证据由本地 tracker 固定到实际构建与联调结果。
+
+本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选按 ADR-0016 的先对账临时计划与 ADR-0017 的权威终态裁决生成。
 
 ## 1. 一句话合同
 
@@ -19,7 +23,7 @@ ping 和 health 都不再充当身份或同步门闩。
 | 主题 | 目标合同 |
 |------|----------|
 | 产品拓扑 | 单家庭、单服务实例、同一时刻一个写入 authority |
-| 客户端真相源 | Room；所有写入先落 Room dirty，再在前台对账并临时规划发布 |
+| 客户端真相源 | Room；所有写入先落 Room 待对账，前台取得服务端 typed disposition 后才临时规划发布 |
 | 服务器位置 | 家庭 NAS 或单实例 VPS；App 不感知部署类型 |
 | 网络 | 任意可用网络；不读取、存储、展示或匹配 SSID/BSSID |
 | 传输 | 生产 HTTPS only；VPS 用系统 PKI，家庭自签名服务用用户确认的 TOFU/SPKI |
@@ -234,20 +238,34 @@ session，不影响 membership 和其它设备。
 只保留以下触发器，并共用一个 sync mutex 与前台 availability 协调器：
 
 - App 回到前台；
-- 本地事实写入成功（只通知“有待发布内容”，不在写入调用栈执行网络）；
+- 本地事实写入成功（只通知“有待对账修改”，不在写入调用栈执行网络）；
 - 记录、汇总、成长页进入时的节流刷新；
 - 用户在记录、汇总、成长页下拉刷新。
 
 健康探测不要求公网 `VALIDATED`，只要求 Android 网络可用与可信 TLS。`/health`、`/ready`
 和 setup capability 匿名并行验证，总等待不超过 8 秒且不得携带 access/refresh token 或家庭
-数据。健康成功产生 30 秒租约；失败使用 30 秒/2 分钟/10 分钟退避。本地写事件只合并待发布
+数据。健康成功产生 30 秒租约；失败使用 30 秒/2 分钟/10 分钟退避。本地写事件只合并待对账
 信号，不打破失败退避；回前台、网络恢复和下拉刷新可以立即探测。进入后台停止探测和同步。
 
 前三项是静默自动同步，不是用户主动发起的「同步动作」，也不增加任何 UI 入口。用户可主动
 触发的「立即同步」只有记录、汇总、成长三页的下拉刷新；账户页无同步按钮、独立同步页或
 同步状态卡，也不提供「仅 Wi-Fi」偏好。网络失败后使用有界退避；本地写入永不等待同步成功。
 
-### 7.2 浅状态
+### 7.2 权威裁决与收敛
+
+健康租约只允许发起同步，不证明家庭事实已对账。每个 Owner/Member 周期在增量 pull 后冻结
+当前待对账 atomic units，并通过经过认证、有界的批量 head-by-UUID 请求取得同一
+generation/cursor 下的 canonical head/absence 与 typed disposition。普通路径只查询本机冻结
+UUID；generation 变化、cursor 证明失效、响应不完整或服务端明确要求时，必须以全量实体快照
+重建权威，不能把“本次增量没看到”当成不存在。
+
+confirmed 精确清状态；adopt_remote 采用家庭权威；remote_absent_rejected 再按本机内容性质映射：
+keep_local_only 保留用户事实但退出家庭 pending，discard_technical 只清无业务所有者的技术
+残留；publish 才进入临时 atomic bundle。
+所有终结写与 commit 回执都使用冻结修订 CAS。暂时网络/5xx/authority 未知保留待对账，但该
+周期不得宣称已收敛。静止周期完成后冻结集没有未终态单元，浅层 pending 为零。
+
+### 7.3 浅状态
 
 账户、记录、汇总、成长页可以显示同一结果向的一行状态：
 
@@ -259,7 +277,10 @@ session，不影响 membership 和其它设备。
 不展示 IP、端口、token、server ID、trust mode、内部枚举或登录历史。详细错误应转译为用户能
 处理的动作；信任不一致使用独立阻断页，而不是普通网络错误。
 
-### 7.3 失败策略
+待同步数量按未终态 atomic units 计算，不直接求和 Room dirty 行；本机保留内容、系统日历、
+cleanup marker、已裁决技术残留不进入该数字。
+
+### 7.4 失败策略
 
 | 失败 | 本地与会话处理 |
 |------|----------------|
@@ -271,10 +292,10 @@ session，不影响 membership 和其它设备。
 | `device_removed` | 清当前设备的全部本地家庭数据 |
 | `membership_deleted` | 清当前设备的全部本地家庭数据 |
 | `family_deleted` | 清当前设备的全部本地家庭数据 |
-| 非法发布操作 403 | 单项终止并解释；不阻断普通 pull |
+| 永久 ACL/非法发布 | 有远端 head 则采用远端；无远端的用户事实转本机保留，纯技术残留清理；不得永久 dirty 重试 |
 | `client_update_required` | 本机 versionCode 缺失或低于服务器 `min_supported_version_code`；**映射为强制升级 UI**（有包 → 可安装强制态；元数据暂缺 → `PackageUnknown` 强制壳 + 重试检查），不得呈现为普通网络/NAS 故障或无强制层的「假正常」；本地 Room 与会话保留；更新检查与 APK 下载仍可用 |
 
-## 7.4 客户端版本门槛与自托管更新
+## 7.5 客户端版本门槛与自托管更新
 
 家庭服务器可对已部署的 release 客户端抬高最低 versionCode，避免破坏性协议下旧客户端半兼容
 脏写。本通道是**自托管应用内更新**（`PackageInstaller` + 鉴权 APK），**不是** Google Play
@@ -337,6 +358,9 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 - authenticated session summary：从 credential 返回 canonical family/membership/device/role；
 - bundle push/pull/media：沿用原子同步和服务端 ACL；并在请求头 versionCode 低于 minSupported 时
   以 `client_update_required` 拒绝；
+- authenticated reconcile：对有界 atomic-unit 批次返回同一 generation/cursor 的
+  canonical head/absence、hash、typed disposition 与稳定 reason；复用 Store 的 LWW/ACL/
+  tombstone/履行冻结/atomic bundle 规则，不接受请求体自报权限，不传媒体 bytes；
 - authenticated app-update：`GET /v1/app-update` 返回部署元数据 JSON；`GET /v1/app-update/apk`
   在 sha256 与元数据一致时提供 release APK；均需设备会话，不设匿名旁路；
 - invite install：独立 LAN HTTP Router 只能提供无家庭信息的 `/join` 与经同一 SHA-256 校验的
@@ -389,8 +413,9 @@ Room dirty/发布回执或 media。
 11. 自托管更新：无会话不能拉元数据/APK；已加入可检查；低于 minSupported 时权威同步失败且
     UI 进入强制升级，同时仍可下载安装；打包缺 release APK 失败；升级后应用私有目录无 APK 残留
     （系统安装器缓存不在承诺范围）。
-12. NAS 断开或 roster 请求永久挂起时，Room 首屏与全部本地护理写入仍完成；恢复健康后待发布
-    内容自动收敛。候选地址失败可证明旧配置未变，不同 family ID 被阻断。
+12. NAS 断开或 roster 请求永久挂起时，Room 首屏与全部本地护理写入仍完成；恢复后完成经过
+    认证的权威裁决，冻结 atomic units 全部终态且静止 pending=0。健康成功但裁决未落库不能
+    误报已同步；候选地址失败可证明旧配置未变，不同 family ID 被阻断。
 13. 隔离空 0.3.5 服务可完成 Owner 设备灾难恢复、重启续传与幂等 commit；非空服务、普通成员、
     manifest/media 篡改和过期批次都 fail closed，且不在现有家庭 NAS 执行破坏性恢复测试。
 14. 普通 NAS CD 前后 TLS SPKI 完全一致；缺失/无效/错配/不可读身份使部署失败。证书生成、
@@ -398,7 +423,8 @@ Room dirty/发布回执或 media。
 
 ## 12. 文档与代码处置
 
-- 本文、ADR-0011 与 ADR-0014 是当前合同；ADR-0009、ADR-0010 已被取代。
+- 本文、ADR-0011、ADR-0014 与 ADR-0017 是当前合同；ADR-0009、ADR-0010 已被取代，
+  ADR-0016 的无 head/full-snapshot 限制被 ADR-0017 取代但先对账/临时 plan 仍有效。
 - 旧 `sync-home-lan` 合同已删除；不得据 git 历史中的旧文恢复旧 wire、配置或界面。
 - 0.3.1 已完成 fresh-current 收口：生产只保留可信 HTTPS、每设备会话、成员申请/审批与
   单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。

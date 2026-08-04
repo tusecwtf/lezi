@@ -339,4 +339,46 @@ class MediaAssetCasRoomTest {
         assertEquals(99L, matched.byteSize)
         assertEquals("sync://family/media-match", matched.remoteUri)
     }
+
+    @Test
+    fun orphanCleanupDeletesOnlyTheExactCapturedRevision() = runBlocking {
+        dao.upsert(
+            MediaAssetEntity(
+                id = 0,
+                recordId = 99,
+                clientUuid = "media-orphan-cas",
+                localUri = "/local/original.jpg",
+                createdAt = 1,
+                updatedAt = 20,
+                syncDirty = true,
+            ),
+        )
+        dao.update(
+            requireNotNull(dao.getByClientUuid("media-orphan-cas")).copy(
+                localUri = "/local/concurrent.jpg",
+                updatedAt = 21,
+            ),
+        )
+
+        assertEquals(
+            0,
+            dao.deleteExactRevision(
+                clientUuid = "media-orphan-cas",
+                expectedUpdatedAt = 20,
+                expectedLocalUri = "/local/original.jpg",
+                expectedDeletedAt = null,
+            ),
+        )
+        assertEquals("/local/concurrent.jpg", dao.getByClientUuid("media-orphan-cas")?.localUri)
+        assertEquals(
+            1,
+            dao.deleteExactRevision(
+                clientUuid = "media-orphan-cas",
+                expectedUpdatedAt = 21,
+                expectedLocalUri = "/local/concurrent.jpg",
+                expectedDeletedAt = null,
+            ),
+        )
+        assertNull(dao.getByClientUuid("media-orphan-cas"))
+    }
 }
