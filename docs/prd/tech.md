@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.7：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push；见 ADR-0017 |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.8：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push；见 ADR-0017 |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,7 +32,7 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.7` |
+| versionName | `0.3.8` |
 | versionCode | `14`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
 | 本地数据契约 | 当前 `v3` / Room v26（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
@@ -148,7 +148,7 @@ UI 事件
 
 Owner 与 Member 使用同一对账优先次序。跨进程只持久化 Room 实体、媒体与修订回执，不持久化
 待发送 payload 队列；进程终止后丢弃临时 plan，下次成功对账后由当前 `syncDirty`/回执重新生成。
-0.3.7 浅层待同步数量按 Baby+avatar、Record+photos、CarePlan+photos、CustomItem 与
+0.3.8 浅层待同步数量按 Baby+avatar、Record+photos、CarePlan+photos、CustomItem 与
 FulfillmentCandidate 原子单元投影，不再直接求和六类 Room dirty 行。
 升级完成后能在本机看到记录只证明数据保留；家庭侧可见性仍须等待首次成功的
 `pull/reconcile → plan → push`，运营验收不得把“本机可见”误报为“已发布到家庭”。
@@ -306,8 +306,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 14,
-  "version_name": "0.3.7",
+  "version_code": 15,
+  "version_name": "0.3.8",
   "min_supported_version_code": 6,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"

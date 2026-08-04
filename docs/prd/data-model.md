@@ -6,7 +6,7 @@
 > [ADR-0012](../adr/0012-preserve-android-local-data-across-in-place-upgrades.md)。
 > 主 PRD：[`README.md`](./README.md)
 >
-> **当前身份与网络合同（0.3.7）：** 历史的一设备一 membership、`left_at`、长期
+> **当前身份与网络合同（0.3.8）：** 历史的一设备一 membership、`left_at`、长期
 > credential、网络名称/明文传输的 0.3 实现说明已由
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 和
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
@@ -524,7 +524,7 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 
 ### 3.12 权威裁决与临时发布计划
 
-> 当前合同：ADR-0017 已实现；0.3.7 保留 ADR-0016 的 Room-first、先 pull、临时计划、
+> 当前合同：ADR-0017 已实现；0.3.8 保留 ADR-0016 的 Room-first、先 pull、临时计划、
 > atomic bundle 与修订 CAS，并以批量权威裁决取代 raw-dirty 直接发布。
 
 发布计划不是 Room 表，也不跨进程保存 payload。每个已加入家庭的同步周期先增量 pull，再把
@@ -756,7 +756,7 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前契约 v3（0.3.7 / versionCode 14）仍为 Room v26，通过
+相邻升级；当前契约 v3（0.3.8 / versionCode 15）仍为 Room v26，通过
 `OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含 LocalUser、Family、
 Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、CustomItemDef、CarePlan 与 FulfillmentCandidate，
 并使用真实 `SyncPort` 和 Record/计划媒体原子包。后续本地数据契约必须通过相邻迁移链保留
