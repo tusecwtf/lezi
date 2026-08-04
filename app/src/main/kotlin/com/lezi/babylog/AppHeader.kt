@@ -373,20 +373,39 @@ private fun AnimatedSleepMoonCap(
     }
 }
 
+/** Decorative sleep-cap bob period; non-essential shell motion (frozen under reduce-motion). */
+private const val SleepCapBobMs = 1_400
+
 @Composable
 private fun SleepMoonCap(
     modifier: Modifier = Modifier,
 ) {
-    val motion = rememberInfiniteTransition(label = "sleepCapMotion")
-    val bob by motion.animateFloat(
-        initialValue = 0f,
-        targetValue = -1.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1_400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "sleepCapBob",
-    )
+    // Continuous bob is non-essential shell decoration. Under reduce-motion
+    // (leziMotionMillis Fast == 0), skip InfiniteTransition entirely so the
+    // enter path's instant fade is not undercut by a looping ornament.
+    val reduceMotion = leziMotionMillis(LeziMotion.Fast) == 0
+    if (reduceMotion) {
+        SleepMoonCapCanvas(bob = 0f, modifier = modifier)
+    } else {
+        val motion = rememberInfiniteTransition(label = "sleepCapMotion")
+        val bob by motion.animateFloat(
+            initialValue = 0f,
+            targetValue = -1.2f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = SleepCapBobMs, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "sleepCapBob",
+        )
+        SleepMoonCapCanvas(bob = bob, modifier = modifier)
+    }
+}
+
+@Composable
+private fun SleepMoonCapCanvas(
+    bob: Float,
+    modifier: Modifier = Modifier,
+) {
     val capColor = com.lezi.babylog.designsystem.LeziColors.SleepMoonCap
     val capEdge = com.lezi.babylog.designsystem.LeziColors.SleepMoonCapEdge
     val moonColor = com.lezi.babylog.designsystem.LeziColors.SleepMoon

@@ -7,6 +7,10 @@ import org.junit.Test
 /**
  * Public token contracts for shared motion durations and template density scales.
  * Expected durations are product ms literals; density pads are [LeziSpacing] steps.
+ *
+ * [LeziMotion.nonEssentialMillis] is the pure policy seam exercised here.
+ * Compose [leziMotionMillis] / [leziMotionDurationScale] apply that policy to a
+ * live [LeziMotion.systemAnimatorDurationScale] read (device smoke in androidTest).
  */
 class MotionDensityTokensTest {
     @Test
@@ -31,6 +35,22 @@ class MotionDensityTokensTest {
         assertEquals(300, LeziMotion.nonEssentialMillis(LeziMotion.Emphasized, motionDurationScale = 1f))
         // Do not pre-scale by partial factors — Compose animation clock owns that.
         assertEquals(200, LeziMotion.nonEssentialMillis(LeziMotion.Base, motionDurationScale = 0.5f))
+    }
+
+    @Test
+    fun `systemAnimatorDurationScale seam feeds the same nonEssentialMillis policy`() {
+        // Thin testable path for what leziMotionMillis does after reading Settings:
+        // scale → nonEssentialMillis(token, scale). Stub scales 0/1 without Android
+        // Settings (instrumented smoke covers the ContentResolver read separately).
+        fun resolveFromScale(tokenMs: Int, scale: Float): Int =
+            LeziMotion.nonEssentialMillis(tokenMs = tokenMs, motionDurationScale = scale)
+
+        assertEquals(0, resolveFromScale(LeziMotion.Base, scale = 0f))
+        assertEquals(0, resolveFromScale(LeziMotion.Fast, scale = 0f))
+        assertEquals(0, resolveFromScale(LeziMotion.Emphasized, scale = 0f))
+        assertEquals(LeziMotion.Fast, resolveFromScale(LeziMotion.Fast, scale = 1f))
+        assertEquals(LeziMotion.Base, resolveFromScale(LeziMotion.Base, scale = 1f))
+        assertEquals(LeziMotion.Emphasized, resolveFromScale(LeziMotion.Emphasized, scale = 1f))
     }
 
     @Test

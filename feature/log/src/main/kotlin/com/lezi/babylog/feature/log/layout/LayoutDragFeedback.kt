@@ -1,10 +1,7 @@
 package com.lezi.babylog.feature.log.layout
+
 import com.lezi.babylog.designsystem.LeziMotion
-import com.lezi.babylog.feature.log.*
-import com.lezi.babylog.feature.log.timeline.*
-import com.lezi.babylog.feature.log.dock.*
-import com.lezi.babylog.feature.log.composer.*
-import com.lezi.babylog.feature.log.photo.*
+
 internal sealed interface LayoutDragFeedbackState {
     data object Idle : LayoutDragFeedbackState
 
@@ -136,6 +133,12 @@ internal fun reduceLayoutDragFeedback(
     }
 }
 
+/**
+ * Pure duration for layout-drag visual pulse. Same policy as shell
+ * [com.lezi.babylog.designsystem.leziMotionMillis]: [LeziMotion.nonEssentialMillis]
+ * with [LeziMotion.Fast]. Pass the product scale from
+ * [LeziMotion.systemAnimatorDurationScale] (or the live Compose helper).
+ */
 internal fun layoutDragFeedbackDurationMillis(motionDurationScale: Float): Int =
     LeziMotion.nonEssentialMillis(
         tokenMs = LeziMotion.Fast,

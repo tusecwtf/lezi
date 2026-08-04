@@ -1,12 +1,20 @@
 package com.lezi.babylog.designsystem
 
+import android.content.ContentResolver
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
@@ -137,6 +145,13 @@ object LeziSpacing {
  * Reduce-motion: [nonEssentialMillis] returns `0` when the system motion duration
  * scale is ≤ 0 so non-essential transitions are instant while state still swaps.
  * Partial scales are left to the Compose animation clock (do not pre-multiply).
+ *
+ * **Scale source of truth:** product policy reads
+ * [Settings.Global.ANIMATOR_DURATION_SCALE] via [systemAnimatorDurationScale]
+ * (live in Compose through [leziMotionDurationScale]). Compose
+ * [androidx.compose.ui.MotionDurationScale] is the same system signal when present
+ * on a coroutine context; both must feed [nonEssentialMillis] only — never a
+ * parallel duration table. This BOM has no public `LocalMotionDurationScale`.
  */
 @Immutable
 object LeziMotion {
@@ -151,36 +166,75 @@ object LeziMotion {
      * Resolve a token duration for a **non-essential** transition.
      *
      * @param tokenMs one of [Fast], [Base], or [Emphasized] (or a positive ms value)
-     * @param motionDurationScale system / Compose [androidx.compose.ui.MotionDurationScale]
-     *   factor; ≤ 0 means reduce-motion / animations disabled
+     * @param motionDurationScale system animator duration scale (or Compose
+     *   [androidx.compose.ui.MotionDurationScale.scaleFactor]); ≤ 0 means
+     *   reduce-motion / animations disabled
      * @return `0` (instant) when scale ≤ 0; otherwise [tokenMs] unchanged
      */
     fun nonEssentialMillis(tokenMs: Int, motionDurationScale: Float): Int =
         if (motionDurationScale <= 0f) 0 else tokenMs
+
+    /**
+     * Product reduce-motion scale from [Settings.Global.ANIMATOR_DURATION_SCALE].
+     * Default `1f` when the setting is absent (no [Settings.SettingNotFoundException]).
+     * Prefer this (or [leziMotionDurationScale] in Compose) over a second parallel
+     * scale table; coroutine [androidx.compose.ui.MotionDurationScale] is the same
+     * system flag when injected by the platform.
+     */
+    fun systemAnimatorDurationScale(contentResolver: ContentResolver): Float =
+        Settings.Global.getFloat(
+            contentResolver,
+            Settings.Global.ANIMATOR_DURATION_SCALE,
+            1f,
+        )
+}
+
+/**
+ * Live system animator-duration scale for Compose call sites.
+ *
+ * Reads [LeziMotion.systemAnimatorDurationScale] and re-reads when
+ * [Settings.Global.ANIMATOR_DURATION_SCALE] changes (ContentObserver), so
+ * shell captures flip if the user toggles Remove animations mid-session.
+ * Compose's animation clock still scales non-zero tweens independently.
+ */
+@Composable
+fun leziMotionDurationScale(): Float {
+    val context = LocalContext.current
+    val resolver = context.contentResolver
+    var scale by remember(resolver) {
+        mutableFloatStateOf(LeziMotion.systemAnimatorDurationScale(resolver))
+    }
+    DisposableEffect(resolver) {
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                scale = LeziMotion.systemAnimatorDurationScale(resolver)
+            }
+        }
+        resolver.registerContentObserver(
+            Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE),
+            false,
+            observer,
+        )
+        // Re-read after register in case the setting changed between remember and now.
+        scale = LeziMotion.systemAnimatorDurationScale(resolver)
+        onDispose {
+            resolver.unregisterContentObserver(observer)
+        }
+    }
+    return scale
 }
 
 /**
  * Compose-side read of [LeziMotion.nonEssentialMillis] for non-essential shell
- * transitions. Snapshots system [Settings.Global.ANIMATOR_DURATION_SCALE]
- * (Compose BOM here has no public `LocalMotionDurationScale`; the animation
- * clock still scales tween specs independently). Capture once per composable
- * and close over the result in non-@Composable `transitionSpec` /
- * `enterTransition` lambdas.
+ * transitions. Uses live [leziMotionDurationScale] (Settings.Global product
+ * signal; no public `LocalMotionDurationScale` on this BOM). Capture the result
+ * per composition and close over it in non-@Composable `transitionSpec` /
+ * `enterTransition` lambdas so mid-session accessibility toggles update the
+ * next transition.
  */
 @Composable
 fun leziMotionMillis(tokenMs: Int): Int {
-    val context = LocalContext.current
-    val scale = remember(context) {
-        try {
-            Settings.Global.getFloat(
-                context.contentResolver,
-                Settings.Global.ANIMATOR_DURATION_SCALE,
-                1f,
-            )
-        } catch (_: Throwable) {
-            1f
-        }
-    }
+    val scale = leziMotionDurationScale()
     return LeziMotion.nonEssentialMillis(tokenMs = tokenMs, motionDurationScale = scale)
 }
 

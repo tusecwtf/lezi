@@ -39,7 +39,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -76,14 +75,15 @@ import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.knownCatalogKeys
 import com.lezi.babylog.core.ui.orderedRecordSections
 import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CustomRecordItem
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlin.coroutines.coroutineContext
 import kotlin.math.roundToInt
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.timeline.*
@@ -249,6 +249,9 @@ internal fun LayoutEditCanvas(
     val feedbackProgress = remember { Animatable(0f) }
     val hapticFeedback = LocalHapticFeedback.current
     val density = LocalDensity.current
+    // Same product scale path as shell (Settings.Global via leziMotionMillis /
+    // nonEssentialMillis) — single reduce-motion resolver for drag pulse too.
+    val dragFeedbackMs = leziMotionMillis(LeziMotion.Fast)
 
     fun dispatchDragFeedback(
         event: LayoutDragFeedbackEvent,
@@ -276,12 +279,11 @@ internal fun LayoutEditCanvas(
         }
     }
 
-    LaunchedEffect(feedbackPulse) {
+    LaunchedEffect(feedbackPulse, dragFeedbackMs) {
         val activePulse = feedbackPulse ?: return@LaunchedEffect
         feedbackProgress.snapTo(1f)
-        val durationMillis = layoutDragFeedbackDurationMillis(
-            coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f,
-        )
+        // dragFeedbackMs already resolved through LeziMotion.nonEssentialMillis.
+        val durationMillis = dragFeedbackMs
         if (durationMillis == 0) {
             feedbackProgress.snapTo(0f)
         } else {

@@ -201,6 +201,15 @@ class UiAuditPathContractTest {
             tokens.contains("fun leziMotionMillis("),
         )
         assertTrue(
+            "single product scale reader from Settings.Global",
+            tokens.contains("fun systemAnimatorDurationScale("),
+        )
+        assertTrue(
+            "live Compose scale observes ANIMATOR_DURATION_SCALE",
+            tokens.contains("fun leziMotionDurationScale("),
+        )
+        assertTrue(tokens.contains("ContentObserver"))
+        assertTrue(
             tokens.contains("Settings.Global.ANIMATOR_DURATION_SCALE"),
         )
         assertTrue("LeziDensity tables", tokens.contains("object LeziDensity"))
@@ -232,17 +241,9 @@ class UiAuditPathContractTest {
         assertTrue(main.contains("label = \"rootOnboardingGate\""))
         assertTrue(main.contains("label = \"rootTopBar\""))
         assertTrue(main.contains("enterTransition = {"))
-        assertFalse(
-            "MainActivity shell paths must not hardcode durationMillis = 200",
-            Regex("""durationMillis\s*=\s*200""").containsMatchIn(main),
-        )
-        assertFalse(
-            "MainActivity shell paths must not hardcode durationMillis = 180",
-            Regex("""durationMillis\s*=\s*180""").containsMatchIn(main),
-        )
-        assertFalse(
-            "MainActivity shell paths must not hardcode durationMillis = 160",
-            Regex("""durationMillis\s*=\s*160""").containsMatchIn(main),
+        assertNoScatteredMagicDurations(
+            source = main,
+            fileLabel = "MainActivity",
         )
 
         val onboarding = read(
@@ -258,8 +259,9 @@ class UiAuditPathContractTest {
         assertTrue(
             onboarding.contains("AnimatedContent (which does not arrange multi-root content)"),
         )
-        assertFalse(
-            Regex("""durationMillis\s*=\s*250""").containsMatchIn(onboarding),
+        assertNoScatteredMagicDurations(
+            source = onboarding,
+            fileLabel = "OnboardingScreen",
         )
 
         val log = read(
@@ -267,19 +269,77 @@ class UiAuditPathContractTest {
         )
         assertTrue(log.contains("leziMotionMillis(LeziMotion.Emphasized)"))
         assertTrue(log.contains("label = \"logLayoutEditMode\""))
-        assertFalse(
-            Regex("""tween\(250\)""").containsMatchIn(log),
+        assertNoScatteredMagicDurations(
+            source = log,
+            fileLabel = "LogScreen",
         )
 
         val header = read("app/src/main/kotlin/com/lezi/babylog/AppHeader.kt")
         assertTrue(header.contains("leziMotionMillis(LeziMotion."))
         assertTrue(header.contains("label = \"sleepingBabyLabel\""))
+        assertTrue(
+            "sleep cap decorative bob must gate InfiniteTransition under reduce-motion",
+            header.contains("leziMotionMillis(LeziMotion.Fast) == 0") &&
+                header.contains("SleepMoonCapCanvas(bob = 0f"),
+        )
+        assertNoScatteredMagicDurations(
+            source = header,
+            fileLabel = "AppHeader",
+        )
 
         val drag = read(
             "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/layout/LayoutDragFeedback.kt",
         )
         assertTrue(drag.contains("LeziMotion.nonEssentialMillis"))
         assertTrue(drag.contains("LeziMotion.Fast"))
+
+        val layoutEdit = read(
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/layout/LayoutEditMode.kt",
+        )
+        assertTrue(
+            "layout-drag feedback must share leziMotionMillis product scale path",
+            layoutEdit.contains("leziMotionMillis(LeziMotion.Fast)"),
+        )
+        assertTrue(
+            "layout-drag pulse duration must close over the shared leziMotion capture",
+            layoutEdit.contains("val dragFeedbackMs = leziMotionMillis(LeziMotion.Fast)"),
+        )
+        assertFalse(
+            "layout-drag must not import coroutine MotionDurationScale as a second scale source",
+            Regex("""import\s+androidx\.compose\.ui\.MotionDurationScale""")
+                .containsMatchIn(layoutEdit),
+        )
+    }
+
+    /**
+     * Ticket 10 acceptance: shell paths must not reintroduce ad-hoc ms on
+     * `durationMillis = N` / `tween(N)`. Allow only reduce-motion instant `0`
+     * (and named *Ms captures from leziMotionMillis / local const tokens).
+     */
+    private fun assertNoScatteredMagicDurations(source: String, fileLabel: String) {
+        val durationLiteral = Regex("""durationMillis\s*=\s*(\d[\d_]*)""")
+        val tweenLiteral = Regex("""tween\s*\(\s*(\d[\d_]*)\s*[,)]""")
+        val offenders = mutableListOf<String>()
+        durationLiteral.findAll(source).forEach { match ->
+            val raw = match.groupValues[1].replace("_", "")
+            val value = raw.toInt()
+            if (value != 0) {
+                offenders += match.value
+            }
+        }
+        tweenLiteral.findAll(source).forEach { match ->
+            val raw = match.groupValues[1].replace("_", "")
+            val value = raw.toInt()
+            if (value != 0) {
+                offenders += match.value
+            }
+        }
+        assertTrue(
+            "$fileLabel must not hardcode positive durationMillis/tween ms " +
+                "(use LeziMotion / leziMotionMillis *Ms captures; 0 allowed for " +
+                "reduce-motion):\n${offenders.joinToString("\n")}",
+            offenders.isEmpty(),
+        )
     }
 
     @Test
