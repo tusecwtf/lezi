@@ -65,9 +65,9 @@
 
 #### 2.1.1 动效时长与模板结构密度
 
-共享 token 在 `designsystem` 的 `LeziMotion` / `LeziDensity`（`Tokens.kt`）与 `design/tokens.json` 的 `motion` / `density` 快照，与既有 `LeziSpacing` **并列**；旧间距 token 可继续使用，高优先结构面逐步迁到密度表（记录面 06+，shell 动效 10）。
+共享 token 在 `designsystem` 的 `LeziMotion` / `LeziDensity`（`Tokens.kt`）与 `design/tokens.json` 的 `motion` / `density` 快照，与既有 `LeziSpacing` **并列**；旧间距 token 可继续使用，高优先结构面逐步迁到密度表（记录面 06+）。Shell 主转场（主导航 / 顶底栏 / 布局编辑 / 引导步进）已迁到 `LeziMotion` + reduce-motion 解析（票 10）；其它叶子面允许既有毫秒字面量直至各自迁移。
 
-**动效（`LeziMotion`，单位 ms）** — 词汇表供主导航淡入淡出、布局编辑、引导步进、内容交叉淡入、区间 Tab 反馈、主计时控件颜色反馈等主转场；接线完成前既有 `tween(durationMillis=…)` 字面量仍合法：
+**动效（`LeziMotion`，单位 ms）** — 词汇表供主导航淡入淡出、布局编辑、引导步进、内容交叉淡入、区间 Tab 反馈、主计时控件颜色反馈等主转场。Shell 路径须引用 token 与 `leziMotionMillis`；其它路径既有 `tween(durationMillis=…)` 字面量仍合法：
 
 | 档位 | 常量 | 时长 | 用途 |
 |------|------|------|------|
@@ -75,7 +75,7 @@
 | Base | `LeziMotion.Base` | 200 | 默认进入/退出与内容交叉淡入 |
 | Emphasized | `LeziMotion.Emphasized` | 300 | 较大结构转场（布局编辑、多步） |
 
-系统「减少动态效果」开启时，非必要转场缩短或瞬时；必要状态变化仍须可读（具体接线见 shell motion 专项 / 票 10）。
+系统「减少动态效果」开启时（Compose `MotionDurationScale` ≤ 0），非必要转场经 `LeziMotion.nonEssentialMillis` / `leziMotionMillis` 瞬时（0ms）；状态切换仍立即完成且可读。主导航、顶/底栏、布局编辑与引导步进已接线（票 10）。
 
 **结构密度（`LeziDensity`，4/8 网格；垫值引用 `LeziSpacing` Xs/Sm/Md）** — 同一结构角色 warm 更开敞、journal 更紧凑；触控下限仍为 `LeziSpacing.Touch`（48dp），密度表不缩小可点热区。`LeziSpacing.CardPad` / `TopBarHorizontal` / `SectionGap` 为单模板遗留值，结构角色迁移后以密度表为准：
 
@@ -166,12 +166,16 @@ Compose 消费优先 `LeziThemeExt.density`（或 `LeziDensity.forStyle`）。�
 ```
 
 - 不在连接前选择新建/加入；不输入或读取 Wi-Fi/SSID。
-- 任一步均可「暂不连接，保持离线」，不破坏 Room dirty、已可信 endpoint 或有效 session。
+- 任一步均可「暂不连接，保持离线」，不破坏 Room 待对账修改、已可信 endpoint 或有效 session。
 - 管理员不扫码登录。普通成员 QR 同时携带 endpoint trust 配置与目标 membership 的十分钟
   单次授权，服务器不生成 QR 图像。
 - 根密码、QR grant 与 access token 不进入可恢复 UI state；首次同步失败保留已签发 session，
   只重试同步。
 - 成员手动申请进入「等待管理员确认」，可以继续离线；批准后下次前台检查完成登录。
+- 「待同步 N 项」按尚未取得家庭同步终态的原子单元计数，不按 Room 行数或照片数累加；只有
+  完整权威裁决落库后才能显示「已同步」。
+- 无法进入家庭权威图但必须保留的用户事实显示「请选择家庭宝宝」或「等待管理员创建宝宝」等
+  可行动本机保留状态，不混入家庭待同步数量，也不以清零为由静默删除。
 
 完成家庭登录后的宝宝投影仍遵循家庭权威宝宝合同：Owner 可创建/管理；普通成员只读并等待
 Owner。详细页面、错误和删除恢复见

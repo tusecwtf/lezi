@@ -47,9 +47,11 @@ import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziDatePickerDialog
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.domain.family.FamilyWizardJoinRole
@@ -259,6 +261,8 @@ fun OnboardingRoute(
     val dateLabel = remember(birthday) {
         LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
     }
+    val stepEnterMs = leziMotionMillis(LeziMotion.Emphasized)
+    val stepExitMs = leziMotionMillis(LeziMotion.Fast)
 
     Column(
         modifier = Modifier
@@ -276,12 +280,12 @@ fun OnboardingRoute(
             targetState = step,
             transitionSpec = {
                 (
-                    fadeIn(animationSpec = tween(durationMillis = 250)) +
+                    fadeIn(animationSpec = tween(durationMillis = stepEnterMs)) +
                         slideInHorizontally(
-                            animationSpec = tween(durationMillis = 250),
+                            animationSpec = tween(durationMillis = stepEnterMs),
                             initialOffsetX = { width -> width / 8 },
                         )
-                    ).togetherWith(fadeOut(animationSpec = tween(durationMillis = 150)))
+                    ).togetherWith(fadeOut(animationSpec = tween(durationMillis = stepExitMs)))
             },
             label = "onboardingStep",
         ) { targetStep ->

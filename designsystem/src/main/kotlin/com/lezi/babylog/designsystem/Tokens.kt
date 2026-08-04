@@ -1,11 +1,14 @@
 package com.lezi.babylog.designsystem
 
+import android.provider.Settings
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -125,12 +128,15 @@ object LeziSpacing {
  * `durationMillis` (and equivalent APIs). Main-transition vocabulary for:
  * nav host fades, layout-edit, wizard steps, content crossfades, range-tab feedback,
  * primary timer control color feedback, and similar shell motion.
- * Prefer these on those paths; existing ad-hoc ms literals remain until shell-motion
- * migration (ticket 10) rewires call sites.
+ * Shell and layout-edit paths should reference these tiers (not ad-hoc ms literals).
  *
  * - [Fast]: micro feedback and short exits
  * - [Base]: default enter/exit and content crossfades
  * - [Emphasized]: larger structural transitions (layout-edit, multi-step)
+ *
+ * Reduce-motion: [nonEssentialMillis] returns `0` when the system motion duration
+ * scale is ≤ 0 so non-essential transitions are instant while state still swaps.
+ * Partial scales are left to the Compose animation clock (do not pre-multiply).
  */
 @Immutable
 object LeziMotion {
@@ -140,6 +146,42 @@ object LeziMotion {
     const val Base: Int = 200
     /** Milliseconds. */
     const val Emphasized: Int = 300
+
+    /**
+     * Resolve a token duration for a **non-essential** transition.
+     *
+     * @param tokenMs one of [Fast], [Base], or [Emphasized] (or a positive ms value)
+     * @param motionDurationScale system / Compose [androidx.compose.ui.MotionDurationScale]
+     *   factor; ≤ 0 means reduce-motion / animations disabled
+     * @return `0` (instant) when scale ≤ 0; otherwise [tokenMs] unchanged
+     */
+    fun nonEssentialMillis(tokenMs: Int, motionDurationScale: Float): Int =
+        if (motionDurationScale <= 0f) 0 else tokenMs
+}
+
+/**
+ * Compose-side read of [LeziMotion.nonEssentialMillis] for non-essential shell
+ * transitions. Snapshots system [Settings.Global.ANIMATOR_DURATION_SCALE]
+ * (Compose BOM here has no public `LocalMotionDurationScale`; the animation
+ * clock still scales tween specs independently). Capture once per composable
+ * and close over the result in non-@Composable `transitionSpec` /
+ * `enterTransition` lambdas.
+ */
+@Composable
+fun leziMotionMillis(tokenMs: Int): Int {
+    val context = LocalContext.current
+    val scale = remember(context) {
+        try {
+            Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f,
+            )
+        } catch (_: Throwable) {
+            1f
+        }
+    }
+    return LeziMotion.nonEssentialMillis(tokenMs = tokenMs, motionDurationScale = scale)
 }
 
 /**

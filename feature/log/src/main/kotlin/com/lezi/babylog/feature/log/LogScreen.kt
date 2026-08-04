@@ -72,6 +72,7 @@ import com.lezi.babylog.core.ui.knownCatalogKeys
 import com.lezi.babylog.core.ui.orderedRecordSections
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.sortCatalogByLocalOrder
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
 import com.lezi.babylog.designsystem.LeziRecordColorRole
@@ -80,6 +81,7 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.TimelineLegendEntry
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.carelog.DayChartCategories
 import com.lezi.babylog.domain.carelog.DayChartCategory
@@ -301,6 +303,7 @@ fun LogRoute(
         requestLayoutExit()
     }
 
+    val layoutEditMs = leziMotionMillis(LeziMotion.Emphasized)
     PageScaffoldBackground {
         Column(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
             AnimatedContent(
@@ -310,11 +313,11 @@ fun LogRoute(
                     .fillMaxWidth(),
                 transitionSpec = {
                     (
-                        fadeIn(animationSpec = tween(250)) +
-                            slideInVertically(animationSpec = tween(250)) { it / 24 }
+                        fadeIn(animationSpec = tween(layoutEditMs)) +
+                            slideInVertically(animationSpec = tween(layoutEditMs)) { it / 24 }
                         ).togetherWith(
-                        fadeOut(animationSpec = tween(250)) +
-                            slideOutVertically(animationSpec = tween(250)) { it / 24 },
+                        fadeOut(animationSpec = tween(layoutEditMs)) +
+                            slideOutVertically(animationSpec = tween(layoutEditMs)) { it / 24 },
                     )
                 },
                 label = "logLayoutEditMode",

@@ -17,7 +17,7 @@ unless a human explicitly parallelizes.
 | 07 | [issues/07-summary-density-empty.md](./issues/07-summary-density-empty.md) | Summary density + empty/calculating honesty | 06 | ready-for-agent |
 | 08 | [issues/08-growth-lazy-history.md](./issues/08-growth-lazy-history.md) | Growth: lazy history + surface polish | 07 | ready-for-agent |
 | 09 | [issues/09-family-lazy-members.md](./issues/09-family-lazy-members.md) | Family: lazy members/devices | 08 | ready-for-agent |
-| 10 | [issues/10-shell-motion-reduce-motion.md](./issues/10-shell-motion-reduce-motion.md) | Shell motion + reduce-motion | 01, 05 | ready-for-agent |
+| 10 | [issues/10-shell-motion-reduce-motion.md](./issues/10-shell-motion-reduce-motion.md) | Shell motion + reduce-motion | 01, 05 | done |
 | 11 | [issues/11-weak-surfaces-menu-widget-export.md](./issues/11-weak-surfaces-menu-widget-export.md) | Weak surfaces: menu / widget / export | 05, 10 | ready-for-agent |
 | 12 | [issues/12-presentation-format-if-needed.md](./issues/12-presentation-format-if-needed.md) | Presentation format convergence (conditional) | 06, 09 | ready-for-agent |
 | 13 | [issues/13-screenshot-matrix-closeout.md](./issues/13-screenshot-matrix-closeout.md) | Screenshot matrix + program close-out | 02, 07, 09, 11, 12 | ready-for-agent |

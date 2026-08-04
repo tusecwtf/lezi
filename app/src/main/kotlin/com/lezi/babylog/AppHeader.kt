@@ -72,10 +72,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.designsystem.LeziAlphas
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.designsystem.readableContentColor
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziIconButton
@@ -165,6 +167,8 @@ internal fun AppHeaderBar(
     val content = leziTopBarContentColor(dark)
     val babyAccent = LeziThemeExt.colors.babyAccent
     val controlShape = LeziThemeExt.controlShape
+    val headerEnterMs = leziMotionMillis(LeziMotion.Emphasized)
+    val headerExitMs = leziMotionMillis(LeziMotion.Fast)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -218,20 +222,20 @@ internal fun AppHeaderBar(
                     transitionSpec = {
                         (fadeIn(
                             animationSpec = tween(
-                                durationMillis = 260,
-                                delayMillis = 60,
+                                durationMillis = headerEnterMs,
+                                delayMillis = if (headerEnterMs == 0) 0 else 60,
                             ),
                         ) + slideInVertically(
                             animationSpec = tween(
-                                durationMillis = 320,
+                                durationMillis = headerEnterMs,
                                 easing = FastOutSlowInEasing,
                             ),
                             initialOffsetY = { height -> height / 4 },
                         )).togetherWith(
-                            fadeOut(animationSpec = tween(durationMillis = 180)) +
+                            fadeOut(animationSpec = tween(durationMillis = headerExitMs)) +
                                 slideOutVertically(
                                     animationSpec = tween(
-                                        durationMillis = 220,
+                                        durationMillis = headerExitMs,
                                         easing = FastOutSlowInEasing,
                                     ),
                                     targetOffsetY = { height -> -height / 4 },
@@ -326,33 +330,43 @@ private fun AnimatedSleepMoonCap(
     sleeping: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val enterMs = leziMotionMillis(LeziMotion.Fast)
+    val exitMs = leziMotionMillis(LeziMotion.Emphasized)
     AnimatedVisibility(
         visible = sleeping,
         modifier = modifier,
-        enter = slideInHorizontally(
-            animationSpec = spring(
-                dampingRatio = 0.58f,
-                stiffness = Spring.StiffnessLow,
-            ),
-            initialOffsetX = { width -> -(width * 3) / 2 },
-        ) + fadeIn(
-            animationSpec = tween(
-                durationMillis = 180,
-                delayMillis = 40,
-            ),
-        ),
-        exit = slideOutHorizontally(
-            animationSpec = tween(
-                durationMillis = 440,
-                easing = FastOutSlowInEasing,
-            ),
-            targetOffsetX = { width -> -(width * 3) / 2 },
-        ) + fadeOut(
-            animationSpec = tween(
-                durationMillis = 280,
-                delayMillis = 80,
-            ),
-        ),
+        enter = if (enterMs == 0) {
+            fadeIn(animationSpec = tween(durationMillis = 0))
+        } else {
+            slideInHorizontally(
+                animationSpec = spring(
+                    dampingRatio = 0.58f,
+                    stiffness = Spring.StiffnessLow,
+                ),
+                initialOffsetX = { width -> -(width * 3) / 2 },
+            ) + fadeIn(
+                animationSpec = tween(
+                    durationMillis = enterMs,
+                    delayMillis = 40,
+                ),
+            )
+        },
+        exit = if (exitMs == 0) {
+            fadeOut(animationSpec = tween(durationMillis = 0))
+        } else {
+            slideOutHorizontally(
+                animationSpec = tween(
+                    durationMillis = exitMs,
+                    easing = FastOutSlowInEasing,
+                ),
+                targetOffsetX = { width -> -(width * 3) / 2 },
+            ) + fadeOut(
+                animationSpec = tween(
+                    durationMillis = exitMs,
+                    delayMillis = 80,
+                ),
+            )
+        },
         label = "sleepCapVisibility",
     ) {
         SleepMoonCap()
@@ -525,24 +539,26 @@ internal fun HeaderCalendarDialog(
                     }
                 }
                 Spacer(Modifier.height(LeziSpacing.Xs))
+                val monthEnterMs = leziMotionMillis(LeziMotion.Base)
+                val monthExitMs = leziMotionMillis(LeziMotion.Fast)
                 AnimatedContent(
                     targetState = displayedMonth,
                     transitionSpec = {
                         val forward = targetState > initialState
                         (slideInHorizontally(
-                            animationSpec = tween(durationMillis = 200),
+                            animationSpec = tween(durationMillis = monthEnterMs),
                             initialOffsetX = { width ->
                                 if (forward) width / 4 else -width / 4
                             },
                         ) + fadeIn(
-                            animationSpec = tween(durationMillis = 200),
+                            animationSpec = tween(durationMillis = monthEnterMs),
                         )).togetherWith(
                             slideOutHorizontally(
-                                animationSpec = tween(durationMillis = 200),
+                                animationSpec = tween(durationMillis = monthEnterMs),
                                 targetOffsetX = { width ->
                                     if (forward) -width / 4 else width / 4
                                 },
-                            ) + fadeOut(animationSpec = tween(durationMillis = 160)),
+                            ) + fadeOut(animationSpec = tween(durationMillis = monthExitMs)),
                         )
                     },
                     label = "headerCalendarMonth",
@@ -598,9 +614,10 @@ private fun CalendarDay(
 ) {
     val selectedColor = MaterialTheme.colorScheme.primary
     val selectedContentColor = calendarContentColor(selectedColor)
+    val daySelectMs = leziMotionMillis(LeziMotion.Fast)
     val dayBackground by animateColorAsState(
         targetValue = if (selected) selectedColor else Color.Transparent,
-        animationSpec = tween(durationMillis = 180),
+        animationSpec = tween(durationMillis = daySelectMs),
         label = "calendarDayBackground",
     )
     val contentColor = when {

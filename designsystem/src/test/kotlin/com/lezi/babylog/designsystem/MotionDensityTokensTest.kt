@@ -19,6 +19,21 @@ class MotionDensityTokensTest {
     }
 
     @Test
+    fun `nonEssentialMillis is instant under reduce-motion and keeps token otherwise`() {
+        // Product policy: non-essential shell transitions become instant when the
+        // system motion duration scale is ≤ 0 (reduce-motion / animations off).
+        // Expected values are ticket literals, not recomputed from helpers.
+        assertEquals(0, LeziMotion.nonEssentialMillis(LeziMotion.Base, motionDurationScale = 0f))
+        assertEquals(0, LeziMotion.nonEssentialMillis(LeziMotion.Fast, motionDurationScale = -1f))
+        assertEquals(0, LeziMotion.nonEssentialMillis(LeziMotion.Emphasized, motionDurationScale = 0f))
+        assertEquals(150, LeziMotion.nonEssentialMillis(LeziMotion.Fast, motionDurationScale = 1f))
+        assertEquals(200, LeziMotion.nonEssentialMillis(LeziMotion.Base, motionDurationScale = 1f))
+        assertEquals(300, LeziMotion.nonEssentialMillis(LeziMotion.Emphasized, motionDurationScale = 1f))
+        // Do not pre-scale by partial factors — Compose animation clock owns that.
+        assertEquals(200, LeziMotion.nonEssentialMillis(LeziMotion.Base, motionDurationScale = 0.5f))
+    }
+
+    @Test
     fun `density tables keep warm more open than journal on spacing steps`() {
         // Warm more open, journal more compact — structural roles only.
         // Density encodes open-vs-compact policy via LeziSpacing grid steps.

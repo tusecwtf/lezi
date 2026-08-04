@@ -208,7 +208,8 @@ class LayoutDragFeedbackTest {
     fun disabledSystemAnimationUsesImmediateFeedbackWithoutChangingTheReducer() {
         assertEquals(0, layoutDragFeedbackDurationMillis(motionDurationScale = 0f))
         assertEquals(0, layoutDragFeedbackDurationMillis(motionDurationScale = -1f))
-        assertEquals(160, layoutDragFeedbackDurationMillis(motionDurationScale = 1f))
+        // LeziMotion.Fast — shared micro-feedback tier under normal motion scale.
+        assertEquals(150, layoutDragFeedbackDurationMillis(motionDurationScale = 1f))
 
         val pickup = reduceLayoutDragFeedback(
             LayoutDragFeedbackState.Idle,

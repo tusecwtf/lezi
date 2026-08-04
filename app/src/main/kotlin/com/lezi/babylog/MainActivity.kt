@@ -100,12 +100,14 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.AppBrandBar
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.carelog.babyAgeLabel
@@ -788,10 +790,11 @@ internal fun LeziRoot(
     val ui by vm.ui.collectAsStateWithLifecycle()
     // Force shell is above onboarding so a joined device still under baby setup cannot
     // silently miss PackageUnknown/WithPackage after client_update_required.
+    val shellBaseMs = leziMotionMillis(LeziMotion.Base)
     Box(Modifier.fillMaxSize()) {
         Crossfade(
             targetState = shouldShowOnboarding(ui.hasBaby, ui.familyRole),
-            animationSpec = tween(durationMillis = 200),
+            animationSpec = tween(durationMillis = shellBaseMs),
             label = "rootOnboardingGate",
         ) { showOnboarding ->
             if (showOnboarding) {
@@ -830,10 +833,12 @@ private fun RootForcedAppUpdateLayer(vm: RootViewModel) {
     forcedUpdate?.let { lastForced = it }
     val showFullShell = forcedUpdate != null &&
         !(recoveryExpanded && sessionRecovery.needsSessionRecovery)
+    val shellBaseMs = leziMotionMillis(LeziMotion.Base)
+    val shellFastMs = leziMotionMillis(LeziMotion.Fast)
     AnimatedVisibility(
         visible = showFullShell,
-        enter = fadeIn(animationSpec = tween(durationMillis = 200)),
-        exit = fadeOut(animationSpec = tween(durationMillis = 160)),
+        enter = fadeIn(animationSpec = tween(durationMillis = shellBaseMs)),
+        exit = fadeOut(animationSpec = tween(durationMillis = shellFastMs)),
         label = "forcedAppUpdateOverlay",
     ) {
         lastForced?.let { forced ->
@@ -888,6 +893,9 @@ private fun LeziMainScaffold(
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
+    // Shell chrome / nav transitions — capture outside non-@Composable transitionSpec.
+    val shellBaseMs = leziMotionMillis(LeziMotion.Base)
+    val shellFastMs = leziMotionMillis(LeziMotion.Fast)
     /**
      * Composer→Timer handoff session captured at navigate time (Ticket 09).
      * Process-local only; durable accept/reject settle via saveable tokens below so
@@ -987,12 +995,12 @@ private fun LeziMainScaffold(
             AnimatedContent(
                 targetState = headerKind,
                 transitionSpec = {
-                    (fadeIn(animationSpec = tween(durationMillis = 200)) +
+                    (fadeIn(animationSpec = tween(durationMillis = shellBaseMs)) +
                         slideInVertically(
-                            animationSpec = tween(durationMillis = 200),
+                            animationSpec = tween(durationMillis = shellBaseMs),
                             initialOffsetY = { height -> -height / 8 },
                         )).togetherWith(
-                        fadeOut(animationSpec = tween(durationMillis = 160)),
+                        fadeOut(animationSpec = tween(durationMillis = shellFastMs)),
                     )
                 },
                 label = "rootTopBar",
@@ -1039,13 +1047,13 @@ private fun LeziMainScaffold(
             AnimatedVisibility(
                 visible = chrome.showBottomBar,
                 enter = slideInVertically(
-                    animationSpec = tween(durationMillis = 200),
+                    animationSpec = tween(durationMillis = shellBaseMs),
                     initialOffsetY = { height -> height },
-                ) + fadeIn(animationSpec = tween(durationMillis = 200)),
+                ) + fadeIn(animationSpec = tween(durationMillis = shellBaseMs)),
                 exit = slideOutVertically(
-                    animationSpec = tween(durationMillis = 200),
+                    animationSpec = tween(durationMillis = shellBaseMs),
                     targetOffsetY = { height -> height },
-                ) + fadeOut(animationSpec = tween(durationMillis = 160)),
+                ) + fadeOut(animationSpec = tween(durationMillis = shellFastMs)),
             ) {
                 val sky = com.lezi.babylog.designsystem.LeziThemeExt.colors.skySoft
                 // Dark skySoft is nearly the same luminance as DarkSurface, so the
@@ -1134,26 +1142,26 @@ private fun LeziMainScaffold(
             enterTransition = {
                 val slide = if (targetState.destination.route.isFullScreenPushRoute()) {
                     slideInVertically(
-                        animationSpec = tween(durationMillis = 200),
+                        animationSpec = tween(durationMillis = shellBaseMs),
                         initialOffsetY = { height -> height / 24 },
                     )
                 } else {
                     EnterTransition.None
                 }
-                fadeIn(animationSpec = tween(durationMillis = 180)) + slide
+                fadeIn(animationSpec = tween(durationMillis = shellFastMs)) + slide
             },
-            exitTransition = { fadeOut(animationSpec = tween(durationMillis = 180)) },
-            popEnterTransition = { fadeIn(animationSpec = tween(durationMillis = 180)) },
+            exitTransition = { fadeOut(animationSpec = tween(durationMillis = shellFastMs)) },
+            popEnterTransition = { fadeIn(animationSpec = tween(durationMillis = shellFastMs)) },
             popExitTransition = {
                 val slide = if (initialState.destination.route.isFullScreenPushRoute()) {
                     slideOutVertically(
-                        animationSpec = tween(durationMillis = 200),
+                        animationSpec = tween(durationMillis = shellBaseMs),
                         targetOffsetY = { height -> height / 24 },
                     )
                 } else {
                     ExitTransition.None
                 }
-                fadeOut(animationSpec = tween(durationMillis = 180)) + slide
+                fadeOut(animationSpec = tween(durationMillis = shellFastMs)) + slide
             },
         ) {
             composable(TopDest.Log.route) {

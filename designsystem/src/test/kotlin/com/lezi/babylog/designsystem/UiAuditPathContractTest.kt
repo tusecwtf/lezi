@@ -192,6 +192,17 @@ class UiAuditPathContractTest {
         assertTrue(tokens.contains("const val Fast: Int = "))
         assertTrue(tokens.contains("const val Base: Int = "))
         assertTrue(tokens.contains("const val Emphasized: Int = "))
+        assertTrue(
+            "reduce-motion resolver for non-essential shell transitions",
+            tokens.contains("fun nonEssentialMillis("),
+        )
+        assertTrue(
+            "Compose helper resolves animator duration scale for shell call sites",
+            tokens.contains("fun leziMotionMillis("),
+        )
+        assertTrue(
+            tokens.contains("Settings.Global.ANIMATOR_DURATION_SCALE"),
+        )
         assertTrue("LeziDensity tables", tokens.contains("object LeziDensity"))
         assertTrue(tokens.contains("data class LeziDensityScale"))
         assertTrue(tokens.contains("val Warm = LeziDensityScale("))
@@ -206,6 +217,69 @@ class UiAuditPathContractTest {
             theme.contains("val density: LeziDensityScale"),
         )
         assertTrue(theme.contains("LeziDensity.forStyle(visualStyle)"))
+    }
+
+    @Test
+    fun `shell main transitions reference LeziMotion tokens and reduce-motion helper`() {
+        // Ticket 10: root nav / top-bottom bar / layout-edit / onboarding steps
+        // must not reintroduce bare magic durations on those paths.
+        val main = read("app/src/main/kotlin/com/lezi/babylog/MainActivity.kt")
+        assertTrue(main.contains("leziMotionMillis(LeziMotion.Base)"))
+        assertTrue(main.contains("leziMotionMillis(LeziMotion.Fast)"))
+        assertTrue(main.contains("shellBaseMs"))
+        assertTrue(main.contains("shellFastMs"))
+        // NavHost / top bar / bottom bar / root gate still animate via captured ms.
+        assertTrue(main.contains("label = \"rootOnboardingGate\""))
+        assertTrue(main.contains("label = \"rootTopBar\""))
+        assertTrue(main.contains("enterTransition = {"))
+        assertFalse(
+            "MainActivity shell paths must not hardcode durationMillis = 200",
+            Regex("""durationMillis\s*=\s*200""").containsMatchIn(main),
+        )
+        assertFalse(
+            "MainActivity shell paths must not hardcode durationMillis = 180",
+            Regex("""durationMillis\s*=\s*180""").containsMatchIn(main),
+        )
+        assertFalse(
+            "MainActivity shell paths must not hardcode durationMillis = 160",
+            Regex("""durationMillis\s*=\s*160""").containsMatchIn(main),
+        )
+
+        val onboarding = read(
+            "feature/onboarding/src/main/kotlin/com/lezi/babylog/feature/onboarding/OnboardingScreen.kt",
+        )
+        assertTrue(onboarding.contains("leziMotionMillis(LeziMotion.Emphasized)"))
+        assertTrue(onboarding.contains("leziMotionMillis(LeziMotion.Fast)"))
+        assertTrue(onboarding.contains("label = \"onboardingStep\""))
+        // Multi-root layout regression guard still required on the same surface.
+        assertTrue(
+            onboarding.contains("verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)"),
+        )
+        assertTrue(
+            onboarding.contains("AnimatedContent (which does not arrange multi-root content)"),
+        )
+        assertFalse(
+            Regex("""durationMillis\s*=\s*250""").containsMatchIn(onboarding),
+        )
+
+        val log = read(
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt",
+        )
+        assertTrue(log.contains("leziMotionMillis(LeziMotion.Emphasized)"))
+        assertTrue(log.contains("label = \"logLayoutEditMode\""))
+        assertFalse(
+            Regex("""tween\(250\)""").containsMatchIn(log),
+        )
+
+        val header = read("app/src/main/kotlin/com/lezi/babylog/AppHeader.kt")
+        assertTrue(header.contains("leziMotionMillis(LeziMotion."))
+        assertTrue(header.contains("label = \"sleepingBabyLabel\""))
+
+        val drag = read(
+            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/layout/LayoutDragFeedback.kt",
+        )
+        assertTrue(drag.contains("LeziMotion.nonEssentialMillis"))
+        assertTrue(drag.contains("LeziMotion.Fast"))
     }
 
     @Test

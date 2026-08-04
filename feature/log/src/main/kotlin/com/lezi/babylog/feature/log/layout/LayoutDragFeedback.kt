@@ -1,4 +1,5 @@
 package com.lezi.babylog.feature.log.layout
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.timeline.*
 import com.lezi.babylog.feature.log.dock.*
@@ -136,4 +137,7 @@ internal fun reduceLayoutDragFeedback(
 }
 
 internal fun layoutDragFeedbackDurationMillis(motionDurationScale: Float): Int =
-    if (motionDurationScale <= 0f) 0 else 160
+    LeziMotion.nonEssentialMillis(
+        tokenMs = LeziMotion.Fast,
+        motionDurationScale = motionDurationScale,
+    )
