@@ -61,8 +61,8 @@ internal object RecordCatalogVisualSpec {
 /** Shared geometry for the everyday and edit-mode five-cell quick dock. */
 internal object QuickDockVisualSpec {
     const val configurableSlotCount: Int = 4
-    /** Warm outer horizontal inset comes from [com.lezi.babylog.designsystem.LeziThemeExt.density]
-     * `topBarHorizontal` at the call site (journal stays full-bleed 0). */
+    /** Outer horizontal inset comes from [com.lezi.babylog.designsystem.LeziThemeExt.density]
+     * `dockOuterHorizontal` at the call site (warm open; journal full-bleed 0). */
     val outerVertical: Dp = LeziSpacing.Xxs
     val rowHorizontal: Dp = LeziSpacing.Xxs
     val rowVertical: Dp = LeziSpacing.Xxs

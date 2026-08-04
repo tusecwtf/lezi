@@ -106,11 +106,24 @@ class RecordDensityEmptyContractTest {
         // Empty draws a ring mark, never a spinner branch.
         assertTrue(marks.contains("StateKind.Empty -> drawCircle("))
         assertTrue(marks.contains("style = Stroke("))
-        // Empty mark color is quieter than primary loading spinner.
+        // Empty arm of markColor must be onSurfaceVariant (not co-presence with any other branch).
         assertTrue(
-            "empty mark must use onSurfaceVariant (not primary) so empty ≠ busy",
-            state.contains("StateKind.Empty") &&
-                state.contains("onSurfaceVariant"),
+            "empty markColor arm must map StateKind.Empty -> onSurfaceVariant",
+            Regex(
+                """StateKind\.Empty\s*->\s*MaterialTheme\.colorScheme\.onSurfaceVariant""",
+            ).containsMatchIn(state),
+        )
+        assertTrue(
+            "loading markColor arm must map StateKind.Loading -> primary",
+            Regex(
+                """StateKind\.Loading\s*->\s*MaterialTheme\.colorScheme\.primary""",
+            ).containsMatchIn(state),
+        )
+        // Empty/loading chrome shell uses density cardPad (not legacy CardPad default alone).
+        assertTrue(
+            "StateContainer LeziCard must pass density.cardPad contentPadding",
+            state.contains("LeziThemeExt.density.cardPad") ||
+                state.contains("density.cardPad"),
         )
     }
 
@@ -131,14 +144,22 @@ class RecordDensityEmptyContractTest {
         // Distinct test tags so empty vs loading remain addressable.
         assertTrue(list.contains("log_records_empty"))
         assertTrue(list.contains("log_records_loading"))
-        // Warm list section spacing + dock outer inset consume density.
+        // Warm list section spacing + dock outer inset consume density roles.
         assertTrue(
             list.contains("density.sectionGap") ||
                 list.contains("LeziThemeExt.density.sectionGap"),
         )
         assertTrue(
-            dock.contains("density.topBarHorizontal") ||
-                dock.contains("LeziThemeExt.density.topBarHorizontal"),
+            "quick dock outer inset must use density.dockOuterHorizontal (no local style branch)",
+            dock.contains("density.dockOuterHorizontal") ||
+                dock.contains("LeziThemeExt.density.dockOuterHorizontal"),
+        )
+        assertFalse(
+            "dock must not hard-code journal full-bleed via if (isJournal)",
+            Regex(
+                """if\s*\(\s*LeziThemeExt\.isJournal\s*\)\s*\{\s*0\.dp""",
+            ).containsMatchIn(dock) ||
+                Regex("""if\s*\(.*isJournal.*\)\s*0\.dp""").containsMatchIn(dock),
         )
     }
 
@@ -149,6 +170,7 @@ class RecordDensityEmptyContractTest {
         assertTrue(LeziDensity.Warm.topBarHorizontal > LeziDensity.Journal.topBarHorizontal)
         assertTrue(LeziDensity.Warm.sectionGap > LeziDensity.Journal.sectionGap)
         assertTrue(LeziDensity.Warm.panelContent > LeziDensity.Journal.panelContent)
+        assertTrue(LeziDensity.Warm.dockOuterHorizontal > LeziDensity.Journal.dockOuterHorizontal)
         assertTrue(LeziSpacing.Touch.value >= 48f)
     }
 

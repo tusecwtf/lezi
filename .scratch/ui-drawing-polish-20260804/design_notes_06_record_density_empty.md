@@ -14,8 +14,10 @@ Observed without reaching private helpers. Expected values from ticket 06 /
      - content pad → `density.panelContent` (warm open > journal compact)
      - section gap → `density.sectionGap`
      - no off-grid ad-hoc 18/10/6 content/section pads on those roles
-   - Quick dock structural outer inset (warm): `density.topBarHorizontal`
-     (journal stays full-bleed `0.dp`)
+   - Quick dock structural outer inset: `density.dockOuterHorizontal`
+     (warm = top-bar role; journal full-bleed `0.dp` in the density table —
+     no local `if (journal)` pad branch)
+   - Empty/loading `StateContainer` card shell: `density.cardPad`
    - Confirm reason card pad: `density.cardPad` (replaces off-grid 14/10)
    - Log list section spacing (warm): `density.sectionGap`
    - Touch targets remain ≥ `LeziSpacing.Touch` (48dp); density does not

@@ -199,6 +199,11 @@ data class LeziDensityScale(
     val topBarHorizontal: Dp,
     val sectionGap: Dp,
     val panelContent: Dp,
+    /**
+     * Outer horizontal inset for the fixed quick dock shell.
+     * Journal is product full-bleed (`0.dp`); warm matches [topBarHorizontal].
+     */
+    val dockOuterHorizontal: Dp,
 )
 
 @Immutable
@@ -209,6 +214,7 @@ object LeziDensity {
         topBarHorizontal = LeziSpacing.Sm,
         sectionGap = LeziSpacing.Md,
         panelContent = LeziSpacing.Md,
+        dockOuterHorizontal = LeziSpacing.Sm,
     )
     /** Compact journal scale — structural pads use [LeziSpacing] Sm/Xs steps. */
     val Journal = LeziDensityScale(
@@ -216,6 +222,8 @@ object LeziDensity {
         topBarHorizontal = LeziSpacing.Xs,
         sectionGap = LeziSpacing.Xs,
         panelContent = LeziSpacing.Xs,
+        // Full-bleed dock shell; top bar still uses [topBarHorizontal] = Xs.
+        dockOuterHorizontal = 0.dp,
     )
 
     fun forStyle(style: LeziVisualStyle): LeziDensityScale = when (style) {

@@ -13,4 +13,4 @@ shared touch minimum.
 - [x] Warm feels more open than journal for the same roles
 - [x] Empty day affordance is visually distinct from loading/calculating
 - [x] Timeline hit-testing and axis math unchanged; marks still density-correct
-- [x] `./gradlew :feature:log:test :app:assembleDebug` green
+- [x] `./gradlew :designsystem:test :feature:log:test :app:assembleDebug` green

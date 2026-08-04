@@ -9,6 +9,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -134,7 +135,11 @@ fun StateContainer(
     onAction: (() -> Unit)? = null,
 ) {
     // Use LeziCard (not banded panel) so nested empty states inside chart panels stay flat.
-    LeziCard(modifier = modifier.fillMaxWidth()) {
+    // Density-backed card pad so empty/loading chrome follows warm-open / journal-compact.
+    LeziCard(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(LeziThemeExt.density.cardPad),
+    ) {
         Column(
             Modifier
                 .fillMaxWidth()
