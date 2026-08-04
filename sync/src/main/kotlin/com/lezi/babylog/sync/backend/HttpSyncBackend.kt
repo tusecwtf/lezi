@@ -1166,10 +1166,13 @@ class HttpSyncBackend internal constructor(
             instanceFollowRedirects = false
             if (!token.isNullOrBlank()) {
                 setRequestProperty("Authorization", "Bearer $token")
-                // Protected family requests: advertise local versionCode for server gates.
-                clientVersionCode?.takeIf { it > 0 }?.let { code ->
-                    setRequestProperty(CLIENT_VERSION_CODE_HEADER, code.toString())
-                }
+            }
+            // Advertise local versionCode for server min gates. Must not depend on a
+            // bearer token: disaster-restore start uses bootstrap secret only (token=null),
+            // and after require_supported_client on restore writes a missing header is
+            // treated as below-min client_update_required (empty-family restore deadlock).
+            clientVersionCode?.takeIf { it > 0 }?.let { code ->
+                setRequestProperty(CLIENT_VERSION_CODE_HEADER, code.toString())
             }
             extraHeaders.forEach(::setRequestProperty)
         }

@@ -134,17 +134,74 @@ class HttpSyncBackendTest {
             assertThat(session.role).isEqualTo(FamilyRole.Owner)
             assertThat(captured[0]).contains("X-Lezi-Bootstrap-Secret: new-server-root")
             assertThat(captured[0]).doesNotContain("Authorization:")
+            // Restore start is token-less but still gated by min_supported when a verified
+            // app-update channel exists — client must advertise version without bearer.
+            assertThat(captured[0]).contains("$CLIENT_VERSION_CODE_HEADER: 10")
             assertThat(captured[0].substringAfter("\n\n")).doesNotContain("new-server-root")
             assertThat(captured[1]).contains(
                 "Authorization: Bearer restore-token-00000000000000000000",
             )
+            assertThat(captured[1]).contains("$CLIENT_VERSION_CODE_HEADER: 10")
             assertThat(captured[1]).doesNotContain("X-Lezi-Bootstrap-Secret:")
             assertThat(captured[1]).doesNotContain("family-token")
             assertThat(captured[2]).contains(
                 "Authorization: Bearer restore-token-00000000000000000000",
             )
+            assertThat(captured[2]).contains("$CLIENT_VERSION_CODE_HEADER: 10")
             assertThat(captured[2]).contains("X-Lezi-Bootstrap-Secret: new-server-root")
             assertThat(captured[2].substringAfter("\n\n")).doesNotContain("new-server-root")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun startDisasterRestoreAdvertisesClientVersionWithoutBearerToken() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-restore-version-header-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"protocol_version":1,"batch_id":"batch-a","status":"started","expires_at":1753500000,"recovery_token":"restore-token-00000000000000000000"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 201 Created\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                                ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+        val endpoint = TrustedEndpointProfile.systemPki(
+            "https://${server.inetAddress.hostAddress}:${server.localPort}",
+        )
+        val backend = loopbackBackend(clientVersionCode = 13)
+
+        try {
+            backend.startDisasterRestore(
+                endpoint,
+                "start-request-00000000000000000002",
+                "00000000-0000-0000-0000-000000000002",
+                "Lezi Home",
+                "Mom",
+                "Pixel 9",
+                "new-server-root",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+            assertThat(request).startsWith("POST /v1/disaster-restore/batches ")
+            assertThat(request).doesNotContain("Authorization:")
+            assertThat(request).contains("X-Lezi-Bootstrap-Secret: new-server-root")
+            // Real shipped open() path — not a hand-injected header on the server harness.
+            assertThat(request).contains("$CLIENT_VERSION_CODE_HEADER: 13")
         } finally {
             server.close()
             responder.join(2_000)
