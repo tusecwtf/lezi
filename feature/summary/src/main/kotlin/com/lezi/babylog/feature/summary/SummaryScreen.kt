@@ -403,7 +403,7 @@ private fun SummaryContent(
                             fadeOut(animationSpec = tween(durationMillis = rangeExitMs))
                     },
                     label = "summary_range_content",
-                ) {
+                ) { range ->
                     // Range body emits multiple siblings; keep a Column so they
                     // retain spacedBy layout once lifted out of the outer Column
                     // into AnimatedContent (which does not arrange multi-root content).
@@ -433,7 +433,7 @@ private fun SummaryContent(
                             diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
                         )
 
-                        if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
+                        if (range == SummaryRange.Week && ui.comparePrevWeek) {
                             val previous = ui.previousWeekTotals
                             LeziSurfacePanel(
                                 Modifier.fillMaxWidth(),
@@ -467,21 +467,21 @@ private fun SummaryContent(
                             JournalWeekGrid(ui.week!!)
                         }
 
-                        val feedChartTotal = when (ui.range) {
+                        val feedChartTotal = when (range) {
                             SummaryRange.Day ->
                                 formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
                             SummaryRange.Week, SummaryRange.Month ->
                                 formatFeedWindowTotal(t.feedMl, t.nursingMin)
                         }
-                        val sleepChartTotal = when (ui.range) {
+                        val sleepChartTotal = when (range) {
                             SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
                             SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
                         }
-                        val diaperChartTotal = when (ui.range) {
+                        val diaperChartTotal = when (range) {
                             SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
                             SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
                         }
-                        val chartTotalScope = when (ui.range) {
+                        val chartTotalScope = when (range) {
                             SummaryRange.Day -> "当日"
                             SummaryRange.Week -> "本周"
                             SummaryRange.Month -> "本月"
@@ -516,9 +516,9 @@ private fun SummaryContent(
                             emptyTag = "summary_chart_empty_sleep",
                             contentPadding = chartCardPad,
                             preContent = {
-                                if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
+                                if (range != SummaryRange.Day && ui.showAvgSleep) {
                                     val averageSleep =
-                                        t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
+                                        t.sleepMin / range.dayCount.coerceAtLeast(1)
                                     Text(
                                         "日均睡眠 ${formatRecordDuration(averageSleep)}",
                                         style = LeziTypography.Meta,
