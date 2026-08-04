@@ -161,6 +161,7 @@ class FamilyMembersDevicesPageDeviceTest {
                     ),
                     onRefreshMembers = {},
                     onEditMyDisplayName = {},
+                    onRenameDevice = { _, _ -> },
                     onDismiss = {},
                 )
             }
@@ -175,6 +176,10 @@ class FamilyMembersDevicesPageDeviceTest {
         compose.onAllNodesWithTag("member_overflow_menu").assertCountEquals(1)
         compose.onNodeWithTag("member_overflow_menu").performClick()
         compose.onNodeWithText("申请改称呼").assertIsDisplayed()
+        // Self devices remain independent lazy rows with rename (not revoke) overflow.
+        compose.onAllNodesWithTag("device_overflow_menu").assertCountEquals(2)
+        compose.onAllNodesWithTag("device_overflow_menu")[0].performClick()
+        compose.onNodeWithText("改设备称呼").assertIsDisplayed()
         compose.onAllNodesWithText("撤销设备").assertCountEquals(0)
     }
 

@@ -2,9 +2,9 @@
 
 Status: ready-for-agent
 
-Serial spine (preferred agent order). **01–08**, **10**, and **11** are done;
-next open frontier is **09** (family lazy members) — keep work one-at-a-time
-unless a human explicitly parallelizes.
+Serial spine (preferred agent order). **01–11** are done; next open frontier is
+**12** (presentation format, conditional) then **13** close-out — keep work
+one-at-a-time unless a human explicitly parallelizes.
 
 | # | File | Title | Blocked by | Status |
 |---|------|-------|------------|--------|
@@ -16,7 +16,7 @@ unless a human explicitly parallelizes.
 | 06 | [issues/06-record-density-empty.md](./issues/06-record-density-empty.md) | Record surface density + empty language | 01, 05 | done |
 | 07 | [issues/07-summary-density-empty.md](./issues/07-summary-density-empty.md) | Summary density + empty/calculating honesty | 06 | done |
 | 08 | [issues/08-growth-lazy-history.md](./issues/08-growth-lazy-history.md) | Growth: lazy history + surface polish | 07 | done |
-| 09 | [issues/09-family-lazy-members.md](./issues/09-family-lazy-members.md) | Family: lazy members/devices | 08 | ready-for-agent |
+| 09 | [issues/09-family-lazy-members.md](./issues/09-family-lazy-members.md) | Family: lazy members/devices | 08 | done |
 | 10 | [issues/10-shell-motion-reduce-motion.md](./issues/10-shell-motion-reduce-motion.md) | Shell motion + reduce-motion | 01, 05 | done |
 | 11 | [issues/11-weak-surfaces-menu-widget-export.md](./issues/11-weak-surfaces-menu-widget-export.md) | Weak surfaces: menu / widget / export | 05, 10 | done |
 | 12 | [issues/12-presentation-format-if-needed.md](./issues/12-presentation-format-if-needed.md) | Presentation format convergence (conditional) | 06, 09 | ready-for-agent |

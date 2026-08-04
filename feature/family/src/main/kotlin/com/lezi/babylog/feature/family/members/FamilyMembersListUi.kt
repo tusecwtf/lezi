@@ -1,9 +1,9 @@
 package com.lezi.babylog.feature.family.members
 
-import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -61,6 +63,96 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Flattened members/devices roster for one lazy list with stable keys.
+ * Device details only appear when the viewer is authorized (owner: all;
+ * ordinary member: self only). Unauthorized members omit device items entirely
+ * (no empty-devices row). Authorized members always get device rows or an
+ * empty-devices placeholder (`devices == null` is coerced to empty list).
+ *
+ * [Member.member] is a header projection with `devices = null` so header
+ * equality does not track device-list churn rendered as sibling items.
+ */
+internal sealed class FamilyRosterLazyItem {
+    abstract val key: String
+    abstract val contentType: String
+
+    data class Member(val member: FamilyMember) : FamilyRosterLazyItem() {
+        override val key: String get() = "member:${member.membershipId}"
+        override val contentType: String get() = "member_row"
+    }
+
+    data class Device(
+        val membershipId: String,
+        val device: FamilyDevice,
+        /** Parent membership is the viewer's self row (for rename eligibility). */
+        val memberIsSelf: Boolean,
+    ) : FamilyRosterLazyItem() {
+        override val key: String get() = "device:${device.deviceId}"
+        override val contentType: String get() = "device_row"
+    }
+
+    data class EmptyDevices(val membershipId: String) : FamilyRosterLazyItem() {
+        override val key: String get() = "empty_devices:$membershipId"
+        override val contentType: String get() = "empty_devices"
+    }
+}
+
+/** Owner may generate a login QR only for ordinary (non-self) members. */
+internal fun canCreateMemberLoginQr(
+    viewerIsOwner: Boolean,
+    member: FamilyMember,
+): Boolean = viewerIsOwner && member.role == FamilyRole.Member
+
+/** Owner may rename another member's 家庭称呼 (never self — self uses edit/apply). */
+internal fun canRenameFamilyMemberRow(
+    viewerIsOwner: Boolean,
+    member: FamilyMember,
+): Boolean = viewerIsOwner && !member.isSelf
+
+/** Owner may rename any device; ordinary member may rename only self devices. */
+internal fun canRenameFamilyDeviceRow(
+    viewerIsOwner: Boolean,
+    memberIsSelf: Boolean,
+): Boolean = viewerIsOwner || memberIsSelf
+
+/** Only the family owner may revoke a device. */
+internal fun canRevokeFamilyDeviceRow(viewerIsOwner: Boolean): Boolean = viewerIsOwner
+
+/**
+ * Privacy-project members then flatten into member header + device (or empty)
+ * rows for LazyColumn keys/contentTypes.
+ */
+internal fun familyRosterLazyItems(
+    members: List<FamilyMember>,
+    viewerIsOwner: Boolean,
+): List<FamilyRosterLazyItem> = buildList {
+    for (member in members) {
+        val authorized = viewerIsOwner || member.isSelf
+        // Header projection: strip devices so Member item equality ignores device churn.
+        add(FamilyRosterLazyItem.Member(member.copy(devices = null)))
+        if (!authorized) {
+            // Unauthorized: no device section at all (not empty-devices).
+            continue
+        }
+        // Authorized null payload → empty section, not a silent drop.
+        val devices = member.devices.orEmpty()
+        if (devices.isEmpty()) {
+            add(FamilyRosterLazyItem.EmptyDevices(member.membershipId))
+        } else {
+            for (device in devices) {
+                add(
+                    FamilyRosterLazyItem.Device(
+                        membershipId = member.membershipId,
+                        device = device,
+                        memberIsSelf = member.isSelf,
+                    ),
+                )
+            }
+        }
+    }
+}
+
 /** Secondary member roster opened from the family-card count entry. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,93 +180,123 @@ internal fun FamilyMembersListSheet(
         ui.membersLoaded,
     )
     val viewerIsOwner = ui.role == FamilyRole.Owner
+    val rosterItems = remember(visibleMembers, viewerIsOwner) {
+        familyRosterLazyItems(visibleMembers, viewerIsOwner)
+    }
+    val rosterState = when {
+        ui.membersLoading && !ui.membersLoaded -> MembersRosterState.Loading
+        visibleMembers.isEmpty() && ui.membersError != null -> MembersRosterState.Error
+        else -> MembersRosterState.Content
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = LeziSpacing.Page)
-                .padding(bottom = LeziSpacing.Xxl),
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(
+                start = LeziSpacing.Page,
+                end = LeziSpacing.Page,
+                bottom = LeziSpacing.Xxl,
+            ),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("家庭成员与设备", style = LeziTypography.TitleSm)
-                    Text(
-                        familyMemberSummary(visibleMembers.size, ui.role, ui.membersLoaded),
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Box {
-                    var manageMenuOpen by remember { mutableStateOf(false) }
-                    LeziIconButton(onClick = { manageMenuOpen = true }, contentDescription = "管理家庭成员与设备", modifier = Modifier.testTag("members_manage_menu")) {
-                        Icon(
-                            Icons.Default.MoreVert,
-                            contentDescription = null,
+            item(key = "members_header", contentType = "members_header") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("家庭成员与设备", style = LeziTypography.TitleSm)
+                        Text(
+                            familyMemberSummary(visibleMembers.size, ui.role, ui.membersLoaded),
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    DropdownMenu(
-                        expanded = manageMenuOpen,
-                        onDismissRequest = { manageMenuOpen = false },
-                    ) {
-                        if (viewerIsOwner && onAddMember != null) {
-                            DropdownMenuItem(
-                                text = { Text("添加成员") },
-                                onClick = {
-                                    manageMenuOpen = false
-                                    onAddMember()
-                                },
-                                modifier = Modifier.testTag("members_menu_add_member"),
+                    Box {
+                        var manageMenuOpen by remember { mutableStateOf(false) }
+                        LeziIconButton(
+                            onClick = { manageMenuOpen = true },
+                            contentDescription = "管理家庭成员与设备",
+                            modifier = Modifier.testTag("members_manage_menu"),
+                        ) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = null,
                             )
                         }
-                        if (viewerIsOwner && onRenameFamily != null) {
+                        DropdownMenu(
+                            expanded = manageMenuOpen,
+                            onDismissRequest = { manageMenuOpen = false },
+                        ) {
+                            if (viewerIsOwner && onAddMember != null) {
+                                DropdownMenuItem(
+                                    text = { Text("添加成员") },
+                                    onClick = {
+                                        manageMenuOpen = false
+                                        onAddMember()
+                                    },
+                                    modifier = Modifier.testTag("members_menu_add_member"),
+                                )
+                            }
+                            if (viewerIsOwner && onRenameFamily != null) {
+                                DropdownMenuItem(
+                                    text = { Text("修改家庭名") },
+                                    onClick = {
+                                        manageMenuOpen = false
+                                        onRenameFamily()
+                                    },
+                                    modifier = Modifier.testTag("members_menu_rename_family"),
+                                )
+                            }
                             DropdownMenuItem(
-                                text = { Text("修改家庭名") },
+                                text = { Text(if (ui.membersLoading) "刷新中…" else "刷新") },
                                 onClick = {
                                     manageMenuOpen = false
-                                    onRenameFamily()
+                                    onRefreshMembers()
                                 },
-                                modifier = Modifier.testTag("members_menu_rename_family"),
+                                enabled = !ui.membersLoading,
+                                modifier = Modifier.testTag("members_menu_refresh"),
                             )
                         }
-                        DropdownMenuItem(
-                            text = { Text(if (ui.membersLoading) "刷新中…" else "刷新") },
-                            onClick = {
-                                manageMenuOpen = false
-                                onRefreshMembers()
-                            },
-                            enabled = !ui.membersLoading,
-                            modifier = Modifier.testTag("members_menu_refresh"),
-                        )
                     }
                 }
             }
+
             if (viewerIsOwner && ui.pendingMemberRequests.isNotEmpty()) {
-                Text(
-                    "设备登录申请（${ui.pendingMemberRequests.size}）",
-                    style = LeziTypography.BodyStrong,
-                    modifier = Modifier.padding(top = LeziSpacing.Sm),
-                )
-                ui.pendingMemberRequests.forEach { request ->
+                item(key = "pending_login_heading", contentType = "pending_heading") {
+                    Text(
+                        "设备登录申请（${ui.pendingMemberRequests.size}）",
+                        style = LeziTypography.BodyStrong,
+                        modifier = Modifier.padding(top = LeziSpacing.Sm),
+                    )
+                }
+                items(
+                    items = ui.pendingMemberRequests,
+                    key = { "pending_login:${it.requestId}" },
+                    contentType = { "pending_login_row" },
+                ) { request ->
                     PendingMemberLoginRow(
                         request = request,
                         onReview = onReviewPending?.let { review ->
                             { review(request) }
                         },
+                        modifier = Modifier.animateItem(),
                     )
                 }
             }
+
             if (viewerIsOwner && ui.pendingMemberRenameRequests.isNotEmpty()) {
-                Text(
-                    "待处理改名（${ui.pendingMemberRenameRequests.size}）",
-                    style = LeziTypography.BodyStrong,
-                    modifier = Modifier.padding(top = LeziSpacing.Sm),
-                )
-                ui.pendingMemberRenameRequests.forEach { request ->
+                item(key = "pending_rename_heading", contentType = "pending_heading") {
+                    Text(
+                        "待处理改名（${ui.pendingMemberRenameRequests.size}）",
+                        style = LeziTypography.BodyStrong,
+                        modifier = Modifier.padding(top = LeziSpacing.Sm),
+                    )
+                }
+                items(
+                    items = ui.pendingMemberRenameRequests,
+                    key = { "pending_rename:${it.requestId}" },
+                    contentType = { "pending_rename_row" },
+                ) { request ->
                     PendingMemberRenameRow(
                         request = request,
                         onApprove = onReviewRename?.let { review ->
@@ -183,32 +305,37 @@ internal fun FamilyMembersListSheet(
                         onReject = onReviewRename?.let { review ->
                             { review(request, false) }
                         },
+                        modifier = Modifier.animateItem(),
                     )
                 }
             }
-            val rosterState = when {
-                ui.membersLoading && !ui.membersLoaded -> MembersRosterState.Loading
-                visibleMembers.isEmpty() && ui.membersError != null -> MembersRosterState.Error
-                else -> MembersRosterState.Content
-            }
-            Crossfade(targetState = rosterState, label = "familyMembersRoster") { state ->
-                when (state) {
-                    MembersRosterState.Loading -> Text(
+
+            when (rosterState) {
+                MembersRosterState.Loading -> item(
+                    key = "roster_loading",
+                    contentType = "roster_status",
+                ) {
+                    Text(
                         "正在读取家人…",
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = LeziSpacing.Xs),
                     )
-                    MembersRosterState.Error -> Text(
+                }
+                MembersRosterState.Error -> item(
+                    key = "roster_error",
+                    contentType = "roster_status",
+                ) {
+                    Text(
                         ui.membersError.orEmpty(),
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.error,
                         modifier = Modifier.padding(top = LeziSpacing.Xs),
                     )
-                    MembersRosterState.Content -> Column(
-                        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
-                    ) {
-                        if (visibleMembers.isEmpty() && ui.membersLoaded && ui.membersError == null) {
+                }
+                MembersRosterState.Content -> {
+                    if (visibleMembers.isEmpty() && ui.membersLoaded && ui.membersError == null) {
+                        item(key = "roster_empty", contentType = "roster_empty") {
                             Text(
                                 "暂时没有可显示的家庭成员",
                                 style = LeziTypography.Body,
@@ -216,53 +343,115 @@ internal fun FamilyMembersListSheet(
                                 modifier = Modifier.padding(vertical = LeziSpacing.Sm),
                             )
                         }
-                        visibleMembers.forEach { member ->
-                            val privacyProjectedMember = if (viewerIsOwner || member.isSelf) {
-                                member
-                            } else {
-                                member.copy(devices = null)
+                    }
+                    items(
+                        items = rosterItems,
+                        key = { it.key },
+                        contentType = { it.contentType },
+                    ) { rosterItem ->
+                        when (rosterItem) {
+                            is FamilyRosterLazyItem.Member -> {
+                                val member = rosterItem.member
+                                FamilyMemberRow(
+                                    member = member,
+                                    onEditSelf = onEditMyDisplayName.takeIf { member.isSelf },
+                                    onRemove = onRemoveMember
+                                        ?.takeIf { canRemoveFamilyMember(viewerIsOwner, member) }
+                                        ?.let { remove ->
+                                            {
+                                                remove(
+                                                    member.membershipId,
+                                                    familyMemberDisplayName(member),
+                                                )
+                                            }
+                                        },
+                                    onCreateLoginQr = onCreateMemberLoginQr
+                                        ?.takeIf { canCreateMemberLoginQr(viewerIsOwner, member) }
+                                        ?.let { create -> { create(member.membershipId) } },
+                                    onRenameMember = onRenameMember
+                                        ?.takeIf {
+                                            canRenameFamilyMemberRow(viewerIsOwner, member)
+                                        }
+                                        ?.let { rename ->
+                                            {
+                                                rename(
+                                                    member.membershipId,
+                                                    familyMemberDisplayName(member),
+                                                )
+                                            }
+                                        },
+                                    modifier = Modifier.animateItem(),
+                                )
                             }
-                            FamilyMemberRow(
-                                member = privacyProjectedMember,
-                                onEditSelf = onEditMyDisplayName.takeIf { member.isSelf },
-                                onRemove = onRemoveMember
-                                    ?.takeIf { canRemoveFamilyMember(viewerIsOwner, member) }
-                                    ?.let { remove ->
-                                        {
-                                            remove(
-                                                member.membershipId,
-                                                familyMemberDisplayName(member),
+                            is FamilyRosterLazyItem.Device -> {
+                                FamilyDeviceRow(
+                                    device = rosterItem.device,
+                                    onRename = onRenameDevice
+                                        ?.takeIf {
+                                            canRenameFamilyDeviceRow(
+                                                viewerIsOwner,
+                                                rosterItem.memberIsSelf,
                                             )
                                         }
-                                    },
-                                onCreateLoginQr = onCreateMemberLoginQr
-                                    ?.takeIf { viewerIsOwner && member.role == FamilyRole.Member }
-                                    ?.let { create -> { create(member.membershipId) } },
-                                onRenameMember = onRenameMember
-                                    ?.takeIf { viewerIsOwner && !member.isSelf }
-                                    ?.let { rename ->
-                                        { rename(member.membershipId, familyMemberDisplayName(member)) }
-                                    },
-                                onRenameDevice = onRenameDevice.takeIf { viewerIsOwner || member.isSelf },
-                                onRevokeDevice = onRevokeDevice.takeIf { viewerIsOwner },
-                            )
+                                        ?.let { rename ->
+                                            {
+                                                rename(
+                                                    rosterItem.device.deviceId,
+                                                    rosterItem.device.deviceName,
+                                                )
+                                            }
+                                        },
+                                    onRevoke = onRevokeDevice
+                                        ?.takeIf { canRevokeFamilyDeviceRow(viewerIsOwner) }
+                                        ?.let { revoke ->
+                                            {
+                                                revoke(
+                                                    rosterItem.device.deviceId,
+                                                    rosterItem.device.deviceName,
+                                                    rosterItem.device.isCurrent,
+                                                )
+                                            }
+                                        },
+                                    modifier = Modifier.animateItem(),
+                                )
+                            }
+                            is FamilyRosterLazyItem.EmptyDevices -> {
+                                Text(
+                                    "暂无设备",
+                                    style = LeziTypography.Meta,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .animateItem()
+                                        .fillMaxWidth()
+                                        .heightIn(min = LeziSpacing.Touch)
+                                        .padding(
+                                            start = DeviceRowIndent,
+                                            top = LeziSpacing.Xs,
+                                            bottom = LeziSpacing.Xs,
+                                        ),
+                                )
+                            }
                         }
-                        ui.membersError?.let { error ->
+                    }
+                    ui.membersError?.let { error ->
+                        item(key = "roster_footer_error", contentType = "roster_status") {
                             Text(
                                 error,
                                 style = LeziTypography.Meta,
                                 color = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.padding(top = LeziSpacing.Xs),
                             )
-                        } ?: if (!ui.membersLoaded && !ui.membersLoading) {
+                        }
+                    } ?: if (!ui.membersLoaded && !ui.membersLoading) {
+                        item(key = "roster_footer_unloaded", contentType = "roster_status") {
                             Text(
                                 "暂时无法读取成员与设备，请重试",
                                 style = LeziTypography.Meta,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = LeziSpacing.Xs),
                             )
-                        } else Unit
-                    }
+                        }
+                    } else Unit
                 }
             }
         }
@@ -281,9 +470,10 @@ private fun PendingMemberRenameRow(
     request: PendingMemberRenameRequest,
     onApprove: (() -> Unit)?,
     onReject: (() -> Unit)?,
+    modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(vertical = LeziSpacing.Xs),
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
@@ -308,10 +498,11 @@ private fun PendingMemberRenameRow(
 private fun PendingMemberLoginRow(
     request: PendingMemberLoginRequest,
     onReview: (() -> Unit)?,
+    modifier: Modifier = Modifier,
 ) {
     val awaitingClaim = request.status == MemberLoginStatus.Approved
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .padding(vertical = LeziSpacing.Xs),
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
@@ -412,6 +603,10 @@ internal fun PendingMemberDecisionDialog(
 internal fun formatPendingRequestTime(epochSeconds: Long): String =
     formatFamilyDeviceLastUsed(epochSeconds)
 
+/**
+ * Member header row only; device rows are sibling lazy items from
+ * [familyRosterLazyItems] so they recycle and animate independently.
+ */
 @Composable
 internal fun FamilyMemberRow(
     member: FamilyMember,
@@ -419,125 +614,97 @@ internal fun FamilyMemberRow(
     onRemove: (() -> Unit)? = null,
     onCreateLoginQr: (() -> Unit)? = null,
     onRenameMember: (() -> Unit)? = null,
-    onRenameDevice: ((deviceId: String, deviceName: String) -> Unit)? = null,
-    onRevokeDevice: ((deviceId: String, deviceName: String, isCurrent: Boolean) -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = MemberRowMinHeight)
+            .padding(vertical = LeziSpacing.Xs),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = MemberRowMinHeight)
-                .padding(vertical = LeziSpacing.Xs),
-            verticalAlignment = Alignment.CenterVertically,
+        Surface(
+            modifier = Modifier.size(MemberAvatarSize),
+            shape = CircleShape,
+            color = if (member.isSelf) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            contentColor = if (member.isSelf) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
         ) {
-            Surface(
-                modifier = Modifier.size(MemberAvatarSize),
-                shape = CircleShape,
-                color = if (member.isSelf) {
-                    MaterialTheme.colorScheme.primaryContainer
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant
-                },
-                contentColor = if (member.isSelf) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            ) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        when {
-                            member.isSelf -> "我"
-                            member.role == FamilyRole.Owner -> "管"
-                            else -> "员"
-                        },
-                        style = LeziTypography.Label,
-                    )
-                }
-            }
-            Spacer(Modifier.size(LeziSpacing.Sm))
-            Column(Modifier.weight(1f)) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
-                    familyMemberTitle(member),
-                    style = LeziTypography.BodyStrong,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    familyRoleLabel(member.role),
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    when {
+                        member.isSelf -> "我"
+                        member.role == FamilyRole.Owner -> "管"
+                        else -> "员"
+                    },
+                    style = LeziTypography.Label,
                 )
             }
-            FamilyRowOverflowMenu(
-                actions = buildList {
-                    if (member.isSelf && onEditSelf != null) {
-                        add(
-                            FamilyRowAction(
-                                label = if (member.role == FamilyRole.Owner) "改称呼" else "申请改称呼",
-                                testTag = "member_action_edit_self",
-                                onClick = onEditSelf,
-                            ),
-                        )
-                    }
-                    if (!member.isSelf && onRenameMember != null) {
-                        add(
-                            FamilyRowAction(
-                                label = "改称呼",
-                                testTag = "member_action_rename",
-                                onClick = onRenameMember,
-                            ),
-                        )
-                    }
-                    if (onCreateLoginQr != null) {
-                        add(
-                            FamilyRowAction(
-                                label = "为这个成员生成登录二维码",
-                                testTag = "member_action_login_qr",
-                                onClick = onCreateLoginQr,
-                            ),
-                        )
-                    }
-                    if (!member.isSelf && onRemove != null) {
-                        add(
-                            FamilyRowAction(
-                                label = "移除",
-                                testTag = "member_action_remove",
-                                onClick = onRemove,
-                                isDestructive = true,
-                            ),
-                        )
-                    }
-                },
-                menuTestTag = "member_overflow_menu",
-                contentDescription = "${familyMemberTitle(member)}的更多操作",
+        }
+        Spacer(Modifier.size(LeziSpacing.Sm))
+        Column(Modifier.weight(1f)) {
+            Text(
+                familyMemberTitle(member),
+                style = LeziTypography.BodyStrong,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                familyRoleLabel(member.role),
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        member.devices?.let { devices ->
-            if (devices.isEmpty()) {
-                Text(
-                    "暂无设备",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = DeviceRowIndent, bottom = LeziSpacing.Xs),
-                )
-            } else {
-                devices.forEach { device ->
-                    FamilyDeviceRow(
-                        device = device,
-                        onRename = onRenameDevice?.let { rename ->
-                            { rename(device.deviceId, device.deviceName) }
-                        },
-                        onRevoke = onRevokeDevice?.let { revoke ->
-                            { revoke(device.deviceId, device.deviceName, device.isCurrent) }
-                        },
+        FamilyRowOverflowMenu(
+            actions = buildList {
+                if (member.isSelf && onEditSelf != null) {
+                    add(
+                        FamilyRowAction(
+                            label = if (member.role == FamilyRole.Owner) "改称呼" else "申请改称呼",
+                            testTag = "member_action_edit_self",
+                            onClick = onEditSelf,
+                        ),
                     )
                 }
-            }
-        }
+                if (!member.isSelf && onRenameMember != null) {
+                    add(
+                        FamilyRowAction(
+                            label = "改称呼",
+                            testTag = "member_action_rename",
+                            onClick = onRenameMember,
+                        ),
+                    )
+                }
+                if (onCreateLoginQr != null) {
+                    add(
+                        FamilyRowAction(
+                            label = "为这个成员生成登录二维码",
+                            testTag = "member_action_login_qr",
+                            onClick = onCreateLoginQr,
+                        ),
+                    )
+                }
+                if (!member.isSelf && onRemove != null) {
+                    add(
+                        FamilyRowAction(
+                            label = "移除",
+                            testTag = "member_action_remove",
+                            onClick = onRemove,
+                            isDestructive = true,
+                        ),
+                    )
+                }
+            },
+            menuTestTag = "member_overflow_menu",
+            contentDescription = "${familyMemberTitle(member)}的更多操作",
+        )
     }
 }
 
@@ -546,10 +713,11 @@ private fun FamilyDeviceRow(
     device: FamilyDevice,
     onRename: (() -> Unit)?,
     onRevoke: (() -> Unit)?,
+    modifier: Modifier = Modifier,
 ) {
     val activity = formatFamilyDeviceLastUsed(device.lastUsedAtEpochSeconds)
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(min = LeziSpacing.Touch)
             .padding(start = DeviceRowIndent, top = LeziSpacing.Xs, bottom = LeziSpacing.Xs)
