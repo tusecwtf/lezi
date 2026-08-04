@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarMonth
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -28,10 +27,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TimePickerLayoutType
 import androidx.compose.material3.TimePickerSelectionMode
@@ -262,7 +259,8 @@ fun LeziClockDialDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            LeziTextButton(
+                label = "确定",
                 onClick = {
                     val (hour, minute) = resolvedHourMinute()
                     val decision = RecordTime.merge(
@@ -282,14 +280,11 @@ fun LeziClockDialDialog(
                         }
                     }
                 },
-            ) {
-                Text("确定")
-            }
+                tone = LeziTextButtonTone.Primary,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消")
-            }
+            LeziTextButton(label = "取消", onClick = onDismiss)
         },
     )
 
@@ -301,26 +296,15 @@ fun LeziClockDialDialog(
         val dateState = rememberDatePickerState(
             initialSelectedDateMillis = selectedUtc,
         )
-        DatePickerDialog(
+        LeziDatePickerDialog(
             onDismissRequest = { showDatePicker = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dateState.selectedDateMillis?.let { millis ->
-                            selectedDate = Instant.ofEpochMilli(millis)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                        }
-                        showDatePicker = false
-                    },
-                ) {
-                    Text("确定")
+            onConfirm = {
+                dateState.selectedDateMillis?.let { millis ->
+                    selectedDate = Instant.ofEpochMilli(millis)
+                        .atZone(ZoneOffset.UTC)
+                        .toLocalDate()
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDatePicker = false }) {
-                    Text("取消")
-                }
+                showDatePicker = false
             },
         ) {
             ChineseLocale {
@@ -628,11 +612,11 @@ private fun TimeDropdownField(
         onExpandedChange = { expanded = it },
         modifier = modifier,
     ) {
-        OutlinedTextField(
+        LeziTextField(
             value = format(value),
             onValueChange = {},
             readOnly = true,
-            label = { Text(label) },
+            label = label,
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier
                 .menuAnchor(MenuAnchorType.PrimaryNotEditable)

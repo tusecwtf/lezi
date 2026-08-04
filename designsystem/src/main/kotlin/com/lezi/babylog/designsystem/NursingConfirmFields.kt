@@ -7,8 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -81,10 +79,10 @@ fun LeziNursingConfirmFields(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 NURSING_ORDER_CHOICES.forEachIndexed { index, (value, label) ->
-                    FilterChip(
+                    LeziFilterChip(
                         selected = input.order == value,
                         onClick = { onInputChange(input.copy(order = value)) },
-                        label = { Text(label) },
+                        label = label,
                         modifier = if (index == 0) {
                             Modifier.focusRequester(orderFocus)
                         } else {
@@ -117,11 +115,11 @@ private fun NursingIntegerField(
     modifier: Modifier,
     onValueChange: (String) -> Unit,
 ) {
-    OutlinedTextField(
+    LeziTextField(
         value = value,
         onValueChange = { onValueChange(it.filter(Char::isDigit).take(maxDigits)) },
         modifier = modifier,
-        label = { Text(label) },
+        label = label,
         isError = isError,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         singleLine = true,
