@@ -3,6 +3,6 @@
   "version_code": 14,
   "version_name": "0.3.7",
   "min_supported_version_code": 6,
-  "sha256": "39583b85646806b56762bf42d486b73721f0932615db86f22aafbb8eacc368ea",
+  "sha256": "9ef230f26cfe4388b32eeb72c6c37b269a7c8faaac2b6111b2c816ccd7d77734",
   "release_notes": "0.3.7 引入服务端权威对账，原子收敛待同步记录与照片，并安全保留 0.3.6 本地数据"
 }
