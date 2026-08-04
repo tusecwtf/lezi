@@ -27,6 +27,7 @@ expected_signer_sha256="$(tr -d '\r\n' <"${REPO_ROOT}/config/release-apk-signer-
 
 apk_path="${test_root}/app-release.apk"
 printf 'lezi-fake-release-apk-bytes-for-gate-test\n' >"${apk_path}"
+chmod 0600 "${apk_path}"
 apk_sha="$(sha256sum "${apk_path}" | awk '{print $1}')"
 wrong_sha="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 apk_analyzer="${test_root}/apkanalyzer"

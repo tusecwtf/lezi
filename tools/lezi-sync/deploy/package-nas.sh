@@ -409,8 +409,13 @@ PY
     echo "  apk path: ${release_apk}" >&2
     exit 1
   fi
-  cp -a "${release_apk}" "${dest_dir}/app-release.apk"
-  cp -a "${app_update_json}" "${dest_dir}/app-update.json"
+  install -m 0644 -- "${release_apk}" "${dest_dir}/app-release.apk"
+  install -m 0644 -- "${app_update_json}" "${dest_dir}/app-update.json"
+  if [[ "$(stat -c '%a' "${dest_dir}/app-release.apk")" != "644" \
+      || "$(stat -c '%a' "${dest_dir}/app-update.json")" != "644" ]]; then
+    echo "error: staged app-update artifacts must use mode 0644" >&2
+    exit 1
+  fi
   echo "==> staged app-update ${package_name} v${version_name} (${version_code})"
   echo "    min_supported=${min_supported} sha256=${apk_sha}"
   echo "    local_data_contract=$(printf '%s' "${contract_values}" | tr '\n' '.')"
