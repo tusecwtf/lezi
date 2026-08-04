@@ -10,9 +10,10 @@ use serde_json::{json, Value};
 
 use super::media::media_entity_is_pullable;
 use crate::model::{
-    validate_bundle_media_for_root, EntityValidationContext, RawEntity, MAX_BUNDLE_MEDIA_ENTITIES,
+    validate_bundle_media_for_root, Entity, EntityValidationContext, RawEntity,
+    MAX_BUNDLE_MEDIA_ENTITIES,
 };
-use crate::store::{ReconcileUnit, StoreError};
+use crate::store::{ReconcileResult, ReconcileUnit, StoreError};
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
     MAX_ENTITY_FUTURE_SKEW_MILLIS,
@@ -105,6 +106,32 @@ fn reconcile_response_fits(response: &Value, max_bytes: usize) -> Result<bool, A
     Ok(response_size <= max_bytes)
 }
 
+fn reconcile_entity_value(entity: Entity) -> Value {
+    json!({
+        "type": entity.entity_type,
+        "client_uuid": entity.client_uuid,
+        "updated_at": entity.updated_at,
+        "deleted_at": entity.deleted_at,
+        "payload": entity.payload,
+    })
+}
+
+fn reconcile_result_value(result: ReconcileResult) -> Value {
+    json!({
+        "entity_type": result.entity_type,
+        "client_uuid": result.client_uuid,
+        "request_content_hash": result.request_content_hash,
+        "disposition": result.disposition,
+        "reason": result.reason,
+        "remote_content_hash": result.remote_content_hash,
+        "remote_root": result.remote_root.map(reconcile_entity_value),
+        "remote_media": result.remote_media
+            .into_iter()
+            .map(reconcile_entity_value)
+            .collect::<Vec<_>>(),
+    })
+}
+
 pub(crate) async fn reconcile_entities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -161,7 +188,10 @@ pub(crate) async fn reconcile_entities(
     let response = json!({
         "generation": state.generation,
         "cursor": result.cursor,
-        "results": result.results,
+        "results": result.results
+            .into_iter()
+            .map(reconcile_result_value)
+            .collect::<Vec<_>>(),
     });
     if !reconcile_response_fits(&response, state.max_reconcile_response_bytes)? {
         return Err(ApiError::conflict_value(

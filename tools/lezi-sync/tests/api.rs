@@ -9219,6 +9219,37 @@ async fn authoritative_reconcile_is_authenticated_bounded_and_generation_scoped(
         "frozen-local-hash"
     );
 
+    let (published_status, published) =
+        publish_root_bundle(&rig.app, token, unit["root"].clone()).await;
+    assert_eq!(published_status, StatusCode::OK, "{published}");
+    let (adopt_status, adopt) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "units": [{
+                "content_hash": "stale-local-hash",
+                "root": {
+                    "type": "baby",
+                    "client_uuid": baby_id,
+                    "updated_at": 1_753_418_399_999_i64,
+                    "deleted_at": null,
+                    "payload": baby_payload("旧本机副本", None),
+                },
+                "media": [],
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(adopt_status, StatusCode::OK, "{adopt}");
+    assert_eq!(adopt["results"][0]["disposition"], "adopt_remote");
+    assert_eq!(adopt["results"][0]["remote_root"]["type"], "baby");
+    assert!(adopt["results"][0]["remote_root"]
+        .get("entity_type")
+        .is_none());
+
     let (future_timestamp, future_body) = json_request(
         &rig.app,
         Method::POST,
