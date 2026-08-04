@@ -105,12 +105,18 @@ fun LeziCard(
  * Full-bleed section surface.
  * Journal: grid/panel with optional bottom band (template 8px bg stripe).
  * Warm: delegates to [LeziCard].
+ *
+ * Journal hairline ownership: the panel's 1dp bottom hairline closes generic
+ * content. When the panel hosts [RecordRow]-style rows (each row already draws
+ * its own bottom hairline), pass [bottomDivider] = false so the row hairlines
+ * stay the single source and the nested edge does not double-draw.
  */
 @Composable
 fun LeziSurfacePanel(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(LeziSpacing.CardPad),
     bottomBand: Boolean = false,
+    bottomDivider: Boolean = true,
     onClick: (() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -155,17 +161,26 @@ fun LeziSurfacePanel(
                     .height(8.dp)
                     .background(MaterialTheme.colorScheme.background),
             )
-        } else {
+        } else if (bottomDivider) {
             Spacer(
                 Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.85f)),
+                    .background(leziHairlineColor()),
             )
         }
     }
 }
 
+/**
+ * Single tappable metric cell with a tone-tinted icon chip, value, and label.
+ *
+ * Division of labor vs `RecordSummaryStrip` (core/ui): this is the warm/log-home
+ * **card** language (tinted background, per-cell border, 82dp min height) used as
+ * standalone summary cards; `RecordSummaryStrip` is the flat five-cell **strip**
+ * language (dividers between cells, record-type icons, filter semantics) embedded
+ * in record panels. Keep both; new record-type filter strips belong to the strip.
+ */
 @Composable
 fun SummaryMetric(
     value: String,
@@ -225,7 +240,7 @@ fun SummaryMetric(
                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
                 contentAlignment = Alignment.Center,
             ) {
-                if (icon != null) icon() else Text("·", style = LeziTypography.Label)
+                if (icon != null) icon() else LeziPlaceholderDot()
             }
             Spacer(Modifier.height(6.dp))
             Text(
@@ -236,9 +251,10 @@ fun SummaryMetric(
             )
             Text(
                 label,
-                style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                style = LeziTypography.Micro,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }

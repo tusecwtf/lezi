@@ -1,33 +1,24 @@
 package com.lezi.babylog.feature.log.dock
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -41,7 +32,6 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
@@ -51,10 +41,11 @@ import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.orderedRecordSections
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.sortCatalogByLocalOrder
+import com.lezi.babylog.designsystem.LeziAlphas
+import com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
 import com.lezi.babylog.designsystem.LeziSpacing
-import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CustomRecordItem
@@ -63,8 +54,6 @@ import com.lezi.babylog.feature.log.timeline.*
 import com.lezi.babylog.feature.log.composer.*
 import com.lezi.babylog.feature.log.layout.*
 import com.lezi.babylog.feature.log.photo.*
-
-private val CustomSlotIcons = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 
 /**
  * Always renders four configurable slots plus fixed "更多" (absolute LTR order).
@@ -84,154 +73,125 @@ internal fun OneHandQuickDock(
     onLongPress: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val journal = LeziThemeExt.isJournal
     val resolved = remember(storedSlots, hiddenTypeKeys, customItems) {
         resolveQuickSlots(storedSlots, hiddenTypeKeys, customItems)
     }
     val cells = remember(resolved) {
         fixedQuickDockOrder(resolved)
     }
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(
-                horizontal = if (journal) 0.dp else QuickDockVisualSpec.outerHorizontalWarm,
-                vertical = QuickDockVisualSpec.outerVertical,
-            )
-            .testTag("one_hand_quick_dock_fixed"),
-        shape = LeziThemeExt.dockShape,
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
-        shadowElevation = LeziThemeExt.dockElevation,
+    QuickDockContainer(
+        modifier = modifier,
+        surfaceModifier = Modifier.testTag("one_hand_quick_dock_fixed"),
     ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(
-                    horizontal = QuickDockVisualSpec.rowHorizontal,
-                    vertical = QuickDockVisualSpec.rowVertical,
-                ),
-            horizontalArrangement = Arrangement.spacedBy(QuickDockVisualSpec.cellSpacing),
-        ) {
-            cells.forEachIndexed { index, cell ->
-                val presentation = quickDockPresentation(cell, sleepRunning)
-                val tint = when (cell) {
-                    is QuickDockCell.Bound ->
-                        if (cell.recordType == RecordType.CUSTOM) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            leziRecordColor(cell.recordType.presentation.colorRole)
-                        }
-                    QuickDockCell.Empty -> MaterialTheme.colorScheme.onSurfaceVariant
-                    QuickDockCell.More -> MaterialTheme.colorScheme.primary
-                }
-                val tag = when (cell) {
-                    is QuickDockCell.Bound -> "one_hand_action_${cell.catalogKey}"
-                    QuickDockCell.Empty -> "one_hand_action_empty_$index"
-                    QuickDockCell.More -> "one_hand_action_more"
-                }
-                val cellInteraction = when (cell) {
-                    is QuickDockCell.Bound -> Modifier
-                        .combinedClickable(
-                            onClick = { onBound(cell.identity) },
-                            onLongClick = onLongPress,
-                        )
-                        .semantics(mergeDescendants = true) {
-                            contentDescription = presentation.contentDescription
-                        }
-                    QuickDockCell.Empty -> Modifier
-                        .pointerInput(onEmpty, onLongPress) {
-                            detectTapGestures(
-                                onTap = { onEmpty() },
-                                onLongPress = { onLongPress() },
-                            )
-                        }
-                        .onPreviewKeyEvent { event ->
-                            if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
-                                onLongPress()
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        .focusable()
-                        .semantics(mergeDescendants = true) {
-                            contentDescription = presentation.contentDescription
-                            stateDescription = "短按无操作"
-                            customActions = listOf(
-                                CustomAccessibilityAction("编辑常用布局") {
-                                    onLongPress()
-                                    true
-                                },
-                            )
-                        }
-                    QuickDockCell.More -> Modifier
-                        .clickable(onClick = onMore)
-                        .semantics(mergeDescendants = true) {
-                            contentDescription = presentation.contentDescription
-                        }
-                }
-                Surface(
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = QuickDockVisualSpec.cellMinHeight)
-                        .testTag(tag)
-                        .then(cellInteraction),
-                    shape = LeziThemeExt.controlShape,
-                    color = if (quickDockIdleContainerIsEmphasized(cell)) {
-                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+        cells.forEachIndexed { index, cell ->
+            val presentation = quickDockPresentation(cell, sleepRunning)
+            val tint = when (cell) {
+                is QuickDockCell.Bound ->
+                    if (cell.recordType == RecordType.CUSTOM) {
+                        MaterialTheme.colorScheme.primary
                     } else {
-                        Color.Transparent
-                    },
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                ) {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 5.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                    ) {
-                        Box(
-                            Modifier
-                                .size(QuickDockVisualSpec.iconSize)
-                                .clip(CircleShape)
-                                .background(tint.copy(alpha = 0.14f)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            when (cell) {
-                                is QuickDockCell.Bound -> {
-                                    if (cell.recordType == RecordType.CUSTOM) {
-                                        Text(
-                                            CustomSlotIcons[
-                                                (cell.customIconSlot ?: 0).coerceIn(0, 7),
-                                            ],
-                                            style = LeziTypography.Meta,
-                                            color = tint,
-                                        )
-                                    } else {
-                                        RecordTypeIcon(cell.recordType, tint = tint)
-                                    }
-                                }
-                                QuickDockCell.Empty -> {
-                                    Text("＋", style = LeziTypography.BodyStrong, color = tint)
-                                }
-                                QuickDockCell.More -> {
-                                    LeziRecordGlyphIcon(
-                                        glyph = LeziRecordGlyph.Other,
-                                        tint = tint,
-                                    )
-                                }
-                            }
-                        }
-                        Text(
-                            presentation.visualLabel,
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                        leziRecordColor(cell.recordType.presentation.colorRole)
+                    }
+                QuickDockCell.Empty -> MaterialTheme.colorScheme.onSurfaceVariant
+                QuickDockCell.More -> MaterialTheme.colorScheme.primary
+            }
+            val tag = when (cell) {
+                is QuickDockCell.Bound -> "one_hand_action_${cell.catalogKey}"
+                QuickDockCell.Empty -> "one_hand_action_empty_$index"
+                QuickDockCell.More -> "one_hand_action_more"
+            }
+            val cellInteraction = when (cell) {
+                is QuickDockCell.Bound -> Modifier
+                    .combinedClickable(
+                        onClick = { onBound(cell.identity) },
+                        onLongClick = onLongPress,
+                    )
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = presentation.contentDescription
+                    }
+                QuickDockCell.Empty -> Modifier
+                    .pointerInput(onEmpty, onLongPress) {
+                        detectTapGestures(
+                            onTap = { onEmpty() },
+                            onLongPress = { onLongPress() },
                         )
                     }
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
+                            onLongPress()
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    .focusable()
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = presentation.contentDescription
+                        stateDescription = "短按无操作"
+                        customActions = listOf(
+                            CustomAccessibilityAction("编辑常用布局") {
+                                onLongPress()
+                                true
+                            },
+                        )
+                    }
+                QuickDockCell.More -> Modifier
+                    .clickable(onClick = onMore)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = presentation.contentDescription
+                    }
+            }
+            QuickDockCell(
+                modifier = Modifier
+                    .testTag(tag)
+                    .then(cellInteraction),
+                containerColor = if (quickDockIdleContainerIsEmphasized(cell)) {
+                    MaterialTheme.colorScheme.primaryContainer.copy(
+                        alpha = LeziAlphas.Emphasis,
+                    )
+                } else {
+                    // Opaque idle base so the press ripple stays visible on the dock shell.
+                    MaterialTheme.colorScheme.surface
+                },
+            ) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = QuickDockVisualSpec.rowVertical),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    QuickDockIconDisc(tint = tint) {
+                        when (cell) {
+                            is QuickDockCell.Bound -> {
+                                if (cell.recordType == RecordType.CUSTOM) {
+                                    LeziCustomItemGlyphIcon(
+                                        slot = cell.customIconSlot ?: 0,
+                                        size = RecordCatalogVisualSpec.innerIconSize,
+                                        tint = tint,
+                                    )
+                                } else {
+                                    RecordTypeIcon(cell.recordType, tint = tint)
+                                }
+                            }
+                            QuickDockCell.Empty -> {
+                                QuickDockAddPlaceholder(tint)
+                            }
+                            QuickDockCell.More -> {
+                                LeziRecordGlyphIcon(
+                                    glyph = LeziRecordGlyph.Other,
+                                    tint = tint,
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        presentation.visualLabel,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

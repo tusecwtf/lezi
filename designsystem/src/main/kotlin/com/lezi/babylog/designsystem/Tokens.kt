@@ -1,7 +1,9 @@
 package com.lezi.babylog.designsystem
 
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -45,6 +47,12 @@ object LeziColors {
     val DarkSkySoft = Color(0xFF1A3344)
     val DarkSunSoft = Color(0xFF3A3420)
     val DarkCreamDeep = Color(0xFF2A2418)
+
+    // Dark semantic accents: hue-preserving brightened variants of Success/Warning/Sun,
+    // lifted by the same strategy as the journal dark palette so they read on DarkBg.
+    val DarkSuccess = Color(0xFF7CD6A1)
+    val DarkWarning = Color(0xFFECCB68)
+    val DarkSun = Color(0xFFF3DB86)
 
     // Sleep-in-progress moon cap (header avatar + sleep composer accents)
     val SleepMoonCap = Color(0xFF7965BE)
@@ -93,6 +101,8 @@ object LeziSpacing {
     val TopBarHorizontal: Dp = 10.dp
     val TopBarAvatar: Dp = 34.dp
     val TopBarAction: Dp = 48.dp
+    /** Unified max height for scrolling dialog content (was ad-hoc 420/480/520). */
+    val DialogContentMax: Dp = 480.dp
 }
 
 /**
@@ -139,6 +149,30 @@ object LeziElevation {
 }
 
 /**
+ * Shared alpha steps for tinted overlays, hairlines, and state feedback,
+ * distilled from existing call sites — prefer these over ad-hoc literals.
+ */
+@Immutable
+object LeziAlphas {
+    /** De-emphasized content sitting on a tinted fill (e.g. sheet surface veil). */
+    val Emphasis = 0.72f
+    /** Quiet decorative marks (focus rings, inactive hints). */
+    val Muted = 0.45f
+    /** Disabled foreground, aligned with the Material disabled alpha. */
+    val Disabled = 0.38f
+    /** Hairline dividers drawn with the outline color. */
+    val Hairline = 0.85f
+}
+
+/**
+ * Single source for journal 1dp outline hairlines (panel footer + record row
+ * separators). Prefer this over ad-hoc `outline.copy(alpha = 0.85f)`.
+ */
+@Composable
+fun leziHairlineColor(): Color =
+    MaterialTheme.colorScheme.outline.copy(alpha = LeziAlphas.Hairline)
+
+/**
  * Shared baby theme swatches. Display and theme resolution always normalize
  * these to a common HSL lightness so header chrome does not jump when switching babies.
  */
@@ -166,6 +200,67 @@ object LeziBabyTheme {
     )
 }
 
+/**
+ * Stool color swatch palette (clinical reference scale), slots 1..7.
+ * Slot 0 stays theme-driven at the call site (surface fill + outline stroke).
+ * Dark variants keep the hue and lift lightness so swatches read on dark surfaces,
+ * mirroring the record-color dark strategy in RecordVisuals.
+ */
+object LeziStoolPalette {
+    private val FillLight = listOf(
+        Color(0xFFF4F1EA), // 1 白陶土
+        Color(0xFFE6C04A), // 2 金黄
+        Color(0xFFE08A3A), // 3 橙
+        Color(0xFF8B5E34), // 4 棕
+        Color(0xFF5FA86A), // 5 绿
+        Color(0xFFC85A4A), // 6 红
+        Color(0xFF2A2A2A), // 7 黑
+    )
+    private val FillDark = listOf(
+        Color(0xFFF4F1EA),
+        Color(0xFFF0D073),
+        Color(0xFFF0A35C),
+        Color(0xFFC08A56),
+        Color(0xFF82C496),
+        Color(0xFFE07868),
+        Color(0xFF454548),
+    )
+    private val OutlineLight = listOf(
+        Color(0xFF9AA3AD),
+        Color(0xFF8A7020),
+        Color(0xFF8A4E18),
+        Color(0xFF4A3420),
+        Color(0xFF2F5C38),
+        Color(0xFF6E2C24),
+        Color(0xFF111111),
+    )
+    private val OutlineDark = listOf(
+        Color(0xFF9AA3AD),
+        Color(0xFFB08A34),
+        Color(0xFFB06A2C),
+        Color(0xFF7A5636),
+        Color(0xFF3F7A50),
+        Color(0xFF8E3A30),
+        Color(0xFFBFC2C5),
+    )
+
+    /** Fill for slot 1..7 (coerced); slot 0 is owned by the theme at the call site. */
+    fun fill(slot: Int, darkTheme: Boolean): Color {
+        val i = (slot.coerceIn(1, 7)) - 1
+        return (if (darkTheme) FillDark else FillLight)[i]
+    }
+
+    /**
+     * Outline for slot 1..7 (coerced). Slot 7 (black swatch) outline was historically
+     * computed from background luminance at the call site; the dark/light pair here
+     * encodes exactly that result (dark bg → light grey ring, light bg → near-black ring).
+     */
+    fun outline(slot: Int, darkTheme: Boolean): Color {
+        val i = (slot.coerceIn(1, 7)) - 1
+        return (if (darkTheme) OutlineDark else OutlineLight)[i]
+    }
+}
+
 object LeziTypography {
     private val BodyFamily = FontFamily.SansSerif
     private val DisplayFamily = FontFamily.Serif
@@ -178,6 +273,8 @@ object LeziTypography {
         lineHeight = 32.sp,
         letterSpacing = (-0.4).sp,
     )
+    /** Page-hero headline — Display face and weight at 34/40. */
+    val Hero = Display.copy(fontSize = 34.sp, lineHeight = 40.sp)
     val Title = TextStyle(
         fontFamily = DisplayFamily,
         fontWeight = FontWeight.SemiBold,
@@ -211,6 +308,8 @@ object LeziTypography {
         fontSize = 12.sp,
         lineHeight = 16.sp,
     )
+    /** Smallest meta text (10sp) — dense axis ticks and footnote labels. */
+    val Micro = Meta.copy(fontSize = 10.sp)
     val Metric = TextStyle(
         fontFamily = MonoFamily,
         fontWeight = FontWeight.Bold,

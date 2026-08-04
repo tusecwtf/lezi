@@ -3,6 +3,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,8 +21,6 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -63,7 +62,9 @@ import com.lezi.babylog.designsystem.LeziConfirmReasonCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziSectionLabel
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziSheetContentMax
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -250,14 +251,14 @@ internal fun QuickRecordSheet(
         ) {
             Box(
                 Modifier
-                    .size(46.dp)
+                    .size(LeziSpacing.Touch)
                     .clip(CircleShape)
-                    .background(typeColor.copy(alpha = 0.14f)),
+                    .background(typeColor.copy(alpha = QuickDockIconDiscAlpha)),
                 contentAlignment = Alignment.Center,
             ) {
-                RecordTypeIcon(draft.type, size = 25.dp, tint = typeColor)
+                RecordTypeIcon(draft.type, size = 24.dp, tint = typeColor)
             }
-            Spacer(Modifier.size(12.dp))
+            Spacer(Modifier.size(LeziSpacing.Sm))
             Column(Modifier.weight(1f)) {
                 Text(
                     sheetKicker(draft),
@@ -293,13 +294,13 @@ internal fun QuickRecordSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
-                .heightIn(max = 620.dp)
+                .heightIn(max = LeziSheetContentMax)
                 .verticalScroll(rememberScrollState())
                 .dismissKeyboardOnTap()
                 .padding(horizontal = LeziSpacing.Lg, vertical = LeziSpacing.Md),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
         ) {
-            SectionLabel("基本信息")
+            LeziSectionLabel("基本信息")
             PurposeFields(
                 draft = draft,
                 amountStepMl = amountStepMl,
@@ -350,7 +351,7 @@ internal fun QuickRecordSheet(
                 enabled = actionsEnabled,
             )
 
-            SectionLabel("备注")
+            LeziSectionLabel("备注")
             OutlinedTextField(
                 value = draft.note,
                 onValueChange = { update(draft.copy(note = it.take(200))) },
@@ -396,7 +397,7 @@ internal fun QuickRecordSheet(
                     Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                 ) {
                     draft.photos.forEachIndexed { index, path ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -430,6 +431,7 @@ internal fun QuickRecordSheet(
                             TextButton(
                                 enabled = actionsEnabled,
                                 onClick = { onRemovePhoto(path) },
+                                modifier = Modifier.heightIn(min = LeziSpacing.Touch),
                             ) { Text("移除") }
                         }
                     }
@@ -437,7 +439,7 @@ internal fun QuickRecordSheet(
             }
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
             ) {
                 TextButton(
                     enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size),
@@ -479,10 +481,12 @@ internal fun QuickRecordSheet(
                     end = LeziSpacing.Lg,
                     bottom = LeziSpacing.Lg,
                 ),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
         ) {
-            confirmChrome.reasonMessage?.let { reason ->
-                LeziConfirmReasonCard(reason)
+            AnimatedVisibility(visible = confirmChrome.reasonMessage != null) {
+                confirmChrome.reasonMessage?.let { reason ->
+                    LeziConfirmReasonCard(reason)
+                }
             }
             // Ticket 21: schedule-care seam — default-on projection; setup is optional and
             // cancel/skip never blocks plan save (CareLog falls back to Lezi reminders).
@@ -527,7 +531,7 @@ internal fun QuickRecordSheet(
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 LeziSecondaryButton(
                     label = "取消",

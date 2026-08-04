@@ -29,18 +29,27 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Brightness6
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.ChildCare
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Upload
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,11 +63,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -73,14 +81,18 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.deviceLayoutSnapshot
-import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.model.birthWeightValidationError
+import com.lezi.babylog.core.ui.AppUpdateOutcomeDialogs
 import com.lezi.babylog.core.ui.BabyAvatar
-import com.lezi.babylog.designsystem.LeziSurfacePanel
-import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.core.ui.BabyAvatarSizeMedium
+import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
+import com.lezi.babylog.core.ui.BabyProfileFormFields
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.core.ui.babyMetaLine
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
+import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
@@ -103,17 +115,9 @@ import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.appupdate.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appupdate.appUpdateUiOutcome
-import com.lezi.babylog.sync.appupdate.forcedUpdateDialogBody
-import com.lezi.babylog.sync.appupdate.forcedUpdatePackageUnknownBody
-import com.lezi.babylog.sync.appupdate.forcedUpdateRetryCheckLabel
-import com.lezi.babylog.sync.appupdate.forcedUpdateTitle
 import com.lezi.babylog.sync.appupdate.localAppVersionLabel
-import com.lezi.babylog.sync.appupdate.optionalUpdateDialogBody
 import dagger.hilt.android.lifecycle.HiltViewModel
-import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -130,6 +134,8 @@ private val BabyThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.Palet
     com.lezi.babylog.designsystem.normalizeBabyThemeArgb(it)
 }
 private val BabyThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
+
+internal const val SETTINGS_MENU_ROW_MORE_TAG = "settings_menu_row_more"
 
 internal fun clearRecordsFailureCopy(error: Throwable): String = when {
     error is LocalRecordsClearCommittedException && error.familyServerRetained ->
@@ -585,30 +591,31 @@ fun SettingsRoute(
                 title = "菜单",
             )
 
-            Text("查找与管理", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionHeading(title = "查找与管理")
             SettingsMenuRow(
                 "搜索全部记录",
                 "按类型、详情或备注查找",
-                icon = "⌕",
+                icon = Icons.Filled.Search,
                 actionLabel = "搜索全部记录",
                 onClick = onOpenSearch,
             )
             SettingsMenuRow(
                 "导出数据",
                 "TXT 文本预览与分享",
-                icon = "⇪",
+                icon = Icons.Filled.Upload,
                 actionLabel = "打开数据导出",
                 onClick = onOpenExport,
             )
             SettingsMenuRow(
                 "日程",
                 "本机提醒与日程列表",
-                icon = "▦",
+                icon = Icons.Filled.CalendarMonth,
                 actionLabel = "打开日程",
                 onClick = onOpenCalendar,
             )
 
-            Text("外观与偏好", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionHeading(title = "外观与偏好")
+            // 只读展示当前模式；三态切换集中在「显示设置」对话框一处。
             SettingsMenuRow(
                 title = "深色模式",
                 subtitle = "当前：${when (ui.settings.darkMode) {
@@ -616,37 +623,33 @@ fun SettingsRoute(
                     "light" -> "浅色"
                     else -> "跟随系统"
                 }}",
-                icon = "☾",
-                trailing = {
-                    Switch(
-                        checked = ui.settings.darkMode == "dark",
-                        onCheckedChange = { on -> vm.setDark(if (on) "dark" else "light") },
-                    )
-                },
+                icon = Icons.Filled.DarkMode,
+                actionLabel = "打开显示设置调整深色模式",
+                onClick = { showDisplay = true },
             )
             SettingsMenuRow(
                 "记录设置",
                 "分项目参数、护理计划与系统日历",
-                icon = "☰",
+                icon = Icons.Filled.Menu,
                 actionLabel = "打开记录设置",
                 onClick = { showRecordSettings = true },
             )
             SettingsMenuRow(
                 "自定义项目",
                 "创建、重命名、图标与本机显示",
-                icon = "+",
+                icon = Icons.Filled.Add,
                 actionLabel = "管理自定义项目",
                 onClick = { showCustomItems = true },
             )
             SettingsMenuRow(
                 "显示设置",
                 "界面模板与主题",
-                icon = "◐",
+                icon = Icons.Filled.Brightness6,
                 actionLabel = "打开显示设置",
                 onClick = { showDisplay = true },
             )
 
-            Text("宝宝", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionHeading(title = "宝宝")
             ui.babies.forEach { b ->
                 SettingsBabyRow(
                     baby = b,
@@ -661,25 +664,25 @@ fun SettingsRoute(
                 SettingsMenuRow(
                     "添加宝宝",
                     "新建本机宝宝档案",
-                    icon = "+",
+                    icon = Icons.Filled.PersonAdd,
                     actionLabel = "添加宝宝",
                     onClick = { showAdd = true },
                 )
             } else {
-                SettingsMenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = "·")
+                SettingsMenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = Icons.Filled.ChildCare)
             }
 
-            Text("数据", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionHeading(title = "数据")
             SettingsMenuRow(
                 title = "清除全部记录",
                 subtitle = "不删除宝宝档案",
-                icon = "!",
+                icon = Icons.Filled.DeleteForever,
                 actionLabel = "清除全部记录",
                 onClick = vm::requestClearRecords,
                 danger = true,
             )
 
-            Text("关于", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            SectionHeading(title = "关于")
             LeziSurfacePanel(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -702,157 +705,17 @@ fun SettingsRoute(
         }
     }
 
-    when (val outcome = appUpdateOutcome) {
-        is AppUpdateUiOutcome.Message -> {
-            AlertDialog(
-                onDismissRequest = {
-                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
-                },
-                title = { Text(outcome.title) },
-                text = { Text(outcome.body) },
-                confirmButton = {
-                    TextButton(
-                        onClick = vm::dismissAppUpdateOutcome,
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "请稍候" else "知道了")
-                    }
-                },
-            )
-        }
-        is AppUpdateUiOutcome.OptionalUpdate -> {
-            AlertDialog(
-                onDismissRequest = {
-                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
-                },
-                title = { Text("发现新版本") },
-                text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
-                confirmButton = {
-                    TextButton(
-                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = vm::dismissAppUpdateOutcome,
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text("稍后")
-                    }
-                },
-            )
-        }
-        is AppUpdateUiOutcome.ForcedUpdate -> {
-            // Non-dismissible: no "稍后", back/outside dismiss ignored.
-            // Secondary to root ForcedAppUpdateState full-screen shell.
-            AlertDialog(
-                onDismissRequest = {},
-                properties = DialogProperties(
-                    dismissOnBackPress = false,
-                    dismissOnClickOutside = false,
-                ),
-                title = { Text(forcedUpdateTitle()) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                        Text(forcedUpdateDialogBody(outcome.metadata))
-                        appUpdateInstallFeedback?.let { feedback ->
-                            Text(
-                                feedback,
-                                color = if (installingAppUpdate) {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                } else {
-                                    MaterialTheme.colorScheme.error
-                                },
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            if (forcedInstallPermissionRequired) {
-                                val intent = Intent(
-                                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                    Uri.parse("package:${context.packageName}"),
-                                )
-                                runCatching { context.startActivity(intent) }
-                                vm.markForcedInstallPermissionOpened()
-                            } else {
-                                vm.installOptionalUpdate(outcome.metadata)
-                            }
-                        },
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text(
-                            when {
-                                installingAppUpdate -> "安装中…"
-                                forcedInstallPermissionRequired -> "去授权安装"
-                                else -> "立即更新"
-                            },
-                        )
-                    }
-                },
-            )
-        }
-        AppUpdateUiOutcome.ForcedUpdatePackageUnknown -> {
-            // Align with ForcedAppUpdateState.PackageUnknown: retry check only.
-            AlertDialog(
-                onDismissRequest = {},
-                properties = DialogProperties(
-                    dismissOnBackPress = false,
-                    dismissOnClickOutside = false,
-                ),
-                title = { Text(forcedUpdateTitle()) },
-                text = { Text(forcedUpdatePackageUnknownBody()) },
-                confirmButton = {
-                    TextButton(
-                        onClick = vm::checkAppUpdate,
-                        enabled = !checkingAppUpdate && !installingAppUpdate,
-                    ) {
-                        Text(
-                            if (checkingAppUpdate) {
-                                "检查中…"
-                            } else {
-                                forcedUpdateRetryCheckLabel()
-                            },
-                        )
-                    }
-                },
-            )
-        }
-        AppUpdateUiOutcome.NeedsInstallPermission -> {
-            AlertDialog(
-                onDismissRequest = vm::dismissAppUpdateOutcome,
-                title = { Text("需要安装权限") },
-                text = {
-                    Text("请允许乐记安装应用，然后再试一次立即更新。")
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            val intent = Intent(
-                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                Uri.parse("package:${context.packageName}"),
-                            )
-                            runCatching { context.startActivity(intent) }
-                            vm.dismissAppUpdateOutcome()
-                        },
-                    ) {
-                        Text("去设置")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = vm::dismissAppUpdateOutcome) {
-                        Text("取消")
-                    }
-                },
-            )
-        }
-        null -> Unit
-    }
+    AppUpdateOutcomeDialogs(
+        outcome = appUpdateOutcome,
+        checkingAppUpdate = checkingAppUpdate,
+        installingAppUpdate = installingAppUpdate,
+        installFeedback = appUpdateInstallFeedback,
+        forcedInstallPermissionRequired = forcedInstallPermissionRequired,
+        onDismissOutcome = vm::dismissAppUpdateOutcome,
+        onInstallUpdate = vm::installOptionalUpdate,
+        onRetryCheck = vm::checkAppUpdate,
+        onForcedInstallPermissionOpened = vm::markForcedInstallPermissionOpened,
+    )
 
     if (showRecordSettings) {
         RecordSettingsDialog(
@@ -916,7 +779,7 @@ fun SettingsRoute(
     }
 
     if (showDisplay) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { showDisplay = false },
             title = { Text("显示设置") },
             text = {
@@ -1057,7 +920,7 @@ fun SettingsRoute(
             LaunchedEffect(babyId) { localPreferenceBabyId = null }
         } else {
             val position = ui.babies.indexOfFirst { it.id == babyId }
-            AlertDialog(
+            LeziAlertDialog(
                 onDismissRequest = { localPreferenceBabyId = null },
                 title = { Text("${baby.nickname}的本机设置") },
                 text = {
@@ -1077,25 +940,16 @@ fun SettingsRoute(
                             maxItemsInEachRow = 4,
                         ) {
                             BabyThemePalette.forEachIndexed { index, argb ->
-                                FilterChip(
+                                BabyThemeColorSwatch(
+                                    argb = argb,
                                     selected = com.lezi.babylog.designsystem.normalizeBabyThemeArgb(
                                         baby.themeColorArgb,
                                     ) == argb,
+                                    actionLabel = "本机主题色：${BabyThemePaletteLabels[index]}",
                                     onClick = {
                                         vm.setBabyLocalTheme(baby.id, argb) {
                                             localPreferenceError = it
                                         }
-                                    },
-                                    modifier = Modifier.semantics {
-                                        contentDescription = "本机主题色：${BabyThemePaletteLabels[index]}"
-                                    },
-                                    label = {
-                                        Box(
-                                            Modifier
-                                                .size(18.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(argb)),
-                                        )
                                     },
                                 )
                             }
@@ -1128,9 +982,7 @@ fun SettingsRoute(
 
     if (showAdd) {
         val addBabyPrimary = settingsAddBabyPrimaryPresentation(addingBaby)
-        val dateLabel = LocalDate.ofEpochDay(newBirthday)
-            .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 if (addBabyPrimary.dismissible) finishAddBabyDialog()
             },
@@ -1139,52 +991,20 @@ fun SettingsRoute(
             title = { Text("添加宝宝") },
             text = {
                 ScrollableDialogColumn {
-                    OutlinedTextField(
-                        enabled = !addingBaby,
-                        value = newName,
-                        onValueChange = {
-                            newName = limitBabyNicknameInput(it)
+                    BabyProfileFormFields(
+                        nickname = newName,
+                        onNicknameChange = {
+                            newName = it
                             addError = null
                         },
-                        label = { Text("昵称（不可重复）") },
-                        singleLine = true,
-                        isError = addError != null,
-                        supportingText = addError?.let { { Text(it) } },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text("性别", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        // Home-LAN wire values only (female/male/null), not Kotlin enum names.
-                        listOf(
-                            "female" to "女宝",
-                            "male" to "男宝",
-                            null to "未设置",
-                        ).forEach { (key, label) ->
-                            FilterChip(
-                                enabled = !addingBaby,
-                                selected = newSex == key,
-                                onClick = { newSex = key },
-                                label = { Text(label) },
-                            )
-                        }
-                    }
-                    Text("出生日期", style = LeziTypography.Label)
-                    OutlinedButton(
+                        nicknameError = addError,
+                        sex = newSex,
+                        onSexChange = { newSex = it },
+                        birthdayEpochDay = newBirthday,
+                        onPickBirthday = { showAddDate = true },
+                        weightText = newWeight,
+                        onWeightTextChange = { newWeight = it },
                         enabled = !addingBaby,
-                        onClick = { showAddDate = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text(dateLabel) }
-                    OutlinedTextField(
-                        enabled = !addingBaby,
-                        value = newWeight,
-                        onValueChange = { newWeight = it.filter { ch -> ch.isDigit() || ch == '.' } },
-                        label = { Text("出生体重（kg，可选）") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        modifier = Modifier.fillMaxWidth(),
                     )
                     Text("主题色", style = LeziTypography.Label)
                     FlowRow(
@@ -1193,21 +1013,12 @@ fun SettingsRoute(
                         maxItemsInEachRow = 4,
                     ) {
                         BabyThemePalette.forEachIndexed { index, argb ->
-                            FilterChip(
-                                enabled = !addingBaby,
+                            BabyThemeColorSwatch(
+                                argb = argb,
                                 selected = newThemeIndex == index,
+                                actionLabel = "主题色：${BabyThemePaletteLabels[index]}",
+                                enabled = !addingBaby,
                                 onClick = { newThemeIndex = index },
-                                modifier = Modifier.semantics {
-                                    contentDescription = "主题色：${BabyThemePaletteLabels[index]}"
-                                },
-                                label = {
-                                    Box(
-                                        Modifier
-                                            .size(18.dp)
-                                            .clip(CircleShape)
-                                            .background(Color(argb)),
-                                    )
-                                },
                             )
                         }
                     }
@@ -1262,32 +1073,11 @@ fun SettingsRoute(
     }
 
     if (showAddDate) {
-        val initialUtc = LocalDate.ofEpochDay(newBirthday)
-            .atStartOfDay(ZoneOffset.UTC)
-            .toInstant()
-            .toEpochMilli()
-        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-        DatePickerDialog(
-            onDismissRequest = { showAddDate = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dateState.selectedDateMillis?.let { ms ->
-                            newBirthday = Instant.ofEpochMilli(ms)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                                .toEpochDay()
-                        }
-                        showAddDate = false
-                    },
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddDate = false }) { Text("取消") }
-            },
-        ) {
-            LeziDatePicker(state = dateState)
-        }
+        BabyBirthdayDatePickerDialog(
+            birthdayEpochDay = newBirthday,
+            onDismiss = { showAddDate = false },
+            onSelect = { newBirthday = it },
+        )
     }
 
     if (showCustomItems) {
@@ -1327,7 +1117,7 @@ fun SettingsRoute(
     // Layout (常用/所有记录) is edited on the record page; no parallel settings dialogs.
 
     if (clearRecordsState.step == SettingsClearRecordsStep.FirstConfirm) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = vm::dismissClearRecords,
             title = { Text("确认清除记录？") },
             text = {
@@ -1344,7 +1134,7 @@ fun SettingsRoute(
         )
     }
     if (clearRecordsState.step == SettingsClearRecordsStep.FinalConfirm) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = vm::dismissClearRecords,
             title = { Text("最后确认") },
             text = {
@@ -1386,7 +1176,7 @@ private fun ScrollableDialogColumn(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(max = 480.dp)
+            .heightIn(max = LeziSpacing.DialogContentMax)
             .verticalScroll(rememberScrollState())
             .imePadding()
             .dismissKeyboardOnTap(),
@@ -1402,12 +1192,9 @@ internal fun SettingsBabyRow(
     onOpenLocalSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val birth = LocalDate.ofEpochDay(baby.birthdayEpochDay)
-        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
-    val weight = baby.birthWeightGrams?.let { " · ${it}g" }.orEmpty()
     SettingsMenuRow(
         title = baby.nickname + if (selected) "（当前）" else "",
-        subtitle = "出生 $birth$weight · 本机外观与顺序",
+        subtitle = babyMetaLine(baby.birthdayEpochDay, baby.birthWeightGrams) + " · 本机外观与顺序",
         modifier = modifier,
         actionLabel = "打开${baby.nickname}的本机设置",
         onClick = onOpenLocalSettings,
@@ -1416,7 +1203,7 @@ internal fun SettingsBabyRow(
                 nickname = baby.nickname,
                 avatarPath = baby.avatarPath,
                 fallbackBackground = Color(baby.themeColorArgb),
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(BabyAvatarSizeMedium),
                 borderWidth = 2.dp,
                 avatarContentDescription = "${baby.nickname}的头像",
             )
@@ -1425,11 +1212,52 @@ internal fun SettingsBabyRow(
 }
 
 @Composable
+private fun BabyThemeColorSwatch(
+    argb: Int,
+    selected: Boolean,
+    actionLabel: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    Box(
+        modifier = modifier
+            .size(LeziSpacing.Touch)
+            .clip(CircleShape)
+            .clickable(
+                enabled = enabled,
+                onClickLabel = actionLabel,
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .then(
+                if (selected) {
+                    Modifier.border(
+                        2.dp,
+                        MaterialTheme.colorScheme.primary,
+                        CircleShape,
+                    )
+                } else {
+                    Modifier
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(Color(argb)),
+        )
+    }
+}
+
+@Composable
 internal fun SettingsMenuRow(
     title: String,
     subtitle: String,
     modifier: Modifier = Modifier,
-    icon: String = "·",
+    icon: ImageVector? = null,
     actionLabel: String? = null,
     onClick: (() -> Unit)? = null,
     danger: Boolean = false,
@@ -1450,7 +1278,6 @@ internal fun SettingsMenuRow(
             .fillMaxWidth()
             .heightIn(min = LeziSpacing.Touch)
             .then(interaction),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 10.dp),
         bottomBand = true,
     ) {
         Row(
@@ -1473,14 +1300,20 @@ internal fun SettingsMenuRow(
                         ),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        icon,
-                        style = LeziTypography.BodyStrong,
-                        color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                    )
+                    if (icon != null) {
+                        Icon(
+                            icon,
+                            contentDescription = null,
+                            tint = if (danger) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                        )
+                    }
                 }
             }
-            Spacer(Modifier.size(10.dp))
+            Spacer(Modifier.size(LeziSpacing.Sm))
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
@@ -1492,7 +1325,12 @@ internal fun SettingsMenuRow(
             if (trailing != null) {
                 trailing()
             } else if (onClick != null) {
-                Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(SETTINGS_MENU_ROW_MORE_TAG),
+                )
             }
         }
     }

@@ -18,8 +18,10 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -108,14 +110,17 @@ class FamilyMembersDevicesPageDeviceTest {
         compose.onNodeWithText("设备登录申请（1）").assertIsDisplayed()
         compose.onNodeWithText("待处理改名（1）").assertIsDisplayed()
         compose.onNodeWithText("妈妈 → 妈咪").assertIsDisplayed()
+        compose.onNodeWithTag("members_manage_menu").performClick()
         compose.onNodeWithText("添加成员").assertIsDisplayed()
+        compose.onNodeWithText("添加成员").performClick()
         compose.onNodeWithText("爷爷").fetchSemanticsNode()
         compose.onNodeWithContentDescription("我的 Pixel，这台设备，刚刚").fetchSemanticsNode()
         compose.onNodeWithText("家庭平板").fetchSemanticsNode()
         compose.onNodeWithText("Pixel 10").fetchSemanticsNode()
         compose.onNodeWithText("暂无设备").fetchSemanticsNode()
-        compose.onAllNodesWithText("撤销设备").assertCountEquals(3)
-        compose.onAllNodesWithText("撤销设备")[0].performClick()
+        compose.onAllNodesWithTag("device_overflow_menu").assertCountEquals(3)
+        compose.onAllNodesWithTag("device_overflow_menu")[0].performClick()
+        compose.onNodeWithText("撤销设备").performClick()
         compose.runOnIdle { assertThat(revokedDevice).isEqualTo("owner-phone") }
         for (technical in listOf("owner-phone", "mom-phone", "pending-request-secret-id", "token", "SPKI")) {
             compose.onAllNodesWithText(technical, substring = true).assertCountEquals(0)
@@ -167,6 +172,8 @@ class FamilyMembersDevicesPageDeviceTest {
         compose.onAllNodesWithText("管理员平板").assertCountEquals(0)
         compose.onAllNodesWithText("奶奶手机").assertCountEquals(0)
         compose.onAllNodesWithText("设备登录申请", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithTag("member_overflow_menu").assertCountEquals(1)
+        compose.onNodeWithTag("member_overflow_menu").performClick()
         compose.onNodeWithText("申请改称呼").assertIsDisplayed()
         compose.onAllNodesWithText("撤销设备").assertCountEquals(0)
     }
@@ -185,6 +192,7 @@ class FamilyMembersDevicesPageDeviceTest {
         }
 
         compose.onNodeWithText("暂时没有可显示的家庭成员").assertIsDisplayed()
+        compose.onNodeWithTag("members_manage_menu").performClick()
         compose.onNodeWithText("刷新").assertIsDisplayed()
     }
 
@@ -209,6 +217,7 @@ class FamilyMembersDevicesPageDeviceTest {
 
         compose.onNodeWithText("家庭成员与设备").assertIsDisplayed()
         compose.onNodeWithText("暂时无法读取成员与设备，请稍后重试").fetchSemanticsNode()
+        compose.onNodeWithTag("members_manage_menu").performClick()
         compose.onNodeWithText("刷新").fetchSemanticsNode()
     }
 
@@ -312,7 +321,7 @@ class FamilyMembersDevicesPageDeviceTest {
             )
         compose.onNodeWithText("永久删除家庭").assertIsNotEnabled()
 
-        compose.onNodeWithText("输入家庭名：乐乐一家").performTextInput("乐乐一家")
+        compose.onNodeWithText("输入家庭名确认").performTextInput("乐乐一家")
         compose.onNodeWithText("管理员根密码").performTextInput("root-password-secret")
         compose.onNodeWithText("永久删除家庭").assertIsEnabled()
     }

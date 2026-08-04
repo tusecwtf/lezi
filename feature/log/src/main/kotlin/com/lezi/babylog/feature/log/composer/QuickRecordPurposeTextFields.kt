@@ -1,4 +1,5 @@
 package com.lezi.babylog.feature.log.composer
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -189,7 +190,7 @@ private fun BabyFoodGuidancePanel(
             TextButton(onClick = { expanded = !expanded }) {
                 Text(if (expanded) "收起阶段说明" else "为什么这样建议")
             }
-            if (expanded) {
+            AnimatedVisibility(visible = expanded) {
                 Text(
                     guidance.stage.explanation,
                     style = LeziTypography.Meta,

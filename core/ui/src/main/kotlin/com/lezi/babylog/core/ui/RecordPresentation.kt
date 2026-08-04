@@ -6,9 +6,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -42,6 +44,7 @@ import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.leziHairlineColor
 import com.lezi.babylog.designsystem.leziRecordColor
 import androidx.compose.material3.Text
 
@@ -58,10 +61,29 @@ enum class RecordSection(val title: String) {
     companion object
 }
 
-/** Shared glyph palette for custom item icons (settings + layout manage + dock). */
+/**
+ * Legacy text-glyph palette for custom item icons.
+ * Kept for call sites not yet migrated; new UI must render the vector
+ * `LeziCustomItemGlyphIcon(slot)` (designsystem) — the glyphs depend on system
+ * fonts and mismatch the record glyph stroke language. Slot order is identical.
+ */
+@Deprecated(
+    "Text glyphs depend on system fonts; render LeziCustomItemGlyphIcon(slot) instead.",
+    ReplaceWith(
+        "LeziCustomItemGlyphIcon(slot)",
+        "com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon",
+    ),
+)
 val CUSTOM_ITEM_ICON_GLYPHS: List<String> =
     listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
 
+@Deprecated(
+    "Text glyphs depend on system fonts; render LeziCustomItemGlyphIcon(slot) instead.",
+    ReplaceWith(
+        "LeziCustomItemGlyphIcon(slot)",
+        "com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon",
+    ),
+)
 fun customItemIconGlyph(slot: Int): String =
     CUSTOM_ITEM_ICON_GLYPHS[slot.coerceIn(0, CUSTOM_ITEM_ICON_GLYPHS.lastIndex)]
 
@@ -245,7 +267,14 @@ data class RecordSummaryValue(
     val label: String,
 )
 
-/** Five-column summary strip with the same semantic icons used by record rows. */
+/**
+ * Five-column summary strip with the same semantic icons used by record rows.
+ *
+ * Division of labor vs `SummaryMetric` (designsystem): this is the flat **strip**
+ * language (cells split by dividers, record-type glyphs, optional filter selection)
+ * for record panels; `SummaryMetric` is the standalone warm **card** language with
+ * tinted tone backgrounds. Keep both — see the note on `SummaryMetric`.
+ */
 @Composable
 fun RecordSummaryStrip(
     values: List<RecordSummaryValue>,
@@ -256,7 +285,7 @@ fun RecordSummaryStrip(
 ) {
     val journal = LeziThemeExt.isJournal
     val body: @Composable () -> Unit = {
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             val visibleValues = values.take(5)
             visibleValues.forEachIndexed { index, item ->
                 val color = leziRecordColor(item.type.presentation.colorRole)
@@ -320,8 +349,8 @@ fun RecordSummaryStrip(
                     Spacer(
                         Modifier
                             .width(1.dp)
-                            .height(62.dp)
-                            .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
+                            .fillMaxHeight()
+                            .background(leziHairlineColor()),
                     )
                 }
             }

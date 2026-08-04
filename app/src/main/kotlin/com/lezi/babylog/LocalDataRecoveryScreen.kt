@@ -3,11 +3,12 @@ package com.lezi.babylog
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -21,9 +22,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.common.LocalDataUpgradeBlockReason
 import com.lezi.babylog.core.common.LocalDataUpgradeState
+import com.lezi.babylog.designsystem.LeziAlertDialog
+import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTypography
 
 internal data class LocalDataRecoveryCopy(
     val title: String,
@@ -82,44 +85,54 @@ internal fun LocalDataUpgradeScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(LeziSpacing.Xxl),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        if (blocked == null) {
-            CircularProgressIndicator()
-            Text(
-                text = progressText.orEmpty(),
-                modifier = Modifier.padding(top = 20.dp),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-        } else {
-            val copy = localDataRecoveryCopy(blocked.reason)
-            Text(text = copy.title, style = MaterialTheme.typography.headlineSmall)
-            Text(
-                text = copy.body,
-                modifier = Modifier.padding(top = 16.dp),
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Text(
-                text = blocked.detail,
-                modifier = Modifier.padding(top = 12.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Button(onClick = onRetry, modifier = Modifier.padding(top = 24.dp)) {
-                Text("重试安全检查")
+        Crossfade(
+            targetState = blocked == null,
+            animationSpec = tween(durationMillis = 200),
+            label = "localDataUpgradeState",
+        ) { inProgress ->
+            if (inProgress) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Text(
+                        text = progressText.orEmpty(),
+                        modifier = Modifier.padding(top = LeziSpacing.Lg),
+                        style = LeziTypography.Body,
+                    )
+                }
+            } else if (blocked != null) {
+                val copy = localDataRecoveryCopy(blocked.reason)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(text = copy.title, style = LeziTypography.Title)
+                    Text(
+                        text = copy.body,
+                        modifier = Modifier.padding(top = LeziSpacing.Md),
+                        style = LeziTypography.Body,
+                    )
+                    Text(
+                        text = blocked.detail,
+                        modifier = Modifier.padding(top = LeziSpacing.Sm),
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = onRetry, modifier = Modifier.padding(top = LeziSpacing.Xl)) {
+                        Text("重试安全检查")
+                    }
+                    OutlinedButton(
+                        onClick = onShareDiagnostics,
+                        modifier = Modifier.padding(top = LeziSpacing.Xs),
+                    ) {
+                        Text("导出诊断")
+                    }
+                    ClearApplicationDataButton(
+                        label = copy.resetLabel,
+                        onConfirmed = onClearApplicationData,
+                    )
+                }
             }
-            OutlinedButton(
-                onClick = onShareDiagnostics,
-                modifier = Modifier.padding(top = 8.dp),
-            ) {
-                Text("导出诊断")
-            }
-            ClearApplicationDataButton(
-                label = copy.resetLabel,
-                onConfirmed = onClearApplicationData,
-            )
         }
     }
 }
@@ -132,13 +145,13 @@ private fun ClearApplicationDataButton(
     var confirmationStage by remember { mutableIntStateOf(0) }
     TextButton(
         onClick = { confirmationStage = 1 },
-        modifier = Modifier.padding(top = 8.dp),
+        modifier = Modifier.padding(top = LeziSpacing.Xs),
     ) {
         Text(label)
     }
     if (confirmationStage > 0) {
         val finalConfirmation = confirmationStage == 2
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { confirmationStage = 0 },
             title = { Text(if (finalConfirmation) "最后确认" else "确认清除本机数据？") },
             text = {

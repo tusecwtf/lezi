@@ -1,5 +1,9 @@
 package com.lezi.babylog.feature.settings.calendar
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -9,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -20,10 +23,12 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import com.lezi.babylog.designsystem.LeziAlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,15 +43,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -60,13 +65,15 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziDetailTopBar
+import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziPrimaryButton
-import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LocalPhotoLoadResult
 import com.lezi.babylog.designsystem.LocalPhotoTarget
+import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.rememberLocalPhoto
@@ -78,6 +85,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.YearMonth
+import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.flow.combine
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -259,7 +267,7 @@ class CalendarViewModel @Inject constructor(
 
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CalendarRoute(
     onBack: () -> Unit,
@@ -346,20 +354,17 @@ fun CalendarRoute(
     LaunchedEffect(monthState.selectedDate) {
         scheduleError = null
     }
-    Scaffold(
-        topBar = {
+    PageScaffoldBackground {
+        Column(Modifier.fillMaxSize()) {
             LeziDetailTopBar(title = "乐记日历", onBack = onBack)
-        },
-    ) { padding ->
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(LeziSpacing.Page)
-                .verticalScroll(rememberScrollState())
-                .testTag(CalendarUiTags.SelectedDayItems),
-            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-        ) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(LeziSpacing.Page)
+                    .verticalScroll(rememberScrollState())
+                    .testTag(CalendarUiTags.SelectedDayItems),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
             CalendarMonthPicker(
                 state = monthState,
                 itemCountsByDate = itemCountsByDate,
@@ -368,6 +373,9 @@ fun CalendarRoute(
                 },
                 onNextMonth = {
                     selectedDateEpochDay = monthState.nextMonth().selectedDate.toEpochDay()
+                },
+                onShowMonth = { month ->
+                    selectedDateEpochDay = monthState.showMonth(month).selectedDate.toEpochDay()
                 },
                 onSelectDate = { date ->
                     selectedDateEpochDay = monthState.selectDate(date).selectedDate.toEpochDay()
@@ -412,76 +420,90 @@ fun CalendarRoute(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text(
-                "${monthState.selectedDate.monthValue}月${monthState.selectedDate.dayOfMonth}日",
-                style = LeziTypography.TitleSm,
-                modifier = Modifier.semantics {
-                    contentDescription =
-                        "已选择${monthState.selectedDate.year}年" +
-                            "${monthState.selectedDate.monthValue}月" +
-                            "${monthState.selectedDate.dayOfMonth}日，" +
-                            "${selectedDayItems.size}条安排"
-                },
-            )
-            if (selectedDayItems.isEmpty()) {
-                CalendarEmptyDayState(
-                    canScheduleSelectedDate = canScheduleSelectedDate,
-                    onSchedule = openPlanTypePicker,
-                )
-            } else {
-                Column(
-                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
-                ) {
-                    selectedDayItems.forEach { item ->
-                        when (item) {
-                            is CalendarDayItem.Plan -> {
-                                val plan = item.plan
-                                val effective = plan.effectiveStatus()
-                                val unsynced = plan.id in systemCalendarUnsyncedPlanIds
-                                val conflictCount = conflictCountByPlanUuid[plan.clientUuid] ?: 0
-                                LeziSurfacePanel(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("calendar_plan_${plan.id}"),
-                                    bottomBand = true,
-                                    onClick = {
-                                        val open = effective == CarePlanStatus.PENDING ||
-                                            effective == CarePlanStatus.MISSED
-                                        when {
-                                            open -> onFulfillPlan(plan.id)
-                                            shouldOpenConflictAudit(
-                                                isFamilyAdmin = isFamilyAdmin,
-                                                effective = effective,
-                                                conflictCount = conflictCount,
-                                            ) -> {
-                                                // Completed/history entry for conflict audit.
-                                                vm.loadConflictAuditsForPlan(plan.clientUuid) {
-                                                    showConflictList = true
+            AnimatedContent(
+                targetState = monthState.selectedDate,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "calendarSelectedDay",
+            ) { selectedDate ->
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text(
+                        "${selectedDate.monthValue}月${selectedDate.dayOfMonth}日",
+                        style = LeziTypography.TitleSm,
+                        modifier = Modifier.semantics {
+                            contentDescription =
+                                "已选择${selectedDate.year}年" +
+                                    "${selectedDate.monthValue}月" +
+                                    "${selectedDate.dayOfMonth}日，" +
+                                    "${selectedDayItems.size}条安排"
+                        },
+                    )
+                    if (selectedDayItems.isEmpty()) {
+                        CalendarEmptyDayState(
+                            canScheduleSelectedDate = canScheduleSelectedDate,
+                            onSchedule = openPlanTypePicker,
+                        )
+                    } else {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+                        ) {
+                            selectedDayItems.forEach { item ->
+                                when (item) {
+                                    is CalendarDayItem.Plan -> {
+                                        val plan = item.plan
+                                        val effective = plan.effectiveStatus()
+                                        val unsynced = plan.id in systemCalendarUnsyncedPlanIds
+                                        val conflictCount =
+                                            conflictCountByPlanUuid[plan.clientUuid] ?: 0
+                                        LeziSurfacePanel(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("calendar_plan_${plan.id}"),
+                                            bottomBand = true,
+                                            onClick = {
+                                                val open = effective == CarePlanStatus.PENDING ||
+                                                    effective == CarePlanStatus.MISSED
+                                                when {
+                                                    open -> onFulfillPlan(plan.id)
+                                                    shouldOpenConflictAudit(
+                                                        isFamilyAdmin = isFamilyAdmin,
+                                                        effective = effective,
+                                                        conflictCount = conflictCount,
+                                                    ) -> {
+                                                        // Completed/history entry for conflict audit.
+                                                        vm.loadConflictAuditsForPlan(
+                                                            plan.clientUuid,
+                                                        ) {
+                                                            showConflictList = true
+                                                        }
+                                                    }
+                                                    else -> onEditPlan(plan.id)
                                                 }
+                                            },
+                                        ) {
+                                            Text(
+                                                plan.displayLabel(),
+                                                style = LeziTypography.BodyStrong,
+                                            )
+                                            Text(
+                                                carePlanCalendarMetaLine(
+                                                    plan = plan,
+                                                    effective = effective,
+                                                    deviceZone = zone,
+                                                    systemCalendarUnsynced = unsynced,
+                                                ),
+                                                style = LeziTypography.Meta,
+                                            )
+                                            if (isFamilyAdmin && conflictCount > 0) {
+                                                Text(
+                                                    "冲突未采纳 $conflictCount · 点此审计",
+                                                    style = LeziTypography.Meta,
+                                                    color = MaterialTheme.colorScheme.tertiary,
+                                                    modifier = Modifier.testTag(
+                                                        "calendar_plan_conflict_${plan.id}",
+                                                    ),
+                                                )
                                             }
-                                            else -> onEditPlan(plan.id)
                                         }
-                                    },
-                                ) {
-                                    Text(plan.displayLabel(), style = LeziTypography.BodyStrong)
-                                    Text(
-                                        carePlanCalendarMetaLine(
-                                            plan = plan,
-                                            effective = effective,
-                                            deviceZone = zone,
-                                            systemCalendarUnsynced = unsynced,
-                                        ),
-                                        style = LeziTypography.Meta,
-                                    )
-                                    if (isFamilyAdmin && conflictCount > 0) {
-                                        Text(
-                                            "冲突未采纳 $conflictCount · 点此审计",
-                                            style = LeziTypography.Meta,
-                                            color = MaterialTheme.colorScheme.tertiary,
-                                            modifier = Modifier.testTag(
-                                                "calendar_plan_conflict_${plan.id}",
-                                            ),
-                                        )
                                     }
                                 }
                             }
@@ -491,14 +513,15 @@ fun CalendarRoute(
             }
         }
     }
+    }
     if (showPlanTypePicker) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { showPlanTypePicker = false },
             title = { Text("选择记录项目") },
             text = {
                 Column(
                     Modifier
-                        .heightIn(max = 420.dp)
+                        .heightIn(max = LeziSpacing.DialogContentMax)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
@@ -538,7 +561,7 @@ fun CalendarRoute(
         )
     }
     if (showConflictList) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 showConflictList = false
                 vm.clearConflictAudits()
@@ -548,7 +571,7 @@ fun CalendarRoute(
             text = {
                 Column(
                     Modifier
-                        .heightIn(max = 480.dp)
+                        .heightIn(max = LeziSpacing.DialogContentMax)
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
@@ -570,20 +593,36 @@ fun CalendarRoute(
                             bottomBand = true,
                             onClick = { vm.openConflictDetail(audit.candidateClientUuid) },
                         ) {
-                            Text(audit.typeLabel, style = LeziTypography.BodyStrong)
-                            Text(
-                                "提交者 ${audit.submitterDisplayName}",
-                                style = LeziTypography.Meta,
-                            )
-                            Text(
-                                "确认 ${formatCalendarDateTime(audit.confirmedAt, zone)}",
-                                style = LeziTypography.Meta,
-                            )
-                            Text(audit.notAdoptedReason, style = LeziTypography.Meta)
-                            if (audit.isConverted) {
-                                Text("已转为独立记录", style = LeziTypography.Meta)
-                            } else {
-                                Text("点此查看详情", style = LeziTypography.Meta)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        audit.typeLabel,
+                                        style = LeziTypography.BodyStrong,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        "提交者 ${audit.submitterDisplayName} · " +
+                                            "确认 ${formatCalendarDateTime(audit.confirmedAt, zone)}" +
+                                            if (audit.isConverted) {
+                                                " · 已转为独立记录"
+                                            } else {
+                                                " · ${audit.notAdoptedReason}"
+                                            },
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                     }
@@ -602,13 +641,13 @@ fun CalendarRoute(
     }
 
     conflictDetail?.let { detail ->
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { vm.clearConflictDetail() },
             title = { Text("冲突未采纳详情") },
             text = {
                 Column(
                     Modifier
-                        .heightIn(max = 520.dp)
+                        .heightIn(max = LeziSpacing.DialogContentMax)
                         .verticalScroll(rememberScrollState())
                         .testTag("conflict_audit_detail"),
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
@@ -643,6 +682,7 @@ fun CalendarRoute(
                                 Box(
                                     modifier = Modifier
                                         .size(72.dp)
+                                        .clip(LeziShapes.Sm)
                                         .testTag("conflict_photo_$index")
                                         .clickable {
                                             previewPhotos = detail.photoLocalPaths
@@ -697,7 +737,7 @@ fun CalendarRoute(
     }
 
     confirmConvertCandidate?.let { candidateUuid ->
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { if (!conflictBusy) confirmConvertCandidate = null },
             title = { Text("确认转为独立记录") },
             text = {
@@ -761,22 +801,42 @@ internal fun CalendarEmptyDayState(
     )
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CalendarMonthPicker(
     state: CalendarMonthState,
     itemCountsByDate: Map<LocalDate, Int>,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
+    onShowMonth: (YearMonth) -> Unit,
     onSelectDate: (LocalDate) -> Unit,
 ) {
-    val cells = remember(state.visibleMonth, state.today) {
-        calendarMonthCells(state.visibleMonth, state.today)
+    val anchorMonth = remember { state.visibleMonth }
+    val pagerState = rememberPagerState(
+        initialPage = CALENDAR_PAGER_START_PAGE,
+        pageCount = { Int.MAX_VALUE },
+    )
+    fun monthForPage(page: Int): YearMonth =
+        anchorMonth.plusMonths((page - CALENDAR_PAGER_START_PAGE).toLong())
+
+    // 外部（翻月按钮）改月份 → pager 动画对齐；滑动停稳 → 回报新月份。
+    LaunchedEffect(state.visibleMonth) {
+        val target = CALENDAR_PAGER_START_PAGE +
+            ChronoUnit.MONTHS.between(anchorMonth, state.visibleMonth).toInt()
+        if (pagerState.currentPage != target) {
+            pagerState.animateScrollToPage(target)
+        }
     }
+    LaunchedEffect(pagerState.settledPage) {
+        val swiped = monthForPage(pagerState.settledPage)
+        if (swiped != state.visibleMonth) onShowMonth(swiped)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .testTag(CalendarUiTags.MonthGrid),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -788,7 +848,12 @@ private fun CalendarMonthPicker(
                 modifier = Modifier
                     .testTag(CalendarUiTags.PreviousMonth)
                     .semantics { contentDescription = "上个月" },
-            ) { Text("‹") }
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                    contentDescription = null,
+                )
+            }
             Text(
                 "${state.visibleMonth.year}年${state.visibleMonth.monthValue}月",
                 style = LeziTypography.BodyStrong,
@@ -798,14 +863,19 @@ private fun CalendarMonthPicker(
                 modifier = Modifier
                     .testTag(CalendarUiTags.NextMonth)
                     .semantics { contentDescription = "下个月" },
-            ) { Text("›") }
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                )
+            }
         }
         Row(Modifier.fillMaxWidth()) {
             listOf("一", "二", "三", "四", "五", "六", "日").forEach { label ->
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .heightIn(min = 24.dp),
+                        .heightIn(min = LeziSpacing.Xl),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -816,62 +886,76 @@ private fun CalendarMonthPicker(
                 }
             }
         }
-        cells.chunked(7).forEach { week ->
-            Row(Modifier.fillMaxWidth()) {
-                week.forEach { cell ->
-                    val selected = cell.date == state.selectedDate
-                    val itemCount = itemCountsByDate[cell.date] ?: 0
-                    val dateDescription =
-                        "${cell.date.year}年${cell.date.monthValue}月${cell.date.dayOfMonth}日"
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = LeziSpacing.Touch)
-                            .testTag(CalendarUiTags.day(cell.date))
-                            .clickable(enabled = cell.isEnabled) { onSelectDate(cell.date) }
-                            .semantics {
-                                contentDescription = buildString {
-                                    append(dateDescription)
-                                    if (cell.isToday) append("，今天")
-                                    append("，${itemCount}条安排")
-                                }
-                                stateDescription = when {
-                                    !cell.isEnabled -> "相邻月份，不可选择"
-                                    selected -> "已选择"
-                                    else -> "未选择"
-                                }
-                            },
-                        shape = MaterialTheme.shapes.small,
-                        color = if (selected) {
-                            MaterialTheme.colorScheme.primaryContainer
-                        } else {
-                            Color.Transparent
-                        },
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(vertical = 3.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            Text(
-                                cell.date.dayOfMonth.toString(),
-                                style = if (selected) {
-                                    LeziTypography.BodyStrong
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth(),
+        ) { page ->
+            val month = monthForPage(page)
+            val cells = remember(month, state.today) {
+                calendarMonthCells(month, state.today)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs)) {
+                cells.chunked(7).forEach { week ->
+                    Row(Modifier.fillMaxWidth()) {
+                        week.forEach { cell ->
+                            val selected = cell.date == state.selectedDate
+                            val itemCount = itemCountsByDate[cell.date] ?: 0
+                            val dateDescription =
+                                "${cell.date.year}年${cell.date.monthValue}月${cell.date.dayOfMonth}日"
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = LeziSpacing.Touch)
+                                    .testTag(CalendarUiTags.day(cell.date))
+                                    .clickable(enabled = cell.isEnabled) {
+                                        onSelectDate(cell.date)
+                                    }
+                                    .semantics {
+                                        contentDescription = buildString {
+                                            append(dateDescription)
+                                            if (cell.isToday) append("，今天")
+                                            append("，${itemCount}条安排")
+                                        }
+                                        stateDescription = when {
+                                            !cell.isEnabled -> "相邻月份，不可选择"
+                                            selected -> "已选择"
+                                            else -> "未选择"
+                                        }
+                                    },
+                                shape = MaterialTheme.shapes.small,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
                                 } else {
-                                    LeziTypography.Body
+                                    Color.Transparent
                                 },
-                                color = when {
-                                    !cell.isEnabled ->
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
-                                    cell.isToday -> MaterialTheme.colorScheme.primary
-                                    else -> MaterialTheme.colorScheme.onSurface
-                                },
-                            )
-                            Text(
-                                if (itemCount > 0) "•" else " ",
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                            )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(vertical = LeziSpacing.Xxs),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(
+                                        cell.date.dayOfMonth.toString(),
+                                        style = if (selected) {
+                                            LeziTypography.BodyStrong
+                                        } else {
+                                            LeziTypography.Body
+                                        },
+                                        color = when {
+                                            !cell.isEnabled ->
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                                    .copy(alpha = 0.35f)
+                                            cell.isToday -> MaterialTheme.colorScheme.primary
+                                            else -> MaterialTheme.colorScheme.onSurface
+                                        },
+                                    )
+                                    Text(
+                                        if (itemCount > 0) "•" else " ",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -879,6 +963,8 @@ private fun CalendarMonthPicker(
         }
     }
 }
+
+private const val CALENDAR_PAGER_START_PAGE = Int.MAX_VALUE / 2
 
 /** Pure entry policy: completed/history + admin + conflicts → audit sheet. */
 internal fun shouldOpenConflictAudit(

@@ -1,13 +1,19 @@
 package com.lezi.babylog.feature.summary
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -15,7 +21,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -32,13 +37,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import android.graphics.Paint as AndroidPaint
@@ -51,6 +58,7 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziRangeTabs
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziSurfacePanel
@@ -264,7 +272,6 @@ class SummaryViewModel @Inject constructor(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SummaryRoute(
     anchorDate: LocalDate,
@@ -276,23 +283,46 @@ fun SummaryRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     val shallowSyncStatus by vm.shallowSyncStatus.collectAsStateWithLifecycle()
     val isRefreshing by vm.isRefreshing.collectAsStateWithLifecycle()
-    if (ui.calculating) {
-        PageScaffoldBackground {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(LeziSpacing.Page),
-                contentAlignment = Alignment.Center,
-            ) {
-                com.lezi.babylog.designsystem.StateContainer(
-                    kind = com.lezi.babylog.designsystem.StateKind.Loading,
-                    title = "正在计算汇总",
-                    message = "正在整理护理记录，请稍候。",
-                )
+    Crossfade(
+        targetState = ui.calculating,
+        label = "summary_loading",
+    ) { calculating ->
+        if (calculating) {
+            PageScaffoldBackground {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(LeziSpacing.Page),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    com.lezi.babylog.designsystem.StateContainer(
+                        kind = com.lezi.babylog.designsystem.StateKind.Loading,
+                        title = "正在计算汇总",
+                        message = "正在整理护理记录，请稍候。",
+                    )
+                }
             }
+        } else {
+            SummaryContent(
+                ui = ui,
+                shallowSyncStatus = shallowSyncStatus,
+                isRefreshing = isRefreshing,
+                onRefresh = vm::refresh,
+                onSelectRange = vm::setRange,
+            )
         }
-        return
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SummaryContent(
+    ui: SummaryUi,
+    shallowSyncStatus: ShallowSyncLine,
+    isRefreshing: Boolean,
+    onRefresh: () -> Unit,
+    onSelectRange: (SummaryRange) -> Unit,
+) {
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
     val t = ui.totals
@@ -300,10 +330,13 @@ fun SummaryRoute(
         ui.rangeStartDate.plusDays(offset.toLong())
     }
 
+    // Journal panels bleed to the screen edge, so the page inset is applied
+    // once to the header block instead of per-section conditional padding.
+    val contentHorizontal = if (journal) LeziSpacing.Page else 0.dp
     PageScaffoldBackground {
         PullToRefreshBox(
             isRefreshing = isRefreshing,
-            onRefresh = vm::refresh,
+            onRefresh = onRefresh,
             modifier = Modifier.fillMaxSize(),
         ) {
             Column(
@@ -311,13 +344,13 @@ fun SummaryRoute(
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState())
                     .padding(
-                        horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                        horizontal = LeziSpacing.Page - contentHorizontal,
                         vertical = LeziSpacing.Page,
                     ),
                 verticalArrangement = Arrangement.spacedBy(if (journal) 0.dp else LeziSpacing.Sm),
             ) {
                 Column(
-                    Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
+                    Modifier.padding(horizontal = contentHorizontal),
                 ) {
                     PageHero(
                         eyebrow = "",
@@ -340,244 +373,190 @@ fun SummaryRoute(
                         modifier = Modifier.testTag("summary_shallow_sync_status"),
                     )
 
-                    RangeTabs(
+                    LeziRangeTabs(
+                        items = SummaryRange.entries,
                         selected = ui.range,
-                        onSelect = vm::setRange,
+                        onSelect = onSelectRange,
+                        label = { it.label },
                     )
                 }
 
-            val windows = t.chartWindows
-            SummaryKpiStrip(
-                feedValue = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
-                    "0次"
-                } else {
-                    "${windows.dayFeedCount}次"
-                },
-                feedDetail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
-                    "当日暂无详情"
-                } else {
-                    formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
-                },
-                sleepValue = formatRecordDuration(windows.daySleepMin),
-                sleepDetail = if (windows.daySleepSegments == 0) {
-                    "当日 0 段"
-                } else {
-                    "当日 ${windows.daySleepSegments} 段"
-                },
-                diaperValue = "${windows.dayDiaper}",
-                diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
-            )
-
-            if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
-                val averageSleep = t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
-                Text(
-                    "日均睡眠 ${formatRecordDuration(averageSleep)}",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
+            AnimatedContent(
+                targetState = ui.range,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "summary_range_content",
+            ) {
+                val windows = t.chartWindows
+                SummaryKpiStrip(
+                    feedValue = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
+                        "0次"
+                    } else {
+                        "${windows.dayFeedCount}次"
+                    },
+                    feedDetail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
+                        "当日暂无详情"
+                    } else {
+                        formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
+                    },
+                    sleepValue = formatRecordDuration(windows.daySleepMin),
+                    sleepDetail = if (windows.daySleepSegments == 0) {
+                        "当日 0 段"
+                    } else {
+                        "当日 ${windows.daySleepSegments} 段"
+                    },
+                    diaperValue = "${windows.dayDiaper}",
+                    diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
                 )
-            }
 
-            if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
-                val previous = ui.previousWeekTotals
+                if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
+                    val previous = ui.previousWeekTotals
+                    LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                        Text("对比上周", style = LeziTypography.TitleSm)
+                        if (previous == null) {
+                            Text(
+                                "上周暂无记录",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            Text(
+                                "喂养 ${formatSigned(t.feedMl - previous.feedMl, "ml")} · " +
+                                    "睡眠 ${formatSigned(t.sleepMin - previous.sleepMin, "分钟")}",
+                                style = LeziTypography.Body,
+                            )
+                            Text(
+                                "尿尿 ${formatSigned(t.pee - previous.pee, "次")} · " +
+                                    "便便 ${formatSigned(t.poop - previous.poop, "次")}",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+
+                if (journal && ui.week != null) {
+                    JournalWeekGrid(ui.week!!)
+                }
+
+                val feedChartTotal = when (ui.range) {
+                    SummaryRange.Day -> formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
+                    SummaryRange.Week, SummaryRange.Month ->
+                        formatFeedWindowTotal(t.feedMl, t.nursingMin)
+                }
+                val sleepChartTotal = when (ui.range) {
+                    SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
+                    SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
+                }
+                val diaperChartTotal = when (ui.range) {
+                    SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
+                    SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
+                }
+                val chartTotalScope = when (ui.range) {
+                    SummaryRange.Day -> "当日"
+                    SummaryRange.Week -> "本周"
+                    SummaryRange.Month -> "本月"
+                }
+
                 LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                    Text("对比上周", style = LeziTypography.TitleSm)
-                    if (previous == null) {
-                        Text(
-                            "上周暂无记录",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    ChartCardHeader(
+                        title = "喂养",
+                        scopeLabel = chartTotalScope,
+                        totalValue = feedChartTotal,
+                    )
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
+                        com.lezi.babylog.designsystem.StateContainer(
+                            kind = com.lezi.babylog.designsystem.StateKind.Empty,
+                            title = "范围内暂无喂养记录",
+                            message = "换一周或去记录页添加喂养。",
                         )
                     } else {
-                        Text(
-                            "喂养 ${formatSigned(t.feedMl - previous.feedMl, "ml")} · " +
-                                "睡眠 ${formatSigned(t.sleepMin - previous.sleepMin, "分钟")}",
-                            style = LeziTypography.Body,
-                        )
-                        Text(
-                            "尿尿 ${formatSigned(t.pee - previous.pee, "次")} · " +
-                                "便便 ${formatSigned(t.poop - previous.poop, "次")}",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        MiniBarChart(
+                            values = t.dayValuesFeed,
+                            dates = chartDates,
+                            metricLabel = "喂养量",
+                            color = ext.laneFeed,
+                            valueFormatter = { v -> if (v <= 0f) "" else "${v.toInt()}ml" },
                         )
                     }
                 }
-            }
 
-            if (journal && ui.week != null) {
-                JournalWeekGrid(ui.week!!)
-            }
-
-            val feedChartTotal = when (ui.range) {
-                SummaryRange.Day -> formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
-                SummaryRange.Week, SummaryRange.Month ->
-                    formatFeedWindowTotal(t.feedMl, t.nursingMin)
-            }
-            val sleepChartTotal = when (ui.range) {
-                SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
-                SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
-            }
-            val diaperChartTotal = when (ui.range) {
-                SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
-                SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
-            }
-            val chartTotalScope = when (ui.range) {
-                SummaryRange.Day -> "当日"
-                SummaryRange.Week -> "本周"
-                SummaryRange.Month -> "本月"
-            }
-
-            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                ChartCardHeader(
-                    title = "喂养",
-                    scopeLabel = chartTotalScope,
-                    totalValue = feedChartTotal,
-                )
-                Spacer(Modifier.height(12.dp))
-                if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
-                    com.lezi.babylog.designsystem.StateContainer(
-                        kind = com.lezi.babylog.designsystem.StateKind.Empty,
-                        title = "范围内暂无喂养记录",
-                        message = "换一周或去记录页添加喂养。",
+                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                    ChartCardHeader(
+                        title = "睡眠",
+                        scopeLabel = chartTotalScope,
+                        totalValue = sleepChartTotal,
                     )
-                } else {
-                    MiniBarChart(
-                        values = t.dayValuesFeed,
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
+                        val averageSleep = t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
+                        Text(
+                            "日均睡眠 ${formatRecordDuration(averageSleep)}",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(LeziSpacing.Xs))
+                    }
+                    if (t.dayValuesSleep.all { it <= 0f }) {
+                        com.lezi.babylog.designsystem.StateContainer(
+                            kind = com.lezi.babylog.designsystem.StateKind.Empty,
+                            title = "范围内暂无已完成睡眠记录",
+                            message = "完成的睡眠会按天汇总到这里。",
+                        )
+                    } else {
+                        MiniBarChart(
+                            values = t.dayValuesSleep,
+                            dates = chartDates,
+                            metricLabel = "睡眠分钟",
+                            color = ext.laneSleep,
+                            valueFormatter = { v ->
+                                if (v <= 0f) "" else formatRecordDuration(v.toLong())
+                            },
+                        )
+                    }
+                }
+
+                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                    ChartCardHeader(
+                        title = "尿布",
+                        scopeLabel = chartTotalScope,
+                        totalValue = diaperChartTotal,
+                    )
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Md)) {
+                        DiaperLegendDot(color = ext.laneCare, label = "尿尿")
+                        DiaperLegendDot(color = ext.sun, label = "便便")
+                    }
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    if (t.dayValuesDiaper.all { it <= 0f }) {
+                        com.lezi.babylog.designsystem.StateContainer(
+                            kind = com.lezi.babylog.designsystem.StateKind.Empty,
+                            title = "范围内暂无尿布记录",
+                            message = "尿/便记录会按天汇总到这里。",
+                        )
+                    } else {
+                        StackedDiaperBarChart(
+                            pee = t.dayValuesPee,
+                            poop = t.dayValuesPoop,
+                            dates = chartDates,
+                            peeColor = ext.laneCare,
+                            poopColor = ext.sun,
+                        )
+                    }
+                }
+                if (t.tempAvg != null) {
+                    WeekLineChart(
+                        title = "体温",
+                        values = t.dayValuesTemp,
                         dates = chartDates,
-                        metricLabel = "喂养量",
-                        color = ext.laneFeed,
-                        valueFormatter = { v -> if (v <= 0f) "" else "${v.toInt()}ml" },
+                        color = ext.danger,
+                        scopeLabel = "${t.tempDays} 天有记录",
+                        totalValue = "%.1f℃".format(t.tempAvg),
                     )
                 }
-            }
-
-            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                ChartCardHeader(
-                    title = "睡眠",
-                    scopeLabel = chartTotalScope,
-                    totalValue = sleepChartTotal,
-                )
-                Spacer(Modifier.height(8.dp))
-                if (t.dayValuesSleep.all { it <= 0f }) {
-                    com.lezi.babylog.designsystem.StateContainer(
-                        kind = com.lezi.babylog.designsystem.StateKind.Empty,
-                        title = "范围内暂无已完成睡眠记录",
-                        message = "完成的睡眠会按天汇总到这里。",
-                    )
-                } else {
-                    MiniBarChart(
-                        values = t.dayValuesSleep,
-                        dates = chartDates,
-                        metricLabel = "睡眠分钟",
-                        color = ext.laneSleep,
-                        valueFormatter = { v ->
-                            if (v <= 0f) "" else formatRecordDuration(v.toLong())
-                        },
-                    )
-                }
-            }
-
-            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                ChartCardHeader(
-                    title = "尿布",
-                    scopeLabel = chartTotalScope,
-                    totalValue = diaperChartTotal,
-                )
-                Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    DiaperLegendDot(color = ext.laneCare, label = "尿尿")
-                    DiaperLegendDot(color = ext.sun, label = "便便")
-                }
-                Spacer(Modifier.height(8.dp))
-                if (t.dayValuesDiaper.all { it <= 0f }) {
-                    com.lezi.babylog.designsystem.StateContainer(
-                        kind = com.lezi.babylog.designsystem.StateKind.Empty,
-                        title = "范围内暂无尿布记录",
-                        message = "尿/便记录会按天汇总到这里。",
-                    )
-                } else {
-                    StackedDiaperBarChart(
-                        pee = t.dayValuesPee,
-                        poop = t.dayValuesPoop,
-                        dates = chartDates,
-                        peeColor = ext.laneCare,
-                        poopColor = ext.sun,
-                    )
-                }
-            }
-            if (t.tempAvg != null) {
-                MetricRow(
-                    title = "体温",
-                    value = "%.1f℃".format(t.tempAvg),
-                    detail = "${t.tempDays} 天有记录",
-                )
-                WeekLineChart(
-                    title = "体温",
-                    values = t.dayValuesTemp,
-                    dates = chartDates,
-                    color = ext.danger,
-                )
             }
 
             Spacer(Modifier.height(LeziSpacing.Xxl))
-            }
-        }
-    }
-}
-
-@Composable
-private fun RangeTabs(
-    selected: SummaryRange,
-    onSelect: (SummaryRange) -> Unit,
-) {
-    val trackShape = LeziThemeExt.controlShape
-    val tabShape = if (LeziThemeExt.isJournal) LeziShapes.JournalSm else LeziShapes.Sm
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(trackShape)
-            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
-            .padding(4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        SummaryRange.entries.forEach { r ->
-            val on = r == selected
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(tabShape)
-                    .background(
-                        if (on) MaterialTheme.colorScheme.surface else Color.Transparent,
-                    )
-                    .then(
-                        if (on) {
-                            Modifier.border(
-                                1.dp,
-                                MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
-                                tabShape,
-                            )
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .heightIn(min = LeziSpacing.Touch)
-                    .selectable(
-                        selected = on,
-                        role = Role.Tab,
-                        onClick = { onSelect(r) },
-                    )
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    r.label,
-                    style = LeziTypography.Label,
-                    color = if (on) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
             }
         }
     }
@@ -604,30 +583,28 @@ private fun SummaryKpiStrip(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
             bottomBand = true,
         ) {
-            Row(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .height(IntrinsicSize.Min),
+            ) {
                 cells.forEachIndexed { index, (title, value, detail) ->
-                    Column(
-                        Modifier
+                    KpiCell(
+                        title = title,
+                        value = value,
+                        detail = detail,
+                        modifier = Modifier
                             .weight(1f)
                             .heightIn(min = 74.dp)
-                            .padding(horizontal = 8.dp, vertical = 10.dp),
-                    ) {
-                        Text(title, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(4.dp))
-                        Text(value, style = LeziTypography.Metric.copy(fontSize = 20.sp), maxLines = 1)
-                        Spacer(Modifier.height(2.dp))
-                        Text(
-                            detail,
-                            style = LeziTypography.Meta.copy(fontSize = 10.sp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                        )
-                    }
+                            .padding(horizontal = LeziSpacing.Xs, vertical = LeziSpacing.Sm),
+                        valueStyle = LeziTypography.Metric.copy(fontSize = 20.sp),
+                        detailStyle = LeziTypography.Micro,
+                    )
                     if (index < cells.lastIndex) {
                         Spacer(
                             Modifier
                                 .width(1.dp)
-                                .height(74.dp)
+                                .fillMaxHeight()
                                 .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
                         )
                     }
@@ -637,7 +614,7 @@ private fun SummaryKpiStrip(
     } else {
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
         ) {
             cells.forEach { (title, value, detail) ->
                 CompactMetricCard(
@@ -660,15 +637,43 @@ private fun CompactMetricCard(
 ) {
     LeziCard(
         modifier = modifier,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 14.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+            horizontal = LeziSpacing.Sm,
+            vertical = LeziSpacing.CardPad,
+        ),
     ) {
+        KpiCell(
+            title = title,
+            value = value,
+            detail = detail,
+            valueStyle = LeziTypography.Metric.copy(fontSize = 22.sp),
+            detailStyle = LeziTypography.Meta.copy(fontSize = 11.sp),
+        )
+    }
+}
+
+@Composable
+private fun KpiCell(
+    title: String,
+    value: String,
+    detail: String,
+    modifier: Modifier = Modifier,
+    valueStyle: TextStyle = LeziTypography.Metric,
+    detailStyle: TextStyle = LeziTypography.Meta,
+) {
+    Column(modifier) {
         Text(title, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(4.dp))
-        Text(value, style = LeziTypography.Metric.copy(fontSize = 22.sp))
+        Spacer(Modifier.height(LeziSpacing.Xxs))
+        Text(
+            value,
+            style = valueStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         Spacer(Modifier.height(2.dp))
         Text(
             detail,
-            style = LeziTypography.Meta.copy(fontSize = 11.sp),
+            style = detailStyle,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 2,
         )
@@ -741,45 +746,60 @@ internal fun calculateBarSlotLayout(
     )
 }
 
-@Composable
-private fun MetricRow(title: String, value: String, detail: String, compare: String? = null) {
-    val journal = LeziThemeExt.isJournal
-    LeziSurfacePanel(
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = if (journal) {
-            androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 8.dp)
-        } else {
-            androidx.compose.foundation.layout.PaddingValues(14.dp)
-        },
-        bottomBand = true,
-    ) {
-        if (journal) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(title, style = LeziTypography.Label)
-                    Text(detail, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(value, style = LeziTypography.Metric)
-                    if (compare != null) Text(compare, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.primary)
-                }
-            }
-        } else {
-            Text(title, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = LeziTypography.Metric)
-            Text(detail, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (compare != null) {
-                Text(compare, style = LeziTypography.Label, color = MaterialTheme.colorScheme.primary)
-            }
-        }
+/** Value labels fit when every slot can be annotated (≤7 bars) or the non-zero set stays sparse. */
+private fun showBarLabels(barCount: Int, nonZeroCount: Int): Boolean =
+    barCount <= 7 || nonZeroCount <= 12
+
+/** Shared slot geometry for the bar charts: tighter gaps once the window passes two weeks. */
+private fun DrawScope.chartBarLayout(barCount: Int): BarSlotLayout = calculateBarSlotLayout(
+    canvasWidth = size.width,
+    barCount = barCount,
+    preferredGap = (if (barCount > 14) 2.dp else 4.dp).toPx(),
+)
+
+/** Shared four-line horizontal grid under the bars. */
+private fun DrawScope.chartGridLines(grid: Color, topPad: Float, plotH: Float) {
+    for (i in 0..3) {
+        val y = topPad + plotH * i / 3f
+        drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
     }
+}
+
+/** Shared bar-top label paint; 10sp is the readable floor even on dense 30-day charts. */
+private fun DrawScope.barLabelPaint(labelColor: Color): AndroidPaint = AndroidPaint().apply {
+    isAntiAlias = true
+    textAlign = AndroidPaint.Align.CENTER
+    textSize = 10.sp.toPx()
+    typeface = Typeface.DEFAULT
+    color = labelColor.toArgb()
+}
+
+/**
+ * Draws a bar-top value label, skipping empty labels and labels wider than
+ * their slot so dense windows never overflow into neighbors.
+ */
+private fun DrawScope.drawBarLabel(
+    paint: AndroidPaint,
+    label: String,
+    centerX: Float,
+    topY: Float,
+    maxWidth: Float,
+) {
+    if (label.isEmpty()) return
+    if (paint.measureText(label) > maxWidth) return
+    drawContext.canvas.nativeCanvas.drawText(
+        label,
+        centerX,
+        topY.coerceAtLeast(paint.textSize),
+        paint,
+    )
 }
 
 @Composable
 private fun DiaperLegendDot(color: Color, label: String) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
     ) {
         Box(
             Modifier
@@ -807,13 +827,12 @@ private fun StackedDiaperBarChart(
     val grid = LeziThemeExt.colors.chartGrid
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val max = (totals.maxOrNull() ?: 0f).coerceAtLeast(1f)
-    val showBarLabels = n <= 7 || totals.count { it > 0f } <= 12
-    val labelAllBars = n <= 7
+    val showLabels = showBarLabels(n, totals.count { it > 0f })
     Column {
         Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(if (showBarLabels) 108.dp else 88.dp)
+                .height(if (showLabels) 108.dp else 88.dp)
                 .semantics {
                     contentDescription = dates.zip(peeValues.zip(poopValues)).joinToString("；") { (date, pair) ->
                         val (p, o) = pair
@@ -821,27 +840,14 @@ private fun StackedDiaperBarChart(
                     }
                 },
         ) {
-            val topPad = if (showBarLabels) 16.dp.toPx() else 0f
+            val topPad = if (showLabels) 16.dp.toPx() else 0f
             val plotH = (size.height - topPad).coerceAtLeast(1f)
-            for (i in 0..3) {
-                val y = topPad + plotH * i / 3f
-                drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
-            }
-            val layout = calculateBarSlotLayout(
-                canvasWidth = size.width,
-                barCount = n,
-                preferredGap = if (n > 14) 2.dp.toPx() else 4.dp.toPx(),
-            )
+            chartGridLines(grid, topPad, plotH)
+            val layout = chartBarLayout(n)
             val gap = layout.gap
             val barW = layout.barWidth
-            val textPaint = AndroidPaint().apply {
-                isAntiAlias = true
-                textAlign = AndroidPaint.Align.CENTER
-                textSize = if (n > 14) 8.sp.toPx() else 10.sp.toPx()
-                typeface = Typeface.DEFAULT
-                this.color = labelColor.toArgb()
-            }
-            val radius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+            val labelPaint = barLabelPaint(labelColor)
+            val radius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx(), 2.dp.toPx())
             for (i in 0 until n) {
                 val peeV = peeValues[i]
                 val poopV = poopValues[i]
@@ -875,13 +881,13 @@ private fun StackedDiaperBarChart(
                         cornerRadius = radius,
                     )
                 }
-                val shouldLabel = showBarLabels && (labelAllBars || total > 0f)
-                if (shouldLabel && total > 0f) {
-                    drawContext.canvas.nativeCanvas.drawText(
-                        "${total.toInt()}",
-                        x + barW / 2f,
-                        (yCursor - 4f).coerceAtLeast(textPaint.textSize),
-                        textPaint,
+                if (showLabels && total > 0f) {
+                    drawBarLabel(
+                        paint = labelPaint,
+                        label = "${total.toInt()}",
+                        centerX = x + barW / 2f,
+                        topY = yCursor - 4f,
+                        maxWidth = barW + gap,
                     )
                 }
             }
@@ -903,39 +909,24 @@ private fun MiniBarChart(
     val grid = LeziThemeExt.colors.chartGrid
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
-    // Label every sample up to seven; for longer sparse ranges, label only non-zero bars.
-    val showBarLabels = values.size <= 7 || values.count { it > 0f } <= 12
-    val labelAllBars = values.size <= 7
+    val showLabels = showBarLabels(values.size, values.count { it > 0f })
     Column {
         Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(if (showBarLabels) 108.dp else 88.dp)
+                .height(if (showLabels) 108.dp else 88.dp)
                 .semantics {
                     contentDescription = chartDescription(metricLabel, dates, values)
                 },
         ) {
-            val topPad = if (showBarLabels) 16.dp.toPx() else 0f
+            val topPad = if (showLabels) 16.dp.toPx() else 0f
             val plotH = (size.height - topPad).coerceAtLeast(1f)
-            for (i in 0..3) {
-                val y = topPad + plotH * i / 3f
-                drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
-            }
+            chartGridLines(grid, topPad, plotH)
             val n = values.size.coerceAtLeast(1)
-            val layout = calculateBarSlotLayout(
-                canvasWidth = size.width,
-                barCount = n,
-                preferredGap = if (n > 14) 2.dp.toPx() else 4.dp.toPx(),
-            )
+            val layout = chartBarLayout(n)
             val gap = layout.gap
             val barW = layout.barWidth
-            val textPaint = AndroidPaint().apply {
-                isAntiAlias = true
-                textAlign = AndroidPaint.Align.CENTER
-                textSize = if (n > 14) 8.sp.toPx() else 10.sp.toPx()
-                typeface = Typeface.DEFAULT
-                this.color = labelColor.toArgb()
-            }
+            val labelPaint = barLabelPaint(labelColor)
             values.forEachIndexed { i, v ->
                 val h = (v / max) * (plotH * 0.85f)
                 val x = layout.firstBarX + i * (barW + gap)
@@ -945,20 +936,17 @@ private fun MiniBarChart(
                         color = color.copy(alpha = 0.85f),
                         topLeft = Offset(x, barTop),
                         size = Size(barW, h.coerceAtLeast(2f)),
-                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx(), 2.dp.toPx()),
                     )
                 }
-                val shouldLabel = showBarLabels && (labelAllBars || v > 0f)
-                if (shouldLabel) {
-                    val label = valueFormatter(v)
-                    if (label.isNotEmpty()) {
-                        drawContext.canvas.nativeCanvas.drawText(
-                            label,
-                            x + barW / 2f,
-                            (barTop - 4f).coerceAtLeast(textPaint.textSize),
-                            textPaint,
-                        )
-                    }
+                if (showLabels) {
+                    drawBarLabel(
+                        paint = labelPaint,
+                        label = valueFormatter(v),
+                        centerX = x + barW / 2f,
+                        topY = barTop - 4f,
+                        maxWidth = barW + gap,
+                    )
                 }
             }
         }
@@ -969,88 +957,116 @@ private fun MiniBarChart(
 @Composable
 private fun JournalWeekGrid(summary: WeekSummary) {
     val ext = LeziThemeExt.colors
+    val labelWidth = 42.dp
+    val rowHeight = 40.dp
     LeziSurfacePanel(
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(10.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(LeziSpacing.Sm),
         bottomBand = true,
     ) {
+        DateAxis(
+            dates = summary.days.map { it.date },
+            modifier = Modifier.padding(start = labelWidth),
+        )
         Row(Modifier.fillMaxWidth()) {
-            Column(
-                Modifier
-                    .width(42.dp)
-                    .height(180.dp)
-                    .padding(top = 20.dp),
-                verticalArrangement = Arrangement.SpaceAround,
-                horizontalAlignment = Alignment.Start,
-            ) {
+            Column(Modifier.width(labelWidth)) {
                 listOf("喂养", "睡眠", "尿便", "体温").forEach { label ->
-                    Text(label, style = LeziTypography.Meta)
+                    Box(
+                        Modifier.height(rowHeight),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        Text(label, style = LeziTypography.Meta)
+                    }
                 }
             }
-            Column(Modifier.weight(1f)) {
-                DateAxis(summary.days.map { it.date })
-                Canvas(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(160.dp)
-                        .semantics {
-                            contentDescription = summary.days.joinToString("；") { day ->
-                                "${day.date.monthValue}月${day.date.dayOfMonth}日，" +
-                                    "喂养${day.feedMl}毫升、母乳${day.nursingMin}分钟，" +
-                                    "睡眠${day.sleepMin}分钟，尿${day.pee}次、便${day.poop}次，" +
-                                    "体温${day.temps.size}条"
-                            }
-                        },
-                ) {
-                    val cols = 7
-                    val rows = 4
-                    val cellW = size.width / cols
-                    val cellH = size.height / rows
-                    for (i in 0..rows) {
-                        drawLine(ext.chartGrid.copy(alpha = 0.7f), Offset(0f, i * cellH), Offset(size.width, i * cellH), 1f)
+            Canvas(
+                Modifier
+                    .weight(1f)
+                    .height(rowHeight * 4)
+                    .semantics {
+                        contentDescription = summary.days.joinToString("；") { day ->
+                            "${day.date.monthValue}月${day.date.dayOfMonth}日，" +
+                                "喂养${day.feedMl}毫升、母乳${day.nursingMin}分钟，" +
+                                "睡眠${day.sleepMin}分钟，尿${day.pee}次、便${day.poop}次，" +
+                                "体温${day.temps.size}条"
+                        }
+                    },
+            ) {
+                val cols = 7
+                val rows = 4
+                val cellW = size.width / cols
+                val cellH = size.height / rows
+                val feedDotRadius = 3.dp.toPx()
+                val sleepMarkPadX = 1.5.dp.toPx()
+                val sleepMarkPadY = 3.dp.toPx()
+                val sleepMarkHeight = 5.dp.toPx()
+                val markMinWidth = 1.dp.toPx()
+                val sleepMarkRadius = 2.dp.toPx()
+                val diaperMarkSize = 3.5.dp.toPx()
+                val diaperMarkY = 2.dp.toPx()
+                val peeMarkX = 4.5.dp.toPx()
+                val poopMarkX = 1.dp.toPx()
+                val peeMarkRadius = 1.dp.toPx()
+                val poopMarkRadius = 1.5.dp.toPx()
+                val tempMarkHalf = 2.dp.toPx()
+                val tempMarkTop = 2.dp.toPx()
+                val tempMarkBottom = 2.dp.toPx()
+                for (i in 0..rows) {
+                    drawLine(ext.chartGrid.copy(alpha = 0.7f), Offset(0f, i * cellH), Offset(size.width, i * cellH), 1f)
+                }
+                for (i in 0..cols) {
+                    drawLine(ext.chartGrid.copy(alpha = 0.55f), Offset(i * cellW, 0f), Offset(i * cellW, size.height), 1f)
+                }
+                summary.days.forEachIndexed { index, day ->
+                    val cx = index * cellW + cellW / 2f
+                    if (day.feedMl > 0 || day.nursingMin > 0) {
+                        drawCircle(ext.laneFeed, feedDotRadius, Offset(cx, cellH * 0.5f))
                     }
-                    for (i in 0..cols) {
-                        drawLine(ext.chartGrid.copy(alpha = 0.55f), Offset(i * cellW, 0f), Offset(i * cellW, size.height), 1f)
+                    if (day.sleepMin > 0) {
+                        drawRoundRect(
+                            ext.laneSleep.copy(alpha = 0.75f),
+                            topLeft = Offset(index * cellW + sleepMarkPadX, cellH + sleepMarkPadY),
+                            size = Size(
+                                (cellW - sleepMarkPadX * 2).coerceAtLeast(markMinWidth),
+                                sleepMarkHeight,
+                            ),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                                sleepMarkRadius,
+                                sleepMarkRadius,
+                            ),
+                        )
                     }
-                    summary.days.forEachIndexed { index, day ->
-                        val cx = index * cellW + cellW / 2f
-                        if (day.feedMl > 0 || day.nursingMin > 0) {
-                            drawCircle(ext.laneFeed, 7f, Offset(cx, cellH * 0.5f))
+                    if (day.pee > 0) {
+                        drawRoundRect(
+                            color = ext.laneCare,
+                            topLeft = Offset(cx - peeMarkX, cellH * 2.5f - diaperMarkY),
+                            size = Size(diaperMarkSize, diaperMarkSize),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                                peeMarkRadius,
+                                peeMarkRadius,
+                            ),
+                        )
+                    }
+                    if (day.poop > 0) {
+                        drawRoundRect(
+                            color = ext.sun,
+                            topLeft = Offset(cx + poopMarkX, cellH * 2.5f - diaperMarkY),
+                            size = Size(diaperMarkSize, diaperMarkSize),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                                poopMarkRadius,
+                                poopMarkRadius,
+                            ),
+                        )
+                    }
+                    if (day.temps.isNotEmpty()) {
+                        val cy = cellH * 3.5f
+                        val triangle = Path().apply {
+                            moveTo(cx, cy - tempMarkTop)
+                            lineTo(cx - tempMarkHalf, cy + tempMarkBottom)
+                            lineTo(cx + tempMarkHalf, cy + tempMarkBottom)
+                            close()
                         }
-                        if (day.sleepMin > 0) {
-                            drawRoundRect(
-                                ext.laneSleep.copy(alpha = 0.75f),
-                                topLeft = Offset(index * cellW + 4f, cellH + 8f),
-                                size = Size((cellW - 8f).coerceAtLeast(3f), 14f),
-                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(5f, 5f),
-                            )
-                        }
-                        if (day.pee > 0) {
-                            drawRoundRect(
-                                color = ext.laneCare,
-                                topLeft = Offset(cx - 12f, cellH * 2.5f - 5f),
-                                size = Size(10f, 10f),
-                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(3f, 3f),
-                            )
-                        }
-                        if (day.poop > 0) {
-                            drawRoundRect(
-                                color = ext.sun,
-                                topLeft = Offset(cx + 2f, cellH * 2.5f - 5f),
-                                size = Size(10f, 10f),
-                                cornerRadius = androidx.compose.ui.geometry.CornerRadius(4f, 4f),
-                            )
-                        }
-                        if (day.temps.isNotEmpty()) {
-                            val cy = cellH * 3.5f
-                            val triangle = Path().apply {
-                                moveTo(cx, cy - 6f)
-                                lineTo(cx - 6f, cy + 5f)
-                                lineTo(cx + 6f, cy + 5f)
-                                close()
-                            }
-                            drawPath(triangle, ext.danger)
-                        }
+                        drawPath(triangle, ext.danger)
                     }
                 }
             }
@@ -1064,11 +1080,21 @@ private fun WeekLineChart(
     values: List<Float>,
     dates: List<LocalDate>,
     color: Color,
+    scopeLabel: String? = null,
+    totalValue: String? = null,
 ) {
     val journal = LeziThemeExt.isJournal
     val grid = LeziThemeExt.colors.chartGrid
     LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
-        Text(title, style = LeziTypography.TitleSm)
+        if (scopeLabel != null && totalValue != null) {
+            ChartCardHeader(
+                title = title,
+                scopeLabel = scopeLabel,
+                totalValue = totalValue,
+            )
+        } else {
+            Text(title, style = LeziTypography.TitleSm)
+        }
         Spacer(Modifier.height(8.dp))
         val max = (values.filter { it > 0f }.maxOrNull() ?: 37f).coerceAtLeast(37.5f)
         val min = (values.filter { it > 0f }.minOrNull() ?: 36f).coerceAtMost(36f)
@@ -1088,6 +1114,8 @@ private fun WeekLineChart(
             }
             val path = Path()
             var started = false
+            val dotRadius = (if (journal) 2.dp else 3.dp).toPx()
+            val strokeWidth = (if (journal) 1.5.dp else 2.dp).toPx()
             values.forEachIndexed { i, v ->
                 if (v <= 0f) return@forEachIndexed
                 val x = size.width * (i / (values.size - 1f).coerceAtLeast(1f))
@@ -1098,33 +1126,36 @@ private fun WeekLineChart(
                 } else {
                     path.lineTo(x, y)
                 }
-                drawCircle(color, radius = if (journal) 4f else 6f, center = Offset(x, y))
+                drawCircle(color, radius = dotRadius, center = Offset(x, y))
             }
-            if (started) drawPath(path, color, style = Stroke(width = if (journal) 3f else 4f))
+            if (started) drawPath(path, color, style = Stroke(width = strokeWidth))
         }
         DateAxis(dates)
     }
 }
 
 @Composable
-private fun DateAxis(dates: List<LocalDate>) {
+private fun DateAxis(
+    dates: List<LocalDate>,
+    modifier: Modifier = Modifier,
+) {
     if (dates.isEmpty()) return
     val color = MaterialTheme.colorScheme.onSurfaceVariant
     if (dates.size == 1) {
         Text(
             "${dates.single().monthValue}/${dates.single().dayOfMonth}",
-            modifier = Modifier.fillMaxWidth(),
+            modifier = modifier.fillMaxWidth(),
             style = LeziTypography.Meta,
             color = color,
             textAlign = TextAlign.Center,
         )
     } else if (dates.size <= 7) {
-        Row(Modifier.fillMaxWidth()) {
+        Row(modifier.fillMaxWidth()) {
             dates.forEach { date ->
                 Text(
                     "${date.monthValue}/${date.dayOfMonth}",
                     modifier = Modifier.weight(1f),
-                    style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                    style = LeziTypography.Micro,
                     color = color,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
@@ -1132,7 +1163,7 @@ private fun DateAxis(dates: List<LocalDate>) {
             }
         }
     } else {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             listOf(dates.first(), dates[dates.lastIndex / 2], dates.last()).forEach { date ->
                 Text(
                     "${date.monthValue}/${date.dayOfMonth}",

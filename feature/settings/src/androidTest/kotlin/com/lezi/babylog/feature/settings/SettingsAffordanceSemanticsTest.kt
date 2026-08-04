@@ -11,7 +11,7 @@ import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
@@ -44,7 +44,8 @@ class SettingsAffordanceSemanticsTest {
             .assertHasNoClickAction()
             .fetchSemanticsNode()
         assertThat(row.config.contains(SemanticsProperties.Role)).isFalse()
-        compose.onAllNodesWithText("›", useUnmergedTree = true).assertCountEquals(0)
+        compose.onAllNodesWithTag(SETTINGS_MENU_ROW_MORE_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
     }
 
     @Test
@@ -69,7 +70,8 @@ class SettingsAffordanceSemanticsTest {
         assertThat(semantics[SemanticsProperties.Role]).isEqualTo(Role.Button)
         assertThat(semantics[SemanticsActions.OnClick].label)
             .isEqualTo("打开年年的本机设置")
-        compose.onAllNodesWithText("›", useUnmergedTree = true).assertCountEquals(1)
+        compose.onAllNodesWithTag(SETTINGS_MENU_ROW_MORE_TAG, useUnmergedTree = true)
+            .assertCountEquals(1)
         compose.onAllNodes(
             SemanticsMatcher.keyIsDefined(SemanticsActions.OnClick),
             useUnmergedTree = true,

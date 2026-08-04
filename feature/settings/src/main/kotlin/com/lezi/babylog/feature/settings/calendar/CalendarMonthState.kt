@@ -121,21 +121,21 @@ internal data class CalendarMonthState(
     val selectedDate: LocalDate,
     val today: LocalDate,
 ) {
-    fun previousMonth(): CalendarMonthState = moveMonth(-1)
+    fun previousMonth(): CalendarMonthState = showMonth(visibleMonth.plusMonths(-1))
 
-    fun nextMonth(): CalendarMonthState = moveMonth(1)
+    fun nextMonth(): CalendarMonthState = showMonth(visibleMonth.plusMonths(1))
+
+    /** Jump to [month] (pager swipe), keeping the selected day-of-month clamped. */
+    fun showMonth(month: YearMonth): CalendarMonthState {
+        val selectedDay = selectedDate.dayOfMonth.coerceAtMost(month.lengthOfMonth())
+        return copy(
+            visibleMonth = month,
+            selectedDate = month.atDay(selectedDay),
+        )
+    }
 
     fun selectDate(date: LocalDate): CalendarMonthState =
         if (YearMonth.from(date) == visibleMonth) copy(selectedDate = date) else this
-
-    private fun moveMonth(delta: Long): CalendarMonthState {
-        val target = visibleMonth.plusMonths(delta)
-        val selectedDay = selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-        return copy(
-            visibleMonth = target,
-            selectedDate = target.atDay(selectedDay),
-        )
-    }
 
     companion object {
         fun initial(initialDate: LocalDate, today: LocalDate): CalendarMonthState =

@@ -46,23 +46,7 @@ enum class LeziVisualStyle(val key: String) {
 
 val LocalLeziVisualStyle = staticCompositionLocalOf { LeziVisualStyle.Warm }
 
-val LocalLeziColors = staticCompositionLocalOf {
-    LeziExtendedColors(
-        fab = LeziColors.Fab,
-        skySoft = LeziColors.SkySoft,
-        sunSoft = LeziColors.SunSoft,
-        creamDeep = LeziColors.CreamDeep,
-        laneSleep = resolveLeziRecordColor(LeziRecordColorRole.Sleep, darkTheme = false),
-        laneFeed = resolveLeziRecordColor(LeziRecordColorRole.Milk, darkTheme = false),
-        laneCare = resolveLeziRecordColor(LeziRecordColorRole.Pee, darkTheme = false),
-        danger = LeziColors.Danger,
-        success = LeziColors.Success,
-        warning = LeziColors.Warning,
-        sun = LeziColors.Sun,
-        chartGrid = LeziColors.Border,
-        babyAccent = LeziColors.Accent,
-    )
-}
+val LocalLeziColors = staticCompositionLocalOf { LightExt }
 
 fun readableContentColor(background: Color): Color {
     val blackContrast = contrastRatio(Color.Black, background)
@@ -315,9 +299,9 @@ private val DarkExt = LeziExtendedColors(
     laneFeed = resolveLeziRecordColor(LeziRecordColorRole.Milk, darkTheme = true),
     laneCare = resolveLeziRecordColor(LeziRecordColorRole.Pee, darkTheme = true),
     danger = Color(0xFFFF897E),
-    success = LeziColors.Success,
-    warning = LeziColors.Warning,
-    sun = LeziColors.Sun,
+    success = LeziColors.DarkSuccess,
+    warning = LeziColors.DarkWarning,
+    sun = LeziColors.DarkSun,
     chartGrid = LeziColors.DarkBorder,
     babyAccent = LeziColors.DarkAccent,
 )

@@ -82,7 +82,7 @@ private fun WidgetContent(
         modifier = GlanceModifier
             .fillMaxSize()
             .background(GlanceTheme.colors.background)
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
             .clickable(
                 actionStartActivity(
                     WidgetComposerContract.createOpenAppIntent(context, model.widgetId),
@@ -99,7 +99,7 @@ private fun WidgetContent(
         Text(
             text = model.primarySummary,
             style = TextStyle(
-                fontSize = 10.sp,
+                fontSize = 12.sp,
                 color = GlanceTheme.colors.onSurfaceVariant,
             ),
             maxLines = 1,
@@ -107,7 +107,7 @@ private fun WidgetContent(
         Text(
             text = model.secondarySummary,
             style = TextStyle(
-                fontSize = 10.sp,
+                fontSize = 12.sp,
                 color = GlanceTheme.colors.onSurfaceVariant,
             ),
             maxLines = 1,
@@ -124,9 +124,9 @@ private fun WidgetContent(
                     Text(
                         text = "+${action.label}",
                         modifier = GlanceModifier
-                            .width(48.dp)
+                            .defaultWeight()
                             .background(GlanceTheme.colors.primaryContainer)
-                            .padding(horizontal = 7.dp, vertical = 18.dp)
+                            .padding(horizontal = 12.dp, vertical = 16.dp)
                             .clickable(
                                 actionStartActivity(
                                     WidgetComposerContract.createIntent(
@@ -137,7 +137,7 @@ private fun WidgetContent(
                                 ),
                             ),
                         style = TextStyle(
-                            fontSize = 10.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             color = GlanceTheme.colors.onPrimaryContainer,
                         ),

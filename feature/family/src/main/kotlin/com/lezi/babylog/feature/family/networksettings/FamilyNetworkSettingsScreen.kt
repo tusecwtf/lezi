@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family.networksettings
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -10,7 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -147,49 +148,54 @@ fun FamilyNetworkSettingsScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                when (val candidate = ui.candidate) {
-                    is FamilyNetworkCandidate.CertificateApproval -> {
-                        LeziSurfacePanel(modifier = Modifier.fillMaxWidth()) {
-                            Text("服务器证书需要确认", style = LeziTypography.BodyStrong)
-                            Text(
-                                "旧指纹：${ui.currentFingerprint ?: "系统证书验证"}",
-                                style = LeziTypography.Meta,
-                            )
-                            Text(
-                                "新指纹：${candidate.candidate.fingerprint}",
-                                style = LeziTypography.Meta,
+                AnimatedVisibility(
+                    visible = ui.candidate is FamilyNetworkCandidate.CertificateApproval ||
+                        ui.candidate is FamilyNetworkCandidate.Ready,
+                ) {
+                    when (val candidate = ui.candidate) {
+                        is FamilyNetworkCandidate.CertificateApproval -> {
+                            LeziSurfacePanel(modifier = Modifier.fillMaxWidth()) {
+                                Text("服务器证书需要确认", style = LeziTypography.BodyStrong)
+                                Text(
+                                    "旧指纹：${ui.currentFingerprint ?: "系统证书验证"}",
+                                    style = LeziTypography.Meta,
+                                )
+                                Text(
+                                    "新指纹：${candidate.candidate.fingerprint}",
+                                    style = LeziTypography.Meta,
+                                )
+                            }
+                            LeziSecondaryButton(
+                                "核对并接受新证书",
+                                onClick = { certificateConfirmation = candidate.candidate },
+                                enabled = !ui.busy,
+                                modifier = Modifier.fillMaxWidth(),
                             )
                         }
-                        LeziSecondaryButton(
-                            "核对并接受新证书",
-                            onClick = { certificateConfirmation = candidate.candidate },
-                            enabled = !ui.busy,
-                            modifier = Modifier.fillMaxWidth(),
+                        is FamilyNetworkCandidate.Ready -> CandidateLoginControls(
+                            ui = ui,
+                            familyState = candidate.familyState,
+                            displayName = displayName,
+                            onDisplayNameChange = { displayName = it },
+                            deviceName = deviceName,
+                            onDeviceNameChange = { deviceName = it },
+                            rootPassword = rootPassword,
+                            onRootPasswordChange = { rootPassword = it },
+                            onReconnectOwner = {
+                                onReconnectOwner(deviceName, rootPassword)
+                                rootPassword = ""
+                            },
+                            onRequestReconnectMember = {
+                                onRequestReconnectMember(displayName, deviceName)
+                            },
+                            onCheckReconnectMember = onCheckReconnectMember,
+                            onCancelReconnectMember = onCancelReconnectMember,
+                            onPrepareDisasterRecovery = onPrepareDisasterRecovery,
                         )
+                        is FamilyNetworkCandidate.Failed,
+                        null,
+                        -> Unit
                     }
-                    is FamilyNetworkCandidate.Ready -> CandidateLoginControls(
-                        ui = ui,
-                        familyState = candidate.familyState,
-                        displayName = displayName,
-                        onDisplayNameChange = { displayName = it },
-                        deviceName = deviceName,
-                        onDeviceNameChange = { deviceName = it },
-                        rootPassword = rootPassword,
-                        onRootPasswordChange = { rootPassword = it },
-                        onReconnectOwner = {
-                            onReconnectOwner(deviceName, rootPassword)
-                            rootPassword = ""
-                        },
-                        onRequestReconnectMember = {
-                            onRequestReconnectMember(displayName, deviceName)
-                        },
-                        onCheckReconnectMember = onCheckReconnectMember,
-                        onCancelReconnectMember = onCancelReconnectMember,
-                        onPrepareDisasterRecovery = onPrepareDisasterRecovery,
-                    )
-                    is FamilyNetworkCandidate.Failed,
-                    null,
-                    -> Unit
                 }
 
                 if (ui.recoveryStatus != null) {
@@ -227,14 +233,13 @@ fun FamilyNetworkSettingsScreen(
     }
 
     certificateConfirmation?.let { certificate ->
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { certificateConfirmation = null },
             title = { Text("确认更换服务器证书？") },
             text = {
+                // 指纹已在上方「服务器证书需要确认」面板展示，弹窗只做确认。
                 Text(
-                    "地址或证书变化后必须重新登录或审批。确认只信任候选证书，不会发送当前家庭凭据。\n\n" +
-                        "旧指纹：${ui.currentFingerprint ?: "系统证书验证"}\n" +
-                        "新指纹：${certificate.fingerprint}",
+                    "地址或证书变化后必须重新登录或审批。确认只信任候选证书，不会发送当前家庭凭据。",
                 )
             },
             confirmButton = {
@@ -251,7 +256,7 @@ fun FamilyNetworkSettingsScreen(
         )
     }
     if (finalRecoveryConfirmation) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { finalRecoveryConfirmation = false },
             title = { Text("最终确认恢复家庭？") },
             text = {
@@ -326,15 +331,7 @@ private fun CandidateLoginControls(
         modifier = Modifier.fillMaxWidth(),
     )
     if (ui.role == FamilyRole.Owner) {
-        OutlinedTextField(
-            value = rootPassword,
-            onValueChange = onRootPasswordChange,
-            label = { Text("新服务器管理员根密码") },
-            singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
-            enabled = !ui.busy,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        RecoveryRootPasswordField(rootPassword, onRootPasswordChange, ui.busy)
         LeziPrimaryButton(
             "重新登录并更新地址",
             onClick = onReconnectOwner,

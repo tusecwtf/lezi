@@ -1,7 +1,7 @@
 package com.lezi.babylog.feature.family
 
-import com.lezi.babylog.feature.family.overview.formatBabyBirthday
-import com.lezi.babylog.feature.family.overview.formatBirthWeightKg
+import com.lezi.babylog.core.ui.formatBabyBirthday
+import com.lezi.babylog.core.ui.formatBirthWeightKg
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
 import org.junit.Test

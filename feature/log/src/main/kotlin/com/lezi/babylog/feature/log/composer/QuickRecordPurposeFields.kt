@@ -49,9 +49,11 @@ import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.stoolAmountLabel
 import com.lezi.babylog.core.ui.stoolColorLabel
 import com.lezi.babylog.core.ui.stoolConsistencyLabel
+import com.lezi.babylog.designsystem.LeziAlphas
 import com.lezi.babylog.designsystem.LeziPeeAmountMark
 import com.lezi.babylog.designsystem.LeziNursingConfirmFields
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziStoolAmountMark
 import com.lezi.babylog.designsystem.LeziStoolColorMark
@@ -216,7 +218,7 @@ private fun NursingFields(
             onClick = onStartNursingTimer,
             modifier = Modifier
                 .fillMaxWidth()
-                .alpha(if (actionsEnabled) 1f else 0.45f),
+                .alpha(if (actionsEnabled) 1f else LeziAlphas.Disabled),
             enabled = actionsEnabled,
             shape = LeziThemeExt.controlShape,
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
@@ -257,9 +259,12 @@ private fun MilkFields(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = {
-            onDraftChange(draft.copy(amountMl = (draft.amountMl - step).coerceAtLeast(1)))
-        }) {
+        TextButton(
+            onClick = {
+                onDraftChange(draft.copy(amountMl = (draft.amountMl - step).coerceAtLeast(1)))
+            },
+            modifier = Modifier.heightIn(min = LeziSpacing.Touch),
+        ) {
             Text("−$step", style = LeziTypography.Title)
         }
         Text(
@@ -268,9 +273,12 @@ private fun MilkFields(
             modifier = Modifier.padding(horizontal = 22.dp),
             color = if (amountError) MaterialTheme.colorScheme.error else Color.Unspecified,
         )
-        TextButton(onClick = {
-            onDraftChange(draft.copy(amountMl = (draft.amountMl + step).coerceAtMost(999)))
-        }) {
+        TextButton(
+            onClick = {
+                onDraftChange(draft.copy(amountMl = (draft.amountMl + step).coerceAtMost(999)))
+            },
+            modifier = Modifier.heightIn(min = LeziSpacing.Touch),
+        ) {
             Text("+$step", style = LeziTypography.Title)
         }
     }
@@ -334,7 +342,7 @@ private fun PeeFields(
         Modifier
             .fillMaxWidth()
             .selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
     ) {
         (1..3).forEach { value ->
             val label = peeAmountLabel(value)
@@ -367,7 +375,7 @@ private fun StoolFields(
     )
     Row(
         Modifier.fillMaxWidth().selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
     ) {
         (1..4).forEach { value ->
             val label = stoolAmountLabel(value)
@@ -389,7 +397,7 @@ private fun StoolFields(
     )
     Row(
         Modifier.fillMaxWidth().selectableGroup(),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
     ) {
         (1..4).forEach { value ->
             val label = stoolConsistencyLabel(value)
@@ -411,12 +419,12 @@ private fun StoolFields(
     )
     Column(
         Modifier.selectableGroup(),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
     ) {
         (0..7).chunked(4).forEach { values ->
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
             ) {
                 values.forEach { value ->
                     val label = stoolColorLabel(value)

@@ -7,6 +7,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -36,6 +37,8 @@ import com.lezi.babylog.core.common.LocalDataGate
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.designsystem.LeziAlphas
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import dagger.Lazy
@@ -70,21 +73,22 @@ class WidgetConfigurationActivity : ComponentActivity() {
                         .fillMaxSize()
                         .safeDrawingPadding(),
                 ) {
-                    val state = screenState
-                    if (state == null) {
-                        Column(
-                            Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                        ) {
-                            CircularProgressIndicator()
+                    Crossfade(targetState = screenState, label = "widgetConfig") { state ->
+                        if (state == null) {
+                            Column(
+                                Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.Center,
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        } else {
+                            WidgetConfigurationScreen(
+                                state = state,
+                                onStateChange = { screenState = it },
+                                onSave = { save(it) },
+                            )
                         }
-                    } else {
-                        WidgetConfigurationScreen(
-                            state = state,
-                            onStateChange = { screenState = it },
-                            onSave = { save(it) },
-                        )
                     }
                 }
             }
@@ -177,8 +181,8 @@ private fun WidgetConfigurationScreen(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(LeziSpacing.Page),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
         Text("设置乐记小组件", style = MaterialTheme.typography.headlineSmall)
         Text("选择宝宝", style = MaterialTheme.typography.titleMedium)
@@ -223,7 +227,7 @@ private fun WidgetConfigurationScreen(
                     color = if (enabled) {
                         MaterialTheme.colorScheme.onSurface
                     } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = LeziAlphas.Disabled)
                     },
                 )
             }

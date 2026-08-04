@@ -2,6 +2,7 @@ package com.lezi.babylog
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -35,7 +36,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronLeft
@@ -58,7 +61,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
@@ -66,14 +68,17 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.lezi.babylog.designsystem.LeziAlphas
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.readableContentColor
 import com.lezi.babylog.core.ui.BabyAvatar
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -83,6 +88,58 @@ import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+
+// Header cluster metrics. The avatar+cap design space is 38×46dp (see SleepMoonCap);
+// the cluster is taller than the avatar so the sleep cap can rise above it without
+// clipping, and the lift keeps the avatar optically centered with AppBrandBar.
+private val babyClusterHeight = 54.dp
+private val babyClusterPadding = 4.dp
+private val avatarCapDesignWidth = 38.dp
+private val avatarCapDesignHeight = 46.dp
+private val avatarCapLift = (-6).dp
+private val avatarNameGap = 3.dp
+
+// Date cluster inner padding: tight so the two-line label reads as one block.
+private val dateColumnHorizontalPadding = 2.dp
+private val dateColumnVerticalPadding = 3.dp
+
+/** Secondary/meta copy sitting on the top-bar fill; aligned with AppBrandBar's 0.82f. */
+private const val headerSecondaryAlpha = 0.82f
+
+/**
+ * Single source for root top-bar chrome colors: baby theme accent in light mode,
+ * surface in dark. `designsystem.AppBrandBar` mirrors these — keep both in sync.
+ */
+@Composable
+internal fun leziTopBarBackground(dark: Boolean): Color = if (dark) {
+    MaterialTheme.colorScheme.surface
+} else {
+    LeziThemeExt.colors.babyAccent
+}
+
+@Composable
+internal fun leziTopBarContentColor(dark: Boolean): Color = if (dark) {
+    MaterialTheme.colorScheme.onSurface
+} else {
+    readableContentColor(leziTopBarBackground(dark))
+}
+
+/** Status-bar-aware top-bar container shared by the context header and the brand bar. */
+@Composable
+internal fun LeziTopBarContainer(
+    dark: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(leziTopBarBackground(dark))
+            .statusBarsPadding(),
+    ) {
+        content()
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -104,16 +161,8 @@ internal fun AppHeaderBar(
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val background = if (dark) {
-        MaterialTheme.colorScheme.surface
-    } else {
-        LeziThemeExt.colors.babyAccent
-    }
-    val content = if (dark) {
-        MaterialTheme.colorScheme.onSurface
-    } else {
-        com.lezi.babylog.designsystem.readableContentColor(background)
-    }
+    val background = leziTopBarBackground(dark)
+    val content = leziTopBarContentColor(dark)
     val babyAccent = LeziThemeExt.colors.babyAccent
     val controlShape = LeziThemeExt.controlShape
     Row(
@@ -127,7 +176,7 @@ internal fun AppHeaderBar(
         Row(
             modifier = Modifier
                 .weight(1f)
-                .height(54.dp)
+                .height(babyClusterHeight)
                 .clip(controlShape)
                 .combinedClickable(
                     enabled = canCycleBaby,
@@ -136,15 +185,15 @@ internal fun AppHeaderBar(
                     onClick = onCycleBaby,
                     onLongClick = onJumpSiblingSameDayAge,
                 )
-                .padding(horizontal = 4.dp, vertical = 4.dp),
+                .padding(horizontal = babyClusterPadding, vertical = babyClusterPadding),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Keep the avatar centered with AppBrandBar while the cap rises above it.
             Box(
                 modifier = Modifier
-                    .width(38.dp)
-                    .height(46.dp)
-                    .offset(y = (-6).dp),
+                    .width(avatarCapDesignWidth)
+                    .height(avatarCapDesignHeight)
+                    .offset(y = avatarCapLift),
             ) {
                 BabyAvatar(
                     nickname = babyName,
@@ -161,7 +210,7 @@ internal fun AppHeaderBar(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
-            Spacer(Modifier.size(3.dp))
+            Spacer(Modifier.size(avatarNameGap))
             Column(modifier = Modifier.weight(1f)) {
                 AnimatedContent(
                     targetState = sleeping,
@@ -197,19 +246,21 @@ internal fun AppHeaderBar(
                         color = content,
                         style = LeziTypography.Label,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Text(
                     babyAge.ifBlank { "本地记录" },
-                    color = content.copy(alpha = 0.82f),
+                    color = content.copy(alpha = headerSecondaryAlpha),
                     style = LeziTypography.Meta,
                     maxLines = 1,
                 )
             }
         }
 
+        // Date cluster wraps its content; the equal 1f weights on both sides keep it
+        // optically centered regardless of baby-name length.
         Row(
-            modifier = Modifier.weight(1.55f),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {
@@ -218,8 +269,7 @@ internal fun AppHeaderBar(
             }
             Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .height(48.dp)
+                    .height(LeziSpacing.Touch)
                     .clip(controlShape)
                     .semantics(mergeDescendants = true) {
                         contentDescription =
@@ -227,7 +277,10 @@ internal fun AppHeaderBar(
                                 headerSecondaryDateLabel(selectedDate)
                     }
                     .clickable(role = Role.Button, onClick = onOpenDatePicker)
-                    .padding(horizontal = 2.dp, vertical = 3.dp),
+                    .padding(
+                        horizontal = dateColumnHorizontalPadding,
+                        vertical = dateColumnVerticalPadding,
+                    ),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
@@ -237,13 +290,15 @@ internal fun AppHeaderBar(
                     style = LeziTypography.Label.copy(fontWeight = FontWeight.Bold),
                     textAlign = TextAlign.Center,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Text(
                     headerSecondaryDateLabel(selectedDate),
-                    color = content.copy(alpha = 0.84f),
+                    color = content.copy(alpha = headerSecondaryAlpha),
                     style = LeziTypography.Meta,
                     textAlign = TextAlign.Center,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             IconButton(
@@ -254,13 +309,13 @@ internal fun AppHeaderBar(
                 Icon(
                     Icons.Filled.ChevronRight,
                     contentDescription = "后一天",
-                    tint = content.copy(alpha = if (canGoNext) 1f else 0.32f),
+                    tint = content.copy(alpha = if (canGoNext) 1f else LeziAlphas.Disabled),
                 )
             }
         }
 
         Box(
-            modifier = Modifier.weight(0.42f),
+            modifier = Modifier.weight(1f),
             contentAlignment = Alignment.CenterEnd,
         ) {
             IconButton(onClick = onSearch, modifier = Modifier.size(LeziSpacing.TopBarAction)) {
@@ -417,13 +472,13 @@ internal fun HeaderCalendarDialog(
     onSelect: (LocalDate) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val monthCells = calendarMonthCells(displayedMonth)
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Surface(
             modifier = Modifier
+                .widthIn(max = 400.dp)
                 .fillMaxWidth()
                 .padding(horizontal = LeziSpacing.Md),
             shape = LeziThemeExt.dialogShape,
@@ -433,10 +488,7 @@ internal fun HeaderCalendarDialog(
             shadowElevation = LeziThemeExt.modalElevation,
         ) {
             Column(
-                Modifier.padding(
-                    horizontal = LeziSpacing.Xs,
-                    vertical = LeziSpacing.Md,
-                ),
+                Modifier.padding(LeziSpacing.Md),
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -460,7 +512,11 @@ internal fun HeaderCalendarDialog(
                             Icons.Filled.ChevronRight,
                             contentDescription = "下个月",
                             tint = MaterialTheme.colorScheme.onSurface.copy(
-                                alpha = if (displayedMonth < YearMonth.from(today)) 1f else 0.3f,
+                                alpha = if (displayedMonth < YearMonth.from(today)) {
+                                    1f
+                                } else {
+                                    LeziAlphas.Disabled
+                                },
                             ),
                         )
                     }
@@ -477,25 +533,50 @@ internal fun HeaderCalendarDialog(
                         )
                     }
                 }
-                Spacer(Modifier.height(6.dp))
-                monthCells.chunked(7).forEach { week ->
-                    Row(Modifier.fillMaxWidth()) {
-                        week.forEach { date ->
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                if (date != null) {
-                                    CalendarDay(
-                                        date = date,
-                                        selected = date == selectedDate,
-                                        today = date == today,
-                                        hasRecord = date in recordDays,
-                                        enabled = !date.isAfter(today),
-                                        onClick = { onSelect(date) },
-                                    )
+                Spacer(Modifier.height(LeziSpacing.Xs))
+                AnimatedContent(
+                    targetState = displayedMonth,
+                    transitionSpec = {
+                        val forward = targetState > initialState
+                        (slideInHorizontally(
+                            animationSpec = tween(durationMillis = 200),
+                            initialOffsetX = { width ->
+                                if (forward) width / 4 else -width / 4
+                            },
+                        ) + fadeIn(
+                            animationSpec = tween(durationMillis = 200),
+                        )).togetherWith(
+                            slideOutHorizontally(
+                                animationSpec = tween(durationMillis = 200),
+                                targetOffsetX = { width ->
+                                    if (forward) -width / 4 else width / 4
+                                },
+                            ) + fadeOut(animationSpec = tween(durationMillis = 160)),
+                        )
+                    },
+                    label = "headerCalendarMonth",
+                ) { month ->
+                    Column {
+                        calendarMonthCells(month).chunked(7).forEach { week ->
+                            Row(Modifier.fillMaxWidth()) {
+                                week.forEach { date ->
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(LeziSpacing.Touch),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        if (date != null) {
+                                            CalendarDay(
+                                                date = date,
+                                                selected = date == selectedDate,
+                                                today = date == today,
+                                                hasRecord = date in recordDays,
+                                                enabled = !date.isAfter(today),
+                                                onClick = { onSelect(date) },
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -533,14 +614,19 @@ private fun CalendarDay(
 ) {
     val selectedColor = MaterialTheme.colorScheme.primary
     val selectedContentColor = calendarContentColor(selectedColor)
+    val dayBackground by animateColorAsState(
+        targetValue = if (selected) selectedColor else Color.Transparent,
+        animationSpec = tween(durationMillis = 180),
+        label = "calendarDayBackground",
+    )
     val contentColor = when {
         selected -> selectedContentColor
         enabled -> MaterialTheme.colorScheme.onSurface
-        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f)
+        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = LeziAlphas.Disabled)
     }
     Box(
         modifier = Modifier
-            .size(48.dp)
+            .size(LeziSpacing.Touch)
             .clip(CircleShape)
             .then(
                 if (today && !selected) {
@@ -549,7 +635,7 @@ private fun CalendarDay(
                     Modifier
                 },
             )
-            .background(if (selected) selectedColor else Color.Transparent)
+            .background(dayBackground)
             .semantics(mergeDescendants = true) {
                 contentDescription =
                     "${date.year}年${date.monthValue}月${date.dayOfMonth}日，" +
@@ -613,8 +699,7 @@ internal fun calendarMonthCells(month: YearMonth): List<LocalDate?> {
     return cells
 }
 
-internal fun calendarContentColor(background: Color): Color =
-    if (background.luminance() > 0.179f) Color.Black else Color.White
+internal fun calendarContentColor(background: Color): Color = readableContentColor(background)
 
 internal fun headerBabyPrimaryLabel(
     babyName: String,

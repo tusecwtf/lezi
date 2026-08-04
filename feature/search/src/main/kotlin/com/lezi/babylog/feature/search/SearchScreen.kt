@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.search
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,12 +9,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -130,6 +140,17 @@ fun SearchRoute(
     vm: SearchViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    // Show the loading card only when a search actually takes long; fast
+    // keystroke searches keep the previous results instead of flashing.
+    var showLoading by remember { mutableStateOf(false) }
+    LaunchedEffect(ui.searching) {
+        if (ui.searching) {
+            delay(LOADING_INDICATOR_DELAY_MS)
+            showLoading = true
+        } else {
+            showLoading = false
+        }
+    }
     Scaffold(
         topBar = {
             LeziDetailTopBar(title = "搜索", onBack = onBack)
@@ -149,19 +170,39 @@ fun SearchRoute(
                 singleLine = true,
                 label = { Text("类型 / 详情 / 备注") },
                 placeholder = { Text("例如：睡眠、布洛芬、发烧") },
+                leadingIcon = {
+                    Icon(Icons.Outlined.Search, contentDescription = null)
+                },
+                trailingIcon = if (ui.query.isNotEmpty()) {
+                    {
+                        IconButton(onClick = { vm.onQuery("") }) {
+                            Icon(Icons.Outlined.Close, contentDescription = "清除搜索")
+                        }
+                    }
+                } else {
+                    null
+                },
             )
             ui.noticeMessage?.let { notice ->
                 Text(
                     text = notice,
                     style = LeziTypography.Body,
-                    color = MaterialTheme.colorScheme.error,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
                         .padding(top = LeziSpacing.Sm)
                         .semantics { contentDescription = notice },
                 )
             }
-            when {
-                ui.query.isBlank() -> {
+            val phase = when {
+                ui.query.isBlank() -> SearchPhase.Prompt
+                ui.searching && (showLoading || ui.results.isEmpty()) -> SearchPhase.Loading
+                ui.errorMessage != null -> SearchPhase.Error
+                ui.results.isEmpty() -> SearchPhase.Empty
+                else -> SearchPhase.Results
+            }
+            Crossfade(targetState = phase, label = "searchPhase") { target ->
+            when (target) {
+                SearchPhase.Prompt -> {
                     StateContainer(
                         kind = StateKind.Empty,
                         title = "输入关键字",
@@ -169,7 +210,7 @@ fun SearchRoute(
                         modifier = Modifier.padding(top = LeziSpacing.Md),
                     )
                 }
-                ui.searching -> {
+                SearchPhase.Loading -> {
                     StateContainer(
                         kind = StateKind.Loading,
                         title = "搜索中",
@@ -177,7 +218,7 @@ fun SearchRoute(
                         modifier = Modifier.padding(top = LeziSpacing.Md),
                     )
                 }
-                ui.errorMessage != null -> {
+                SearchPhase.Error -> {
                     StateContainer(
                         kind = StateKind.Error,
                         title = "暂时无法搜索",
@@ -187,7 +228,7 @@ fun SearchRoute(
                         onAction = vm::retry,
                     )
                 }
-                ui.results.isEmpty() -> {
+                SearchPhase.Empty -> {
                     StateContainer(
                         kind = StateKind.Empty,
                         title = "无结果",
@@ -195,7 +236,7 @@ fun SearchRoute(
                         modifier = Modifier.padding(top = LeziSpacing.Md),
                     )
                 }
-                else -> {
+                SearchPhase.Results -> {
                     LazyColumn(
                         contentPadding = PaddingValues(top = LeziSpacing.Md, bottom = LeziSpacing.Xxl),
                         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
@@ -213,7 +254,7 @@ fun SearchRoute(
                                 onClick = {
                                     vm.requestOpenEdit(hit)?.let(onOpenEdit)
                                 },
-                                modifier = Modifier.semantics {
+                                modifier = Modifier.animateItem().semantics {
                                     contentDescription = if (hit.canEdit) {
                                         "编辑$title"
                                     } else {
@@ -225,9 +266,14 @@ fun SearchRoute(
                     }
                 }
             }
+            }
         }
     }
 }
+
+private enum class SearchPhase { Prompt, Loading, Error, Empty, Results }
+
+private const val LOADING_INDICATOR_DELAY_MS = 300L
 
 private const val MAX_SEARCH_QUERY_CODE_POINTS = 100
 private const val SEARCH_QUERY_PREVIEW_CODE_POINTS = 30

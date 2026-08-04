@@ -2,6 +2,10 @@ package com.lezi.babylog.feature.family
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -406,75 +410,82 @@ fun FamilyRoute(
         }
     }
 
-    if (showNetworkSettings) {
-        LaunchedEffect(Unit) { networkSettingsHost.entered() }
-        FamilyNetworkSettingsScreen(
-            ui = networkSettings,
-            onBack = { showNetworkSettings = false },
-            onEndpointDraftChange = networkSettingsHost::updateEndpointDraft,
-            onProbeCandidate = networkSettingsHost::probeCandidate,
-            onTrustCandidate = networkSettingsHost::trustCandidate,
-            onRefreshAvailability = networkSettingsHost::refreshAvailability,
-            onReconnectOwner = networkSettingsHost::reconnectOwner,
-            onRequestReconnectMember = networkSettingsHost::requestReconnectMember,
-            onCheckReconnectMember = networkSettingsHost::checkReconnectMember,
-            onCancelReconnectMember = networkSettingsHost::cancelReconnectMember,
-            onPrepareDisasterRecovery = networkSettingsHost::prepareDisasterRecovery,
-            onStartDisasterRecovery = networkSettingsHost::startDisasterRecovery,
-            onCommitDisasterRecovery = networkSettingsHost::commitDisasterRecovery,
-            onCancelDisasterRecovery = networkSettingsHost::cancelDisasterRecovery,
-        )
-        return
+    AnimatedContent(
+        targetState = showNetworkSettings,
+        transitionSpec = { fadeIn() togetherWith fadeOut() },
+        label = "familyPageContent",
+    ) { networkSettingsVisible ->
+        if (networkSettingsVisible) {
+            LaunchedEffect(Unit) { networkSettingsHost.entered() }
+            FamilyNetworkSettingsScreen(
+                ui = networkSettings,
+                onBack = { showNetworkSettings = false },
+                onEndpointDraftChange = networkSettingsHost::updateEndpointDraft,
+                onProbeCandidate = networkSettingsHost::probeCandidate,
+                onTrustCandidate = networkSettingsHost::trustCandidate,
+                onRefreshAvailability = networkSettingsHost::refreshAvailability,
+                onReconnectOwner = networkSettingsHost::reconnectOwner,
+                onRequestReconnectMember = networkSettingsHost::requestReconnectMember,
+                onCheckReconnectMember = networkSettingsHost::checkReconnectMember,
+                onCancelReconnectMember = networkSettingsHost::cancelReconnectMember,
+                onPrepareDisasterRecovery = networkSettingsHost::prepareDisasterRecovery,
+                onStartDisasterRecovery = networkSettingsHost::startDisasterRecovery,
+                onCommitDisasterRecovery = networkSettingsHost::commitDisasterRecovery,
+                onCancelDisasterRecovery = networkSettingsHost::cancelDisasterRecovery,
+            )
+        } else {
+            PageScaffoldBackground {
+                AccountPageContent(
+                    overview = overview,
+                    members = members,
+                    primary = primary,
+                    endpointConfigured = endpointConfigured,
+                    babyActions = AccountBabyActions(
+                        add = onAddBaby,
+                        setCurrent = overviewHost::setCurrent,
+                        edit = { dialog = FamilyDialog.EditBaby(it) },
+                        merge = { dialog = FamilyDialog.MergeBaby(it) },
+                        delete = { dialog = FamilyDialog.DeleteBaby(it) },
+                    ),
+                    familyActions = AccountFamilySectionActions(
+                        openMembers = {
+                            membersHost.refreshMembers(showErrors = true)
+                            dialog = FamilyDialog.MembersList
+                        },
+                        connect = ::openEndpointConnection,
+                        openOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
+                        dismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
+                    ),
+                    bottomActions = AccountBottomActions(
+                        openNetworkSettings = { showNetworkSettings = true },
+                        logoutCurrentDevice = { dialog = FamilyDialog.ConfirmDeviceLogout },
+                        leaveFamily = { dialog = FamilyDialog.ConfirmLeave },
+                        deleteFamily = {
+                            resetDeleteFamilyConfirmation()
+                            membersHost.refreshMembers(showErrors = true)
+                            dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
+                        },
+                    ),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(LeziSpacing.Page),
+                )
+            }
+        }
     }
 
-    PageScaffoldBackground {
-        AccountPageContent(
-            overview = overview,
-            members = members,
-            primary = primary,
-            endpointConfigured = endpointConfigured,
-            babyActions = AccountBabyActions(
-                add = onAddBaby,
-                setCurrent = overviewHost::setCurrent,
-                edit = { dialog = FamilyDialog.EditBaby(it) },
-                merge = { dialog = FamilyDialog.MergeBaby(it) },
-                delete = { dialog = FamilyDialog.DeleteBaby(it) },
-            ),
-            familyActions = AccountFamilySectionActions(
-                openMembers = {
-                    membersHost.refreshMembers(showErrors = true)
-                    dialog = FamilyDialog.MembersList
-                },
-                connect = ::openEndpointConnection,
-                openOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
-                dismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
-            ),
-            bottomActions = AccountBottomActions(
-                openNetworkSettings = { showNetworkSettings = true },
-                logoutCurrentDevice = { dialog = FamilyDialog.ConfirmDeviceLogout },
-                leaveFamily = { dialog = FamilyDialog.ConfirmLeave },
-                deleteFamily = {
-                    resetDeleteFamilyConfirmation()
-                    membersHost.refreshMembers(showErrors = true)
-                    dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
-                },
-            ),
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(LeziSpacing.Page),
+    if (!showNetworkSettings) {
+        OverviewAppUpdateDialogs(
+            host = overviewHost,
+            outcome = appUpdateOutcome,
+            checkingAppUpdate = checkingAppUpdate,
+            installingAppUpdate = installingAppUpdate,
         )
     }
 
-    OverviewAppUpdateDialogs(
-        host = overviewHost,
-        outcome = appUpdateOutcome,
-        checkingAppUpdate = checkingAppUpdate,
-        installingAppUpdate = installingAppUpdate,
-    )
 
-
-    when (val active = dialog) {
+    if (!showNetworkSettings) when (val active = dialog) {
         FamilyDialog.ConnectEndpoint -> FamilyEndpointConnectionDialog(
             state = familyWizardState,
             endpointDraft = endpointDraft,
@@ -1268,7 +1279,7 @@ fun FamilyRoute(
 
     // Member-login QR is driven solely by FamilyWizardController state (shared with onboarding).
     val memberLoginQrModel = projectMemberLoginQrDialog(familyWizardState)
-    if (memberLoginQrModel != null) {
+    if (!showNetworkSettings && memberLoginQrModel != null) {
         val payload = memberLoginQrModel.payload
         MemberLoginQrConfirmDialog(
             familyName = memberLoginQrModel.display.familyName,

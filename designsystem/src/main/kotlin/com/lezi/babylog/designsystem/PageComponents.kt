@@ -21,8 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,15 +36,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 
 @Composable
 fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
     val bg = MaterialTheme.colorScheme.background
     val journal = LeziThemeExt.isJournal
     val sun = LocalLeziColors.current.sunSoft
+    // 520dp (not raw px) so the halo keeps its proportion across densities.
+    val haloRadiusPx = with(LocalDensity.current) { 520.dp.toPx() }
     Box(
         Modifier
             .fillMaxSize()
@@ -58,7 +60,7 @@ fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
                         Brush.radialGradient(
                             colors = listOf(sun.copy(alpha = 0.55f), Color.Transparent),
                             center = Offset(Float.POSITIVE_INFINITY, 0f),
-                            radius = 520f,
+                            radius = haloRadiusPx,
                         ),
                     )
                 },
@@ -109,7 +111,8 @@ fun AppBrandBar(
     dark: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // Shared with AppHeaderBar: baby theme accent in light mode, surface in dark.
+    // Mirrors the app-side top-bar chrome (leziTopBarBackground / LeziTopBarContainer in
+    // app/AppHeader.kt): baby theme accent in light mode, surface in dark. Keep in sync.
     val background = if (dark) {
         MaterialTheme.colorScheme.surface
     } else {
@@ -171,9 +174,11 @@ fun AppBrandBar(
                 onClick = onToggleTheme,
                 modifier = Modifier.size(LeziSpacing.TopBarAction),
             ) {
+                // Icon shows the target state (sun in dark → tap for light, moon in
+                // light → tap for dark), not the current one.
                 Icon(
-                    if (dark) Icons.Filled.DarkMode else Icons.Outlined.DarkMode,
-                    contentDescription = "切换深色",
+                    if (dark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
+                    contentDescription = if (dark) "切换浅色" else "切换深色",
                     tint = content,
                 )
             }
@@ -210,7 +215,7 @@ fun PageHero(
                 }
                 Text(
                     title,
-                    style = LeziTypography.Display.copy(fontSize = 34.sp, lineHeight = 40.sp),
+                    style = LeziTypography.Hero,
                 )
             }
             if (trailing != null) {

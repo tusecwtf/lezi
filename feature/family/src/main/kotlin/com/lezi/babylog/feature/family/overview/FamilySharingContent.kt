@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -19,12 +20,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.traversalIndex
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.feature.family.components.FamilyDestructiveButton
 import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
 import com.lezi.babylog.feature.family.components.FamilyPrimarySurface
 import com.lezi.babylog.feature.family.components.buildFamilyOverviewCard
@@ -117,39 +120,17 @@ internal fun FamilySharingContent(
 
     LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
         if (connection.showFamilyContext) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        card.familyNameLabel,
-                        style = LeziTypography.TitleSm,
-                    )
-                    Text(
-                        familyNameSupportingCopy(overview.role),
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            FamilyCardInfoRow(
+                title = card.familyNameLabel,
+                titleStyle = LeziTypography.TitleSm,
+                meta = familyNameSupportingCopy(overview.role),
+            )
             Spacer(Modifier.height(LeziSpacing.Sm))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        card.selfTitle,
-                        style = LeziTypography.BodyStrong,
-                    )
-                    Text(
-                        "我的家庭称呼",
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            FamilyCardInfoRow(
+                title = card.selfTitle,
+                titleStyle = LeziTypography.BodyStrong,
+                meta = "我的家庭称呼",
+            )
             Spacer(Modifier.height(LeziSpacing.Sm))
             if (connection.showRoster) {
                 FamilyMemberRosterEntry(
@@ -165,7 +146,7 @@ internal fun FamilySharingContent(
                     } ?: 0,
                     onOpenMembers = onOpenMembers,
                 )
-                Spacer(Modifier.height(LeziSpacing.Xs))
+                Spacer(Modifier.height(LeziSpacing.Sm))
             }
         } else {
             Text(
@@ -220,21 +201,21 @@ internal fun FamilyAccountActions(
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(LeziSpacing.Xs))
-        LeziSecondaryButton(
+        FamilyDestructiveButton(
             "退出这台设备",
             onClick = onLogoutCurrentDevice,
             modifier = Modifier.fillMaxWidth(),
         )
         if (overview.role == FamilyRole.Member) {
             Spacer(Modifier.height(LeziSpacing.Xs))
-            LeziSecondaryButton(
+            FamilyDestructiveButton(
                 "退出家庭",
                 onClick = onLeaveFamily,
                 modifier = Modifier.fillMaxWidth(),
             )
         } else if (overview.role == FamilyRole.Owner) {
             Spacer(Modifier.height(LeziSpacing.Xs))
-            LeziSecondaryButton(
+            FamilyDestructiveButton(
                 "删除家庭",
                 onClick = onDeleteFamily,
                 modifier = Modifier.fillMaxWidth(),
@@ -242,6 +223,28 @@ internal fun FamilyAccountActions(
         }
     }
     Spacer(Modifier.height(LeziSpacing.Xxl))
+}
+
+/** Title + meta info row shared by the family card's 家庭名/称呼 lines. */
+@Composable
+private fun FamilyCardInfoRow(
+    title: String,
+    titleStyle: TextStyle,
+    meta: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = titleStyle)
+            Text(
+                meta,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }
 
 @Composable
@@ -291,7 +294,10 @@ internal fun FamilyMemberRosterEntry(
                 Text(
                     loginRequestCount.coerceAtMost(99).toString(),
                     style = LeziTypography.Label,
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.padding(
+                        horizontal = LeziSpacing.Xs,
+                        vertical = LeziSpacing.Xxs,
+                    ),
                 )
             }
         }
@@ -365,12 +371,14 @@ internal fun OptionalAppUpdateBanner(
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                 modifier = Modifier
+                    .heightIn(min = LeziSpacing.Touch)
                     .clickable(
                         onClickLabel = "稍后提醒",
                         role = Role.Button,
                         onClick = onDismiss,
                     )
-                    .padding(start = LeziSpacing.Sm, top = LeziSpacing.Xs, bottom = LeziSpacing.Xs),
+                    .padding(start = LeziSpacing.Sm, top = LeziSpacing.Xs, bottom = LeziSpacing.Xs)
+                    .wrapContentHeight(Alignment.CenterVertically),
             )
         }
     }

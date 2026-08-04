@@ -3,24 +3,19 @@ package com.lezi.babylog.feature.family.wizard
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.QrCodeScanner
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,6 +37,9 @@ import androidx.compose.ui.window.SecureFlagPolicy
 import com.google.zxing.BarcodeFormat
 import com.journeyapps.barcodescanner.BarcodeEncoder
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.family.FamilyWizardSnapshot
@@ -76,7 +74,7 @@ internal fun FamilyEndpointConnectionDialog(
     val ready = state as? FamilyWizardState.EndpointReady
     val failure = state as? FamilyWizardState.EndpointFailure
     val certificateChanged = failure?.reason == SetupProbeResult.Failed.CertificateChanged
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onKeepOffline,
         title = {
             Text(
@@ -86,7 +84,7 @@ internal fun FamilyEndpointConnectionDialog(
                     certificateChanged -> "服务器安全信息已变化"
                     ready?.snapshot?.mode == FamilyWizardMode.Create -> "这里还没有家庭"
                     ready != null -> "已找到家庭"
-                    failure != null -> failure.message
+                    failure != null -> "连接失败"
                     else -> "连接家庭服务器"
                 },
             )
@@ -169,12 +167,35 @@ private fun FamilyWizardStepHeader(
     step: FamilyWizardStep,
     endpointConfigured: Boolean,
 ) {
-    val (step1, step2) = familyWizardProgress(mode, step, endpointConfigured)
-    Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
+    val (step1, step2) = familyWizardProgress(mode, endpointConfigured)
+    Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
+        WizardStepChip(label = step1, active = step == FamilyWizardStep.Endpoint)
+        WizardStepChip(label = step2, active = step != FamilyWizardStep.Endpoint)
+    }
+}
+
+@Composable
+private fun WizardStepChip(label: String, active: Boolean) {
+    Surface(
+        shape = LeziShapes.Pill,
+        color = if (active) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        contentColor = if (active) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        },
+    ) {
         Text(
-            step1 + "  ·  " + step2,
+            label,
             style = LeziTypography.Meta,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(
+                horizontal = LeziSpacing.Sm,
+                vertical = LeziSpacing.Xxs,
+            ),
         )
     }
 }
@@ -189,7 +210,7 @@ internal fun FamilyVerifiedEndpointDialog(
     onChangeEndpoint: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(familyWizardTitle(mode, FamilyWizardStep.Endpoint)) },
         text = {
@@ -217,31 +238,30 @@ internal fun FamilyJoinRoleDialog(
     onBackToEndpoint: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text("你要如何加入？") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                 Text("已找到配置完成的家庭。请选择这台设备使用的身份。")
-                Button(
+                LeziPrimaryButton(
+                    "我是家庭管理员",
                     onClick = onOwner,
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("我是家庭管理员") }
-                OutlinedButton(
+                )
+                LeziSecondaryButton(
+                    "我是家庭成员",
                     onClick = onMember,
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("我是家庭成员") }
-                OutlinedButton(
+                )
+                LeziSecondaryButton(
+                    "扫描成员登录二维码",
                     onClick = onScanMemberLoginQr,
                     enabled = !busy,
                     modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
-                    Spacer(Modifier.size(LeziSpacing.Xs))
-                    Text("扫描成员登录二维码")
-                }
+                )
             }
         },
         confirmButton = {},
@@ -266,7 +286,7 @@ internal fun OwnerLoginDialog(
     onBackToRole: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(
@@ -277,7 +297,7 @@ internal fun OwnerLoginDialog(
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 480.dp)
+                    .heightIn(max = LeziSpacing.DialogContentMax)
                     .verticalScroll(rememberScrollState())
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
@@ -330,7 +350,7 @@ internal fun OwnerTakeoverConfirmationDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
         title = { Text("接管管理员身份？") },
         text = {
@@ -361,7 +381,7 @@ internal fun MemberLoginRequestDialog(
     onBackToRole: () -> Unit,
     onKeepOffline: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!submitting) onKeepOffline() },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
@@ -369,7 +389,7 @@ internal fun MemberLoginRequestDialog(
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 480.dp)
+                    .heightIn(max = LeziSpacing.DialogContentMax)
                     .verticalScroll(rememberScrollState())
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
@@ -433,7 +453,7 @@ internal fun MemberApprovalWaitingDialog(
     onCancel: () -> Unit,
     onKeepOffline: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!busy) onKeepOffline() },
         title = { Text("等待管理员确认") },
         text = {
@@ -492,7 +512,7 @@ internal fun CreateFamilyDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!creating) onDismiss() },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(
@@ -503,7 +523,7 @@ internal fun CreateFamilyDialog(
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 480.dp)
+                    .heightIn(max = LeziSpacing.DialogContentMax)
                     .verticalScroll(rememberScrollState())
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),

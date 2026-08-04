@@ -198,19 +198,13 @@ fun LeziStoolColorMark(
     modifier: Modifier = Modifier,
 ) {
     val fill = leziStoolColor(colorIndex)
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val outline = when (colorIndex.coerceIn(0, 7)) {
         0 -> MaterialTheme.colorScheme.outline
-        1 -> Color(0xFF9AA3AD)
-        2 -> Color(0xFF8A7020)
-        3 -> Color(0xFF8A4E18)
-        4 -> Color(0xFF4A3420)
-        5 -> Color(0xFF2F5C38)
-        6 -> Color(0xFF6E2C24)
-        else -> if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
-            Color(0xFFBFC2C5)
-        } else {
-            Color(0xFF111111)
-        }
+        // Slot 7 (black swatch): the outline was historically picked by background
+        // luminance at this call site; LeziStoolPalette.outline encodes that same
+        // dark/light pair, so the luminance rule now lives in the token.
+        else -> LeziStoolPalette.outline(colorIndex, darkTheme)
     }
     Canvas(modifier) {
         drawStoolBlob(
@@ -224,13 +218,10 @@ fun LeziStoolColorMark(
 @Composable
 fun leziStoolColor(index: Int): Color = when (index.coerceIn(0, 7)) {
     0 -> MaterialTheme.colorScheme.surface
-    1 -> Color(0xFFF4F1EA)
-    2 -> Color(0xFFE6C04A)
-    3 -> Color(0xFFE08A3A)
-    4 -> Color(0xFF8B5E34)
-    5 -> Color(0xFF5FA86A)
-    6 -> Color(0xFFC85A4A)
-    else -> Color(0xFF2A2A2A)
+    else -> LeziStoolPalette.fill(
+        slot = index,
+        darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f,
+    )
 }
 
 private data class GlyphShape(

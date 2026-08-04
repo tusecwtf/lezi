@@ -26,10 +26,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -47,9 +47,14 @@ internal object RecordCatalogVisualSpec {
     val columnSpacing: Dp = LeziSpacing.Xs
     val rowSpacing: Dp = LeziSpacing.Xs
     val cardMinHeight: Dp = 64.dp
+    // Two icon tiers across dock + catalog: 32dp disc, 18dp glyph inside a disc.
     val iconSize: Dp = 32.dp
+    val innerIconSize: Dp = 18.dp
     val iconShape: RoundedCornerShape = LeziShapes.JournalCard
-    val contentPadding: PaddingValues = PaddingValues(horizontal = 3.dp, vertical = 5.dp)
+    val contentPadding: PaddingValues = PaddingValues(
+        horizontal = LeziSpacing.Xxs,
+        vertical = LeziSpacing.Xxs,
+    )
 }
 
 /** Shared geometry for the everyday and edit-mode five-cell quick dock. */
@@ -58,10 +63,10 @@ internal object QuickDockVisualSpec {
     val outerHorizontalWarm: Dp = LeziSpacing.Xs
     val outerVertical: Dp = LeziSpacing.Xxs
     val rowHorizontal: Dp = LeziSpacing.Xxs
-    val rowVertical: Dp = 5.dp
-    val cellSpacing: Dp = 2.dp
+    val rowVertical: Dp = LeziSpacing.Xxs
+    val cellSpacing: Dp = LeziSpacing.Xxs
     val cellMinHeight: Dp = 64.dp
-    val iconSize: Dp = 30.dp
+    val iconSize: Dp = RecordCatalogVisualSpec.iconSize
     val occupiedHeight: Dp = outerVertical + outerVertical +
         rowVertical + rowVertical + cellMinHeight
     val snackbarSafetySpacing: Dp = LeziSpacing.Xs
@@ -154,23 +159,23 @@ internal fun RecordCatalogCard(
                 Modifier
                     .size(RecordCatalogVisualSpec.iconSize)
                     .clip(RecordCatalogVisualSpec.iconShape)
-                    .background(color.copy(alpha = 0.14f)),
+                    .background(color.copy(alpha = QuickDockIconDiscAlpha)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (isAdd) {
-                    Text(
-                        "＋",
-                        style = LeziTypography.BodyStrong,
-                        color = color,
-                    )
+                    QuickDockAddPlaceholder(tint = color)
                 } else if (recordType == RecordType.CUSTOM || customIconSlot != null) {
-                    Text(
-                        CUSTOM_ITEM_ICON_GLYPHS[(customIconSlot ?: 0).coerceIn(0, 7)],
-                        style = LeziTypography.BodyStrong,
-                        color = color,
+                    LeziCustomItemGlyphIcon(
+                        slot = customIconSlot ?: 0,
+                        size = RecordCatalogVisualSpec.innerIconSize,
+                        tint = color,
                     )
                 } else if (recordType != null) {
-                    RecordTypeIcon(recordType, size = 18.dp, tint = color)
+                    RecordTypeIcon(
+                        recordType,
+                        size = RecordCatalogVisualSpec.innerIconSize,
+                        tint = color,
+                    )
                 }
             }
             Spacer(Modifier.height(3.dp))

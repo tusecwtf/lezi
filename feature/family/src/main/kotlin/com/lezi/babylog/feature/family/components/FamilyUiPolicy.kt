@@ -230,24 +230,16 @@ internal fun familyWizardTitle(mode: FamilyWizardMode, step: FamilyWizardStep): 
 /**
  * Step chip labels for the wizard chrome (1/2 endpoint → identity).
  * [endpointReady] must reflect a real HTTPS endpoint — never true merely
- * because [step] is Identity.
+ * because the wizard has moved past the endpoint step.
  */
 internal fun familyWizardProgress(
     mode: FamilyWizardMode,
-    step: FamilyWizardStep,
     endpointReady: Boolean,
 ): Pair<String, String> {
     val step1 = if (endpointReady) "✓ 家庭服务器" else "1 家庭服务器"
-    val step2 = when {
-        step == FamilyWizardStep.Role -> "2 选择身份"
-        step == FamilyWizardStep.Identity -> when (mode) {
-            FamilyWizardMode.Create -> "2 新建家庭"
-            FamilyWizardMode.Join -> "2 加入家庭"
-        }
-        else -> when (mode) {
-            FamilyWizardMode.Create -> "2 新建家庭"
-            FamilyWizardMode.Join -> "2 加入家庭"
-        }
+    val step2 = when (mode) {
+        FamilyWizardMode.Create -> "2 新建家庭"
+        FamilyWizardMode.Join -> "2 加入家庭"
     }
     return step1 to step2
 }

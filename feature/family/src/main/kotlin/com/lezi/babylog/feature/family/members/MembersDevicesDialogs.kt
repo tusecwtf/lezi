@@ -5,15 +5,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -55,7 +53,7 @@ internal fun RenameFamilyDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
@@ -105,7 +103,7 @@ internal fun EditMyDisplayNameDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
@@ -179,7 +177,7 @@ internal fun MemberLoginQrCodeDialog(
             640,
         ).asImageBitmap()
     }
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("成员登录二维码") },
         text = {
@@ -191,7 +189,9 @@ internal fun MemberLoginQrCodeDialog(
                 Image(
                     bitmap = qrBitmap,
                     contentDescription = copy.description,
-                    modifier = Modifier.size(240.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 240.dp),
                 )
                 Text("已授权：${code.payload.memberDisplayName}", style = LeziTypography.BodyStrong)
                 Text(
@@ -216,7 +216,7 @@ internal fun LeaveFamilyDialog(
         FamilyDestructiveAction.LeaveFamily,
         busy,
     )
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("退出家庭？") },
         text = {
@@ -246,7 +246,7 @@ internal fun LogoutCurrentDeviceDialog(
         FamilyDestructiveAction.LogoutDevice,
         busy,
     )
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("退出这台设备？") },
         text = {
@@ -278,7 +278,7 @@ internal fun RevokeFamilyDeviceDialog(
         FamilyDestructiveAction.RevokeDevice,
         busy,
     )
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text(if (isCurrent) "撤销这台设备？" else "撤销「$deviceName」？") },
         text = {
@@ -318,7 +318,7 @@ internal fun DeleteFamilyDialog(
     onDismiss: () -> Unit,
 ) {
     val final = stage == FamilyDialog.DeleteStage.Final
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!deleting) onDismiss() },
         properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
         title = { Text(if (final) "删除整个家庭" else "删除家庭服务器上的全部数据？") },
@@ -337,11 +337,14 @@ internal fun DeleteFamilyDialog(
                         color = MaterialTheme.colorScheme.error,
                     )
                 } else if (final) {
+                    Text(
+                        "请输入完整家庭名「$expectedFamilyName」以确认删除。",
+                    )
                     OutlinedTextField(
                         enabled = !deleting,
                         value = familyNameInput,
                         onValueChange = onFamilyNameInputChange,
-                        label = { Text("输入家庭名：$expectedFamilyName") },
+                        label = { Text("输入家庭名确认") },
                         singleLine = true,
                         isError = familyNameInput.isNotEmpty() &&
                             familyNameInput.trim() != expectedFamilyName.trim(),

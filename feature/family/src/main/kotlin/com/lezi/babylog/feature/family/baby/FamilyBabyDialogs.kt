@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -90,7 +90,7 @@ private fun DeleteBabyDialog(
         FamilyDestructiveAction.DeleteBaby,
         busy,
     )
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("删除「${baby.nickname}」？") },
         text = { Text("删除后该档案不可恢复。记录仍会留在本机但不再出现在当前宝宝视图中。") },
@@ -115,12 +115,12 @@ private fun MergeBabyDialog(
     onPreview: (Long, Long) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("把「${source.nickname}」合并到…") },
         text = {
             Column(
-                modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                modifier = Modifier.heightIn(max = LeziSpacing.DialogContentMax).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 babies.filter { it.id != source.id }.forEach { target ->
@@ -153,7 +153,7 @@ private fun MergePreviewDialog(
         FamilyDestructiveAction.MergeBaby,
         busy,
     )
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (presentation.dismissible) onDismiss() },
         title = { Text("确认合并宝宝档案？") },
         text = {

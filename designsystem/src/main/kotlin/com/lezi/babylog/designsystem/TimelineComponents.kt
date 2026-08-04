@@ -1,10 +1,12 @@
 package com.lezi.babylog.designsystem
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,7 +30,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
@@ -42,16 +46,17 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
  * A day-lane mark. Sleep is an [isEvent]=false interval; feed/care are
@@ -112,7 +117,11 @@ fun TimelineLane(
     label: String,
     segments: List<TimelineLaneSegment>,
     modifier: Modifier = Modifier,
-    trackHeight: Dp = 34.dp,
+    /**
+     * Requested lane height. Values below 48dp are raised (event dots need room),
+     * so the effective floor is 48dp — pass a taller value to grow the lanes.
+     */
+    trackHeight: Dp = 48.dp,
     /** Content-axis minute for the now line; null hides it. */
     nowContentMinute: Int? = null,
     markerStyle: Boolean = true,
@@ -149,16 +158,34 @@ fun TimelineLane(
     val onSelectState by rememberUpdatedState(onCategorySelect)
     val onPanState by rememberUpdatedState(onHorizontalPan)
     val onPanEndState by rememberUpdatedState(onPanEnd)
+    // Animated selection highlight: per-category 0→1 progress so dot radius,
+    // alpha, and the focus ring ease instead of jumping on tap.
+    val highlightAnims = remember { mutableStateMapOf<String, Animatable<Float, AnimationVector1D>>() }
+    segments.mapNotNull { it.dayChartCategoryKey }.distinct().forEach { key ->
+        val anim = highlightAnims.getOrPut(key) { Animatable(0f) }
+        LaunchedEffect(key, selectedCategoryKey) {
+            anim.animateTo(
+                if (key == selectedCategoryKey) 1f else 0f,
+                animationSpec = tween(150),
+            )
+        }
+    }
+    val selectionLevel by animateFloatAsState(
+        targetValue = if (selectedCategoryKey != null) 1f else 0f,
+        animationSpec = tween(150),
+        label = "laneSelectionDim",
+    )
     Row(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             label,
-            style = LeziTypography.Meta.copy(fontSize = 10.sp),
+            style = LeziTypography.Micro,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.width(44.dp),
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         Canvas(
             Modifier
@@ -281,43 +308,42 @@ fun TimelineLane(
                         return@forEach
                     }
                     val center = Offset(x, h * 0.32f)
-                    val radius = when {
-                        highlighted -> 11.dp.toPx()
-                        selectionDimmed -> 6.5.dp.toPx()
-                        neighborDimmed -> 7.dp.toPx()
-                        else -> 7.5.dp.toPx()
-                    }
-                    val fillAlpha = when {
-                        highlighted -> 1f
-                        selectionDimmed -> 0.35f
-                        neighborDimmed -> 0.42f
-                        else -> 0.95f
-                    }
-                    val stemAlpha = when {
-                        highlighted -> 0.55f
-                        selectionDimmed -> 0.2f
-                        neighborDimmed -> 0.28f
-                        else -> 0.55f
-                    }
-                    val coreAlpha = when {
-                        selectionDimmed -> 0.35f
-                        neighborDimmed -> 0.5f
-                        else -> 0.9f
-                    }
+                    // Animated levels: highlight eases 0→1 for the selected category;
+                    // dim eases in for everything else while a filter is active.
+                    val highlightLevel = seg.dayChartCategoryKey
+                        ?.let { highlightAnims[it]?.value }
+                        ?: 0f
+                    val dimLevel = selectionLevel * (1f - highlightLevel)
+                    val baseRadius = if (neighborDimmed) 7.dp.toPx() else 7.5.dp.toPx()
+                    val radius = baseRadius +
+                        (11.dp.toPx() - baseRadius) * highlightLevel +
+                        (6.5.dp.toPx() - baseRadius) * dimLevel
+                    val baseFill = if (neighborDimmed) 0.42f else 0.95f
+                    val fillAlpha = baseFill +
+                        (1f - baseFill) * highlightLevel +
+                        (0.35f - baseFill) * dimLevel
+                    val baseStem = if (neighborDimmed) 0.28f else 0.55f
+                    val stemAlpha = baseStem +
+                        (0.55f - baseStem) * highlightLevel +
+                        (0.2f - baseStem) * dimLevel
+                    val baseCore = if (neighborDimmed) 0.5f else 0.9f
+                    val coreAlpha = baseCore +
+                        (0.9f - baseCore) * highlightLevel +
+                        (0.35f - baseCore) * dimLevel
                     drawLine(
                         color = segmentColor.copy(alpha = stemAlpha),
                         start = Offset(x, h * 0.18f),
                         end = Offset(x, h / 2f),
-                        strokeWidth = if (highlighted) 3f else 2.2f,
+                        strokeWidth = 2.2f + 0.8f * highlightLevel,
                     )
-                    if (highlighted) {
+                    if (highlightLevel > 0f) {
                         drawCircle(
-                            color = focusRing.copy(alpha = 0.28f),
+                            color = focusRing.copy(alpha = 0.28f * highlightLevel),
                             radius = radius + 7f,
                             center = center,
                         )
                         drawCircle(
-                            color = focusRing.copy(alpha = 0.45f),
+                            color = focusRing.copy(alpha = 0.45f * highlightLevel),
                             radius = radius + 4f,
                             center = center,
                         )
@@ -332,15 +358,15 @@ fun TimelineLane(
                         radius = radius * 0.35f,
                         center = center,
                     )
-                    if (highlighted) {
+                    if (highlightLevel > 0f) {
                         drawCircle(
-                            color = focusRing,
+                            color = focusRing.copy(alpha = highlightLevel),
                             radius = radius + 2.5f,
                             center = center,
                             style = Stroke(width = 3f),
                         )
                         drawCircle(
-                            color = Color.White,
+                            color = Color.White.copy(alpha = highlightLevel),
                             radius = radius + 0.5f,
                             center = center,
                             style = Stroke(width = 1.6f),
@@ -702,12 +728,23 @@ private fun TimelineHourLabels(
             val fraction =
                 (contentMinute - viewportStartMinutes).toFloat() / viewportDurationMinutes
             if (fraction < -0.02f || fraction > 1.02f) return@forEach
-            val x = maxWidth * fraction.coerceIn(0f, 1f)
+            val clampedFraction = fraction.coerceIn(0f, 1f)
+            val x = maxWidth * clampedFraction
             Text(
                 label,
-                style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                style = LeziTypography.Micro,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = x),
+                // Anchor by the label's own measured width (the right-edge tick
+                // right-aligns to the viewport) and clamp so it is never clipped.
+                modifier = Modifier.layout { measurable, constraints ->
+                    val placeable = measurable.measure(constraints)
+                    val xPx = (x.toPx() - placeable.width * clampedFraction)
+                        .roundToInt()
+                        .coerceIn(0, (constraints.maxWidth - placeable.width).coerceAtLeast(0))
+                    layout(placeable.width, placeable.height) {
+                        placeable.place(xPx, 0)
+                    }
+                },
                 maxLines = 1,
             )
         }
@@ -732,48 +769,11 @@ internal suspend fun PointerInputScope.detectTimelineRailGestures(
         detectTapGestures(onTap = onTap)
         return
     }
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        val touchSlop = viewConfiguration.touchSlop
-        var totalX = 0f
-        var totalY = 0f
-        var pastSlop = false
-        var isHorizontal = false
-        val pointerId = down.id
-        try {
-            while (true) {
-                val event = awaitPointerEvent()
-                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                if (!change.pressed) {
-                    if (!pastSlop) {
-                        onTap(down.position)
-                    }
-                    break
-                }
-                val delta = change.positionChange()
-                if (!pastSlop) {
-                    totalX += delta.x
-                    totalY += delta.y
-                    val distSq = totalX * totalX + totalY * totalY
-                    if (distSq >= touchSlop * touchSlop) {
-                        pastSlop = true
-                        isHorizontal = abs(totalX) >= abs(totalY)
-                        if (isHorizontal) {
-                            change.consume()
-                            onHorizontalPan(totalX)
-                        }
-                        // Vertical: leave unconsumed so LazyColumn can scroll.
-                    }
-                } else if (isHorizontal) {
-                    totalX += delta.x
-                    change.consume()
-                    onHorizontalPan(totalX)
-                }
-            }
-        } finally {
-            onGestureEnd?.invoke()
-        }
-    }
+    trackSlopHorizontalGesture(
+        onTap = onTap,
+        onHorizontalDrag = { totalDeltaPx -> onHorizontalPan(totalDeltaPx) },
+        onGestureEnd = { onGestureEnd?.invoke() },
+    )
 }
 
 /**

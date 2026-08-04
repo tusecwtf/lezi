@@ -12,18 +12,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePickerDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -35,24 +29,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.birthWeightValidationError
-import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.ui.BabyAvatar
+import com.lezi.babylog.core.ui.BabyAvatarSizeEditPreview
+import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
+import com.lezi.babylog.core.ui.BabyProfileFormFields
 import com.lezi.babylog.core.ui.CameraCapture
-import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun BabyEditDialog(
     baby: Baby,
@@ -137,11 +126,8 @@ internal fun BabyEditDialog(
         croppedAvatar?.bitmap?.asImageBitmap()
     }
     val hasAvatar = croppedAvatar != null || (!removeAvatar && baby.avatarPath != null)
-    val dateLabel = remember(birthday) {
-        LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
-    }
 
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = {
             if (!saving) onDismiss()
         },
@@ -151,7 +137,7 @@ internal fun BabyEditDialog(
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 520.dp)
+                    .heightIn(max = LeziSpacing.DialogContentMax)
                     .verticalScroll(rememberScrollState())
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
@@ -168,7 +154,7 @@ internal fun BabyEditDialog(
                         previewBitmap = previewBitmap,
                         fallbackBackground = Color(baby.themeColorArgb),
                         fallbackStyle = LeziTypography.Title,
-                        modifier = Modifier.size(76.dp),
+                        modifier = Modifier.size(BabyAvatarSizeEditPreview),
                         borderWidth = 3.dp,
                         avatarContentDescription = "头像保存效果预览",
                     )
@@ -237,50 +223,20 @@ internal fun BabyEditDialog(
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
-                    value = nickname,
-                    enabled = !saving,
-                    onValueChange = {
-                        nickname = limitBabyNicknameInput(it)
+                BabyProfileFormFields(
+                    nickname = nickname,
+                    onNicknameChange = {
+                        nickname = it
                         localError = null
                     },
-                    label = { Text("昵称（不可重复）") },
-                    singleLine = true,
-                    isError = localError != null,
-                    supportingText = localError?.let { { Text(it) } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Text("性别", style = LeziTypography.Label)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(
-                        "female" to "女宝",
-                        "male" to "男宝",
-                        null to "未设置",
-                    ).forEach { (key, label) ->
-                        FilterChip(
-                            selected = sex == key,
-                            enabled = !saving,
-                            onClick = { sex = key },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-                Text("出生日期", style = LeziTypography.Label)
-                OutlinedButton(
+                    nicknameError = localError,
+                    sex = sex,
+                    onSexChange = { sex = it },
+                    birthdayEpochDay = birthday,
+                    onPickBirthday = { showDate = true },
+                    weightText = weightText,
+                    onWeightTextChange = { weightText = it },
                     enabled = !saving,
-                    onClick = { showDate = true },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(dateLabel) }
-                OutlinedTextField(
-                    value = weightText,
-                    enabled = !saving,
-                    onValueChange = { weightText = it.filter { ch -> ch.isDigit() || ch == '.' } },
-                    label = { Text("出生体重（kg，可选）") },
-                    placeholder = { Text("例如 3.20") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.fillMaxWidth(),
-                    supportingText = { Text("可填千克，保存时换算为克") },
                 )
             }
         },
@@ -324,32 +280,11 @@ internal fun BabyEditDialog(
     )
 
     if (showDate) {
-        val initialUtc = LocalDate.ofEpochDay(birthday)
-            .atStartOfDay(ZoneOffset.UTC)
-            .toInstant()
-            .toEpochMilli()
-        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-        DatePickerDialog(
-            onDismissRequest = { showDate = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dateState.selectedDateMillis?.let { ms ->
-                            birthday = Instant.ofEpochMilli(ms)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                                .toEpochDay()
-                        }
-                        showDate = false
-                    },
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDate = false }) { Text("取消") }
-            },
-        ) {
-            LeziDatePicker(state = dateState)
-        }
+        BabyBirthdayDatePickerDialog(
+            birthdayEpochDay = birthday,
+            onDismiss = { showDate = false },
+            onSelect = { birthday = it },
+        )
     }
 
     pickedAvatarUri?.let { sourceUri ->

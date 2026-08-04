@@ -22,6 +22,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
+/**
+ * Journal flat-list row / warm card row for a single record.
+ *
+ * Journal rows own their 1dp bottom hairline (row separators). When rows are hosted
+ * inside a `LeziSurfacePanel`, pass the panel's `bottomDivider = false` so the panel
+ * closing hairline does not double-draw under the last row.
+ */
 @Composable
 fun RecordRow(
     time: String,
@@ -31,7 +38,7 @@ fun RecordRow(
     tone: LeziTone = LeziTone.Neutral,
     anomaly: Boolean = false,
     leading: @Composable () -> Unit = {
-        Text("•", style = LeziTypography.TitleSm)
+        LeziPlaceholderDot(color = MaterialTheme.colorScheme.onSurface)
     },
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -100,7 +107,7 @@ fun RecordRow(
                 Modifier
                     .fillMaxWidth()
                     .height(1.dp)
-                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.85f)),
+                    .background(leziHairlineColor()),
             )
         }
         return

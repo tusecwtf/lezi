@@ -5,8 +5,12 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -21,7 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -31,6 +35,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,6 +47,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -58,6 +64,7 @@ import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -191,10 +198,10 @@ fun TimerRoute(
                         Modifier
                     },
                 )
-                .padding(20.dp),
+                .padding(LeziSpacing.Lg),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = if (viewportMode == TimerViewportMode.Scrollable) {
-                Arrangement.spacedBy(20.dp)
+                Arrangement.spacedBy(LeziSpacing.Lg)
             } else {
                 Arrangement.SpaceBetween
             },
@@ -204,7 +211,7 @@ fun TimerRoute(
                     when (state.lastSide) {
                         "L" -> "上次停在左侧"
                         "R" -> "上次停在右侧"
-                        else -> "点左右大圆开始"
+                        else -> "左右均可开始"
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -238,8 +245,8 @@ fun TimerRoute(
             BoxWithConstraints(
                 Modifier.fillMaxWidth(),
             ) {
-                val buttonSize = ((maxWidth - 12.dp) / 2)
-                    .coerceIn(120.dp, 148.dp)
+                val buttonSize = (maxWidth * 0.42f)
+                    .coerceIn(120.dp, 200.dp)
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
@@ -298,7 +305,7 @@ fun TimerRoute(
     }
 
     if (showDiscardConfirmation) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { showDiscardConfirmation = false },
             title = { Text("丢弃本次计时？") },
             text = { Text("已累计的喂奶计时将不会保存，此操作无法撤销。") },
@@ -388,37 +395,69 @@ private fun SideButton(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(
-            Modifier
-                .size(size)
-                .clip(CircleShape)
-                .background(if (running) color else color.copy(alpha = 0.18f))
-                .clickable(enabled = enabled, onClick = onClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    label,
-                    color = if (running) runningContentColor else color,
-                    style = MaterialTheme.typography.titleLarge,
-                )
-                Text(
-                    time,
-                    color = if (running) runningContentColor else MaterialTheme.colorScheme.onBackground,
-                    fontSize = if (time.length >= 6) 22.sp else 28.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                )
-                Text(
-                    if (running) "暂停" else "开始",
-                    color = if (running) {
-                        runningContentColor.copy(alpha = 0.9f)
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-            }
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed && enabled) 0.96f else 1f,
+        label = "sideButtonScale",
+    )
+    val backgroundColor by animateColorAsState(
+        targetValue = if (running) color else color.copy(alpha = 0.18f),
+        label = "sideButtonBackground",
+    )
+    val labelColor by animateColorAsState(
+        targetValue = if (running) runningContentColor else color,
+        label = "sideButtonLabel",
+    )
+    val timeColor by animateColorAsState(
+        targetValue = if (running) {
+            runningContentColor
+        } else {
+            MaterialTheme.colorScheme.onBackground
+        },
+        label = "sideButtonTime",
+    )
+    val actionColor by animateColorAsState(
+        targetValue = if (running) {
+            runningContentColor.copy(alpha = 0.9f)
+        } else {
+            // Idle: action word shares the label's color family — two tiers, not three.
+            color
+        },
+        label = "sideButtonAction",
+    )
+    Box(
+        Modifier
+            .size(size)
+            .scale(scale)
+            .clip(CircleShape)
+            .background(backgroundColor)
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(bounded = true),
+                enabled = enabled,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                label,
+                color = labelColor,
+                style = MaterialTheme.typography.titleLarge,
+            )
+            Text(
+                time,
+                color = timeColor,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                softWrap = false,
+            )
+            Text(
+                if (running) "暂停" else "开始",
+                color = actionColor,
+            )
         }
     }
 }

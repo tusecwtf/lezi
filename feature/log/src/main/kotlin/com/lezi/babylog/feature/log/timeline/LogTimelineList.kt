@@ -1,4 +1,6 @@
 package com.lezi.babylog.feature.log.timeline
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,6 +24,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -79,6 +82,16 @@ internal class LogTimelineListState {
 @Composable
 internal fun rememberLogTimelineListState(): LogTimelineListState =
     remember { LogTimelineListState() }
+
+/** Data-driven spec for the warm-mode summary metric cards (one per record type). */
+private data class SummaryMetricSpec(
+    val type: RecordType,
+    val tone: LeziTone,
+    val label: String,
+    val value: String,
+    /** Spoken form used by the selection accessibility label. */
+    val spokenValue: String,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -218,70 +231,67 @@ internal fun LogTimelineList(
                             onSelect = onSelectSummary,
                         )
                     } else {
+                        val summaryMetrics = listOf(
+                            SummaryMetricSpec(
+                                type = RecordType.FORMULA,
+                                tone = LeziTone.Blue,
+                                label = "奶量",
+                                value = "${state.summary.feedMl}ml",
+                                spokenValue = "奶量 ${state.summary.feedMl}毫升",
+                            ),
+                            SummaryMetricSpec(
+                                type = RecordType.NURSING,
+                                tone = LeziTone.Blue,
+                                label = "母乳",
+                                value = "${state.summary.nursingMinutes}min",
+                                spokenValue = "母乳 ${state.summary.nursingMinutes}分钟",
+                            ),
+                            SummaryMetricSpec(
+                                type = RecordType.SLEEP,
+                                tone = LeziTone.Yellow,
+                                label = "睡眠",
+                                value = formatRecordDuration(state.summary.sleepMinutes),
+                                spokenValue =
+                                    "睡眠 ${formatRecordDuration(state.summary.sleepMinutes)}",
+                            ),
+                            SummaryMetricSpec(
+                                type = RecordType.PEE,
+                                tone = LeziTone.Cream,
+                                label = "尿尿",
+                                value = "${state.summary.peeCount}次",
+                                spokenValue = "尿尿 ${state.summary.peeCount}次",
+                            ),
+                            SummaryMetricSpec(
+                                type = RecordType.POOP,
+                                tone = LeziTone.Neutral,
+                                label = "便便",
+                                value = "${state.summary.poopCount}次",
+                                spokenValue = "便便 ${state.summary.poopCount}次",
+                            ),
+                        )
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                         ) {
-                            SummaryMetric(
-                                value = "${state.summary.feedMl}ml",
-                                label = "奶量",
-                                tone = LeziTone.Blue,
-                                modifier = Modifier.weight(1f),
-                                icon = { RecordTypeIcon(RecordType.FORMULA) },
-                                selected = selectedSummaryType == RecordType.FORMULA,
-                                selectionLabel = "奶量 ${state.summary.feedMl}毫升，${if (selectedSummaryType == RecordType.FORMULA) "已筛选" else "点按筛选"}",
-                                onClick = if (RecordType.FORMULA in selectableSummaryTypes) {
-                                    { onSelectSummary(RecordType.FORMULA) }
-                                } else null,
-                            )
-                            SummaryMetric(
-                                value = "${state.summary.nursingMinutes}min",
-                                label = "母乳",
-                                tone = LeziTone.Blue,
-                                modifier = Modifier.weight(1f),
-                                icon = { RecordTypeIcon(RecordType.NURSING) },
-                                selected = selectedSummaryType == RecordType.NURSING,
-                                selectionLabel = "母乳 ${state.summary.nursingMinutes}分钟，${if (selectedSummaryType == RecordType.NURSING) "已筛选" else "点按筛选"}",
-                                onClick = if (RecordType.NURSING in selectableSummaryTypes) {
-                                    { onSelectSummary(RecordType.NURSING) }
-                                } else null,
-                            )
-                            SummaryMetric(
-                                value = formatRecordDuration(state.summary.sleepMinutes),
-                                label = "睡眠",
-                                tone = LeziTone.Yellow,
-                                modifier = Modifier.weight(1f),
-                                icon = { RecordTypeIcon(RecordType.SLEEP) },
-                                selected = selectedSummaryType == RecordType.SLEEP,
-                                selectionLabel = "睡眠 ${formatRecordDuration(state.summary.sleepMinutes)}，${if (selectedSummaryType == RecordType.SLEEP) "已筛选" else "点按筛选"}",
-                                onClick = if (RecordType.SLEEP in selectableSummaryTypes) {
-                                    { onSelectSummary(RecordType.SLEEP) }
-                                } else null,
-                            )
-                            SummaryMetric(
-                                value = "${state.summary.peeCount}次",
-                                label = "尿尿",
-                                tone = LeziTone.Cream,
-                                modifier = Modifier.weight(1f),
-                                icon = { RecordTypeIcon(RecordType.PEE) },
-                                selected = selectedSummaryType == RecordType.PEE,
-                                selectionLabel = "尿尿 ${state.summary.peeCount}次，${if (selectedSummaryType == RecordType.PEE) "已筛选" else "点按筛选"}",
-                                onClick = if (RecordType.PEE in selectableSummaryTypes) {
-                                    { onSelectSummary(RecordType.PEE) }
-                                } else null,
-                            )
-                            SummaryMetric(
-                                value = "${state.summary.poopCount}次",
-                                label = "便便",
-                                tone = LeziTone.Neutral,
-                                modifier = Modifier.weight(1f),
-                                icon = { RecordTypeIcon(RecordType.POOP) },
-                                selected = selectedSummaryType == RecordType.POOP,
-                                selectionLabel = "便便 ${state.summary.poopCount}次，${if (selectedSummaryType == RecordType.POOP) "已筛选" else "点按筛选"}",
-                                onClick = if (RecordType.POOP in selectableSummaryTypes) {
-                                    { onSelectSummary(RecordType.POOP) }
-                                } else null,
-                            )
+                            summaryMetrics.forEach { spec ->
+                                val selected = selectedSummaryType == spec.type
+                                SummaryMetric(
+                                    value = spec.value,
+                                    label = spec.label,
+                                    tone = spec.tone,
+                                    modifier = Modifier.weight(1f),
+                                    icon = { RecordTypeIcon(spec.type) },
+                                    selected = selected,
+                                    selectionLabel = "${spec.spokenValue}，${
+                                        if (selected) "已筛选" else "点按筛选"
+                                    }",
+                                    onClick = if (spec.type in selectableSummaryTypes) {
+                                        { onSelectSummary(spec.type) }
+                                    } else {
+                                        null
+                                    },
+                                )
+                            }
                         }
                     }
                 }
@@ -314,7 +324,11 @@ internal fun LogTimelineList(
 
             if (state.day != today) {
                 item {
-                    Row(Modifier.padding(horizontal = LeziSpacing.Page)) {
+                    Row(
+                        Modifier.padding(
+                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                        ),
+                    ) {
                         LeziSecondaryButton(
                             "返回今天",
                             onClick = onGoToday,
@@ -420,88 +434,87 @@ internal fun LogTimelineList(
                             editTestTag = "timeline_swipe_edit_plan_${plan.id}",
                             deleteTestTag = "timeline_swipe_delete_plan_${plan.id}",
                         ) {
-                            RecordRow(
-                                time = formatClock(plan.scheduledAt, zone),
-                                title = title,
-                                summary = planSummary,
-                                relative = relativeTimeLabel(plan.scheduledAt, nowMs),
-                                tone = if (isMissed || planPublishLabel != null) {
-                                    LeziTone.Yellow
-                                } else {
-                                    LeziTone.Blue
-                                },
-                                anomaly = false,
-                                leading = { RecordTypeIcon(plan.type) },
-                                onClick = {
-                                    if (planRevealed) {
-                                        managementState.collapseSwipeRows()
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                RecordRow(
+                                    time = formatClock(plan.scheduledAt, zone),
+                                    title = title,
+                                    summary = planSummary,
+                                    relative = relativeTimeLabel(plan.scheduledAt, nowMs),
+                                    tone = if (isMissed || planPublishLabel != null) {
+                                        LeziTone.Yellow
                                     } else {
-                                        managementState.collapseSwipeRows()
-                                        if (canFulfillPlan) {
-                                            onOpenComposer(
-                                                RecordComposerRequest.Fulfill(plan.id),
-                                            )
-                                        }
-                                    }
-                                },
-                                modifier = Modifier
-                                    .managementActions(
-                                        rowManagementCustomActions(
-                                            targetLabel = "${title}护理计划",
-                                            canEdit = canEditPlan,
-                                            canDelete = canDeletePlan,
-                                            canSkip = canSkipPlan,
-                                            skipEnabled = !skipBlocked,
-                                            onEdit = editPlanAction,
-                                            onDelete = deletePlanAction,
-                                            onSkip = skipPlanAction,
-                                        ),
-                                    )
-                                    .semantics {
-                                        val publishDetail = if (planPublishLabel != null) {
-                                            "。" + localCarePlanPublishDetail(
-                                                lastSyncFailed = state.lastSyncFailed,
-                                                publicationState = planPublicationState,
-                                            )
+                                        LeziTone.Blue
+                                    },
+                                    anomaly = false,
+                                    leading = { RecordTypeIcon(plan.type) },
+                                    onClick = {
+                                        if (planRevealed) {
+                                            managementState.collapseSwipeRows()
                                         } else {
-                                            ""
-                                        }
-                                        contentDescription =
-                                            "完成${title}护理计划$publishDetail"
-                                        if (skipFeedback != null) {
-                                            stateDescription = skipFeedback
+                                            managementState.collapseSwipeRows()
+                                            if (canFulfillPlan) {
+                                                onOpenComposer(
+                                                    RecordComposerRequest.Fulfill(plan.id),
+                                                )
+                                            }
                                         }
                                     },
-                            )
-                        }
-                        if (canSkipPlan) {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
-                            ) {
-                                TextButton(
-                                    onClick = { skipPlanAction() },
-                                    enabled = !skipBlocked,
-                                    modifier = Modifier.testTag("care_plan_skip_${plan.id}"),
-                                ) {
-                                    Text(
-                                        when {
-                                            skipRunning -> "跳过中…"
-                                            skipFeedback != null -> "重试跳过"
-                                            else -> "跳过"
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .managementActions(
+                                            rowManagementCustomActions(
+                                                targetLabel = "${title}护理计划",
+                                                canEdit = canEditPlan,
+                                                canDelete = canDeletePlan,
+                                                canSkip = canSkipPlan,
+                                                skipEnabled = !skipBlocked,
+                                                onEdit = editPlanAction,
+                                                onDelete = deletePlanAction,
+                                                onSkip = skipPlanAction,
+                                            ),
+                                        )
+                                        .semantics {
+                                            val publishDetail = if (planPublishLabel != null) {
+                                                "。" + localCarePlanPublishDetail(
+                                                    lastSyncFailed = state.lastSyncFailed,
+                                                    publicationState = planPublicationState,
+                                                )
+                                            } else {
+                                                ""
+                                            }
+                                            contentDescription =
+                                                "完成${title}护理计划$publishDetail"
+                                            if (skipFeedback != null) {
+                                                stateDescription = skipFeedback
+                                            }
                                         },
-                                    )
+                                )
+                                // Skip lives in the card trailing area, next to the swipe actions.
+                                if (canSkipPlan) {
+                                    TextButton(
+                                        onClick = { skipPlanAction() },
+                                        enabled = !skipBlocked,
+                                        modifier = Modifier.testTag("care_plan_skip_${plan.id}"),
+                                    ) {
+                                        Text(
+                                            when {
+                                                skipRunning -> "跳过中…"
+                                                skipFeedback != null -> "重试跳过"
+                                                else -> "跳过"
+                                            },
+                                        )
+                                    }
                                 }
                             }
-                            if (skipFeedback != null) {
-                                ManagementActionFeedback(
-                                    message = skipFeedback,
-                                    isError = skipFailed,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .testTag("care_plan_skip_feedback_${plan.id}"),
-                                )
-                            }
+                        }
+                        if (canSkipPlan && skipFeedback != null) {
+                            ManagementActionFeedback(
+                                message = skipFeedback,
+                                isError = skipFailed,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("care_plan_skip_feedback_${plan.id}"),
+                            )
                         }
                     }
                 }
@@ -517,28 +530,37 @@ internal fun LogTimelineList(
                 }
             }
 
-            when {
-                state.loading -> item {
-                    StateContainer(
-                        kind = StateKind.Loading,
-                        title = "加载中",
-                        message = "正在读取当日记录…",
-                        modifier = Modifier.padding(
-                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                        ),
-                    )
+            if (state.loading || state.records.isEmpty()) {
+                item(key = "records_phase", contentType = "records_phase") {
+                    Crossfade(
+                        targetState = state.loading,
+                        animationSpec = tween(250),
+                        label = "recordsPhase",
+                        modifier = Modifier.animateItem(),
+                    ) { loading ->
+                        if (loading) {
+                            StateContainer(
+                                kind = StateKind.Loading,
+                                title = "加载中",
+                                message = "正在读取当日记录…",
+                                modifier = Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
+                            )
+                        } else {
+                            StateContainer(
+                                kind = StateKind.Empty,
+                                title = "还没有记录",
+                                message = "点下方快捷入口添加第一条记录",
+                                modifier = Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
+                            )
+                        }
+                    }
                 }
-                state.records.isEmpty() -> item {
-                    StateContainer(
-                        kind = StateKind.Empty,
-                        title = "还没有记录",
-                        message = "点下方快捷入口添加第一条记录",
-                        modifier = Modifier.padding(
-                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                        ),
-                    )
-                }
-                else -> items(filteredTimelineRecords, key = { it.id }) { record ->
+            } else {
+                items(filteredTimelineRecords, key = { it.id }) { record ->
                     val title = record.displayLabel()
                     val recordMetadata = state.recordMetadata[record.id]
                     val recordCapabilities = recordMetadata?.capabilities
@@ -575,9 +597,11 @@ internal fun LogTimelineList(
                         onDelete = deleteRecordAction,
                         editTestTag = "timeline_swipe_edit_record_${record.id}",
                         deleteTestTag = "timeline_swipe_delete_record_${record.id}",
-                        modifier = Modifier.padding(
-                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                        ),
+                        modifier = Modifier
+                            .animateItem()
+                            .padding(
+                                horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                            ),
                     ) {
                         RecordRow(
                             time = formatClock(record.timestamp, zone),

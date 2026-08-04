@@ -112,6 +112,13 @@ private data class LayoutConfigurationKey(
     val themeIdentity: Any?,
 )
 
+/** Drag-avatar widths: heading pill spans wider; item chip tracks the catalog card look. */
+private val HeadingDragAvatarWidth = 160.dp
+private val ItemDragAvatarWidth = 80.dp
+
+/** Lift of the floating drag avatar above the edit canvas (no matching shape token yet). */
+private val DragAvatarElevation = 6.dp
+
 /** Full-screen layout editor continuing the 添加记录 categorized-card visual language. */
 @Composable
 internal fun LayoutEditCanvas(
@@ -695,7 +702,7 @@ internal fun LayoutEditCanvas(
             val localX = d.pointerWindow.x - rootWindowOrigin.x
             val localY = d.pointerWindow.y - rootWindowOrigin.y
             val headingDrag = d.source is LayoutDragSource.CategoryHeading
-            val avatarWidth = if (headingDrag) 160.dp else 80.dp
+            val avatarWidth = if (headingDrag) HeadingDragAvatarWidth else ItemDragAvatarWidth
             val widthPx = with(density) { avatarWidth.toPx() }
             val avatarModifier = Modifier
                 .zIndex(20f)
@@ -727,7 +734,7 @@ internal fun LayoutEditCanvas(
                         2.dp,
                         MaterialTheme.colorScheme.primary,
                     ),
-                    shadowElevation = 6.dp,
+                    shadowElevation = DragAvatarElevation,
                 ) {
                     Box(
                         Modifier.padding(horizontal = LeziSpacing.Sm),
@@ -755,7 +762,7 @@ internal fun LayoutEditCanvas(
                 .padding(
                     start = LeziSpacing.Page,
                     end = LeziSpacing.Page,
-                    bottom = 96.dp,
+                    bottom = quickDockSnackbarBottomInset,
                 )
                 .zIndex(30f)
                 .testTag("layout_edit_undo_snackbar"),

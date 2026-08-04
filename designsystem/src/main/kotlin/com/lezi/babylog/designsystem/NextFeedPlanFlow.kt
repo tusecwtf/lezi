@@ -1,10 +1,14 @@
 package com.lezi.babylog.designsystem
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -83,7 +87,13 @@ fun LeziNextFeedPlanFlow(
         }
     }
 
-    when (state.phase) {
+    // Phase transitions crossfade dialog content instead of hard-swapping windows.
+    AnimatedContent(
+        targetState = state.phase,
+        transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(120)) },
+        label = "nextFeedPlanPhase",
+    ) { phase ->
+        when (phase) {
         NextFeedPlanPhase.EditingTime -> LeziClockDialDialog(
             title = "选择下次喂养时间",
             value = Instant.ofEpochMilli(state.selectedAtMillis)
@@ -101,10 +111,10 @@ fun LeziNextFeedPlanFlow(
             },
             onDismiss = { dispatch(NextFeedPlanEvent.TimeEditCancelled) },
         )
-        NextFeedPlanPhase.Scheduled -> AlertDialog(
+        NextFeedPlanPhase.Scheduled -> LeziAlertDialog(
             onDismissRequest = {},
             title = { Text("已安排下次喂养") },
-            text = { Text(scheduledMessage) },
+            text = { Text(scheduledMessage, style = LeziTypography.Body) },
             confirmButton = {
                 TextButton(onClick = { dispatch(NextFeedPlanEvent.AcknowledgeScheduled) }) {
                     Text("完成")
@@ -114,17 +124,17 @@ fun LeziNextFeedPlanFlow(
         NextFeedPlanPhase.Skipped -> Unit
         NextFeedPlanPhase.ReconciliationRequired,
         NextFeedPlanPhase.Reconciling,
-        -> AlertDialog(
+        -> LeziAlertDialog(
             onDismissRequest = {},
             title = { Text("正在核对下次喂养") },
-            text = { Text("记录已保存；正在确认护理计划是否已经写入。") },
+            text = { Text("记录已保存；正在确认护理计划是否已经写入。", style = LeziTypography.Body) },
             confirmButton = {
                 TextButton(onClick = {}, enabled = false) {
                     Text("正在核对…")
                 }
             },
         )
-        NextFeedPlanPhase.ReconciliationFailed -> AlertDialog(
+        NextFeedPlanPhase.ReconciliationFailed -> LeziAlertDialog(
             onDismissRequest = {},
             title = { Text("无法确认下次喂养") },
             text = {
@@ -138,7 +148,7 @@ fun LeziNextFeedPlanFlow(
         )
         else -> {
             val scheduling = state.phase == NextFeedPlanPhase.Scheduling
-            AlertDialog(
+            LeziAlertDialog(
                 onDismissRequest = {},
                 title = { Text("安排下次喂养？") },
                 text = {
@@ -183,6 +193,7 @@ fun LeziNextFeedPlanFlow(
                     }
                 },
             )
+        }
         }
     }
 }

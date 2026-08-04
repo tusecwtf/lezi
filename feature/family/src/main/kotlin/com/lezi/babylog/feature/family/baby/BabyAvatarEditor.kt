@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
@@ -197,7 +197,7 @@ internal fun AvatarCropDialog(
         pan = geometry.pan
     }
 
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = {
             if (!saving) onDismiss()
         },
@@ -317,7 +317,7 @@ private fun AvatarCropViewport(
         modifier = Modifier
             .size(252.dp)
             .clip(CircleShape)
-            .background(androidx.compose.ui.graphics.Color.Black)
+            .background(MaterialTheme.colorScheme.scrim)
             .semantics { contentDescription = "头像裁剪预览" }
             .pointerInput(bitmap) {
                 detectTransformGestures { _, gesturePan, gestureZoom, _ ->

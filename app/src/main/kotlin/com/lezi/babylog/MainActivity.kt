@@ -12,9 +12,18 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
-import androidx.compose.foundation.background
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -27,7 +36,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.automirrored.outlined.ShowChart
@@ -41,6 +52,7 @@ import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -189,9 +201,17 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val transparent = Color.Transparent.toArgb()
                     val navigationScrim = MaterialTheme.colorScheme.surface.toArgb()
+                    // Top bar background comes from the shared top-bar chrome (see
+                    // leziTopBarBackground in AppHeader.kt): dark → surface,
+                    // light → babyAccent. Pick status bar icon color from its luminance
+                    // so dark icons never sit on the dark accent fill.
+                    val topBarBackground = leziTopBarBackground(dark)
+                    val topBarNeedsLightIcons =
+                        com.lezi.babylog.designsystem.readableContentColor(topBarBackground) ==
+                            Color.White
                     SideEffect {
                         this@MainActivity.enableEdgeToEdge(
-                            statusBarStyle = if (dark) {
+                            statusBarStyle = if (topBarNeedsLightIcons) {
                                 SystemBarStyle.dark(transparent)
                             } else {
                                 SystemBarStyle.light(transparent, transparent)
@@ -637,6 +657,16 @@ internal data class RootChromeVisibility(
     val preserveBottomBarExtent: Boolean,
 )
 
+/** Root top bar variants swapped via AnimatedContent (date header ↔ brand bar). */
+private enum class RootHeaderKind { None, Context, Brand }
+
+/** Push-style routes that own the full screen (chrome hidden); they slide vertically. */
+private fun String?.isFullScreenPushRoute(): Boolean =
+    this?.startsWith("timer") == true ||
+        this == "search" ||
+        this == "export" ||
+        this == "calendar"
+
 internal fun rootChromeVisibility(
     route: String?,
     logLayoutEditActive: Boolean,
@@ -679,17 +709,23 @@ internal fun LeziRoot(
     // Force shell is above onboarding so a joined device still under baby setup cannot
     // silently miss PackageUnknown/WithPackage after client_update_required.
     Box(Modifier.fillMaxSize()) {
-        if (shouldShowOnboarding(ui.hasBaby, ui.familyRole)) {
-            // Baby creation updates this route through CareLog; no completion callback is needed.
-            OnboardingRoute(onFinished = {})
-        } else {
-            LeziMainScaffold(
-                vm = vm,
-                ui = ui,
-                dark = dark,
-                externalNavigationRequest = externalNavigationRequest,
-                onExternalNavigationConsumed = onExternalNavigationConsumed,
-            )
+        Crossfade(
+            targetState = shouldShowOnboarding(ui.hasBaby, ui.familyRole),
+            animationSpec = tween(durationMillis = 200),
+            label = "rootOnboardingGate",
+        ) { showOnboarding ->
+            if (showOnboarding) {
+                // Baby creation updates this route through CareLog; no completion callback is needed.
+                OnboardingRoute(onFinished = {})
+            } else {
+                LeziMainScaffold(
+                    vm = vm,
+                    ui = ui,
+                    dark = dark,
+                    externalNavigationRequest = externalNavigationRequest,
+                    onExternalNavigationConsumed = onExternalNavigationConsumed,
+                )
+            }
         }
         RootForcedAppUpdateLayer(vm)
     }
@@ -701,18 +737,29 @@ private fun RootForcedAppUpdateLayer(vm: RootViewModel) {
     val forcedBusy by vm.forcedUpdateBusy.collectAsStateWithLifecycle()
     val forcedMessage by vm.forcedUpdateMessage.collectAsStateWithLifecycle()
     val needsInstallPermission by vm.forcedUpdateNeedsInstallPermission.collectAsStateWithLifecycle()
-    forcedUpdate?.let { forced ->
-        ForcedAppUpdateOverlay(
-            forced = forced,
-            busy = forcedBusy,
-            message = forcedMessage,
-            needsInstallPermission = needsInstallPermission,
-            onInstall = { metadata -> vm.installForcedAppUpdate(metadata) },
-            onRetryCheck = vm::retryForcedAppUpdateCheck,
-        )
+    // Keep the last non-null shell so the exit fade still has content to animate.
+    var lastForced by remember { mutableStateOf<ForcedAppUpdateState?>(null) }
+    forcedUpdate?.let { lastForced = it }
+    AnimatedVisibility(
+        visible = forcedUpdate != null,
+        enter = fadeIn(animationSpec = tween(durationMillis = 200)),
+        exit = fadeOut(animationSpec = tween(durationMillis = 160)),
+        label = "forcedAppUpdateOverlay",
+    ) {
+        lastForced?.let { forced ->
+            ForcedAppUpdateOverlay(
+                forced = forced,
+                busy = forcedBusy,
+                message = forcedMessage,
+                needsInstallPermission = needsInstallPermission,
+                onInstall = { metadata -> vm.installForcedAppUpdate(metadata) },
+                onRetryCheck = vm::retryForcedAppUpdateCheck,
+            )
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LeziMainScaffold(
     vm: RootViewModel,
@@ -825,69 +872,84 @@ private fun LeziMainScaffold(
             )
         },
         topBar = {
-            when {
-                chrome.showTopBar && showContextHeader -> {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(
-                                if (dark) {
-                                    MaterialTheme.colorScheme.surface
-                                } else {
-                                    com.lezi.babylog.designsystem.LeziThemeExt.colors.babyAccent
+            val headerKind = when {
+                chrome.showTopBar && showContextHeader -> RootHeaderKind.Context
+                chrome.showTopBar && showBrandHeader -> RootHeaderKind.Brand
+                else -> RootHeaderKind.None
+            }
+            AnimatedContent(
+                targetState = headerKind,
+                transitionSpec = {
+                    (fadeIn(animationSpec = tween(durationMillis = 200)) +
+                        slideInVertically(
+                            animationSpec = tween(durationMillis = 200),
+                            initialOffsetY = { height -> -height / 8 },
+                        )).togetherWith(
+                        fadeOut(animationSpec = tween(durationMillis = 160)),
+                    )
+                },
+                label = "rootTopBar",
+            ) { header ->
+                when (header) {
+                    RootHeaderKind.Context -> {
+                        LeziTopBarContainer(dark = dark) {
+                            AppHeaderBar(
+                                babyName = ui.baby?.nickname.orEmpty(),
+                                babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
+                                avatarPath = ui.baby?.avatarPath,
+                                sleeping = ui.sleeping,
+                                selectedDate = ui.selectedDate,
+                                today = today,
+                                canCycleBaby = ui.babies.size > 1,
+                                canGoNext = ui.selectedDate.isBefore(today),
+                                dark = dark,
+                                onCycleBaby = { vm.cycleBaby() },
+                                onJumpSiblingSameDayAge = { vm.jumpSiblingSameDayAge() },
+                                onPreviousDate = { vm.shiftDay(-1) },
+                                onNextDate = { vm.shiftDay(1) },
+                                onOpenDatePicker = {
+                                    displayedMonth = YearMonth.from(ui.selectedDate)
+                                    vm.setCalendarMonth(displayedMonth)
+                                    showHeaderCalendar = true
                                 },
+                                onSearch = { nav.navigate("search") },
                             )
-                            .statusBarsPadding(),
-                    ) {
-                        AppHeaderBar(
-                            babyName = ui.baby?.nickname.orEmpty(),
-                            babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
-                            avatarPath = ui.baby?.avatarPath,
-                            sleeping = ui.sleeping,
-                            selectedDate = ui.selectedDate,
-                            today = today,
-                            canCycleBaby = ui.babies.size > 1,
-                            canGoNext = ui.selectedDate.isBefore(today),
-                            dark = dark,
-                            onCycleBaby = { vm.cycleBaby() },
-                            onJumpSiblingSameDayAge = { vm.jumpSiblingSameDayAge() },
-                            onPreviousDate = { vm.shiftDay(-1) },
-                            onNextDate = { vm.shiftDay(1) },
-                            onOpenDatePicker = {
-                                displayedMonth = YearMonth.from(ui.selectedDate)
-                                vm.setCalendarMonth(displayedMonth)
-                                showHeaderCalendar = true
-                            },
-                            onSearch = { nav.navigate("search") },
-                        )
+                        }
                     }
-                }
-                chrome.showTopBar && showBrandHeader -> {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .background(
-                                if (dark) {
-                                    MaterialTheme.colorScheme.surface
-                                } else {
-                                    com.lezi.babylog.designsystem.LeziThemeExt.colors.babyAccent
-                                },
+                    RootHeaderKind.Brand -> {
+                        LeziTopBarContainer(dark = dark) {
+                            AppBrandBar(
+                                onToggleTheme = { vm.toggleDark() },
+                                dark = dark,
                             )
-                            .statusBarsPadding(),
-                    ) {
-                        AppBrandBar(
-                            onToggleTheme = { vm.toggleDark() },
-                            dark = dark,
-                        )
+                        }
                     }
+                    RootHeaderKind.None -> Unit
                 }
             }
         },
         bottomBar = {
-            if (chrome.showBottomBar) {
+            AnimatedVisibility(
+                visible = chrome.showBottomBar,
+                enter = slideInVertically(
+                    animationSpec = tween(durationMillis = 200),
+                    initialOffsetY = { height -> height },
+                ) + fadeIn(animationSpec = tween(durationMillis = 200)),
+                exit = slideOutVertically(
+                    animationSpec = tween(durationMillis = 200),
+                    targetOffsetY = { height -> height },
+                ) + fadeOut(animationSpec = tween(durationMillis = 160)),
+            ) {
                 val sky = com.lezi.babylog.designsystem.LeziThemeExt.colors.skySoft
+                // Dark skySoft is nearly the same luminance as DarkSurface, so the
+                // selected indicator disappears; use a translucent primary instead.
+                val indicatorColor = if (dark) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.32f)
+                } else {
+                    sky
+                }
                 NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                    containerColor = MaterialTheme.colorScheme.surface,
                     tonalElevation = 0.dp,
                 ) {
                     TopDest.entries.forEach { dest ->
@@ -901,21 +963,26 @@ private fun LeziMainScaffold(
                                 restoreState = true
                             }
                         }
+                        val onLongClick = if (dest == TopDest.Log ||
+                            dest == TopDest.Summary ||
+                            dest == TopDest.Growth
+                        ) {
+                            ({ vm.cycleBaby() })
+                        } else {
+                            null
+                        }
                         NavigationBarItem(
                             selected = selected,
-                            onClick = navigateToDestination,
-                            modifier = Modifier.pointerInput(dest) {
-                                detectTapGestures(
-                                    onLongPress = {
-                                        if (dest == TopDest.Log ||
-                                            dest == TopDest.Summary ||
-                                            dest == TopDest.Growth
-                                        ) {
-                                            vm.cycleBaby()
-                                        }
-                                    },
-                                    onTap = { navigateToDestination() },
-                                )
+                            // Single navigation owner: Material onClick. Long-press
+                            // baby cycle is layered via pointerInput with onLongPress
+                            // only — never onTap — so a short press cannot fire twice.
+                            onClick = { navigateToDestination() },
+                            modifier = if (onLongClick != null) {
+                                Modifier.pointerInput(onLongClick) {
+                                    detectTapGestures(onLongPress = { onLongClick() })
+                                }
+                            } else {
+                                Modifier
                             },
                             icon = {
                                 Icon(
@@ -925,16 +992,17 @@ private fun LeziMainScaffold(
                             },
                             label = { Text(dest.label) },
                             colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = sky,
-                                selectedIconColor = MaterialTheme.colorScheme.onBackground,
-                                selectedTextColor = MaterialTheme.colorScheme.onBackground,
+                                indicatorColor = indicatorColor,
+                                selectedIconColor = MaterialTheme.colorScheme.onSurface,
+                                selectedTextColor = MaterialTheme.colorScheme.onSurface,
                                 unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             ),
                         )
                     }
                 }
-            } else if (chrome.preserveBottomBarExtent) {
+            }
+            if (!chrome.showBottomBar && chrome.preserveBottomBarExtent) {
                 // Keep the editor Dock aligned with its everyday position without
                 // exposing a second copy of the primary navigation tabs.
                 NavigationBar(
@@ -956,10 +1024,30 @@ private fun LeziMainScaffold(
                 .fillMaxSize()
                 .padding(padding)
                 .consumeWindowInsets(padding),
-            enterTransition = { EnterTransition.None },
-            exitTransition = { ExitTransition.None },
-            popEnterTransition = { EnterTransition.None },
-            popExitTransition = { ExitTransition.None },
+            enterTransition = {
+                val slide = if (targetState.destination.route.isFullScreenPushRoute()) {
+                    slideInVertically(
+                        animationSpec = tween(durationMillis = 200),
+                        initialOffsetY = { height -> height / 24 },
+                    )
+                } else {
+                    EnterTransition.None
+                }
+                fadeIn(animationSpec = tween(durationMillis = 180)) + slide
+            },
+            exitTransition = { fadeOut(animationSpec = tween(durationMillis = 180)) },
+            popEnterTransition = { fadeIn(animationSpec = tween(durationMillis = 180)) },
+            popExitTransition = {
+                val slide = if (initialState.destination.route.isFullScreenPushRoute()) {
+                    slideOutVertically(
+                        animationSpec = tween(durationMillis = 200),
+                        targetOffsetY = { height -> height / 24 },
+                    )
+                } else {
+                    ExitTransition.None
+                }
+                fadeOut(animationSpec = tween(durationMillis = 180)) + slide
+            },
         ) {
             composable(TopDest.Log.route) {
                 LogRoute(
@@ -1208,7 +1296,7 @@ private fun ForcedAppUpdateOverlay(
         ) {
             Text(
                 forcedUpdateTitle(),
-                style = LeziTypography.TitleSm,
+                style = LeziTypography.Title,
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Spacer(Modifier.height(LeziSpacing.Md))
@@ -1232,6 +1320,14 @@ private fun ForcedAppUpdateOverlay(
                         onClick = { onInstall(forced.metadata) },
                         enabled = !busy,
                     ) {
+                        if (busy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                            )
+                            Spacer(Modifier.width(LeziSpacing.Xs))
+                        }
                         Text(if (busy) "安装中…" else "立即更新")
                     }
                     Spacer(Modifier.height(LeziSpacing.Sm))

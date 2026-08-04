@@ -24,9 +24,11 @@ class PhotoPreviewDialogTest {
                 "${sourceFile.name} must use the shared preview component",
                 source.contains("LeziPhotoPreviewDialog("),
             )
+            // Callers may use HorizontalPager for non-photo UI (e.g. calendar month
+            // swipe). Full-screen photo decoding belongs only in the shared dialog.
             assertFalse(
-                "${sourceFile.name} must not own another full-screen photo pager",
-                source.contains("HorizontalPager("),
+                "${sourceFile.name} must not host full-screen photo decode itself",
+                source.contains("LocalPhotoTarget.FULLSCREEN"),
             )
             assertTrue(
                 "${sourceFile.name} must use the bounded local-photo loader",

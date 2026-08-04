@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -33,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -78,12 +80,18 @@ fun QuickRecordButton(
                     .background(toneBg(tone)),
                 contentAlignment = Alignment.Center,
             ) { icon() }
-            Text(title, style = LeziTypography.Label, maxLines = 1)
+            Text(
+                title,
+                style = LeziTypography.Label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
             Text(
                 subtitle,
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         } else Row(
             Modifier.padding(LeziSpacing.Sm),
@@ -124,22 +132,23 @@ fun StateContainer(
                 .padding(vertical = LeziSpacing.Lg),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(
-                when (kind) {
-                    StateKind.Loading -> "…"
-                    StateKind.Empty -> "○"
-                    StateKind.Error -> "!"
-                    StateKind.Recording -> "●"
-                    StateKind.Success -> "✓"
-                },
-                style = LeziTypography.Display,
-                color = when (kind) {
-                    StateKind.Error -> LocalLeziColors.current.danger
-                    StateKind.Success -> LocalLeziColors.current.success
-                    StateKind.Recording -> LocalLeziColors.current.fab
-                    else -> MaterialTheme.colorScheme.primary
-                },
-            )
+            val markColor = when (kind) {
+                StateKind.Error -> LocalLeziColors.current.danger
+                StateKind.Success -> LocalLeziColors.current.success
+                StateKind.Recording -> LocalLeziColors.current.fab
+                else -> MaterialTheme.colorScheme.primary
+            }
+            Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+                if (kind == StateKind.Loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.5.dp,
+                        color = markColor,
+                    )
+                } else {
+                    LeziStateMark(kind = kind, color = markColor)
+                }
+            }
             Spacer(Modifier.height(LeziSpacing.Xs))
             Text(title, style = LeziTypography.TitleSm)
             Spacer(Modifier.height(4.dp))

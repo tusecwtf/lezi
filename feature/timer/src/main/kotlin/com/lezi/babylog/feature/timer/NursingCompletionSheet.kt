@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.timer
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -27,7 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
+import com.lezi.babylog.designsystem.LeziAlphas
 import com.lezi.babylog.designsystem.LeziConfirmAppearance
 import com.lezi.babylog.designsystem.LeziConfirmChromeEvent
 import com.lezi.babylog.designsystem.LeziConfirmChromeState
@@ -37,7 +38,9 @@ import com.lezi.babylog.designsystem.LeziNursingConfirmFields
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziSectionLabel
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziSheetContentMax
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -108,13 +111,13 @@ internal fun NursingCompletionSheet(
     ) {
         Column(
             modifier = Modifier.padding(horizontal = LeziSpacing.Lg),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
         ) {
             Text("母乳 · 计时完成", style = LeziTypography.Eyebrow)
             Text("确认母乳记录", style = LeziTypography.Title)
             FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
             ) {
                 NursingStatusBadge("时长已冻结")
                 NursingStatusBadge("取消后继续计时")
@@ -125,20 +128,20 @@ internal fun NursingCompletionSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
-                .heightIn(max = 530.dp)
+                .heightIn(max = LeziSheetContentMax)
                 .verticalScroll(rememberScrollState())
                 .dismissKeyboardOnTap()
                 .padding(horizontal = LeziSpacing.Lg, vertical = LeziSpacing.Md),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
         ) {
-            SectionLabel("基本信息")
+            LeziSectionLabel("基本信息")
             LeziNursingConfirmFields(
                 input = draft.confirmInput(),
                 onInputChange = { update(draft.withConfirmInput(it)) },
                 highlightedField = highlightedNursingField,
             )
 
-            SectionLabel("时间")
+            LeziSectionLabel("时间")
             ReadOnlyTimeField("开始时刻", draft.startedAt, zone)
             Surface(
                 onClick = {
@@ -156,10 +159,13 @@ internal fun NursingCompletionSheet(
                             "结束时刻，${formatTime(draft.endedAt, zone)}，选择时间"
                     },
                 shape = LeziThemeExt.controlShape,
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = LeziAlphas.Muted),
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                    modifier = Modifier.padding(
+                        horizontal = LeziSpacing.CardPad,
+                        vertical = LeziSpacing.Sm,
+                    ),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
@@ -175,7 +181,7 @@ internal fun NursingCompletionSheet(
                 }
             }
 
-            SectionLabel("备注")
+            LeziSectionLabel("备注")
             OutlinedTextField(
                 value = draft.note,
                 onValueChange = { update(draft.copy(note = it.take(200))) },
@@ -205,15 +211,15 @@ internal fun NursingCompletionSheet(
                     end = LeziSpacing.Lg,
                     bottom = LeziSpacing.Lg,
                 ),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
         ) {
             val reason = confirmChrome.shownReason.takeIf { confirmChrome.reasonVisible }
-            if (reason != null) {
-                LeziConfirmReasonCard(reason)
+            AnimatedVisibility(visible = reason != null) {
+                reason?.let { LeziConfirmReasonCard(it) }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 LeziSecondaryButton(
                     label = "取消",
@@ -309,7 +315,10 @@ private fun NursingStatusBadge(label: String) {
         Text(
             label,
             style = LeziTypography.Meta,
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+            modifier = Modifier.padding(
+                horizontal = LeziSpacing.Xs,
+                vertical = LeziSpacing.Xxs,
+            ),
         )
     }
 }
@@ -319,22 +328,18 @@ private fun ReadOnlyTimeField(label: String, value: Long, zone: ZoneId) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = LeziThemeExt.controlShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = LeziAlphas.Muted),
     ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+        Column(
+            Modifier.padding(
+                horizontal = LeziSpacing.CardPad,
+                vertical = LeziSpacing.Sm,
+            ),
+        ) {
             Text(label, style = LeziTypography.Meta)
             Text(formatTime(value, zone), style = LeziTypography.BodyStrong)
         }
     }
-}
-
-@Composable
-private fun SectionLabel(label: String) {
-    Text(
-        label,
-        style = LeziTypography.Eyebrow,
-        color = MaterialTheme.colorScheme.primary,
-    )
 }
 
 private fun formatTime(value: Long, zone: ZoneId): String =

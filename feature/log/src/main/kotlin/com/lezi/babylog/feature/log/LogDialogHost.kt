@@ -1,6 +1,6 @@
 package com.lezi.babylog.feature.log
 import androidx.compose.foundation.layout.Row
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -90,7 +90,7 @@ internal fun LogDialogHost(
         layoutFailure != null &&
         layoutFailure.sequence != dismissedLayoutFailure
     ) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = onDismissLayoutFailure,
             title = {
                 Text(if (failedLayoutUndo != null) "撤销未完成" else "布局尚未保存")
@@ -120,7 +120,7 @@ internal fun LogDialogHost(
     }
 
     publishChromeRecord?.let { target ->
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = onDismissPublishChrome,
             title = { Text(target.title) },
             text = {
@@ -164,7 +164,7 @@ internal fun LogDialogHost(
         }
         val deleteRunning = deleteActionState == ManagementActionState.Running(deleteRequest)
         val deleteFeedback = managementActionFeedback(deleteActionState, deleteRequest)
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 if (!deleteRunning) onDismissListDelete()
             },

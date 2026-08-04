@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -443,7 +443,7 @@ fun RecordComposerHost(
     }
 
     if (confirmTimerHandoff) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 if (!handoffBusy) {
                     confirmTimerHandoff = false
@@ -488,7 +488,7 @@ fun RecordComposerHost(
     }
 
     timerHandoffOverflowMessage?.let { message ->
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { timerHandoffOverflowMessage = null },
             title = { Text("照片过多") },
             text = { Text(message) },
@@ -504,7 +504,7 @@ fun RecordComposerHost(
         val planConfirmation = state.draft
             ?.takeIf { it.isEditingCarePlan }
             ?.let(::carePlanDeleteConfirmation)
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 if (!state.deleting) {
                     deleteAttempted = false
@@ -556,7 +556,7 @@ fun RecordComposerHost(
     }
 
     if (confirmConvert) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 if (!state.saving) confirmConvert = false
             },

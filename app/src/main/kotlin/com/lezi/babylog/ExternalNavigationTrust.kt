@@ -1,12 +1,12 @@
 package com.lezi.babylog
 
 import android.content.Intent
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver
 import com.lezi.babylog.feature.widget.WidgetComposerContract
 import com.lezi.babylog.feature.widget.WidgetComposerTarget
@@ -146,7 +146,7 @@ internal fun UntrustedExternalNavigationConfirmationDialog(
             "此请求来自应用外部。继续后将打开护理计划的完成确认面板；确认保存前不会生成记录。",
         )
     }
-    AlertDialog(
+    LeziAlertDialog(
         modifier = Modifier.testTag(UNTRUSTED_NAVIGATION_DIALOG_TAG),
         onDismissRequest = onDismiss,
         title = { Text(title) },

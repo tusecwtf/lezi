@@ -1,5 +1,5 @@
 package com.lezi.babylog.feature.log.composer
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -18,7 +18,7 @@ internal fun RecordComposerDiscardDialog(
     onContinueEditing: () -> Unit,
     onDiscard: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!busy) onContinueEditing() },
         title = { Text("放弃未保存的更改？") },
         text = { Text("当前修改尚未保存。放弃后会关闭编辑，并清理本草稿新导入的照片。") },

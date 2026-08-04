@@ -3,13 +3,23 @@ package com.lezi.babylog.core.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -28,6 +38,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.designsystem.CUSTOM_ITEM_GLYPH_COUNT
+import com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 
@@ -203,7 +215,7 @@ fun CustomItemManageDialog(
         }
     }
 
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = {
             if (!deleteState.deleting && !externalBusy) onDismiss()
         },
@@ -220,7 +232,13 @@ fun CustomItemManageDialog(
         text = {
             Column(
                 Modifier
-                    .heightIn(max = if (mode == CustomItemManageMode.Settings) 560.dp else 420.dp)
+                    .heightIn(
+                        max = if (mode == CustomItemManageMode.Settings) {
+                            560.dp
+                        } else {
+                            LeziSpacing.DialogContentMax
+                        },
+                    )
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
@@ -243,14 +261,21 @@ fun CustomItemManageDialog(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text(
-                                    "${customItemIconGlyph(item.iconSlot)} ${item.name}",
-                                    style = if (mode == CustomItemManageMode.Settings) {
-                                        LeziTypography.BodyStrong
-                                    } else {
-                                        LeziTypography.Body
-                                    },
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    LeziCustomItemGlyphIcon(
+                                        slot = item.iconSlot,
+                                        size = 16.dp,
+                                    )
+                                    Spacer(Modifier.width(LeziSpacing.Xs))
+                                    Text(
+                                        item.name,
+                                        style = if (mode == CustomItemManageMode.Settings) {
+                                            LeziTypography.BodyStrong
+                                        } else {
+                                            LeziTypography.Body
+                                        },
+                                    )
+                                }
                                 if (showLocalHide) {
                                     Text(
                                         customItemLocalHideHint(manageable, locallyHidden),
@@ -262,16 +287,28 @@ fun CustomItemManageDialog(
                             if (manageable) {
                                 Row {
                                     if (showReorder) {
-                                        TextButton(
+                                        IconButton(
                                             enabled = !externalBusy && index > 0,
                                             onClick = { onMove(item.id, -1) },
-                                        ) { Text("↑") }
-                                        TextButton(
+                                            modifier = Modifier.size(LeziSpacing.Touch),
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.KeyboardArrowUp,
+                                                contentDescription = "上移${item.name}",
+                                            )
+                                        }
+                                        IconButton(
                                             enabled = !externalBusy && index < items.lastIndex,
                                             onClick = { onMove(item.id, 1) },
-                                        ) { Text("↓") }
+                                            modifier = Modifier.size(LeziSpacing.Touch),
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.KeyboardArrowDown,
+                                                contentDescription = "下移${item.name}",
+                                            )
+                                        }
                                     }
-                                    TextButton(
+                                    IconButton(
                                         enabled = !externalBusy,
                                         onClick = {
                                             editingId = item.id
@@ -279,21 +316,26 @@ fun CustomItemManageDialog(
                                             iconSlot = item.iconSlot
                                             error = null
                                         },
-                                    ) { Text("改") }
-                                    TextButton(
+                                        modifier = Modifier.size(LeziSpacing.Touch),
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.Edit,
+                                            contentDescription = "编辑${item.name}",
+                                        )
+                                    }
+                                    IconButton(
                                         enabled = !externalBusy,
                                         onClick = {
                                             dispatchDelete(CustomItemDeleteAction.Request(item))
                                         },
-                                        modifier = Modifier.testTag("custom_item_delete_${item.id}"),
+                                        modifier = Modifier
+                                            .size(LeziSpacing.Touch)
+                                            .testTag("custom_item_delete_${item.id}"),
                                     ) {
-                                        Text(
-                                            "删",
-                                            color = if (mode == CustomItemManageMode.Settings) {
-                                                MaterialTheme.colorScheme.error
-                                            } else {
-                                                MaterialTheme.colorScheme.onSurface
-                                            },
+                                        Icon(
+                                            Icons.Outlined.Delete,
+                                            contentDescription = "删除${item.name}",
+                                            tint = MaterialTheme.colorScheme.error,
                                         )
                                     }
                                 }
@@ -344,15 +386,14 @@ fun CustomItemManageDialog(
                         .testTag(nameFieldTag),
                 )
                 Text("选择图标", style = LeziTypography.Label)
-                CUSTOM_ITEM_ICON_GLYPHS.chunked(4).forEachIndexed { rowIndex, icons ->
+                (0 until CUSTOM_ITEM_GLYPH_COUNT).chunked(4).forEach { slots ->
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        icons.forEachIndexed { columnIndex, icon ->
-                            val slot = rowIndex * 4 + columnIndex
+                        slots.forEach { slot ->
                             FilterChip(
                                 enabled = !externalBusy,
                                 selected = iconSlot == slot,
                                 onClick = { iconSlot = slot },
-                                label = { Text(icon) },
+                                label = { LeziCustomItemGlyphIcon(slot = slot) },
                             )
                         }
                     }
@@ -410,7 +451,7 @@ fun CustomItemManageDialog(
 
     deleteState.target?.let { target ->
         val confirmation = customItemDeleteConfirmation(target, mode)
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = {
                 dispatchDelete(CustomItemDeleteAction.Cancel)
             },

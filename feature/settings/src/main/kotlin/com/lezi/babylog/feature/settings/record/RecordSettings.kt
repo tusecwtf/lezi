@@ -9,7 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -46,13 +46,13 @@ internal fun RecordSettingsDialog(
     onFeverAdvice: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("记录设置") },
         text = {
             Column(
                 Modifier
-                    .heightIn(max = 520.dp)
+                    .heightIn(max = LeziSpacing.DialogContentMax)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {

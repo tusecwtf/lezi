@@ -4,8 +4,6 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +15,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -33,7 +30,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -138,7 +134,6 @@ fun SwipeEditDeleteRow(
     var crossedCommit by remember { mutableStateOf(false) }
     val success = LocalLeziColors.current.success
     val danger = LocalLeziColors.current.danger
-    val onAction = MaterialTheme.colorScheme.onError
     val density = LocalDensity.current
 
     val displayOffset = if (dragging) dragOffset else animOffset.value
@@ -228,6 +223,8 @@ fun SwipeEditDeleteRow(
         revealDelete -> danger
         else -> Color.Transparent
     }
+    // Foreground reads against the actual fill (green edit / red delete), not onError.
+    val onAction = readableContentColor(actionColor)
     val showActionLabel = fillFraction >= SWIPE_LABEL_MIN_RATIO
     // Match row outer radius: journal flat list = 0; warm cards = 8.
     val corner: Dp = LeziThemeExt.swipeActionCorner
@@ -247,77 +244,40 @@ fun SwipeEditDeleteRow(
             .then(
                 if (canSwipe) {
                     Modifier.pointerInput(editEnabled, deleteEnabled) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val touchSlop = viewConfiguration.touchSlop
-                            var totalX = 0f
-                            var totalY = 0f
-                            var pastSlop = false
-                            var isHorizontal = false
-                            val pointerId = down.id
-                            val startOffset = if (dragging) dragOffset else animOffset.value
-                            try {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == pointerId }
-                                        ?: break
-                                    if (!change.pressed) break
-                                    val delta = change.positionChange()
-                                    if (!pastSlop) {
-                                        totalX += delta.x
-                                        totalY += delta.y
-                                        val distSq = totalX * totalX + totalY * totalY
-                                        if (distSq >= touchSlop * touchSlop) {
-                                            pastSlop = true
-                                            isHorizontal = abs(totalX) >= abs(totalY)
-                                            if (isHorizontal) {
-                                                change.consume()
-                                                // Claim exclusive open for this row.
-                                                onOpenChange(true)
-                                                dragging = true
-                                                val next = (startOffset + totalX)
-                                                    .coerceIn(maxEditOffset(), maxDeleteOffset())
-                                                dragOffset = next
-                                                maybeHaptic(
-                                                    next,
-                                                    widthOrDefault(),
-                                                    crossedCommit,
-                                                ) { crossed ->
-                                                    crossedCommit = crossed
-                                                    if (crossed) {
-                                                        haptic.performHapticFeedback(
-                                                            HapticFeedbackType.LongPress,
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    } else if (isHorizontal) {
-                                        totalX += delta.x
-                                        change.consume()
-                                        val next = (startOffset + totalX)
-                                            .coerceIn(maxEditOffset(), maxDeleteOffset())
-                                        dragOffset = next
-                                        maybeHaptic(
-                                            next,
-                                            widthOrDefault(),
-                                            crossedCommit,
-                                        ) { crossed ->
-                                            crossedCommit = crossed
-                                            if (crossed) {
-                                                haptic.performHapticFeedback(
-                                                    HapticFeedbackType.LongPress,
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            } finally {
-                                if (isHorizontal) {
-                                    settleFromDrag(dragOffset)
+                        var startOffset = 0f
+                        fun applyDrag(totalX: Float) {
+                            val next = (startOffset + totalX)
+                                .coerceIn(maxEditOffset(), maxDeleteOffset())
+                            dragOffset = next
+                            maybeHaptic(
+                                next,
+                                widthOrDefault(),
+                                crossedCommit,
+                            ) { crossed ->
+                                crossedCommit = crossed
+                                if (crossed) {
+                                    haptic.performHapticFeedback(
+                                        HapticFeedbackType.LongPress,
+                                    )
                                 }
                             }
                         }
+                        trackSlopHorizontalGesture(
+                            onGestureStart = {
+                                startOffset = if (dragging) dragOffset else animOffset.value
+                            },
+                            onHorizontalStart = {
+                                // Claim exclusive open for this row.
+                                onOpenChange(true)
+                                dragging = true
+                            },
+                            onHorizontalDrag = { totalX -> applyDrag(totalX) },
+                            onGestureEnd = { wasHorizontal ->
+                                if (wasHorizontal) {
+                                    settleFromDrag(dragOffset)
+                                }
+                            },
+                        )
                     }
                 } else {
                     Modifier

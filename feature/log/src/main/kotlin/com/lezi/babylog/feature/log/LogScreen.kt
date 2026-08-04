@@ -1,4 +1,11 @@
 package com.lezi.babylog.feature.log
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -296,153 +303,170 @@ fun LogRoute(
 
     PageScaffoldBackground {
         Column(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
-            if (inLayoutEdit) {
-                val prefs = checkNotNull(editingPrefs)
-                val known = remember(state.customItems) {
-                    knownCatalogKeys(state.customItems.map { it.clientUuid })
-                }
-                val undoCandidate =
-                    (layoutUndoState as? LayoutUndoState.Available)?.candidate
-                // Session clock only — never recompute with System.currentTimeMillis.
-                val undoRemainingOfferMs = undoCandidate?.let {
-                    vm.remainingLayoutUndoOfferMs()
-                }
-                fun applyLayoutIntent(
-                    intent: LayoutEditIntent,
-                    inputOrigin: LayoutGuidanceInputOrigin,
-                ) {
-                    val write = vm.applyLayoutEditIntent(intent, known) ?: return
-                    // Drag-guidance completion is the only composition-local await;
-                    // undo phase is owned by LayoutUndoWriteTracker on viewModelScope.
-                    layoutGuidanceScope.launch {
-                        val result = write.receipt.result.await()
-                        val guidance = vm.currentLayoutEditSession()?.dragGuidance
-                        if (
-                            guidance != null &&
-                            shouldRequestLayoutDragGuidanceCompletion(
-                                state = guidance,
-                                changed = write.nextPrefs != write.previousPrefs,
-                                inputOrigin = inputOrigin,
-                                layoutReceiptSucceeded = result.isSuccess,
-                            )
-                        ) {
-                            vm.markLayoutDragGuidanceCompleted { markerSucceeded ->
-                                vm.reduceLayoutDragGuidance(
-                                    LayoutDragGuidanceEvent.DragCompletionFinished(
-                                        changed = true,
-                                        inputOrigin = LayoutGuidanceInputOrigin.TouchDrag,
-                                        layoutReceiptSucceeded = true,
-                                        markerReceiptSucceeded = markerSucceeded,
-                                    ),
+            AnimatedContent(
+                targetState = inLayoutEdit,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                transitionSpec = {
+                    (
+                        fadeIn(animationSpec = tween(250)) +
+                            slideInVertically(animationSpec = tween(250)) { it / 24 }
+                        ).togetherWith(
+                        fadeOut(animationSpec = tween(250)) +
+                            slideOutVertically(animationSpec = tween(250)) { it / 24 },
+                    )
+                },
+                label = "logLayoutEditMode",
+            ) { editing ->
+                if (editing) {
+                    val prefs = checkNotNull(editingPrefs)
+                    val known = remember(state.customItems) {
+                        knownCatalogKeys(state.customItems.map { it.clientUuid })
+                    }
+                    val undoCandidate =
+                        (layoutUndoState as? LayoutUndoState.Available)?.candidate
+                    // Session clock only — never recompute with System.currentTimeMillis.
+                    val undoRemainingOfferMs = undoCandidate?.let {
+                        vm.remainingLayoutUndoOfferMs()
+                    }
+                    fun applyLayoutIntent(
+                        intent: LayoutEditIntent,
+                        inputOrigin: LayoutGuidanceInputOrigin,
+                    ) {
+                        val write = vm.applyLayoutEditIntent(intent, known) ?: return
+                        // Drag-guidance completion is the only composition-local await;
+                        // undo phase is owned by LayoutUndoWriteTracker on viewModelScope.
+                        layoutGuidanceScope.launch {
+                            val result = write.receipt.result.await()
+                            val guidance = vm.currentLayoutEditSession()?.dragGuidance
+                            if (
+                                guidance != null &&
+                                shouldRequestLayoutDragGuidanceCompletion(
+                                    state = guidance,
+                                    changed = write.nextPrefs != write.previousPrefs,
+                                    inputOrigin = inputOrigin,
+                                    layoutReceiptSucceeded = result.isSuccess,
                                 )
+                            ) {
+                                vm.markLayoutDragGuidanceCompleted { markerSucceeded ->
+                                    vm.reduceLayoutDragGuidance(
+                                        LayoutDragGuidanceEvent.DragCompletionFinished(
+                                            changed = true,
+                                            inputOrigin = LayoutGuidanceInputOrigin.TouchDrag,
+                                            layoutReceiptSucceeded = true,
+                                            markerReceiptSucceeded = markerSucceeded,
+                                        ),
+                                    )
+                                }
                             }
                         }
                     }
-                }
-                fun closeLayoutDragGuidance() {
-                    val reduction = vm.reduceLayoutDragGuidance(
-                        LayoutDragGuidanceEvent.CloseRequested,
-                    ) ?: return
-                    if (!reduction.markCompleted) return
-                    vm.markLayoutDragGuidanceCompleted { succeeded ->
-                        vm.reduceLayoutDragGuidance(
-                            LayoutDragGuidanceEvent.CompletionMarkerFinished(succeeded),
-                        )
-                        if (!succeeded) {
-                            onMessage("帮助状态保存失败，下次进入时仍会显示")
+                    fun closeLayoutDragGuidance() {
+                        val reduction = vm.reduceLayoutDragGuidance(
+                            LayoutDragGuidanceEvent.CloseRequested,
+                        ) ?: return
+                        if (!reduction.markCompleted) return
+                        vm.markLayoutDragGuidanceCompleted { succeeded ->
+                            vm.reduceLayoutDragGuidance(
+                                LayoutDragGuidanceEvent.CompletionMarkerFinished(succeeded),
+                            )
+                            if (!succeeded) {
+                                onMessage("帮助状态保存失败，下次进入时仍会显示")
+                            }
                         }
                     }
-                }
-                LayoutEditCanvas(
-                    prefs = prefs,
-                    customItems = state.customItems,
-                    onIntent = { intent ->
-                        applyLayoutIntent(
-                            intent = intent,
-                            inputOrigin = LayoutGuidanceInputOrigin.AlternativeAction,
-                        )
-                    },
-                    onTouchDragIntent = { intent ->
-                        applyLayoutIntent(
-                            intent = intent,
-                            inputOrigin = LayoutGuidanceInputOrigin.TouchDrag,
-                        )
-                    },
-                    onDone = ::requestLayoutExit,
-                    onOpenCustomManage = { showCustomManage = true },
-                    writeState = layoutWriteState,
-                    hasSubmittedIntent = editingSession.hasSubmittedIntent,
-                    cancelDragSignal = layoutDragCancelSignal,
-                    undoCandidate = undoCandidate,
-                    undoRemainingOfferMs = undoRemainingOfferMs,
-                    initialCatalogScroll = editingSession.catalogScroll,
-                    onCatalogScrollChanged = vm::updateLayoutCatalogScroll,
-                    configurationSessionKey =
-                        state.settings.darkMode to state.settings.visualStyle,
-                    dragGuidance = editingSession.dragGuidance,
-                    onDragGuidanceHelp = {
-                        vm.reduceLayoutDragGuidance(LayoutDragGuidanceEvent.HelpRequested)
-                    },
-                    onDragGuidanceClose = ::closeLayoutDragGuidance,
-                    onUndo = { token ->
-                        vm.requestLayoutUndo(token)
-                    },
-                    onUndoExpired = { token ->
-                        vm.reduceLayoutUndoEvent(LayoutUndoEvent.OfferExpired(token))
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                )
-            } else {
-            LogTimelineList(
-                state = state,
-                listState = listState,
-                managementState = timelineListState,
-                journal = journal,
-                today = today,
-                zone = zone,
-                nowMs = nowMs,
-                selectedSummaryType = selectedSummaryType,
-                selectableSummaryTypes = selectableSummaryTypes,
-                onSelectSummary = ::selectSummary,
-                dayChartFilter = dayChartFilter,
-                onSelectDayChartCategory = { key ->
-                    dayChartFilterState = reduceDayChartFilter(
-                        reconciledDayChartFilterState,
-                        DayChartFilterAction.Select(
-                            categoryKey = key,
-                            dayRecords = state.records,
-                        ),
+                    LayoutEditCanvas(
+                        prefs = prefs,
+                        customItems = state.customItems,
+                        onIntent = { intent ->
+                            applyLayoutIntent(
+                                intent = intent,
+                                inputOrigin = LayoutGuidanceInputOrigin.AlternativeAction,
+                            )
+                        },
+                        onTouchDragIntent = { intent ->
+                            applyLayoutIntent(
+                                intent = intent,
+                                inputOrigin = LayoutGuidanceInputOrigin.TouchDrag,
+                            )
+                        },
+                        onDone = ::requestLayoutExit,
+                        onOpenCustomManage = { showCustomManage = true },
+                        writeState = layoutWriteState,
+                        hasSubmittedIntent = editingSession.hasSubmittedIntent,
+                        cancelDragSignal = layoutDragCancelSignal,
+                        undoCandidate = undoCandidate,
+                        undoRemainingOfferMs = undoRemainingOfferMs,
+                        initialCatalogScroll = editingSession.catalogScroll,
+                        onCatalogScrollChanged = vm::updateLayoutCatalogScroll,
+                        configurationSessionKey =
+                            state.settings.darkMode to state.settings.visualStyle,
+                        dragGuidance = editingSession.dragGuidance,
+                        onDragGuidanceHelp = {
+                            vm.reduceLayoutDragGuidance(LayoutDragGuidanceEvent.HelpRequested)
+                        },
+                        onDragGuidanceClose = ::closeLayoutDragGuidance,
+                        onUndo = { token ->
+                            vm.requestLayoutUndo(token)
+                        },
+                        onUndoExpired = { token ->
+                            vm.reduceLayoutUndoEvent(LayoutUndoEvent.OfferExpired(token))
+                        },
+                        modifier = Modifier.fillMaxSize(),
                     )
-                },
-                dayChartLegend = dayChartLegend,
-                nowContentMinute = nowContentMinute,
-                timelineViewportStart = timelineViewportStart,
-                timelineViewportDuration = timelineViewportDuration,
-                timelineAxis = timelineAxis,
-                onTimelineViewportStartChange = { timelineViewportStart = it },
-                filteredTimelineRecords = filteredTimelineRecords,
-                onGoToday = onGoToday,
-                onRefresh = vm::refresh,
-                onOpenComposer = onOpenComposer,
-                onRequestDelete = { listDeleteTarget = it },
-                onOpenPublishChrome = { publishChromeRecord = it },
-                onSkipCarePlan = vm::skipCarePlan,
-                onMessage = onMessage,
-                modifier = Modifier.weight(1f),
-            )
-            OneHandQuickDock(
-                storedSlots = state.settings.quickRecordSlots,
-                hiddenTypeKeys = state.settings.hiddenItems,
-                customItems = state.customItems,
-                sleepRunning = state.openSleep != null,
-                onBound = { identity -> openComposer(identity) },
-                onEmpty = { /* empty short-press is no-op; long-press opens layout edit */ },
-                onMore = { showMore = true },
-                onLongPress = { openLayoutEdit() },
-            )
-            } // end everyday (non-layout-edit) branch
+                } else {
+                    Column(Modifier.fillMaxSize()) {
+                        LogTimelineList(
+                            state = state,
+                            listState = listState,
+                            managementState = timelineListState,
+                            journal = journal,
+                            today = today,
+                            zone = zone,
+                            nowMs = nowMs,
+                            selectedSummaryType = selectedSummaryType,
+                            selectableSummaryTypes = selectableSummaryTypes,
+                            onSelectSummary = ::selectSummary,
+                            dayChartFilter = dayChartFilter,
+                            onSelectDayChartCategory = { key ->
+                                dayChartFilterState = reduceDayChartFilter(
+                                    reconciledDayChartFilterState,
+                                    DayChartFilterAction.Select(
+                                        categoryKey = key,
+                                        dayRecords = state.records,
+                                    ),
+                                )
+                            },
+                            dayChartLegend = dayChartLegend,
+                            nowContentMinute = nowContentMinute,
+                            timelineViewportStart = timelineViewportStart,
+                            timelineViewportDuration = timelineViewportDuration,
+                            timelineAxis = timelineAxis,
+                            onTimelineViewportStartChange = { timelineViewportStart = it },
+                            filteredTimelineRecords = filteredTimelineRecords,
+                            onGoToday = onGoToday,
+                            onRefresh = vm::refresh,
+                            onOpenComposer = onOpenComposer,
+                            onRequestDelete = { listDeleteTarget = it },
+                            onOpenPublishChrome = { publishChromeRecord = it },
+                            onSkipCarePlan = vm::skipCarePlan,
+                            onMessage = onMessage,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OneHandQuickDock(
+                            storedSlots = state.settings.quickRecordSlots,
+                            hiddenTypeKeys = state.settings.hiddenItems,
+                            customItems = state.customItems,
+                            sleepRunning = state.openSleep != null,
+                            onBound = { identity -> openComposer(identity) },
+                            onEmpty = { /* empty short-press is no-op; long-press opens layout edit */ },
+                            onMore = { showMore = true },
+                            onLongPress = { openLayoutEdit() },
+                        )
+                    }
+                }
+            }
         }
     }
 

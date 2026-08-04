@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.calendar.SystemCalendarDisclosureLevel
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
@@ -186,7 +187,7 @@ fun SystemCalendarSetupDialog(
         if (hasPermission) refreshTargets()
     }
 
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("系统日历") },
         text = {
@@ -201,14 +202,14 @@ fun SystemCalendarSetupDialog(
                 Text(
                     "披露级别",
                     style = LeziTypography.Body,
-                    modifier = Modifier.padding(top = 12.dp),
+                    modifier = Modifier.padding(top = LeziSpacing.Sm),
                 )
                 listOf(1, 2, 3).forEach { level ->
                     val selected = draft.disclosureLevel == level
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 48.dp)
+                            .heightIn(min = LeziSpacing.Touch)
                             .selectable(
                                 selected = selected,
                                 role = Role.RadioButton,
@@ -216,7 +217,7 @@ fun SystemCalendarSetupDialog(
                                     draft = draft.selectDisclosureLevel(level)
                                 },
                             )
-                            .padding(vertical = 4.dp),
+                            .padding(vertical = LeziSpacing.Xxs),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(selected = selected, onClick = null)
@@ -244,7 +245,7 @@ fun SystemCalendarSetupDialog(
                 Text(
                     "目标日历",
                     style = LeziTypography.Body,
-                    modifier = Modifier.padding(top = 8.dp),
+                    modifier = Modifier.padding(top = LeziSpacing.Sm),
                 )
                 if (!hasPermission) {
                     TextButton(
@@ -263,7 +264,7 @@ fun SystemCalendarSetupDialog(
                     Text(
                         "正在加载可写日历…",
                         style = LeziTypography.Meta,
-                        modifier = Modifier.padding(top = 8.dp),
+                        modifier = Modifier.padding(top = LeziSpacing.Xs),
                     )
                 } else if (targets.isEmpty()) {
                     Text(status ?: "未找到可写日历", style = LeziTypography.Meta)
@@ -273,7 +274,7 @@ fun SystemCalendarSetupDialog(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(min = 48.dp)
+                                .heightIn(min = LeziSpacing.Touch)
                                 .selectable(
                                     selected = selected,
                                     role = Role.RadioButton,
@@ -303,7 +304,7 @@ fun SystemCalendarSetupDialog(
                         it,
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
+                        modifier = Modifier.padding(top = LeziSpacing.Xs),
                     )
                 }
             }

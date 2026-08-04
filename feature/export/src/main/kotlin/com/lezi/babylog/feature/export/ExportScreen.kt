@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.export
 
 import android.content.ClipData
 import android.content.Intent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,9 +10,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.OutlinedButton
@@ -29,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -37,7 +43,6 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziDatePicker
-import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
@@ -80,7 +85,7 @@ class ExportViewModel @Inject constructor(
         includePhotos: Boolean,
     ) {
         if (_state.value.busy) return
-        _state.update { it.copy(busy = true, pendingShare = null, error = null) }
+        _state.update { it.copy(busy = true, preview = null, pendingShare = null, error = null) }
         viewModelScope.launch {
             val result = try {
                 withContext(Dispatchers.IO) {
@@ -187,21 +192,23 @@ fun ExportRoute(
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                Text("导出范围", style = LeziTypography.TitleSm)
-                Text(
-                    "${fromDate.exportLabel()} — ${toDate.exportLabel()}",
-                    style = LeziTypography.BodyStrong,
-                )
-                OutlinedButton(
-                    onClick = { dateTarget = ExportDateTarget.From },
-                    enabled = !state.busy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("选择开始日期") }
-                OutlinedButton(
-                    onClick = { dateTarget = ExportDateTarget.To },
-                    enabled = !state.busy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("选择结束日期") }
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
+                    Text("导出范围", style = LeziTypography.TitleSm)
+                    Text(
+                        "${fromDate.exportLabel()} — ${toDate.exportLabel()}",
+                        style = LeziTypography.BodyStrong,
+                    )
+                    OutlinedButton(
+                        onClick = { dateTarget = ExportDateTarget.From },
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("选择开始日期") }
+                    OutlinedButton(
+                        onClick = { dateTarget = ExportDateTarget.To },
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("选择结束日期") }
+                }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -215,26 +222,49 @@ fun ExportRoute(
                     enabled = !state.busy,
                 )
             }
-            LeziPrimaryButton(
-                if (state.busy) "正在生成…" else "导出 TXT 并分享",
+            OutlinedButton(
                 onClick = { request(ExportFormat.Txt) },
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            )
-            LeziPrimaryButton(
-                if (state.busy) "正在生成…" else "导出 PDF 并分享",
+            ) {
+                if (state.busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.size(LeziSpacing.Xs))
+                }
+                Text(if (state.busy) "正在生成…" else "导出 TXT 并分享")
+            }
+            Button(
                 onClick = { request(ExportFormat.Pdf) },
                 enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            )
+            ) {
+                if (state.busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                    Spacer(Modifier.size(LeziSpacing.Xs))
+                }
+                Text(if (state.busy) "正在生成…" else "导出 PDF 并分享")
+            }
             (inputError ?: state.error)?.let {
                 Text(it, color = MaterialTheme.colorScheme.error)
             }
-            state.preview?.let { text ->
+            AnimatedVisibility(visible = state.preview != null) {
                 LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                     Text("预览", style = LeziTypography.TitleSm)
                     Spacer(Modifier.height(LeziSpacing.Xs))
-                    Text(text.take(2_000), style = LeziTypography.Mono)
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        Text(state.preview.orEmpty().take(2_000), style = LeziTypography.Mono)
+                    }
                 }
             }
         }

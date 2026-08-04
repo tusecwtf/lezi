@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -33,7 +33,7 @@ internal fun OnboardingJoinRoleDialog(
     onMember: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!familyWizardBusy) onDismiss() },
         title = { Text("你要如何加入？") },
         text = {
@@ -71,7 +71,7 @@ internal fun OnboardingOwnerLoginDialog(
     onBack: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("管理员登录") },
         text = {
@@ -133,7 +133,7 @@ internal fun OnboardingOwnerTakeoverDialog(
     onConfirm: () -> Unit,
     onCancel: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = onCancel,
         title = { Text("接管管理员身份？") },
         text = {
@@ -166,7 +166,7 @@ internal fun OnboardingMemberJoinDialog(
     onKeepOffline: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!familyWizardBusy) onDismiss() },
         title = { Text("申请在这台设备登录") },
         text = {
@@ -184,7 +184,9 @@ internal fun OnboardingMemberJoinDialog(
                     onValueChange = onJoinDisplayNameChange,
                     label = { Text("我的家庭称呼") },
                     placeholder = { Text("如：妈妈、干妈、月嫂小王") },
-                    supportingText = { Text("家庭称呼，必填；家人用这个认出你") },
+                    supportingText = {
+                        Text("家人用这个认出你；管理员会看到并决定是否通过这个称呼添加你")
+                    },
                     enabled = !familyWizardBusy,
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -197,11 +199,6 @@ internal fun OnboardingMemberJoinDialog(
                     enabled = !familyWizardBusy,
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                )
-                Text(
-                    "管理员会看到你的申请，并决定是否用这个称呼添加新成员。",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 formError?.let { err ->
                     Text(err, color = MaterialTheme.colorScheme.error)
@@ -234,7 +231,7 @@ internal fun OnboardingMemberWaitingDialog(
     onCheckResult: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = {
             if (!familyWizardBusy) onDismiss()
         },

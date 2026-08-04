@@ -3,7 +3,6 @@ package com.lezi.babylog.designsystem
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -36,13 +35,13 @@ fun MemberLoginQrConfirmSurface(
     onDismiss: () -> Unit,
     showManualJoin: Boolean = true,
 ) {
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
         title = { Text(title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                 familyName?.let { Text(it, style = LeziTypography.TitleSm) }
-                Text("已由家庭管理员授权：$memberDisplayName")
+                Text("已由家庭管理员授权：$memberDisplayName", style = LeziTypography.Body)
                 OutlinedTextField(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
@@ -52,7 +51,7 @@ fun MemberLoginQrConfirmSurface(
                     isError = feedback != null && !verificationInProgress,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Text("将信任管理员提供的家庭服务器配置。")
+                Text("将信任管理员提供的家庭服务器配置。", style = LeziTypography.Body)
                 feedback?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }

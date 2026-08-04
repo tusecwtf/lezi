@@ -6,9 +6,16 @@ import android.content.ContextWrapper
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -35,13 +42,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.family.FamilyWizardJoinRole
 import com.lezi.babylog.domain.family.FamilyWizardMode
@@ -258,12 +266,32 @@ fun OnboardingRoute(
             .verticalScroll(rememberScrollState())
             .imePadding()
             .dismissKeyboardOnTap()
-            .padding(24.dp)
+            .padding(LeziSpacing.Page)
             .testTag(UiTags.ONBOARDING),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
-        Text("欢迎使用乐记", style = MaterialTheme.typography.headlineSmall)
-        when (step) {
+        Text("欢迎使用乐记", style = LeziTypography.Title)
+        AnimatedContent(
+            targetState = step,
+            transitionSpec = {
+                (
+                    fadeIn(animationSpec = tween(durationMillis = 250)) +
+                        slideInHorizontally(
+                            animationSpec = tween(durationMillis = 250),
+                            initialOffsetX = { width -> width / 8 },
+                        )
+                    ).togetherWith(fadeOut(animationSpec = tween(durationMillis = 150)))
+            },
+            label = "onboardingStep",
+        ) { targetStep ->
+            // Step composables emit multiple siblings; keep a Column so they
+            // retain spacedBy layout once lifted out of the outer Column into
+            // AnimatedContent (which does not arrange multi-root content).
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
+        when (targetStep) {
             OnboardingStep.ChooseFamily -> {
                 OnboardingChooseFamilyStep(
                     verifiedEndpoint = verifiedEndpoint,
@@ -428,6 +456,8 @@ fun OnboardingRoute(
             }
             OnboardingStep.RecoveryComplete -> {
                 OnboardingRecoveryCompleteStep()
+            }
+        }
             }
         }
     }

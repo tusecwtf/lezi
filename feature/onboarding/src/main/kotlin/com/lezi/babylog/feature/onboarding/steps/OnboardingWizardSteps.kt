@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.onboarding.steps
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -17,11 +19,13 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,12 +39,14 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.LeziBabyTheme
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.normalizeBabyThemeArgb
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState
@@ -68,18 +74,31 @@ internal fun OnboardingChooseFamilyStep(
 ) {
     Text(
         onboardingChooseFamilyBody(),
-        style = MaterialTheme.typography.bodyMedium,
+        style = LeziTypography.Body,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     verifiedEndpoint?.let { endpoint ->
-        Text("家庭服务器已找到\n${endpoint.origin}")
-    }
-    if (pendingMemberLogin != null) {
-        Text(
-            "等待管理员确认",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        if (pendingMemberLogin != null) {
+            Text(
+                "等待管理员确认",
+                style = LeziTypography.TitleSm,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                endpoint.origin,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        } else {
+            Text("家庭服务器已找到")
+            Text(
+                endpoint.origin,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
     Button(
         onClick = onConnectOrResume,
@@ -109,11 +128,10 @@ internal fun OnboardingChooseFamilyStep(
             modifier = Modifier.fillMaxWidth(),
         ) { Text("忘记此服务器") }
     }
-    OutlinedButton(
+    TextButton(
         onClick = onOfflineMode,
         modifier = Modifier
             .fillMaxWidth()
-            .height(52.dp)
             .testTag(UiTags.ONBOARDING_OFFLINE_MODE),
     ) { Text("离线模式") }
 }
@@ -128,20 +146,29 @@ internal fun OnboardingConnectServerStep(
     onReturnToAddress: () -> Unit,
     onKeepOffline: () -> Unit,
 ) {
-    Text(model.title, style = MaterialTheme.typography.titleMedium)
+    Text(model.title, style = LeziTypography.TitleSm)
     when (val primary = model.primary) {
         is ConnectServerPrimary.Trust -> {
             Text("这个服务器的证书尚未被手机系统认识。")
             Text("请向部署服务器的人确认以下指纹。首次确认仍存在连接到错误服务器的风险。")
             SelectionContainer {
-                Text(primary.candidate.fingerprint)
+                Text(
+                    primary.candidate.fingerprint,
+                    style = LeziTypography.Mono,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
         ConnectServerPrimary.ForgetAndReconnect -> {
             Text("已固定的服务器公钥与当前连接不一致。为保护登录凭证，连接已停止。")
         }
         is ConnectServerPrimary.ContinueWithReady -> {
-            Text(primary.origin)
+            Text(
+                primary.origin,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         ConnectServerPrimary.Connect -> {
             Text("请输入部署乐记家庭后台的完整 HTTPS 地址")
@@ -161,6 +188,13 @@ internal fun OnboardingConnectServerStep(
         onClick = onPrimaryAction,
         modifier = Modifier.fillMaxWidth().height(52.dp),
     ) {
+        if (familyWizardBusy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.size(LeziSpacing.Xs))
+        }
         Text(model.primaryLabel(familyWizardBusy))
     }
     if (model.primary is ConnectServerPrimary.Trust) {
@@ -196,10 +230,10 @@ internal fun OnboardingCreateFamilyStep(
 ) {
     Text(
         "连接家里的 NAS。若 NAS 已有家庭，同一动作会接回原管理员与历史数据。",
-        style = MaterialTheme.typography.bodyMedium,
+        style = LeziTypography.Body,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    Text("已确认的家庭服务器", style = MaterialTheme.typography.labelMedium)
+    Text("已确认的家庭服务器", style = LeziTypography.Label)
     Text(
         verifiedOrigin ?: "尚未确认家庭服务器，请返回重新连接",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -245,6 +279,13 @@ internal fun OnboardingCreateFamilyStep(
             .fillMaxWidth()
             .height(52.dp),
     ) {
+        if (familyWizardBusy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.size(LeziSpacing.Xs))
+        }
         Text(
             if (familyWizardBusy) {
                 "正在连接…"
@@ -283,7 +324,7 @@ internal fun OnboardingCreateBabyStep(
     val primary = onboardingCreateBabyPrimaryPresentation(creatingBaby)
     Text(
         onboardingCreateBabyBody(createBabySource),
-        style = MaterialTheme.typography.bodyMedium,
+        style = LeziTypography.Body,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     OutlinedTextField(
@@ -295,8 +336,8 @@ internal fun OnboardingCreateBabyStep(
         modifier = Modifier.fillMaxWidth(),
     )
     FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
     ) {
         listOf(null to "未设置", "female" to "女", "male" to "男")
             .forEach { (value, label) ->
@@ -304,13 +345,25 @@ internal fun OnboardingCreateBabyStep(
                     selected = sex == value,
                     onClick = { onSexChange(value) },
                     label = { Text(label) },
+                    modifier = Modifier.heightIn(min = LeziSpacing.Touch),
                 )
             }
     }
-    OutlinedButton(
-        onClick = onShowDate,
-        modifier = Modifier.fillMaxWidth(),
-    ) { Text("生日：$dateLabel") }
+    OutlinedTextField(
+        value = dateLabel,
+        onValueChange = {},
+        enabled = false,
+        label = { Text("生日") },
+        singleLine = true,
+        colors = OutlinedTextFieldDefaults.colors(
+            disabledTextColor = MaterialTheme.colorScheme.onSurface,
+            disabledBorderColor = MaterialTheme.colorScheme.outline,
+            disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onShowDate),
+    )
     OutlinedTextField(
         value = weightText,
         onValueChange = { onWeightTextChange(it.filter { ch -> ch.isDigit() }) },
@@ -319,11 +372,11 @@ internal fun OnboardingCreateBabyStep(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = Modifier.fillMaxWidth(),
     )
-    Text("主题色", style = MaterialTheme.typography.labelLarge)
+    Text("主题色", style = LeziTypography.Label)
     FlowRow(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
         maxItemsInEachRow = 4,
     ) {
         ThemePalette.forEachIndexed { index, color ->
@@ -389,8 +442,8 @@ internal fun OnboardingRecoveryPendingStep(
 ) {
     Text(
         "家庭身份已接回，但历史数据还没有恢复完成。请确认家庭服务器可访问后重试。",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.error,
+        style = LeziTypography.Body,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     if (recoveryFailure?.committedOutcome != null) {
         Text(
@@ -405,6 +458,13 @@ internal fun OnboardingRecoveryPendingStep(
             .fillMaxWidth()
             .height(52.dp),
     ) {
+        if (familyWizardBusy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.size(LeziSpacing.Xs))
+        }
         Text(
             if (familyWizardBusy) {
                 "正在恢复…"
@@ -419,7 +479,7 @@ internal fun OnboardingRecoveryPendingStep(
 internal fun OnboardingRecoveryCompleteStep() {
     Text(
         "家庭与历史宝宝已恢复完成，正在进入家庭记录。",
-        style = MaterialTheme.typography.bodyMedium,
+        style = LeziTypography.Body,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
@@ -475,7 +535,7 @@ internal fun connectServerStepModel(
         primary is ConnectServerPrimary.ContinueWithReady &&
             primary.mode == FamilyWizardMode.Create -> "这里还没有家庭"
         primary is ConnectServerPrimary.ContinueWithReady -> "已找到家庭"
-        failure != null -> failure.message
+        // Endpoint failure copy renders once via failureMessage; title stays a stable label.
         else -> "连接家庭服务器"
     }
     return ConnectServerStepModel(

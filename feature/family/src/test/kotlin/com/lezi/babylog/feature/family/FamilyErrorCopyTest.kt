@@ -351,16 +351,14 @@ class FamilyErrorCopyTest {
             FamilyPrimaryCta.JOIN,
             familyWizardTitle(FamilyWizardMode.Join, FamilyWizardStep.Identity),
         )
-        // Progress must not claim ✓ solely because step is Identity
+        // Progress must not claim ✓ before the endpoint is actually trusted
         val dishonestWouldBe = familyWizardProgress(
             FamilyWizardMode.Join,
-            FamilyWizardStep.Identity,
             endpointReady = false,
         )
         assertEquals("1 家庭服务器", dishonestWouldBe.first)
         val ready = familyWizardProgress(
             FamilyWizardMode.Join,
-            FamilyWizardStep.Endpoint,
             endpointReady = true,
         )
         assertEquals("✓ 家庭服务器", ready.first)

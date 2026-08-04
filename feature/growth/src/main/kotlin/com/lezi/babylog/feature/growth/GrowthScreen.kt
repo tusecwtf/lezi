@@ -1,27 +1,35 @@
 package com.lezi.babylog.feature.growth
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -58,10 +66,12 @@ import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
+import com.lezi.babylog.designsystem.LeziAlertDialog
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziRangeTabs
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
@@ -339,111 +349,114 @@ fun GrowthRoute(
                 modifier = Modifier.testTag("growth_shallow_sync_status"),
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = ui.metric == GrowthMetric.WEIGHT,
-                    onClick = { vm.setMetric(GrowthMetric.WEIGHT) },
-                    label = { Text("体重") },
-                )
-                FilterChip(
-                    selected = ui.metric == GrowthMetric.HEIGHT,
-                    onClick = { vm.setMetric(GrowthMetric.HEIGHT) },
-                    label = { Text("身长/身高") },
-                )
-            }
-
-            if (ui.points.isEmpty()) {
-                StateContainer(
-                    kind = StateKind.Empty,
-                    title = "还没有测量",
-                    message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
-                    actionLabel = "去录入",
-                    onAction = { openNewMeasurement() },
-                )
-            } else {
-                val latest = ui.points.last()
-                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                    Text(
-                        when (ui.metric) {
-                            GrowthMetric.WEIGHT -> "最新体重"
-                            GrowthMetric.HEIGHT -> "最新${ui.birthday?.let { birthday ->
-                                growthLinearMeasurementLabel(birthday, latest.measuredAt, zone)
-                            } ?: "身长/身高"}"
-                        },
-                        style = LeziTypography.Meta,
-                    )
-                    Text(
-                        formatMeasurementValue(ui.metric, latest.value),
-                        style = LeziTypography.Metric,
-                    )
-                    GrowthChart(points = ui.points, bands = bands, metric = ui.metric)
-                    latest.referenceWarning?.let { warning ->
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                            shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
-                        ) {
-                            Text(
-                                warning,
-                                modifier = Modifier.padding(LeziSpacing.Sm),
-                                style = LeziTypography.Meta,
-                            )
-                        }
+            LeziRangeTabs(
+                items = GrowthMetric.entries,
+                selected = ui.metric,
+                onSelect = vm::setMetric,
+                label = {
+                    when (it) {
+                        GrowthMetric.WEIGHT -> "体重"
+                        GrowthMetric.HEIGHT -> "身长/身高"
                     }
-                    if (bands.isNotEmpty()) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Text("— P3", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text("— P50", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.secondary)
-                            Text("— P97", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
+                },
+            )
 
-                SectionHeading(
-                    title = "测量记录",
-                )
-                LeziSurfacePanel(
-                    Modifier.fillMaxWidth(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                    bottomBand = true,
-                ) {
-                    history.forEachIndexed { index, point ->
-                        if (index > 0) {
-                            HorizontalDivider(
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                            )
-                        }
-                        MeasurementHistoryRow(
-                            metric = ui.metric,
-                            point = point,
-                            zone = zone,
-                            onClick = { openEditMeasurement(point) },
+            AnimatedContent(
+                targetState = ui.metric,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "growth_metric_content",
+            ) {
+                if (ui.points.isEmpty()) {
+                    StateContainer(
+                        kind = StateKind.Empty,
+                        title = "还没有测量",
+                        message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
+                        actionLabel = "去录入",
+                        onAction = { openNewMeasurement() },
+                    )
+                } else {
+                    val latest = ui.points.last()
+                    LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                        Text(
+                            when (ui.metric) {
+                                GrowthMetric.WEIGHT -> "最新体重"
+                                GrowthMetric.HEIGHT -> "最新${ui.birthday?.let { birthday ->
+                                    growthLinearMeasurementLabel(birthday, latest.measuredAt, zone)
+                                } ?: "身长/身高"}"
+                            },
+                            style = LeziTypography.Meta,
                         )
+                        Text(
+                            formatMeasurementValue(ui.metric, latest.value),
+                            style = LeziTypography.Metric,
+                        )
+                        GrowthChart(points = ui.points, bands = bands, metric = ui.metric)
+                        latest.referenceWarning?.let { warning ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
+                            ) {
+                                Text(
+                                    warning,
+                                    modifier = Modifier.padding(LeziSpacing.Sm),
+                                    style = LeziTypography.Meta,
+                                )
+                            }
+                        }
+                        if (bands.isNotEmpty()) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("— P3", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.outline)
+                                Text("— P50", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.secondary)
+                                Text("— P97", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                    }
+
+                    SectionHeading(
+                        title = "测量记录",
+                    )
+                    LeziSurfacePanel(
+                        Modifier
+                            .fillMaxWidth()
+                            .animateContentSize(),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                        bottomBand = true,
+                    ) {
+                        history.forEachIndexed { index, point ->
+                            if (index > 0) {
+                                HorizontalDivider(
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                )
+                            }
+                            MeasurementHistoryRow(
+                                metric = ui.metric,
+                                point = point,
+                                zone = zone,
+                                onClick = { openEditMeasurement(point) },
+                            )
+                        }
                     }
                 }
-            }
 
-            growthReferenceNotice(
-                sex = ui.sex,
-                hasReferenceBands = bands.isNotEmpty(),
-                hasMeasurementsOutsideReference =
-                    ui.referenceValidUntilMonthExclusive?.let { exclusive ->
-                        ui.points.any { it.monthAge >= exclusive }
-                    } == true,
-            )?.let { notice ->
                 Text(
-                    notice,
+                    text = listOfNotNull(
+                        growthReferenceNotice(
+                            sex = ui.sex,
+                            hasReferenceBands = bands.isNotEmpty(),
+                            hasMeasurementsOutsideReference =
+                                ui.referenceValidUntilMonthExclusive?.let { exclusive ->
+                                    ui.points.any { it.monthAge >= exclusive }
+                                } == true,
+                        ),
+                        "WS/T 423—2022 · 按性别 P3/P50/P97 参考带 · " +
+                            "早产或特殊疾病请遵医嘱 · 非医疗诊断",
+                    ).joinToString("\n"),
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Text(
-                "WS/T 423—2022 · 按性别 P3/P50/P97 参考带 · " +
-                    "早产或特殊疾病请遵医嘱 · 非医疗诊断",
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Spacer(Modifier.height(LeziSpacing.Xxl))
             }
         }
@@ -452,7 +465,7 @@ fun GrowthRoute(
     val activeDraft = draft
     if (activeDraft != null) {
         val isEditing = activeDraft.recordId != null
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { if (!busy) closeMeasurementDraft() },
             modifier = Modifier.imePadding(),
             properties = DialogProperties(decorFitsSystemWindows = false),
@@ -473,7 +486,7 @@ fun GrowthRoute(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 480.dp)
+                        .fillMaxHeight(0.85f)
                         .verticalScroll(rememberScrollState())
                         .imePadding()
                         .dismissKeyboardOnTap(),
@@ -509,19 +522,17 @@ fun GrowthRoute(
                         measurement.format(DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm")),
                         style = LeziTypography.BodyStrong,
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            enabled = !busy,
+                    Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
+                        LeziSecondaryButton(
+                            label = "修改日期",
                             onClick = { showMeasureDate = true },
-                        ) {
-                            Text("修改日期")
-                        }
-                        OutlinedButton(
                             enabled = !busy,
+                        )
+                        LeziSecondaryButton(
+                            label = "选择时间",
                             onClick = { showMeasureClock = true },
-                        ) {
-                            Text("选择时间")
-                        }
+                            enabled = !busy,
+                        )
                     }
                     if (isEditing) {
                         LeziSecondaryButton(
@@ -544,30 +555,35 @@ fun GrowthRoute(
                 }
             },
             confirmButton = {
-                TextButton(
-                    enabled = !busy,
-                    onClick = { vm.saveMeasurement() },
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                 ) {
-                    Text(
-                        when {
-                            saving -> "保存中…"
-                            isEditing -> "保存修改"
-                            else -> "保存"
-                        },
+                    if (saving) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                    LeziPrimaryButton(
+                        label = if (isEditing) "保存修改" else "保存",
+                        onClick = { vm.saveMeasurement() },
+                        enabled = !busy,
                     )
                 }
             },
             dismissButton = {
-                TextButton(
-                    enabled = !busy,
+                LeziSecondaryButton(
+                    label = "取消",
                     onClick = { closeMeasurementDraft() },
-                ) { Text("取消") }
+                    enabled = !busy,
+                )
             },
         )
     }
 
     if (editor.deleteConfirmationOpen) {
-        AlertDialog(
+        LeziAlertDialog(
             onDismissRequest = { if (!busy) vm.cancelMeasurementDelete() },
             title = { Text("删除这条测量？") },
             text = {
@@ -594,18 +610,21 @@ fun GrowthRoute(
                 TextButton(
                     enabled = !busy,
                     onClick = { vm.deleteMeasurement() },
+                    modifier = Modifier.heightIn(min = LeziSpacing.Touch),
                 ) {
                     Text(
                         if (deleting) "删除中…" else "确认删除",
                         color = MaterialTheme.colorScheme.error,
+                        style = LeziTypography.Label,
                     )
                 }
             },
             dismissButton = {
-                TextButton(
-                    enabled = !busy,
+                LeziSecondaryButton(
+                    label = "取消",
                     onClick = { vm.cancelMeasurementDelete() },
-                ) { Text("取消") }
+                    enabled = !busy,
+                )
             },
         )
     }
@@ -725,7 +744,18 @@ private fun MeasurementHistoryRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(formatMeasurementValue(metric, point.value), style = LeziTypography.BodyStrong)
-            Text("修改", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.primary)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
+            ) {
+                Text("修改", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.primary)
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
         }
         Text(
             whenText,
@@ -839,15 +869,31 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
         fun x(m: Float) = size.width * (m / maxMonth).coerceIn(0f, 1f)
         fun y(v: Float) = size.height - ((v - yMin) / (yMax - yMin).coerceAtLeast(0.1f)) * size.height
 
+        val gridStroke = 1.dp.toPx()
+        val bandStroke = (if (journal) 1.5.dp else 2.dp).toPx()
+        val medianStroke = (if (journal) 2.dp else 2.5.dp).toPx()
+        val pointRadius = (if (journal) 2.5.dp else 3.5.dp).toPx()
+        val seriesStroke = (if (journal) 1.5.dp else 2.dp).toPx()
+
         val gridLines = if (journal) 6 else 3
         for (i in 0..gridLines) {
             val yy = size.height * i / gridLines.toFloat()
-            drawLine(ext.chartGrid.copy(alpha = if (journal) 0.7f else 0.35f), Offset(0f, yy), Offset(size.width, yy), strokeWidth = 1f)
+            drawLine(
+                ext.chartGrid.copy(alpha = if (journal) 0.7f else 0.35f),
+                Offset(0f, yy),
+                Offset(size.width, yy),
+                strokeWidth = gridStroke,
+            )
         }
         if (journal) {
             for (i in 0..6) {
                 val xx = size.width * i / 6f
-                drawLine(ext.chartGrid.copy(alpha = 0.5f), Offset(xx, 0f), Offset(xx, size.height), strokeWidth = 1f)
+                drawLine(
+                    ext.chartGrid.copy(alpha = 0.5f),
+                    Offset(xx, 0f),
+                    Offset(xx, size.height),
+                    strokeWidth = gridStroke,
+                )
             }
         }
 
@@ -860,6 +906,7 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
             }
             return p
         }
+
         if (bands.isNotEmpty()) {
             if (journal) {
                 val area = Path()
@@ -872,13 +919,13 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
                 area.close()
                 drawPath(area, ext.laneCare.copy(alpha = 0.16f))
             }
-            drawPath(bandPath { it.p3 }, muted.copy(alpha = 0.65f), style = Stroke(if (journal) 1.5f else 2f))
+            drawPath(bandPath { it.p3 }, muted.copy(alpha = 0.65f), style = Stroke(bandStroke))
             drawPath(
                 bandPath { it.p50 },
                 percentile,
-                style = Stroke(if (journal) 2f else 2.5f),
+                style = Stroke(medianStroke),
             )
-            drawPath(bandPath { it.p97 }, muted.copy(alpha = 0.65f), style = Stroke(if (journal) 1.5f else 2f))
+            drawPath(bandPath { it.p97 }, muted.copy(alpha = 0.65f), style = Stroke(bandStroke))
         }
 
         val line = Path()
@@ -886,8 +933,8 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
             val xx = x(pt.monthAge)
             val yy = y(pt.value)
             if (i == 0) line.moveTo(xx, yy) else line.lineTo(xx, yy)
-            drawCircle(accent, radius = if (journal) 5f else 7f, center = Offset(xx, yy))
+            drawCircle(accent, radius = pointRadius, center = Offset(xx, yy))
         }
-        if (points.size >= 2) drawPath(line, accent, style = Stroke(width = if (journal) 3f else 4f))
+        if (points.size >= 2) drawPath(line, accent, style = Stroke(width = seriesStroke))
     }
 }

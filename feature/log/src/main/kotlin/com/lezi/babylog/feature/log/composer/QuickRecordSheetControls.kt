@@ -26,7 +26,10 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.designsystem.LeziAlphas
+import com.lezi.babylog.designsystem.LeziSectionLabel
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import java.time.Instant
@@ -132,7 +135,7 @@ internal fun TimeFields(
     enabled: Boolean = true,
 ) {
     val container = accentColor?.copy(alpha = 0.18f)
-        ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+        ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = LeziAlphas.Muted)
     val accent = accentColor ?: MaterialTheme.colorScheme.primary
     val startHighlighted = highlightedField == ComposerInvalidField.StartTime
     val endHighlighted = highlightedField == ComposerInvalidField.EndTime
@@ -141,7 +144,7 @@ internal fun TimeFields(
     } else {
         null
     }
-    SectionLabel(resolvedSleepPolicy?.timeSectionLabel ?: "记录时间")
+    LeziSectionLabel(resolvedSleepPolicy?.timeSectionLabel ?: "记录时间")
     when {
         resolvedSleepPolicy?.isPlanIntent == true -> {
             TimeButton(
@@ -284,6 +287,9 @@ internal fun TimeFields(
     }
 }
 
+/** Shared vertical padding for the time-row controls so their heights align. */
+private val TimeRowVerticalPadding = LeziSpacing.Sm
+
 @Composable
 private fun EmptyTimeButton(
     prompt: String,
@@ -296,7 +302,7 @@ private fun EmptyTimeButton(
         enabled = enabled,
         modifier = Modifier.fillMaxWidth(),
         shape = LeziThemeExt.controlShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = LeziAlphas.Muted),
         border = if (highlighted) {
             BorderStroke(2.dp, MaterialTheme.colorScheme.error)
         } else {
@@ -305,7 +311,7 @@ private fun EmptyTimeButton(
     ) {
         Text(
             prompt,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = TimeRowVerticalPadding),
             style = LeziTypography.BodyStrong,
             color = if (highlighted) {
                 MaterialTheme.colorScheme.error
@@ -322,7 +328,9 @@ private fun TimeButton(
     millis: Long,
     zone: ZoneId,
     onClick: () -> Unit,
-    containerColor: Color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+    containerColor: Color = MaterialTheme.colorScheme.primaryContainer.copy(
+        alpha = LeziAlphas.Muted,
+    ),
     accentColor: Color = MaterialTheme.colorScheme.primary,
     highlighted: Boolean = false,
     enabled: Boolean = true,
@@ -342,7 +350,7 @@ private fun TimeButton(
         },
     ) {
         Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            Modifier.padding(horizontal = 14.dp, vertical = TimeRowVerticalPadding),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -360,9 +368,9 @@ private fun TimeReadOnly(label: String, millis: Long, zone: ZoneId) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = LeziThemeExt.controlShape,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = LeziAlphas.Muted),
     ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = TimeRowVerticalPadding)) {
             Text(label, style = LeziTypography.Meta)
             Text(formatRecordTime(millis, zone), style = LeziTypography.BodyStrong)
         }
@@ -441,15 +449,6 @@ internal fun DecimalField(
         isError = isError,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
         singleLine = true,
-    )
-}
-
-@Composable
-internal fun SectionLabel(label: String) {
-    Text(
-        label,
-        style = LeziTypography.Label,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 

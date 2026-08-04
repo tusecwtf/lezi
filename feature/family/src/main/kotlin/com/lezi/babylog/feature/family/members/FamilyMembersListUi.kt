@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family.members
 
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,8 +14,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import com.lezi.babylog.designsystem.LeziAlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -22,8 +29,14 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -95,15 +108,50 @@ internal fun FamilyMembersListSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Column(horizontalAlignment = Alignment.End) {
-                    if (viewerIsOwner && onAddMember != null) {
-                        TextButton(onClick = onAddMember) { Text("添加成员") }
+                Box {
+                    var manageMenuOpen by remember { mutableStateOf(false) }
+                    IconButton(
+                        onClick = { manageMenuOpen = true },
+                        modifier = Modifier.testTag("members_manage_menu"),
+                    ) {
+                        Icon(
+                            Icons.Default.MoreVert,
+                            contentDescription = "管理家庭成员与设备",
+                        )
                     }
-                    if (viewerIsOwner && onRenameFamily != null) {
-                        TextButton(onClick = onRenameFamily) { Text("修改家庭名") }
-                    }
-                    TextButton(onClick = onRefreshMembers, enabled = !ui.membersLoading) {
-                        Text(if (ui.membersLoading) "刷新中…" else "刷新")
+                    DropdownMenu(
+                        expanded = manageMenuOpen,
+                        onDismissRequest = { manageMenuOpen = false },
+                    ) {
+                        if (viewerIsOwner && onAddMember != null) {
+                            DropdownMenuItem(
+                                text = { Text("添加成员") },
+                                onClick = {
+                                    manageMenuOpen = false
+                                    onAddMember()
+                                },
+                                modifier = Modifier.testTag("members_menu_add_member"),
+                            )
+                        }
+                        if (viewerIsOwner && onRenameFamily != null) {
+                            DropdownMenuItem(
+                                text = { Text("修改家庭名") },
+                                onClick = {
+                                    manageMenuOpen = false
+                                    onRenameFamily()
+                                },
+                                modifier = Modifier.testTag("members_menu_rename_family"),
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text(if (ui.membersLoading) "刷新中…" else "刷新") },
+                            onClick = {
+                                manageMenuOpen = false
+                                onRefreshMembers()
+                            },
+                            enabled = !ui.membersLoading,
+                            modifier = Modifier.testTag("members_menu_refresh"),
+                        )
                     }
                 }
             }
@@ -140,63 +188,95 @@ internal fun FamilyMembersListSheet(
                     )
                 }
             }
-            if (visibleMembers.isEmpty() && ui.membersLoaded && ui.membersError == null) {
-                Text(
-                    "暂时没有可显示的家庭成员",
-                    style = LeziTypography.Body,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = LeziSpacing.Sm),
-                )
+            val rosterState = when {
+                ui.membersLoading && !ui.membersLoaded -> MembersRosterState.Loading
+                visibleMembers.isEmpty() && ui.membersError != null -> MembersRosterState.Error
+                else -> MembersRosterState.Content
             }
-            visibleMembers.forEach { member ->
-                val privacyProjectedMember = if (viewerIsOwner || member.isSelf) {
-                    member
-                } else {
-                    member.copy(devices = null)
-                }
-                FamilyMemberRow(
-                    member = privacyProjectedMember,
-                    onEditSelf = onEditMyDisplayName.takeIf { member.isSelf },
-                    onRemove = onRemoveMember
-                        ?.takeIf { canRemoveFamilyMember(viewerIsOwner, member) }
-                        ?.let { remove ->
-                            {
-                                remove(
-                                    member.membershipId,
-                                    familyMemberDisplayName(member),
-                                )
+            Crossfade(targetState = rosterState, label = "familyMembersRoster") { state ->
+                when (state) {
+                    MembersRosterState.Loading -> Text(
+                        "正在读取家人…",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = LeziSpacing.Xs),
+                    )
+                    MembersRosterState.Error -> Text(
+                        ui.membersError.orEmpty(),
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = LeziSpacing.Xs),
+                    )
+                    MembersRosterState.Content -> Column(
+                        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+                    ) {
+                        if (visibleMembers.isEmpty() && ui.membersLoaded && ui.membersError == null) {
+                            Text(
+                                "暂时没有可显示的家庭成员",
+                                style = LeziTypography.Body,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(vertical = LeziSpacing.Sm),
+                            )
+                        }
+                        visibleMembers.forEach { member ->
+                            val privacyProjectedMember = if (viewerIsOwner || member.isSelf) {
+                                member
+                            } else {
+                                member.copy(devices = null)
                             }
-                        },
-                    onCreateLoginQr = onCreateMemberLoginQr
-                        ?.takeIf { viewerIsOwner && member.role == FamilyRole.Member }
-                        ?.let { create -> { create(member.membershipId) } },
-                    onRenameMember = onRenameMember
-                        ?.takeIf { viewerIsOwner && !member.isSelf }
-                        ?.let { rename ->
-                            { rename(member.membershipId, familyMemberDisplayName(member)) }
-                        },
-                    onRenameDevice = onRenameDevice.takeIf { viewerIsOwner || member.isSelf },
-                    onRevokeDevice = onRevokeDevice.takeIf { viewerIsOwner },
-                )
+                            FamilyMemberRow(
+                                member = privacyProjectedMember,
+                                onEditSelf = onEditMyDisplayName.takeIf { member.isSelf },
+                                onRemove = onRemoveMember
+                                    ?.takeIf { canRemoveFamilyMember(viewerIsOwner, member) }
+                                    ?.let { remove ->
+                                        {
+                                            remove(
+                                                member.membershipId,
+                                                familyMemberDisplayName(member),
+                                            )
+                                        }
+                                    },
+                                onCreateLoginQr = onCreateMemberLoginQr
+                                    ?.takeIf { viewerIsOwner && member.role == FamilyRole.Member }
+                                    ?.let { create -> { create(member.membershipId) } },
+                                onRenameMember = onRenameMember
+                                    ?.takeIf { viewerIsOwner && !member.isSelf }
+                                    ?.let { rename ->
+                                        { rename(member.membershipId, familyMemberDisplayName(member)) }
+                                    },
+                                onRenameDevice = onRenameDevice.takeIf { viewerIsOwner || member.isSelf },
+                                onRevokeDevice = onRevokeDevice.takeIf { viewerIsOwner },
+                            )
+                        }
+                        ui.membersError?.let { error ->
+                            Text(
+                                error,
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = LeziSpacing.Xs),
+                            )
+                        } ?: if (!ui.membersLoaded && !ui.membersLoading) {
+                            Text(
+                                "暂时无法读取成员与设备，请重试",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = LeziSpacing.Xs),
+                            )
+                        } else Unit
+                    }
+                }
             }
-            ui.membersError?.let { error ->
-                Text(
-                    error,
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = LeziSpacing.Xs),
-                )
-            } ?: if (!ui.membersLoaded && !ui.membersLoading) {
-                Text(
-                    "暂时无法读取成员与设备，请重试",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = LeziSpacing.Xs),
-                )
-            } else Unit
         }
     }
 }
+
+private enum class MembersRosterState { Loading, Error, Content }
+
+/** 成员行头像直径；设备行缩进由「头像 + 间距」派生，避免 56dp 心算值。 */
+private val MemberAvatarSize = 40.dp
+private val DeviceRowIndent = MemberAvatarSize + LeziSpacing.Sm
+private val MemberRowMinHeight = 56.dp
 
 @Composable
 private fun PendingMemberRenameRow(
@@ -279,13 +359,13 @@ internal fun PendingMemberDecisionDialog(
     val conflictsWithExisting = existingMembers.any {
         normalizedFamilyDisplayNameKey(it.displayName) == requestedKey
     }
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(if (awaitingClaim) "等待设备领取" else "确认这台设备") },
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 420.dp)
+                    .heightIn(max = LeziSpacing.DialogContentMax)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
             ) {
@@ -313,31 +393,40 @@ internal fun PendingMemberDecisionDialog(
                         }
                     }
                 }
-                if (awaitingClaim) {
-                    TextButton(onClick = onReject, enabled = !busy) {
-                        Text("撤销批准")
-                    }
-                } else {
-                    TextButton(onClick = onApproveNew, enabled = !busy && !conflictsWithExisting) {
-                        Text("用此称呼添加新成员")
-                    }
-                    if (conflictsWithExisting) {
-                        Text(
-                            "该家庭称呼已存在，请绑定到现有成员",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                    TextButton(onClick = onReject, enabled = !busy) {
-                        Text("拒绝")
-                    }
+                if (!awaitingClaim && conflictsWithExisting) {
+                    Text(
+                        "该家庭称呼已存在，请绑定到现有成员",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         },
-        confirmButton = {},
+        confirmButton = {
+            if (awaitingClaim) {
+                TextButton(onClick = onReject, enabled = !busy) {
+                    Text("撤销批准", color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                TextButton(onClick = onApproveNew, enabled = !busy && !conflictsWithExisting) {
+                    Text("用此称呼添加新成员")
+                }
+            }
+        },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !busy) {
-                Text(if (awaitingClaim) "关闭" else "取消")
+            if (awaitingClaim) {
+                TextButton(onClick = onDismiss, enabled = !busy) {
+                    Text("关闭")
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
+                    TextButton(onClick = onReject, enabled = !busy) {
+                        Text("拒绝", color = MaterialTheme.colorScheme.error)
+                    }
+                    TextButton(onClick = onDismiss, enabled = !busy) {
+                        Text("取消")
+                    }
+                }
             }
         },
     )
@@ -363,12 +452,12 @@ internal fun FamilyMemberRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 56.dp)
+                .heightIn(min = MemberRowMinHeight)
                 .padding(vertical = LeziSpacing.Xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Surface(
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(MemberAvatarSize),
                 shape = CircleShape,
                 color = if (member.isSelf) {
                     MaterialTheme.colorScheme.primaryContainer
@@ -406,31 +495,49 @@ internal fun FamilyMemberRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            Column(horizontalAlignment = Alignment.End) {
-                if (member.isSelf && onEditSelf != null) {
-                    androidx.compose.material3.TextButton(onClick = onEditSelf) {
-                        Text(if (member.role == FamilyRole.Owner) "改称呼" else "申请改称呼")
-                    }
-                }
-                if (!member.isSelf && onRenameMember != null) {
-                    androidx.compose.material3.TextButton(onClick = onRenameMember) {
-                        Text("改称呼")
-                    }
-                }
-                if (onCreateLoginQr != null) {
-                    androidx.compose.material3.TextButton(onClick = onCreateLoginQr) {
-                        Text("为这个成员生成登录二维码")
-                    }
-                }
-                if (!member.isSelf && onRemove != null) {
-                    androidx.compose.material3.TextButton(onClick = onRemove) {
-                        Text(
-                            "移除",
-                            color = MaterialTheme.colorScheme.error,
+            FamilyRowOverflowMenu(
+                actions = buildList {
+                    if (member.isSelf && onEditSelf != null) {
+                        add(
+                            FamilyRowAction(
+                                label = if (member.role == FamilyRole.Owner) "改称呼" else "申请改称呼",
+                                testTag = "member_action_edit_self",
+                                onClick = onEditSelf,
+                            ),
                         )
                     }
-                }
-            }
+                    if (!member.isSelf && onRenameMember != null) {
+                        add(
+                            FamilyRowAction(
+                                label = "改称呼",
+                                testTag = "member_action_rename",
+                                onClick = onRenameMember,
+                            ),
+                        )
+                    }
+                    if (onCreateLoginQr != null) {
+                        add(
+                            FamilyRowAction(
+                                label = "为这个成员生成登录二维码",
+                                testTag = "member_action_login_qr",
+                                onClick = onCreateLoginQr,
+                            ),
+                        )
+                    }
+                    if (!member.isSelf && onRemove != null) {
+                        add(
+                            FamilyRowAction(
+                                label = "移除",
+                                testTag = "member_action_remove",
+                                onClick = onRemove,
+                                isDestructive = true,
+                            ),
+                        )
+                    }
+                },
+                menuTestTag = "member_overflow_menu",
+                contentDescription = "${familyMemberTitle(member)}的更多操作",
+            )
         }
         member.devices?.let { devices ->
             if (devices.isEmpty()) {
@@ -438,7 +545,7 @@ internal fun FamilyMemberRow(
                     "暂无设备",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 56.dp, bottom = LeziSpacing.Xs),
+                    modifier = Modifier.padding(start = DeviceRowIndent, bottom = LeziSpacing.Xs),
                 )
             } else {
                 devices.forEach { device ->
@@ -467,8 +574,8 @@ private fun FamilyDeviceRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .padding(start = 56.dp, top = LeziSpacing.Xs, bottom = LeziSpacing.Xs)
+            .heightIn(min = LeziSpacing.Touch)
+            .padding(start = DeviceRowIndent, top = LeziSpacing.Xs, bottom = LeziSpacing.Xs)
             .semantics {
                 contentDescription = buildString {
                     append(device.deviceName)
@@ -493,20 +600,87 @@ private fun FamilyDeviceRow(
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
-        }
-        Column(horizontalAlignment = Alignment.End) {
             Text(
                 activity,
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (onRename != null) {
-                TextButton(onClick = onRename) { Text("改设备称呼") }
-            }
-            if (onRevoke != null) {
-                TextButton(onClick = onRevoke) {
-                    Text("撤销设备", color = MaterialTheme.colorScheme.error)
+        }
+        FamilyRowOverflowMenu(
+            actions = buildList {
+                if (onRename != null) {
+                    add(
+                        FamilyRowAction(
+                            label = "改设备称呼",
+                            testTag = "device_action_rename",
+                            onClick = onRename,
+                        ),
+                    )
                 }
+                if (onRevoke != null) {
+                    add(
+                        FamilyRowAction(
+                            label = "撤销设备",
+                            testTag = "device_action_revoke",
+                            onClick = onRevoke,
+                            isDestructive = true,
+                        ),
+                    )
+                }
+            },
+            menuTestTag = "device_overflow_menu",
+            contentDescription = "${device.deviceName}的更多操作",
+        )
+    }
+}
+
+private class FamilyRowAction(
+    val label: String,
+    val testTag: String,
+    val onClick: () -> Unit,
+    val isDestructive: Boolean = false,
+)
+
+@Composable
+private fun FamilyRowOverflowMenu(
+    actions: List<FamilyRowAction>,
+    menuTestTag: String,
+    contentDescription: String,
+) {
+    if (actions.isEmpty()) return
+    Box {
+        var menuOpen by remember { mutableStateOf(false) }
+        IconButton(
+            onClick = { menuOpen = true },
+            modifier = Modifier.testTag(menuTestTag),
+        ) {
+            Icon(
+                Icons.Default.MoreVert,
+                contentDescription = contentDescription,
+            )
+        }
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+        ) {
+            actions.forEach { action ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            action.label,
+                            color = if (action.isDestructive) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                Color.Unspecified
+                            },
+                        )
+                    },
+                    onClick = {
+                        menuOpen = false
+                        action.onClick()
+                    },
+                    modifier = Modifier.testTag(action.testTag),
+                )
             }
         }
     }
@@ -536,7 +710,7 @@ internal fun RemoveMemberConfirmDialog(
     onDismiss: () -> Unit,
 ) {
     val label = displayName.trim().ifBlank { "家人" }
-    AlertDialog(
+    LeziAlertDialog(
         onDismissRequest = { if (!removing) onDismiss() },
         title = { Text("删除成员？") },
         text = {

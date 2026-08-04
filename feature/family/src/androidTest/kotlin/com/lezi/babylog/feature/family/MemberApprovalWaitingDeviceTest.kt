@@ -7,6 +7,7 @@ import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performTextReplacement
@@ -334,6 +335,7 @@ class MemberApprovalWaitingDeviceTest {
             }
         }
 
+        compose.onAllNodesWithTag("member_overflow_menu")[1].performClick()
         compose.onNodeWithText("为这个成员生成登录二维码").performClick()
         compose.runOnIdle { assertThat(target).isEqualTo("membership-mom") }
 
