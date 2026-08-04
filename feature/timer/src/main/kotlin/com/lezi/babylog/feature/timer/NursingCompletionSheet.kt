@@ -186,6 +186,7 @@ internal fun NursingCompletionSheet(
                 value = draft.note,
                 onValueChange = { update(draft.copy(note = it.take(200))) },
                 modifier = Modifier.fillMaxWidth(),
+                singleLine = false,
                 label = { Text("备注（可选）") },
                 placeholder = { Text("例如含接、吐奶或宝宝状态") },
                 minLines = 2,

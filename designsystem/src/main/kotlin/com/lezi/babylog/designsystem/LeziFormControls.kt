@@ -16,8 +16,45 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.DatePickerDialog as MaterialDatePickerDialog
 
 /**
+ * Resolves Material-compatible line mode for [LeziTextField].
+ *
+ * When [minLines] or [maxLines] request more than one line, multi-line wins even if
+ * [singleLine] was left at its default `true` (migration hazard after OutlinedTextField
+ * which defaulted to multi-line). Pure function so unit tests drive the real policy.
+ */
+fun leziTextFieldLineMode(
+    singleLine: Boolean,
+    minLines: Int,
+    maxLines: Int,
+): LeziTextFieldLineMode {
+    val wantsMulti = minLines > 1 || maxLines > 1
+    val effectiveSingle = singleLine && !wantsMulti
+    val effectiveMin = if (effectiveSingle) 1 else minLines.coerceAtLeast(1)
+    val effectiveMax = if (effectiveSingle) {
+        1
+    } else {
+        maxLines.coerceAtLeast(effectiveMin)
+    }
+    return LeziTextFieldLineMode(
+        singleLine = effectiveSingle,
+        minLines = effectiveMin,
+        maxLines = effectiveMax,
+    )
+}
+
+data class LeziTextFieldLineMode(
+    val singleLine: Boolean,
+    val minLines: Int,
+    val maxLines: Int,
+)
+
+/**
  * Product text field — one outlined style with [LeziTypography] labels.
  * Material [OutlinedTextField] stays inside designsystem only.
+ *
+ * Prefer [singleLine] = true for form rows. Multi-line notes/diaries should pass
+ * [minLines] / [maxLines] > 1 (and may set [singleLine] = false explicitly);
+ * [leziTextFieldLineMode] forces multi-line whenever those bounds require it.
  */
 @Composable
 fun LeziTextField(
@@ -39,15 +76,16 @@ fun LeziTextField(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     colors: TextFieldColors = OutlinedTextFieldDefaults.colors(),
 ) {
+    val lines = leziTextFieldLineMode(singleLine, minLines, maxLines)
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         modifier = modifier,
         enabled = enabled,
         readOnly = readOnly,
-        singleLine = singleLine,
-        minLines = minLines,
-        maxLines = maxLines,
+        singleLine = lines.singleLine,
+        minLines = lines.minLines,
+        maxLines = lines.maxLines,
         isError = isError,
         label = label,
         placeholder = placeholder,

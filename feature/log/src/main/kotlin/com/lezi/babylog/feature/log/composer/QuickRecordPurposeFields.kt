@@ -688,6 +688,7 @@ private fun TextFields(
             ),
         label = { Text(if (draft.type == RecordType.DIARY) "日记正文" else "内容") },
         isError = bodyError,
+        singleLine = false,
         minLines = if (draft.type == RecordType.DIARY) 4 else 2,
         maxLines = 7,
         supportingText = { Text("${draft.body.length}/800") },
@@ -711,6 +712,7 @@ private fun SymptomFields(
         onValueChange = { onDraftChange(draft.copy(description = it.take(200))) },
         modifier = Modifier.fillMaxWidth(),
         label = { Text("情况描述（可选）") },
+        singleLine = false,
         minLines = 2,
     )
 }
@@ -777,7 +779,9 @@ private fun HospitalFields(
         value = draft.hospitalAdvice,
         onValueChange = { onDraftChange(draft.copy(hospitalAdvice = it.take(300))) },
         modifier = Modifier.fillMaxWidth(),
+        singleLine = false,
         label = { Text("医嘱（可选）") },
         minLines = 2,
+        maxLines = 6,
     )
 }

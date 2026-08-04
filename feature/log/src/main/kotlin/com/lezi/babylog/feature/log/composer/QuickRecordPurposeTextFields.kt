@@ -66,8 +66,10 @@ internal fun CustomTextFields(
         value = draft.customDetail,
         onValueChange = { onDraftChange(draft.copy(customDetail = it.take(200))) },
         modifier = Modifier.fillMaxWidth(),
+        singleLine = false,
         label = { Text("详情（可选）") },
         minLines = 2,
+        maxLines = 6,
     )
 }
 

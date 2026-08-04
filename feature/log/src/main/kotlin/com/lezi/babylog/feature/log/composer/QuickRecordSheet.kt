@@ -356,6 +356,7 @@ internal fun QuickRecordSheet(
                 label = { Text("备注（可选）") },
                 placeholder = { Text(notePlaceholder(draft.type)) },
                 isError = confirmChrome.focusField == ComposerInvalidField.Note,
+                singleLine = false,
                 minLines = 2,
                 maxLines = 4,
                 supportingText = { Text("${draft.note.length}/200") },

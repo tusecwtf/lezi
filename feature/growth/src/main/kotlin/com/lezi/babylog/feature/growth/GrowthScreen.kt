@@ -513,9 +513,11 @@ fun GrowthRoute(
                             vm.updateMeasurementDraft(activeDraft.copy(note = text.take(200)))
                         },
                         enabled = !busy,
+                        singleLine = false,
                         label = { Text("备注（可选）") },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 2,
+                        maxLines = 4,
                         supportingText = { Text("${activeDraft.note.length}/200") },
                     )
                     val measurement = Instant.ofEpochMilli(activeDraft.measuredAt).atZone(zone)
