@@ -57,12 +57,21 @@ class UiAuditPathContractTest {
             Regex("""(?<![A-Za-z])FilterChip\("""),
             // Bare Button( — not LeziPrimaryButton / LeziSecondaryButton / LeziTextButton
             Regex("""(?<![A-Za-z.])Button\("""),
+            Regex("""(?<![A-Za-z])OutlinedTextField\("""),
+            Regex("""(?<![A-Za-z])IconButton\("""),
+            Regex("""(?<![A-Za-z])DatePickerDialog\("""),
+            // Bare Switch( — not LeziSwitch
+            Regex("""(?<![A-Za-z.])Switch\("""),
         )
         val importBanned = listOf(
             "import androidx.compose.material3.TextButton",
             "import androidx.compose.material3.OutlinedButton",
             "import androidx.compose.material3.FilterChip",
             "import androidx.compose.material3.Button",
+            "import androidx.compose.material3.OutlinedTextField",
+            "import androidx.compose.material3.Switch",
+            "import androidx.compose.material3.IconButton",
+            "import androidx.compose.material3.DatePickerDialog",
         )
         val offenders = mutableListOf<String>()
         for (root in listOf("app/src/main", "feature", "core/ui/src/main")) {
@@ -100,6 +109,12 @@ class UiAuditPathContractTest {
             .contains("fun LeziFilterChip("))
         assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
             .contains("fun LeziIconButton("))
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/LeziFormControls.kt")
+            .contains("fun LeziTextField("))
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/LeziFormControls.kt")
+            .contains("fun LeziSwitch("))
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/LeziFormControls.kt")
+            .contains("fun LeziDatePickerDialog("))
     }
 
     @Test

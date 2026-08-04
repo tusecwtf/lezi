@@ -16,9 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
@@ -39,12 +37,14 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziDatePickerDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziSwitch
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.export.ExportPort
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -218,7 +218,7 @@ fun ExportRoute(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("PDF 包含记录图片", style = LeziTypography.Body)
-                Switch(
+                LeziSwitch(
                     checked = includePhotos,
                     onCheckedChange = { includePhotos = it },
                     enabled = !state.busy,
@@ -266,32 +266,23 @@ fun ExportRoute(
                 .toInstant()
                 .toEpochMilli(),
         )
-        DatePickerDialog(
+        LeziDatePickerDialog(
             onDismissRequest = { dateTarget = null },
-            confirmButton = {
-                LeziTextButton(
-                    label = "确定",
-                    onClick = {
-                        picker.selectedDateMillis?.let { millis ->
-                            val picked = Instant.ofEpochMilli(millis)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                            if (target == ExportDateTarget.From) {
-                                fromDate = picked
-                                if (toDate.isBefore(picked)) toDate = picked
-                            } else {
-                                toDate = picked
-                                if (fromDate.isAfter(picked)) fromDate = picked
-                            }
-                            inputError = null
-                        }
-                        dateTarget = null
-                    },
-                    tone = LeziTextButtonTone.Primary,
-                )
-            },
-            dismissButton = {
-                LeziTextButton(label = "取消", onClick = { dateTarget = null })
+            onConfirm = {
+                picker.selectedDateMillis?.let { millis ->
+                    val picked = Instant.ofEpochMilli(millis)
+                        .atZone(ZoneOffset.UTC)
+                        .toLocalDate()
+                    if (target == ExportDateTarget.From) {
+                        fromDate = picked
+                        if (toDate.isBefore(picked)) toDate = picked
+                    } else {
+                        toDate = picked
+                        if (fromDate.isAfter(picked)) fromDate = picked
+                    }
+                    inputError = null
+                }
+                dateTarget = null
             },
         ) {
             LeziDatePicker(state = picker)

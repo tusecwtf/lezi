@@ -25,9 +25,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -75,6 +73,8 @@ import com.lezi.babylog.designsystem.rememberDismissKeyboard
 import com.lezi.babylog.designsystem.rememberLocalPhoto
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziTextField
+import com.lezi.babylog.designsystem.LeziSwitch
 import java.time.Instant
 import java.time.ZoneId
 import com.lezi.babylog.feature.log.*
@@ -340,7 +340,7 @@ internal fun QuickRecordSheet(
             )
 
             LeziSectionLabel("备注")
-            OutlinedTextField(
+            LeziTextField(
                 value = draft.note,
                 onValueChange = { update(draft.copy(note = it.take(200))) },
                 modifier = Modifier
@@ -482,7 +482,7 @@ internal fun QuickRecordSheet(
                             style = LeziTypography.Meta,
                         )
                     }
-                    Switch(
+                    LeziSwitch(
                         checked = draft.projectToSystemCalendar,
                         onCheckedChange = { on ->
                             isDirty = true

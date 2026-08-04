@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -58,6 +57,7 @@ import com.lezi.babylog.designsystem.LeziStoolColorMark
 import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextField
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -674,7 +674,7 @@ private fun TextFields(
     fieldFocusRequester: FocusRequester? = null,
 ) {
     val bodyError = highlightedField == ComposerInvalidField.Body
-    OutlinedTextField(
+    LeziTextField(
         value = draft.body,
         onValueChange = { onDraftChange(draft.copy(body = it.take(800))) },
         modifier = Modifier
@@ -706,7 +706,7 @@ private fun SymptomFields(
         choices = listOf(1 to "轻微", 2 to "一般", 3 to "明显"),
         selected = draft.severity,
     ) { onDraftChange(draft.copy(severity = it)) }
-    OutlinedTextField(
+    LeziTextField(
         value = draft.description,
         onValueChange = { onDraftChange(draft.copy(description = it.take(200))) },
         modifier = Modifier.fillMaxWidth(),
@@ -723,7 +723,7 @@ private fun MedicineFields(
     fieldFocusRequester: FocusRequester? = null,
 ) {
     val nameError = highlightedField == ComposerInvalidField.MedicineName
-    OutlinedTextField(
+    LeziTextField(
         value = draft.medicineName,
         onValueChange = { onDraftChange(draft.copy(medicineName = it.take(50))) },
         modifier = Modifier
@@ -739,7 +739,7 @@ private fun MedicineFields(
         isError = nameError,
         singleLine = true,
     )
-    OutlinedTextField(
+    LeziTextField(
         value = draft.medicineDose,
         onValueChange = { onDraftChange(draft.copy(medicineDose = it.take(30))) },
         modifier = Modifier.fillMaxWidth(),
@@ -757,7 +757,7 @@ private fun HospitalFields(
     fieldFocusRequester: FocusRequester? = null,
 ) {
     val reasonError = highlightedField == ComposerInvalidField.HospitalReason
-    OutlinedTextField(
+    LeziTextField(
         value = draft.hospitalReason,
         onValueChange = { onDraftChange(draft.copy(hospitalReason = it.take(100))) },
         modifier = Modifier
@@ -773,7 +773,7 @@ private fun HospitalFields(
         isError = reasonError,
         singleLine = true,
     )
-    OutlinedTextField(
+    LeziTextField(
         value = draft.hospitalAdvice,
         onValueChange = { onDraftChange(draft.copy(hospitalAdvice = it.take(300))) },
         modifier = Modifier.fillMaxWidth(),

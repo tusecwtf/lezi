@@ -13,7 +13,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -33,6 +32,7 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SetupFamilyState
@@ -131,7 +131,7 @@ fun FamilyNetworkSettingsScreen(
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                LeziTextField(
                     value = ui.endpointDraft,
                     onValueChange = onEndpointDraftChange,
                     label = { Text("候选 HTTPS 地址") },
@@ -318,7 +318,7 @@ private fun CandidateLoginControls(
         return
     }
 
-    OutlinedTextField(
+    LeziTextField(
         value = deviceName,
         onValueChange = onDeviceNameChange,
         label = { Text("这台设备的称呼") },
@@ -336,7 +336,7 @@ private fun CandidateLoginControls(
         )
     } else {
         if (ui.pendingMember == null) {
-            OutlinedTextField(
+            LeziTextField(
                 value = displayName,
                 onValueChange = onDisplayNameChange,
                 label = { Text("家庭称呼") },
@@ -407,7 +407,7 @@ private fun DisasterRecoveryControls(
     }
 
     if (ui.recoveryStatus == "summary_ready") {
-        OutlinedTextField(
+        LeziTextField(
             value = ownerDisplayName,
             onValueChange = onOwnerDisplayNameChange,
             label = { Text("新管理员家庭称呼") },
@@ -415,7 +415,7 @@ private fun DisasterRecoveryControls(
             enabled = !ui.busy,
             modifier = Modifier.fillMaxWidth(),
         )
-        OutlinedTextField(
+        LeziTextField(
             value = deviceName,
             onValueChange = onDeviceNameChange,
             label = { Text("这台设备的称呼") },
@@ -461,7 +461,7 @@ private fun RecoveryRootPasswordField(
     onValueChange: (String) -> Unit,
     busy: Boolean,
 ) {
-    OutlinedTextField(
+    LeziTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text("新服务器管理员根密码") },

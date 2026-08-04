@@ -9,9 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -32,6 +30,8 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziTextField
+import com.lezi.babylog.designsystem.LeziSwitch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -207,7 +207,7 @@ internal fun TimeFields(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text("同时记醒来", style = LeziTypography.BodyStrong)
-                Switch(
+                LeziSwitch(
                     checked = recordWake,
                     onCheckedChange = { checked -> onToggleRecordWake?.invoke(checked) },
                     enabled = enabled,
@@ -408,7 +408,7 @@ internal fun IntegerField(
     focusRequester: FocusRequester? = null,
     onValueChange: (String) -> Unit,
 ) {
-    OutlinedTextField(
+    LeziTextField(
         value = value,
         onValueChange = { onValueChange(it.filter(Char::isDigit).take(4)) },
         modifier = modifier.then(
@@ -430,7 +430,7 @@ internal fun DecimalField(
     focusRequester: FocusRequester? = null,
     onValueChange: (String) -> Unit,
 ) {
-    OutlinedTextField(
+    LeziTextField(
         value = value,
         onValueChange = { candidate ->
             val filtered = candidate.filter { it.isDigit() || it == '.' }

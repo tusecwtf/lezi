@@ -45,7 +45,6 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -79,6 +78,7 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.readableContentColor
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziIconButton
 import com.lezi.babylog.core.ui.BabyAvatar
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -264,8 +264,8 @@ internal fun AppHeaderBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {
-            IconButton(onClick = onPreviousDate, modifier = Modifier.size(LeziSpacing.TopBarAction)) {
-                Icon(Icons.Filled.ChevronLeft, contentDescription = "前一天", tint = content)
+            LeziIconButton(onClick = onPreviousDate, contentDescription = "前一天", modifier = Modifier.size(LeziSpacing.TopBarAction)) {
+                Icon(Icons.Filled.ChevronLeft, contentDescription = null, tint = content)
             }
             Column(
                 modifier = Modifier
@@ -301,14 +301,10 @@ internal fun AppHeaderBar(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(
-                onClick = onNextDate,
-                enabled = canGoNext,
-                modifier = Modifier.size(LeziSpacing.TopBarAction),
-            ) {
+            LeziIconButton(onClick = onNextDate, contentDescription = "后一天", enabled = canGoNext, modifier = Modifier.size(LeziSpacing.TopBarAction)) {
                 Icon(
                     Icons.Filled.ChevronRight,
-                    contentDescription = "后一天",
+                    contentDescription = null,
                     tint = content.copy(alpha = if (canGoNext) 1f else LeziAlphas.Disabled),
                 )
             }
@@ -318,8 +314,8 @@ internal fun AppHeaderBar(
             modifier = Modifier.weight(1f),
             contentAlignment = Alignment.CenterEnd,
         ) {
-            IconButton(onClick = onSearch, modifier = Modifier.size(LeziSpacing.TopBarAction)) {
-                Icon(Icons.Outlined.Search, contentDescription = "搜索", tint = content)
+            LeziIconButton(onClick = onSearch, contentDescription = "搜索", modifier = Modifier.size(LeziSpacing.TopBarAction)) {
+                Icon(Icons.Outlined.Search, contentDescription = null, tint = content)
             }
         }
     }
@@ -495,22 +491,17 @@ internal fun HeaderCalendarDialog(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    IconButton(
-                        onClick = { onMonthChange(displayedMonth.minusMonths(1)) },
-                    ) {
-                        Icon(Icons.Filled.ChevronLeft, contentDescription = "上个月")
+                    LeziIconButton(onClick = { onMonthChange(displayedMonth.minusMonths(1)) }, contentDescription = "上个月") {
+                        Icon(Icons.Filled.ChevronLeft, contentDescription = null)
                     }
                     Text(
                         "${displayedMonth.year}年${displayedMonth.monthValue}月",
                         style = LeziTypography.TitleSm,
                     )
-                    IconButton(
-                        onClick = { onMonthChange(displayedMonth.plusMonths(1)) },
-                        enabled = displayedMonth < YearMonth.from(today),
-                    ) {
+                    LeziIconButton(onClick = { onMonthChange(displayedMonth.plusMonths(1)) }, contentDescription = "下个月", enabled = displayedMonth < YearMonth.from(today)) {
                         Icon(
                             Icons.Filled.ChevronRight,
-                            contentDescription = "下个月",
+                            contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurface.copy(
                                 alpha = if (displayedMonth < YearMonth.from(today)) {
                                     1f

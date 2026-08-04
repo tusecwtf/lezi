@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -47,6 +46,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziDatePickerDialog
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
@@ -466,18 +466,13 @@ fun OnboardingRoute(
     if (showDate) {
         val initialMillis = birthday.toDatePickerMillis()
         val state = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
-        DatePickerDialog(
+        LeziDatePickerDialog(
             onDismissRequest = { showDate = false },
-            confirmButton = {
-                LeziTextButton(label = "确定", onClick = {
-                        state.selectedDateMillis?.let { ms ->
-                            birthday = ms.datePickerMillisToEpochDay()
-                        }
-                        showDate = false
-                    }, tone = LeziTextButtonTone.Primary)
-            },
-            dismissButton = {
-                LeziTextButton(label = "取消", onClick = { showDate = false })
+            onConfirm = {
+                state.selectedDateMillis?.let { ms ->
+                    birthday = ms.datePickerMillisToEpochDay()
+                }
+                showDate = false
             },
         ) {
             LeziDatePicker(state = state)

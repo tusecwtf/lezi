@@ -18,10 +18,7 @@ import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -43,6 +40,9 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziFilterChip
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextField
+import com.lezi.babylog.designsystem.LeziSwitch
+import com.lezi.babylog.designsystem.LeziIconButton
 
 /** Minimal row for the shared custom-definition manage surface. */
 data class CustomItemManageRow(
@@ -288,54 +288,58 @@ fun CustomItemManageDialog(
                             if (manageable) {
                                 Row {
                                     if (showReorder) {
-                                        IconButton(
-                                            enabled = !externalBusy && index > 0,
+                                        LeziIconButton(
                                             onClick = { onMove(item.id, -1) },
+                                            contentDescription = "上移${item.name}",
+                                            enabled = !externalBusy && index > 0,
                                             modifier = Modifier.size(LeziSpacing.Touch),
                                         ) {
                                             Icon(
                                                 Icons.Outlined.KeyboardArrowUp,
-                                                contentDescription = "上移${item.name}",
+                                                contentDescription = null,
                                             )
                                         }
-                                        IconButton(
-                                            enabled = !externalBusy && index < items.lastIndex,
+                                        LeziIconButton(
                                             onClick = { onMove(item.id, 1) },
+                                            contentDescription = "下移${item.name}",
+                                            enabled = !externalBusy && index < items.lastIndex,
                                             modifier = Modifier.size(LeziSpacing.Touch),
                                         ) {
                                             Icon(
                                                 Icons.Outlined.KeyboardArrowDown,
-                                                contentDescription = "下移${item.name}",
+                                                contentDescription = null,
                                             )
                                         }
                                     }
-                                    IconButton(
-                                        enabled = !externalBusy,
+                                    LeziIconButton(
                                         onClick = {
                                             editingId = item.id
                                             name = item.name
                                             iconSlot = item.iconSlot
                                             error = null
                                         },
+                                        contentDescription = "编辑${item.name}",
+                                        enabled = !externalBusy,
                                         modifier = Modifier.size(LeziSpacing.Touch),
                                     ) {
                                         Icon(
                                             Icons.Outlined.Edit,
-                                            contentDescription = "编辑${item.name}",
+                                            contentDescription = null,
                                         )
                                     }
-                                    IconButton(
-                                        enabled = !externalBusy,
+                                    LeziIconButton(
                                         onClick = {
                                             dispatchDelete(CustomItemDeleteAction.Request(item))
                                         },
+                                        contentDescription = "删除${item.name}",
+                                        enabled = !externalBusy,
                                         modifier = Modifier
                                             .size(LeziSpacing.Touch)
                                             .testTag("custom_item_delete_${item.id}"),
                                     ) {
                                         Icon(
                                             Icons.Outlined.Delete,
-                                            contentDescription = "删除${item.name}",
+                                            contentDescription = null,
                                             tint = MaterialTheme.colorScheme.error,
                                         )
                                     }
@@ -352,7 +356,7 @@ fun CustomItemManageDialog(
                                     if (locallyHidden) "本机显示：关" else "本机显示：开",
                                     style = LeziTypography.Label,
                                 )
-                                Switch(
+                                LeziSwitch(
                                     enabled = !externalBusy,
                                     checked = !locallyHidden,
                                     onCheckedChange = { onToggleLocalHidden(item.id) },
@@ -361,7 +365,7 @@ fun CustomItemManageDialog(
                         }
                     }
                 }
-                OutlinedTextField(
+                LeziTextField(
                     enabled = !externalBusy,
                     value = name,
                     onValueChange = {

@@ -45,7 +45,6 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -95,6 +94,7 @@ import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziFilterChip
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziSwitch
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
@@ -865,7 +865,7 @@ fun SettingsRoute(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("显示日均睡眠")
-                        Switch(
+                        LeziSwitch(
                             checked = ui.showAvgSleep,
                             onCheckedChange = vm::setShowAvgSleep,
                         )
@@ -876,7 +876,7 @@ fun SettingsRoute(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("周汇总对比上周")
-                        Switch(
+                        LeziSwitch(
                             checked = ui.comparePrevWeek,
                             onCheckedChange = vm::setComparePrevWeek,
                         )

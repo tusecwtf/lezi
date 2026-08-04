@@ -13,9 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,6 +40,8 @@ import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.LeziTextField
+import com.lezi.babylog.designsystem.LeziIconButton
 import com.lezi.babylog.domain.carelog.formatClock
 import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -163,7 +163,7 @@ fun SearchRoute(
                 .padding(LeziSpacing.Page)
                 .dismissKeyboardOnTap(),
         ) {
-            OutlinedTextField(
+            LeziTextField(
                 value = ui.query,
                 onValueChange = vm::onQuery,
                 modifier = Modifier.fillMaxWidth(),
@@ -175,8 +175,8 @@ fun SearchRoute(
                 },
                 trailingIcon = if (ui.query.isNotEmpty()) {
                     {
-                        IconButton(onClick = { vm.onQuery("") }) {
-                            Icon(Icons.Outlined.Close, contentDescription = "清除搜索")
+                        LeziIconButton(onClick = { vm.onQuery("") }, contentDescription = "清除搜索") {
+                            Icon(Icons.Outlined.Close, contentDescription = null)
                         }
                     }
                 } else {

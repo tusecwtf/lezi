@@ -11,7 +11,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -22,6 +21,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziSwitch
 
 /**
  * Single-page 记录设置: 分项目 + 护理计划/日历 in one dialog.
@@ -106,7 +106,7 @@ internal fun PerItemSettingsBody(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text("喂奶计时入口")
-        Switch(checked = settings.timerEnabled, onCheckedChange = onTimerEnabled)
+        LeziSwitch(checked = settings.timerEnabled, onCheckedChange = onTimerEnabled)
     }
     Text("记录时刻", style = LeziTypography.Meta)
     FlowRow(
@@ -149,7 +149,7 @@ internal fun PerItemSettingsBody(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(
+        LeziSwitch(
             checked = settings.infantFeverAdviceEnabled,
             onCheckedChange = onFeverAdvice,
         )
@@ -181,7 +181,7 @@ internal fun PlanCalendarSettingsBody(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Switch(
+        LeziSwitch(
             checked = carePlanRemindersEnabled,
             onCheckedChange = onCarePlanRemindersEnabled,
         )

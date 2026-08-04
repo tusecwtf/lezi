@@ -5,9 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
@@ -16,12 +14,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziDatePickerDialog
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziFilterChip
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziTextField
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -52,7 +52,7 @@ fun BabyProfileFormFields(
         modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
-        OutlinedTextField(
+        LeziTextField(
             value = nickname,
             enabled = enabled,
             onValueChange = { onNicknameChange(limitBabyNicknameInput(it)) },
@@ -85,7 +85,7 @@ fun BabyProfileFormFields(
             enabled = enabled,
             modifier = Modifier.fillMaxWidth(),
         )
-        OutlinedTextField(
+        LeziTextField(
             value = weightText,
             enabled = enabled,
             onValueChange = { onWeightTextChange(it.filter { ch -> ch.isDigit() || ch == '.' }) },
@@ -112,27 +112,18 @@ fun BabyBirthdayDatePickerDialog(
         .toInstant()
         .toEpochMilli()
     val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-    DatePickerDialog(
+    LeziDatePickerDialog(
         onDismissRequest = onDismiss,
-        confirmButton = {
-            LeziTextButton(
-                label = "确定",
-                onClick = {
-                    dateState.selectedDateMillis?.let { ms ->
-                        onSelect(
-                            Instant.ofEpochMilli(ms)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                                .toEpochDay(),
-                        )
-                    }
-                    onDismiss()
-                },
-                tone = LeziTextButtonTone.Primary,
-            )
-        },
-        dismissButton = {
-            LeziTextButton(label = "取消", onClick = onDismiss)
+        onConfirm = {
+            dateState.selectedDateMillis?.let { ms ->
+                onSelect(
+                    Instant.ofEpochMilli(ms)
+                        .atZone(ZoneOffset.UTC)
+                        .toLocalDate()
+                        .toEpochDay(),
+                )
+            }
+            onDismiss()
         },
     ) {
         LeziDatePicker(state = dateState)

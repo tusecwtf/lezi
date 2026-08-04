@@ -14,7 +14,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,6 +42,7 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
@@ -102,7 +102,7 @@ internal fun FamilyEndpointConnectionDialog(
                     Text("已固定的服务器公钥与当前连接不一致。为保护登录凭证，连接已停止。")
                 } else if (ready == null) {
                     Text("请输入部署乐记家庭后台的完整 HTTPS 地址")
-                    OutlinedTextField(
+                    LeziTextField(
                         value = endpointDraft,
                         onValueChange = onEndpointDraftChange,
                         enabled = !probing,
@@ -298,7 +298,7 @@ internal fun OwnerLoginDialog(
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text("登录会新增一台管理员设备，已有管理员设备不会退出。")
-                OutlinedTextField(
+                LeziTextField(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
                     label = { Text("设备称呼") },
@@ -308,7 +308,7 @@ internal fun OwnerLoginDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                LeziTextField(
                     value = rootPassword,
                     onValueChange = onRootPasswordChange,
                     label = { Text("管理员根密码") },
@@ -381,7 +381,7 @@ internal fun MemberLoginRequestDialog(
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                OutlinedTextField(
+                LeziTextField(
                     value = displayName,
                     onValueChange = onDisplayNameChange,
                     label = { Text("我的家庭称呼") },
@@ -393,7 +393,7 @@ internal fun MemberLoginRequestDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                LeziTextField(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
                     label = { Text("这台设备的名称") },
@@ -508,7 +508,7 @@ internal fun CreateFamilyDialog(
                     )
                 }
                 FamilyScopeRow("称呼", "家庭身份", "必填自由文本，不是关系芯片")
-                OutlinedTextField(
+                LeziTextField(
                     value = displayName,
                     onValueChange = onDisplayNameChange,
                     label = { Text("我是宝宝的？") },
@@ -522,7 +522,7 @@ internal fun CreateFamilyDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 FamilyScopeRow("家庭", "共享家庭名", "必填")
-                OutlinedTextField(
+                LeziTextField(
                     value = familyName,
                     onValueChange = onFamilyNameChange,
                     label = { Text("家庭名") },
@@ -535,7 +535,7 @@ internal fun CreateFamilyDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                LeziTextField(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
                     label = { Text("设备称呼") },
@@ -546,7 +546,7 @@ internal fun CreateFamilyDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 FamilyScopeRow("一次", "服务器初始化", "根密码仅用于本次建家")
-                OutlinedTextField(
+                LeziTextField(
                     value = bootstrapSecret,
                     onValueChange = onBootstrapSecretChange,
                     label = { Text("管理员根密码") },

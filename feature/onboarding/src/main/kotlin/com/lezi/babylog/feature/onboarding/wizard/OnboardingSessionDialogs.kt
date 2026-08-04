@@ -10,7 +10,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -24,6 +23,7 @@ import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.sync.PendingMemberLogin
 
@@ -78,7 +78,7 @@ internal fun OnboardingOwnerLoginDialog(
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text("登录会新增一台管理员设备，已有管理员设备不会退出。")
-                OutlinedTextField(
+                LeziTextField(
                     value = ownerDeviceName,
                     onValueChange = onOwnerDeviceNameChange,
                     label = { Text("设备称呼") },
@@ -86,7 +86,7 @@ internal fun OnboardingOwnerLoginDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                LeziTextField(
                     value = ownerRootPassword,
                     onValueChange = onOwnerRootPasswordChange,
                     label = { Text("管理员根密码") },
@@ -156,7 +156,7 @@ internal fun OnboardingMemberJoinDialog(
                     .imePadding(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                OutlinedTextField(
+                LeziTextField(
                     value = joinDisplayName,
                     onValueChange = onJoinDisplayNameChange,
                     label = { Text("我的家庭称呼") },
@@ -168,7 +168,7 @@ internal fun OnboardingMemberJoinDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                LeziTextField(
                     value = memberDeviceName,
                     onValueChange = onMemberDeviceNameChange,
                     label = { Text("这台设备的名称") },

@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,6 +47,7 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziConfirmAppearance
 import com.lezi.babylog.designsystem.reduceLeziConfirmChrome
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.core.model.RecordTime
 import java.time.Instant
 import java.time.ZoneId
@@ -182,7 +182,7 @@ internal fun NursingCompletionSheet(
             }
 
             LeziSectionLabel("备注")
-            OutlinedTextField(
+            LeziTextField(
                 value = draft.note,
                 onValueChange = { update(draft.copy(note = it.take(200))) },
                 modifier = Modifier.fillMaxWidth(),

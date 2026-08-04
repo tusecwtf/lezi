@@ -21,7 +21,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -44,6 +43,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziIconButton
 import com.lezi.babylog.feature.family.components.canRemoveFamilyMember
 import com.lezi.babylog.feature.family.components.familyMemberDisplayName
 import com.lezi.babylog.feature.family.components.familyMemberSummary
@@ -111,13 +111,10 @@ internal fun FamilyMembersListSheet(
                 }
                 Box {
                     var manageMenuOpen by remember { mutableStateOf(false) }
-                    IconButton(
-                        onClick = { manageMenuOpen = true },
-                        modifier = Modifier.testTag("members_manage_menu"),
-                    ) {
+                    LeziIconButton(onClick = { manageMenuOpen = true }, contentDescription = "管理家庭成员与设备", modifier = Modifier.testTag("members_manage_menu")) {
                         Icon(
                             Icons.Default.MoreVert,
-                            contentDescription = "管理家庭成员与设备",
+                            contentDescription = null,
                         )
                     }
                     DropdownMenu(
@@ -630,13 +627,10 @@ private fun FamilyRowOverflowMenu(
     if (actions.isEmpty()) return
     Box {
         var menuOpen by remember { mutableStateOf(false) }
-        IconButton(
-            onClick = { menuOpen = true },
-            modifier = Modifier.testTag(menuTestTag),
-        ) {
+        LeziIconButton(onClick = { menuOpen = true }, contentDescription = contentDescription, modifier = Modifier.testTag(menuTestTag)) {
             Icon(
                 Icons.Default.MoreVert,
-                contentDescription = contentDescription,
+                contentDescription = null,
             )
         }
         DropdownMenu(

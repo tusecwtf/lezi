@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,6 +26,7 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziFilterChip
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.timeline.*
 import com.lezi.babylog.feature.log.dock.*
@@ -41,7 +41,7 @@ internal fun CustomTextFields(
     fieldFocusRequester: FocusRequester? = null,
 ) {
     val titleError = highlightedField == ComposerInvalidField.CustomTitle
-    OutlinedTextField(
+    LeziTextField(
         value = draft.customTitle,
         onValueChange = { onDraftChange(draft.copy(customTitle = it.take(30))) },
         modifier = Modifier
@@ -62,7 +62,7 @@ internal fun CustomTextFields(
         singleLine = true,
         // Snapshot title remains editable; the concrete definition identity stays fixed.
     )
-    OutlinedTextField(
+    LeziTextField(
         value = draft.customDetail,
         onValueChange = { onDraftChange(draft.copy(customDetail = it.take(200))) },
         modifier = Modifier.fillMaxWidth(),
@@ -108,7 +108,7 @@ internal fun FoodFields(
             },
         )
     }
-    OutlinedTextField(
+    LeziTextField(
         value = draft.foodContent,
         onValueChange = { onDraftChange(draft.copy(foodContent = it.take(80))) },
         modifier = Modifier
@@ -125,7 +125,7 @@ internal fun FoodFields(
         isError = contentError,
         singleLine = true,
     )
-    OutlinedTextField(
+    LeziTextField(
         value = draft.foodAmount,
         onValueChange = { onDraftChange(draft.copy(foodAmount = it.take(30))) },
         modifier = Modifier.fillMaxWidth(),
@@ -208,7 +208,7 @@ internal fun VaccineFields(
     fieldFocusRequester: FocusRequester? = null,
 ) {
     val nameError = highlightedField == ComposerInvalidField.VaccineName
-    OutlinedTextField(
+    LeziTextField(
         value = draft.vaccineName,
         onValueChange = { onDraftChange(draft.copy(vaccineName = it.take(80))) },
         modifier = Modifier
@@ -224,7 +224,7 @@ internal fun VaccineFields(
         isError = nameError,
         singleLine = true,
     )
-    OutlinedTextField(
+    LeziTextField(
         value = draft.vaccineBatch,
         onValueChange = { onDraftChange(draft.copy(vaccineBatch = it.take(50))) },
         modifier = Modifier.fillMaxWidth(),

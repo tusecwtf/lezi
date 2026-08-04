@@ -13,7 +13,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,6 +37,7 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.feature.family.components.FamilyDestructiveAction
 import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
@@ -64,7 +64,7 @@ internal fun RenameFamilyDialog(
                 modifier = Modifier.dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                OutlinedTextField(
+                LeziTextField(
                     value = familyName,
                     onValueChange = onFamilyNameChange,
                     label = { Text("共享家庭名") },
@@ -112,7 +112,7 @@ internal fun EditMyDisplayNameDialog(
                 modifier = Modifier.dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                OutlinedTextField(
+                LeziTextField(
                     value = displayName,
                     onValueChange = onDisplayNameChange,
                     label = { Text(fieldLabel) },
@@ -331,7 +331,7 @@ internal fun DeleteFamilyDialog(
                     Text(
                         "请输入完整家庭名「$expectedFamilyName」以确认删除。",
                     )
-                    OutlinedTextField(
+                    LeziTextField(
                         enabled = !deleting,
                         value = familyNameInput,
                         onValueChange = onFamilyNameInputChange,
@@ -341,7 +341,7 @@ internal fun DeleteFamilyDialog(
                             familyNameInput.trim() != expectedFamilyName.trim(),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    LeziTextField(
                         enabled = !deleting,
                         value = rootPassword,
                         onValueChange = onRootPasswordChange,

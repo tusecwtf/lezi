@@ -25,12 +25,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDatePickerState
@@ -69,6 +67,7 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziDatePickerDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziRangeTabs
 import com.lezi.babylog.designsystem.LeziTextButtonTone
@@ -82,6 +81,7 @@ import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.growth.GrowthMeasurementLifecycle
 import com.lezi.babylog.domain.growth.ObserveGrowthMeasurements
@@ -493,7 +493,7 @@ fun GrowthRoute(
                         .dismissKeyboardOnTap(),
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
-                    OutlinedTextField(
+                    LeziTextField(
                         value = activeDraft.valueText,
                         onValueChange = { text ->
                             vm.updateMeasurementDraft(activeDraft.copy(valueText = text))
@@ -507,7 +507,7 @@ fun GrowthRoute(
                             { Text(error) }
                         },
                     )
-                    OutlinedTextField(
+                    LeziTextField(
                         value = activeDraft.note,
                         onValueChange = { text ->
                             vm.updateMeasurementDraft(activeDraft.copy(note = text.take(200)))
@@ -633,58 +633,51 @@ fun GrowthRoute(
             .toInstant()
             .toEpochMilli()
         val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-        DatePickerDialog(
+        LeziDatePickerDialog(
             onDismissRequest = { if (!busy) showMeasureDate = false },
-            confirmButton = {
-                LeziTextButton(
-                    label = "确定",
-                    enabled = !busy,
-                    onClick = {
-                        dateState.selectedDateMillis?.let { millis ->
-                            val selectedDate = Instant.ofEpochMilli(millis)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                            val dateDecision = RecordTime.selectDate(
-                                selectedDate = selectedDate,
-                                zone = zone,
+            onConfirm = {
+                if (busy) return@LeziDatePickerDialog
+                dateState.selectedDateMillis?.let { millis ->
+                    val selectedDate = Instant.ofEpochMilli(millis)
+                        .atZone(ZoneOffset.UTC)
+                        .toLocalDate()
+                    val dateDecision = RecordTime.selectDate(
+                        selectedDate = selectedDate,
+                        zone = zone,
+                    )
+                    val decision = RecordTime.merge(
+                        value = current,
+                        date = dateDecision.date,
+                        hour = current.hour,
+                        minute = current.minute,
+                        step = 1,
+                    )
+                    when (decision) {
+                        RecordTimeDecision.RejectedGap -> {
+                            vm.reportMeasurementMessage(
+                                "所选日期不存在当前时刻，请改用其他时刻",
                             )
-                            val decision = RecordTime.merge(
-                                value = current,
-                                date = dateDecision.date,
-                                hour = current.hour,
-                                minute = current.minute,
-                                step = 1,
-                            )
-                            when (decision) {
-                                RecordTimeDecision.RejectedGap -> {
-                                    vm.reportMeasurementMessage(
-                                        "所选日期不存在当前时刻，请改用其他时刻",
-                                    )
-                                }
-                                is RecordTimeDecision.Accepted -> {
-                                    vm.updateMeasurementDraft(
-                                        draftForPickers.copy(
-                                            measuredAt = decision.value.toInstant().toEpochMilli(),
-                                        ),
-                                    )
-                                    vm.reportMeasurementMessage(
-                                        if (dateDecision is RecordDateDecision.ClampedToToday) {
-                                            "测量日期不能晚于今天，已保留为今天"
-                                        } else {
-                                            null
-                                        },
-                                    )
-                                }
-                            }
                         }
-                        showMeasureDate = false
-                    },
-                    tone = LeziTextButtonTone.Primary,
-                )
+                        is RecordTimeDecision.Accepted -> {
+                            vm.updateMeasurementDraft(
+                                draftForPickers.copy(
+                                    measuredAt = decision.value.toInstant().toEpochMilli(),
+                                ),
+                            )
+                            vm.reportMeasurementMessage(
+                                if (dateDecision is RecordDateDecision.ClampedToToday) {
+                                    "测量日期不能晚于今天，已保留为今天"
+                                } else {
+                                    null
+                                },
+                            )
+                        }
+                    }
+                }
+                showMeasureDate = false
             },
-            dismissButton = {
-                LeziTextButton(label = "取消", onClick = { showMeasureDate = false }, enabled = !busy)
-            },
+            confirmEnabled = !busy,
+            dismissEnabled = !busy,
         ) {
             LeziDatePicker(state = dateState)
         }

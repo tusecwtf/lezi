@@ -21,8 +21,6 @@ import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -48,6 +46,8 @@ import com.lezi.babylog.designsystem.normalizeBabyThemeArgb
 import com.lezi.babylog.designsystem.LeziFilterChip
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziTextField
+import com.lezi.babylog.designsystem.leziReadOnlyTextFieldColors
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.onboarding.OnboardingCreateBabySource
@@ -159,7 +159,7 @@ internal fun OnboardingConnectServerStep(
         }
         ConnectServerPrimary.Connect -> {
             Text("请输入部署乐记家庭后台的完整 HTTPS 地址")
-            OutlinedTextField(
+            LeziTextField(
                 value = endpointDraft,
                 onValueChange = onEndpointDraftChange,
                 enabled = !familyWizardBusy,
@@ -214,14 +214,14 @@ internal fun OnboardingCreateFamilyStep(
         verifiedOrigin ?: "尚未确认家庭服务器，请返回重新连接",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    OutlinedTextField(
+    LeziTextField(
         value = createFamilyName,
         onValueChange = onCreateFamilyNameChange,
         label = { Text("家庭名") },
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )
-    OutlinedTextField(
+    LeziTextField(
         value = createDisplayName,
         onValueChange = onCreateDisplayNameChange,
         label = { Text("我的称呼") },
@@ -229,7 +229,7 @@ internal fun OnboardingCreateFamilyStep(
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )
-    OutlinedTextField(
+    LeziTextField(
         value = createDeviceName,
         onValueChange = onCreateDeviceNameChange,
         label = { Text("设备称呼") },
@@ -237,7 +237,7 @@ internal fun OnboardingCreateFamilyStep(
         singleLine = true,
         modifier = Modifier.fillMaxWidth(),
     )
-    OutlinedTextField(
+    LeziTextField(
         value = bootstrapSecret,
         onValueChange = onBootstrapSecretChange,
         label = { Text("管理员根密码") },
@@ -284,7 +284,7 @@ internal fun OnboardingCreateBabyStep(
         style = LeziTypography.Body,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    OutlinedTextField(
+    LeziTextField(
         value = name,
         onValueChange = onNameChange,
         label = { Text("宝宝昵称") },
@@ -301,22 +301,18 @@ internal fun OnboardingCreateBabyStep(
                 LeziFilterChip(selected = sex == value, onClick = { onSexChange(value) }, label = label)
             }
     }
-    OutlinedTextField(
+    LeziTextField(
         value = dateLabel,
         onValueChange = {},
         enabled = false,
         label = { Text("生日") },
         singleLine = true,
-        colors = OutlinedTextFieldDefaults.colors(
-            disabledTextColor = MaterialTheme.colorScheme.onSurface,
-            disabledBorderColor = MaterialTheme.colorScheme.outline,
-            disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-        ),
+        colors = leziReadOnlyTextFieldColors(),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onShowDate),
     )
-    OutlinedTextField(
+    LeziTextField(
         value = weightText,
         onValueChange = { onWeightTextChange(it.filter { ch -> ch.isDigit() }) },
         label = { Text("出生体重（克，可选）") },
