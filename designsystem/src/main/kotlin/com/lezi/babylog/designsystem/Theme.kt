@@ -413,4 +413,11 @@ object LeziThemeExt {
     /** Outer corner for swipe action strips (journal flat rows → 0). */
     val swipeActionCorner: Dp
         @Composable get() = if (isJournal) 0.dp else 8.dp
+
+    /**
+     * Template structural density (warm open / journal compact).
+     * Prefer this over messaging [LeziDensity.forStyle] through [visualStyle].
+     */
+    val density: LeziDensityScale
+        @Composable get() = LeziDensity.forStyle(visualStyle)
 }

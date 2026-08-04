@@ -58,8 +58,35 @@
 | **触控** | 常规 ≥48dp；计时器按钮显著更大 |
 | **媒体** | 照片统一压缩（建议长边约 1200～2000px，一档即可） |
 | **字体** | 顶栏昵称/日龄强调；时刻中等；相对时间次级灰字；汇总数字突出 |
+| **动效** | 主转场应迁到 `LeziMotion` 三档（见 §2.1.1）；迁移完成前允许既有毫秒字面量，**新**主路径优先 token |
+| **结构密度** | 结构角色以 `LeziDensity` 为准（warm 更开敞 / journal 更紧凑，见 §2.1.1）；高优先面逐步替换，既有 `LeziSpacing` 结构值仍可用直至迁移 |
 
 品牌色板自定（建议一组柔和、夜喂不刺眼的主题色 8～12 色，**全部免费可用**）。
+
+#### 2.1.1 动效时长与模板结构密度
+
+共享 token 在 `designsystem` 的 `LeziMotion` / `LeziDensity`（`Tokens.kt`）与 `design/tokens.json` 的 `motion` / `density` 快照，与既有 `LeziSpacing` **并列**；旧间距 token 可继续使用，高优先结构面逐步迁到密度表（记录面 06+，shell 动效 10）。
+
+**动效（`LeziMotion`，单位 ms）** — 词汇表供主导航淡入淡出、布局编辑、引导步进、内容交叉淡入、区间 Tab 反馈、主计时控件颜色反馈等主转场；接线完成前既有 `tween(durationMillis=…)` 字面量仍合法：
+
+| 档位 | 常量 | 时长 | 用途 |
+|------|------|------|------|
+| Fast | `LeziMotion.Fast` | 150 | 微反馈、短退出 |
+| Base | `LeziMotion.Base` | 200 | 默认进入/退出与内容交叉淡入 |
+| Emphasized | `LeziMotion.Emphasized` | 300 | 较大结构转场（布局编辑、多步） |
+
+系统「减少动态效果」开启时，非必要转场缩短或瞬时；必要状态变化仍须可读（具体接线见 shell motion 专项 / 票 10）。
+
+**结构密度（`LeziDensity`，4/8 网格；垫值引用 `LeziSpacing` Xs/Sm/Md）** — 同一结构角色 warm 更开敞、journal 更紧凑；触控下限仍为 `LeziSpacing.Touch`（48dp），密度表不缩小可点热区。`LeziSpacing.CardPad` / `TopBarHorizontal` / `SectionGap` 为单模板遗留值，结构角色迁移后以密度表为准：
+
+| 结构角色 | Warm（开敞） | Journal（紧凑） | 网格步 |
+|----------|--------------|-----------------|--------|
+| 卡片内边距 `cardPad` | 16 (`Md`) | 12 (`Sm`) | 4/8 |
+| 顶栏水平 inset `topBarHorizontal` | 12 (`Sm`) | 8 (`Xs`) | 4/8 |
+| 分区间距 `sectionGap` | 16 (`Md`) | 8 (`Xs`) | 4/8 |
+| 面板内容 pad `panelContent` | 16 (`Md`) | 8 (`Xs`) | 4/8 |
+
+Compose 消费优先 `LeziThemeExt.density`（或 `LeziDensity.forStyle`）。高优先消费面：顶栏、三日本地日时间条 chrome、汇总图卡、确认面板与快捷记录坞结构间隙。
 
 ### 2.2 单手操作契约
 

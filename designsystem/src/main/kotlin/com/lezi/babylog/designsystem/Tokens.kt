@@ -95,14 +95,91 @@ object LeziSpacing {
     val Touch: Dp = 48.dp
     val Nav: Dp = 76.dp
     val Page: Dp = 16.dp
+    /**
+     * Legacy single-template card pad (off-grid 14).
+     * For structural density roles prefer [LeziDensity.forStyle] / [LeziThemeExt.density]
+     * (`cardPad`); keep this value until migration tickets rewire call sites.
+     */
     val CardPad: Dp = 14.dp
+    /**
+     * Legacy single-template section gap.
+     * For structural density roles prefer [LeziDensity.forStyle] / [LeziThemeExt.density]
+     * (`sectionGap`); keep this value until migration tickets rewire call sites.
+     */
     val SectionGap: Dp = 12.dp
     val TopBarHeight: Dp = 68.dp
+    /**
+     * Legacy single-template top-bar horizontal inset (off-grid 10).
+     * For structural density roles prefer [LeziDensity.forStyle] / [LeziThemeExt.density]
+     * (`topBarHorizontal`); keep this value until migration tickets rewire call sites.
+     */
     val TopBarHorizontal: Dp = 10.dp
     val TopBarAvatar: Dp = 34.dp
     val TopBarAction: Dp = 48.dp
     /** Unified max height for scrolling dialog content (was ad-hoc 420/480/520). */
     val DialogContentMax: Dp = 480.dp
+}
+
+/**
+ * Shared motion durations in **milliseconds** for [androidx.compose.animation.core.tween]
+ * `durationMillis` (and equivalent APIs). Main-transition vocabulary for:
+ * nav host fades, layout-edit, wizard steps, content crossfades, range-tab feedback,
+ * primary timer control color feedback, and similar shell motion.
+ * Prefer these on those paths; existing ad-hoc ms literals remain until shell-motion
+ * migration (ticket 10) rewires call sites.
+ *
+ * - [Fast]: micro feedback and short exits
+ * - [Base]: default enter/exit and content crossfades
+ * - [Emphasized]: larger structural transitions (layout-edit, multi-step)
+ */
+@Immutable
+object LeziMotion {
+    /** Milliseconds. */
+    const val Fast: Int = 150
+    /** Milliseconds. */
+    const val Base: Int = 200
+    /** Milliseconds. */
+    const val Emphasized: Int = 300
+}
+
+/**
+ * Template-specific structural density on the 4/8 grid ([LeziSpacing] steps).
+ * Warm is more open; journal is more compact for the same roles.
+ * Authority for card pad, top-bar horizontal inset, section gap, and panel content
+ * pad once call sites migrate; [LeziSpacing.CardPad] / [LeziSpacing.TopBarHorizontal] /
+ * [LeziSpacing.SectionGap] remain as legacy single-template values until then.
+ * Compose consumers should prefer [LeziThemeExt.density]. Touch minimum stays
+ * [LeziSpacing.Touch].
+ */
+@Immutable
+data class LeziDensityScale(
+    val cardPad: Dp,
+    val topBarHorizontal: Dp,
+    val sectionGap: Dp,
+    val panelContent: Dp,
+)
+
+@Immutable
+object LeziDensity {
+    /** Open warm scale — structural pads use [LeziSpacing] Md/Sm steps. */
+    val Warm = LeziDensityScale(
+        cardPad = LeziSpacing.Md,
+        topBarHorizontal = LeziSpacing.Sm,
+        sectionGap = LeziSpacing.Md,
+        panelContent = LeziSpacing.Md,
+    )
+    /** Compact journal scale — structural pads use [LeziSpacing] Sm/Xs steps. */
+    val Journal = LeziDensityScale(
+        cardPad = LeziSpacing.Sm,
+        topBarHorizontal = LeziSpacing.Xs,
+        sectionGap = LeziSpacing.Xs,
+        panelContent = LeziSpacing.Xs,
+    )
+
+    fun forStyle(style: LeziVisualStyle): LeziDensityScale = when (style) {
+        LeziVisualStyle.Warm -> Warm
+        LeziVisualStyle.Journal -> Journal
+    }
 }
 
 /**

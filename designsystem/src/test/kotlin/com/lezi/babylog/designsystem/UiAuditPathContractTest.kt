@@ -214,6 +214,35 @@ class UiAuditPathContractTest {
         assertTrue(source.contains("确认删除"))
     }
 
+    @Test
+    fun `motion and density token symbols remain on the audit path`() {
+        // Symbol presence only — exact values live in MotionDensityTokensTest.
+        val tokens = read(
+            "designsystem/src/main/kotlin/com/lezi/babylog/designsystem/Tokens.kt",
+        )
+        val theme = read(
+            "designsystem/src/main/kotlin/com/lezi/babylog/designsystem/Theme.kt",
+        )
+        assertTrue("LeziMotion Fast tier", tokens.contains("object LeziMotion"))
+        assertTrue(tokens.contains("const val Fast: Int = "))
+        assertTrue(tokens.contains("const val Base: Int = "))
+        assertTrue(tokens.contains("const val Emphasized: Int = "))
+        assertTrue("LeziDensity tables", tokens.contains("object LeziDensity"))
+        assertTrue(tokens.contains("data class LeziDensityScale"))
+        assertTrue(tokens.contains("val Warm = LeziDensityScale("))
+        assertTrue(tokens.contains("val Journal = LeziDensityScale("))
+        assertTrue(tokens.contains("fun forStyle(style: LeziVisualStyle)"))
+        assertTrue(
+            "legacy structural spacing must point agents at LeziDensity",
+            tokens.contains("prefer [LeziDensity.forStyle]"),
+        )
+        assertTrue(
+            "style-derived density matches other LeziThemeExt chrome",
+            theme.contains("val density: LeziDensityScale"),
+        )
+        assertTrue(theme.contains("LeziDensity.forStyle(visualStyle)"))
+    }
+
     private fun read(relative: String): String =
         repositoryRoot().resolve(relative).readText()
 
