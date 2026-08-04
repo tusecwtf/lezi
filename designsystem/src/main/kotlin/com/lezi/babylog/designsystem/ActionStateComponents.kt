@@ -25,11 +25,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -351,7 +353,13 @@ fun LeziSecondaryButton(
     }
 }
 
-/** Icon-only control with [LeziSpacing.Touch] min size (month chevrons, overflow, …). */
+/**
+ * Icon-only control with [LeziSpacing.Touch] min size (month chevrons, overflow, …).
+ *
+ * Provides themed [LocalContentColor] (onSurface, disabled alpha) so migrations off
+ * Material IconButton do not inherit ambient black and vanish in dark mode.
+ * Explicit Icon `tint = …` at call sites still wins over the ambient default.
+ */
 @Composable
 fun LeziIconButton(
     onClick: () -> Unit,
@@ -360,6 +368,9 @@ fun LeziIconButton(
     enabled: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    val contentColor = MaterialTheme.colorScheme.onSurface.copy(
+        alpha = if (enabled) 1f else LeziAlphas.Disabled,
+    )
     Box(
         modifier = modifier
             .defaultMinSize(minWidth = LeziSpacing.Touch, minHeight = LeziSpacing.Touch)
@@ -373,7 +384,9 @@ fun LeziIconButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        content()
+        CompositionLocalProvider(LocalContentColor provides contentColor) {
+            content()
+        }
     }
 }
 
@@ -426,11 +439,17 @@ enum class LeziTextButtonTone {
 
     /** Error-colored destructive confirm. */
     Destructive,
+
+    /**
+     * White label for chrome over dark media scrims (photo preview close).
+     * Keeps dismiss readable on light photos without forking button geometry.
+     */
+    OnMedia,
 }
 
 /**
  * Compact text action used in dialog button slots and quiet inline rows.
- * Always meets [LeziSpacing.Touch] min height; shape/typeface come from tokens.
+ * Always meets [LeziSpacing.Touch] min width and height; shape/typeface from tokens.
  */
 @Composable
 fun LeziTextButton(
@@ -444,10 +463,11 @@ fun LeziTextButton(
         LeziTextButtonTone.Neutral -> MaterialTheme.colorScheme.onSurface
         LeziTextButtonTone.Primary -> MaterialTheme.colorScheme.primary
         LeziTextButtonTone.Destructive -> MaterialTheme.colorScheme.error
+        LeziTextButtonTone.OnMedia -> Color.White
     }.copy(alpha = if (enabled) 1f else LeziAlphas.Disabled)
     Box(
         modifier = modifier
-            .defaultMinSize(minHeight = LeziSpacing.Touch)
+            .defaultMinSize(minWidth = LeziSpacing.Touch, minHeight = LeziSpacing.Touch)
             .clip(LeziThemeExt.buttonShape)
             .clickable(enabled = enabled, onClick = onClick)
             .semantics { role = Role.Button }

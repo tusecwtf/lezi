@@ -4,9 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
@@ -42,11 +40,11 @@ fun MemberLoginQrConfirmSurface(
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                 familyName?.let { Text(it, style = LeziTypography.TitleSm) }
                 Text("已由家庭管理员授权：$memberDisplayName", style = LeziTypography.Body)
-                OutlinedTextField(
+                LeziTextField(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
+                    label = "这台设备的名称 *",
                     enabled = deviceNameEditable && !submitting && !verificationInProgress,
-                    label = { Text("这台设备的名称 *") },
                     singleLine = true,
                     isError = feedback != null && !verificationInProgress,
                     modifier = Modifier.fillMaxWidth(),
@@ -56,31 +54,35 @@ fun MemberLoginQrConfirmSurface(
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }
                 if (showManualJoin) {
-                    TextButton(onClick = onManualJoin, enabled = !submitting) {
-                        Text("改用加入家庭")
-                    }
+                    LeziTextButton(
+                        label = "改用加入家庭",
+                        onClick = onManualJoin,
+                        enabled = !submitting,
+                    )
                 }
             }
         },
         confirmButton = {
             if (showConfirm && !verificationInProgress) {
-                TextButton(
+                LeziTextButton(
+                    label = when {
+                        submitting -> "同步中…"
+                        verificationRetryRequired -> "重新确认"
+                        recoveryRetryRequired -> "重试首次同步"
+                        else -> confirmLabel
+                    },
                     onClick = onConfirm,
                     enabled = !submitting,
-                ) {
-                    Text(
-                        when {
-                            submitting -> "同步中…"
-                            verificationRetryRequired -> "重新确认"
-                            recoveryRetryRequired -> "重试首次同步"
-                            else -> confirmLabel
-                        },
-                    )
-                }
+                    tone = LeziTextButtonTone.Primary,
+                )
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
+            LeziTextButton(
+                label = "取消",
+                onClick = onDismiss,
+                enabled = !submitting,
+            )
         },
     )
 }

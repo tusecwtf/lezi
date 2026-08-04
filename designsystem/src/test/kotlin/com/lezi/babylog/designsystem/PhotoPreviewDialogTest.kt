@@ -49,6 +49,11 @@ class PhotoPreviewDialogTest {
         assertTrue(sharedSource.contains("rememberLocalPhoto("))
         assertTrue(sharedSource.contains("LocalPhotoTarget.FULLSCREEN"))
         assertFalse(sharedSource.contains("decodePhotoPreviewBitmap(path)"))
+        // Ticket 04 chrome details live in NextFeedPhotoQrChromeContractTest; keep a
+        // thin shared-path assertion here so callers still require the Lezi dismiss.
+        assertTrue(sharedSource.contains("LeziTextButton("))
+        assertTrue(sharedSource.contains("LeziTextButtonTone.OnMedia"))
+        assertTrue(sharedSource.contains("PhotoChromeChipAlpha"))
     }
 
     private fun repositoryRoot(): File = generateSequence(

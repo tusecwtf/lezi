@@ -25,7 +25,6 @@ import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -86,11 +85,12 @@ fun LeziDetailTopBar(
             .padding(horizontal = LeziSpacing.TopBarHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(
+        LeziIconButton(
             onClick = onBack,
+            contentDescription = "返回",
             modifier = Modifier.size(LeziSpacing.TopBarAction),
         ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
         }
         Spacer(Modifier.width(8.dp))
         Text(
@@ -158,27 +158,29 @@ fun AppBrandBar(
             )
         }
         if (onSearch != null) {
-            IconButton(
+            LeziIconButton(
                 onClick = onSearch,
+                contentDescription = "搜索",
                 modifier = Modifier.size(LeziSpacing.TopBarAction),
             ) {
                 Icon(
                     Icons.Outlined.Search,
-                    contentDescription = "搜索",
+                    contentDescription = null,
                     tint = content,
                 )
             }
         }
         if (onToggleTheme != null) {
-            IconButton(
+            LeziIconButton(
                 onClick = onToggleTheme,
+                contentDescription = if (dark) "切换浅色" else "切换深色",
                 modifier = Modifier.size(LeziSpacing.TopBarAction),
             ) {
                 // Icon shows the target state (sun in dark → tap for light, moon in
                 // light → tap for dark), not the current one.
                 Icon(
                     if (dark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
-                    contentDescription = if (dark) "切换浅色" else "切换深色",
+                    contentDescription = null,
                     tint = content,
                 )
             }

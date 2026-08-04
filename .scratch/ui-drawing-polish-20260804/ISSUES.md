@@ -11,7 +11,7 @@ unless a human explicitly parallelizes.
 | 01 | [issues/01-expand-motion-density-tokens.md](./issues/01-expand-motion-density-tokens.md) | Expand motion + density token tables | — | done |
 | 02 | [issues/02-bounded-photo-lru.md](./issues/02-bounded-photo-lru.md) | Bounded local photo LRU | 01 | done |
 | 03 | [issues/03-chrome-dial-nursing.md](./issues/03-chrome-dial-nursing.md) | High-frequency chrome: dial + nursing | 01 | done |
-| 04 | [issues/04-chrome-nextfeed-photo-qr.md](./issues/04-chrome-nextfeed-photo-qr.md) | Remaining designsystem chrome | 03 | ready-for-agent |
+| 04 | [issues/04-chrome-nextfeed-photo-qr.md](./issues/04-chrome-nextfeed-photo-qr.md) | Remaining designsystem chrome | 03 | done |
 | 05 | [issues/05-contract-ban-bare-material.md](./issues/05-contract-ban-bare-material.md) | Contract: ban bare Material outside wrappers | 04 | ready-for-agent |
 | 06 | [issues/06-record-density-empty.md](./issues/06-record-density-empty.md) | Record surface density + empty language | 01, 05 | ready-for-agent |
 | 07 | [issues/07-summary-density-empty.md](./issues/07-summary-density-empty.md) | Summary density + empty/calculating honesty | 06 | ready-for-agent |

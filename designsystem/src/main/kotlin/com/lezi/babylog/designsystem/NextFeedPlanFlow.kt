@@ -6,12 +6,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -19,8 +15,8 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.NextFeedPlanEffect
 import com.lezi.babylog.core.model.NextFeedPlanEvent
 import com.lezi.babylog.core.model.NextFeedPlanOrigin
@@ -116,9 +112,11 @@ fun LeziNextFeedPlanFlow(
             title = { Text("已安排下次喂养") },
             text = { Text(scheduledMessage, style = LeziTypography.Body) },
             confirmButton = {
-                TextButton(onClick = { dispatch(NextFeedPlanEvent.AcknowledgeScheduled) }) {
-                    Text("完成")
-                }
+                LeziTextButton(
+                    label = "完成",
+                    onClick = { dispatch(NextFeedPlanEvent.AcknowledgeScheduled) },
+                    tone = LeziTextButtonTone.Primary,
+                )
             },
         )
         NextFeedPlanPhase.Skipped -> Unit
@@ -129,9 +127,12 @@ fun LeziNextFeedPlanFlow(
             title = { Text("正在核对下次喂养") },
             text = { Text("记录已保存；正在确认护理计划是否已经写入。", style = LeziTypography.Body) },
             confirmButton = {
-                TextButton(onClick = {}, enabled = false) {
-                    Text("正在核对…")
-                }
+                LeziTextButton(
+                    label = "正在核对…",
+                    onClick = {},
+                    enabled = false,
+                    tone = LeziTextButtonTone.Primary,
+                )
             },
         )
         NextFeedPlanPhase.ReconciliationFailed -> LeziAlertDialog(
@@ -141,9 +142,11 @@ fun LeziNextFeedPlanFlow(
                 Text(state.scheduleError ?: "持久化状态暂时不可用，请重新核对。")
             },
             confirmButton = {
-                TextButton(onClick = { dispatch(NextFeedPlanEvent.Reconcile) }) {
-                    Text("重新核对")
-                }
+                LeziTextButton(
+                    label = "重新核对",
+                    onClick = { dispatch(NextFeedPlanEvent.Reconcile) },
+                    tone = LeziTextButtonTone.Primary,
+                )
             },
         )
         else -> {
@@ -170,26 +173,29 @@ fun LeziNextFeedPlanFlow(
                     }
                 },
                 confirmButton = {
-                    TextButton(
+                    LeziTextButton(
+                        label = if (scheduling) "正在安排…" else "确认安排",
                         onClick = {
                             dispatch(NextFeedPlanEvent.Schedule(nowMillis()))
                         },
                         enabled = !scheduling,
-                    ) {
-                        Text(if (scheduling) "正在安排…" else "确认安排")
-                    }
+                        tone = LeziTextButtonTone.Primary,
+                    )
                 },
                 dismissButton = {
-                    Row {
-                        TextButton(
+                    // Stack secondaries so dual Touch-height actions do not crowd one
+                    // Material dismiss slot (matches other LeziAlertDialog hierarchies).
+                    Column(horizontalAlignment = Alignment.End) {
+                        LeziTextButton(
+                            label = "调整时间",
                             onClick = { dispatch(NextFeedPlanEvent.EditTime) },
                             enabled = !scheduling,
-                        ) { Text("调整时间") }
-                        Spacer(Modifier.width(4.dp))
-                        TextButton(
+                        )
+                        LeziTextButton(
+                            label = "不安排",
                             onClick = { dispatch(NextFeedPlanEvent.Skip) },
                             enabled = !scheduling,
-                        ) { Text("不安排") }
+                        )
                     }
                 },
             )

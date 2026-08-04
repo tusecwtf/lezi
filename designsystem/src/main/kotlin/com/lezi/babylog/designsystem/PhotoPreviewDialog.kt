@@ -12,17 +12,26 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+
+/** Peak scrim opacity over media so white OnMedia chrome stays readable on light photos. */
+internal val PhotoChromeScrimAlpha = 0.72f
+
+/** Solid chip under freeform dismiss / page-count so contrast does not ride the fade alone. */
+internal val PhotoChromeChipAlpha = 0.55f
+
+internal val PhotoChromeTopScrimHeight = 112.dp
+internal val PhotoChromeBottomScrimHeight = 88.dp
 
 /**
  * Full-screen black-pager photo preview shared by composer and conflict audit.
@@ -89,15 +98,19 @@ fun LeziPhotoPreviewDialog(
                         }
                     }
                 }
-                // Chrome scrims: close button and page count stay readable on light photos.
+                // Band scrims plus local chips: close/page-count stay readable on light photos.
                 Box(
                     Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .height(96.dp)
+                        .height(PhotoChromeTopScrimHeight)
                         .background(
                             Brush.verticalGradient(
-                                listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent),
+                                listOf(
+                                    Color.Black.copy(alpha = PhotoChromeScrimAlpha),
+                                    Color.Black.copy(alpha = PhotoChromeScrimAlpha * 0.85f),
+                                    Color.Transparent,
+                                ),
                             ),
                         ),
                 )
@@ -105,21 +118,27 @@ fun LeziPhotoPreviewDialog(
                     Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .height(80.dp)
+                        .height(PhotoChromeBottomScrimHeight)
                         .background(
                             Brush.verticalGradient(
-                                listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f)),
+                                listOf(
+                                    Color.Transparent,
+                                    Color.Black.copy(alpha = PhotoChromeScrimAlpha * 0.85f),
+                                    Color.Black.copy(alpha = PhotoChromeScrimAlpha),
+                                ),
                             ),
                         ),
                 )
-                TextButton(
+                LeziTextButton(
+                    label = "关闭",
                     onClick = onDismiss,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(LeziSpacing.Md),
-                ) {
-                    Text("关闭", color = Color.White)
-                }
+                        .padding(LeziSpacing.Md)
+                        .clip(LeziThemeExt.buttonShape)
+                        .background(Color.Black.copy(alpha = PhotoChromeChipAlpha)),
+                    tone = LeziTextButtonTone.OnMedia,
+                )
                 if (showPageCount && photos.size > 1) {
                     Text(
                         "${pagerState.currentPage + 1}/${photos.size}",
@@ -127,7 +146,10 @@ fun LeziPhotoPreviewDialog(
                         style = LeziTypography.Meta,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .padding(LeziSpacing.Md),
+                            .padding(LeziSpacing.Md)
+                            .clip(LeziThemeExt.buttonShape)
+                            .background(Color.Black.copy(alpha = PhotoChromeChipAlpha))
+                            .padding(horizontal = LeziSpacing.Sm, vertical = LeziSpacing.Xs),
                     )
                 }
             }
