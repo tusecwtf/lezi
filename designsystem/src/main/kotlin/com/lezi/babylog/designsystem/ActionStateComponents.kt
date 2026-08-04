@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -193,6 +192,11 @@ enum class LeziPrimaryButtonMode {
     Disabled,
 }
 
+/**
+ * Primary CTA: flat filled surface (warm-card language — no bottom hard-edge
+ * strip, no floating shadow). Matches secondary/destructive flatness; only the
+ * primary fill differs. Press feedback is ripple, not elevation change.
+ */
 @Composable
 fun LeziPrimaryButton(
     label: String,
@@ -208,9 +212,7 @@ fun LeziPrimaryButton(
         LeziPrimaryButtonMode.Enabled
     },
 ) {
-    val journal = LeziThemeExt.isJournal
     val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
     val clickable = mode != LeziPrimaryButtonMode.Disabled && !busy
     val shape = LeziThemeExt.buttonShape
     val fillColor = when (mode) {
@@ -227,26 +229,10 @@ fun LeziPrimaryButton(
         LeziPrimaryButtonMode.Disabled ->
             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
     }
-    val hardEdge = journal && mode == LeziPrimaryButtonMode.Enabled
-    val elevation = when {
-        mode != LeziPrimaryButtonMode.Enabled -> LeziElevation.None
-        hardEdge -> LeziElevation.None
-        pressed -> LeziElevation.None
-        else -> LeziElevation.ButtonWarm
-    }
-    val hardShadow = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f).let { base ->
-        // Darken primary for the journal hard edge (template-v2 accent-strong).
-        Color(
-            red = (base.red * 0.72f).coerceIn(0f, 1f),
-            green = (base.green * 0.72f).coerceIn(0f, 1f),
-            blue = (base.blue * 0.72f).coerceIn(0f, 1f),
-            alpha = 1f,
-        )
-    }
-    val edge = LeziElevation.JournalHardEdge
-    Box(
+    Surface(
         modifier = modifier
-            .heightIn(min = LeziSpacing.Touch + if (hardEdge && !pressed) edge else 0.dp)
+            .fillMaxWidth()
+            .heightIn(min = LeziSpacing.Touch)
             .then(
                 if (mode == LeziPrimaryButtonMode.ExplainedDisabled) {
                     Modifier.border(
@@ -257,50 +243,35 @@ fun LeziPrimaryButton(
                 } else {
                     Modifier
                 },
-            ),
-    ) {
-        if (hardEdge && !pressed) {
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .offset(y = edge)
-                    .clip(shape)
-                    .background(hardShadow),
             )
-        }
-        Surface(
-            modifier = Modifier
+            .clickable(
+                enabled = clickable,
+                interactionSource = interaction,
+                indication = if (clickable) ripple() else null,
+                onClick = onClick,
+            ),
+        shape = shape,
+        color = fillColor,
+        contentColor = labelColor,
+        shadowElevation = LeziElevation.None,
+        tonalElevation = LeziElevation.None,
+    ) {
+        Row(
+            Modifier
                 .fillMaxWidth()
-                .heightIn(min = LeziSpacing.Touch)
-                .offset(y = if (hardEdge && pressed) edge else 0.dp)
-                .clickable(
-                    enabled = clickable,
-                    interactionSource = interaction,
-                    indication = if (clickable) ripple() else null,
-                    onClick = onClick,
-                ),
-            shape = shape,
-            color = fillColor,
-            contentColor = labelColor,
-            shadowElevation = elevation,
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = labelColor,
-                    )
-                    Spacer(Modifier.width(LeziSpacing.Xs))
-                }
-                Text(label, style = LeziTypography.Label, maxLines = 1)
+            if (busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = labelColor,
+                )
+                Spacer(Modifier.width(LeziSpacing.Xs))
             }
+            Text(label, style = LeziTypography.Label, maxLines = 1)
         }
     }
 }

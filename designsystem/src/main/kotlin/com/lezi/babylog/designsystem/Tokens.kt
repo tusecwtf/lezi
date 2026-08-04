@@ -328,18 +328,19 @@ object LeziShapes {
     val Micro = RoundedCornerShape(2.dp)
 }
 
-/** Soft float (warm) vs thin/hard (journal) elevation steps. */
+/**
+ * Soft float (warm cards/dock/modal) vs flat/thin (journal panels).
+ * Primary CTAs ([LeziPrimaryButton]) are flat: [None] only — no bottom hard-edge
+ * strip and no button float elevation.
+ */
 @Immutable
 object LeziElevation {
     val None = 0.dp
     val CardWarm = 1.dp
-    val ButtonWarm = 4.dp
     val DockWarm = 8.dp
     val ModalWarm = 12.dp
     val DockJournal = 2.dp
     val ModalJournal = 8.dp
-    /** Journal primary hard-edge shadow height (CSS `0 3px 0`). */
-    val JournalHardEdge = 3.dp
 }
 
 /**

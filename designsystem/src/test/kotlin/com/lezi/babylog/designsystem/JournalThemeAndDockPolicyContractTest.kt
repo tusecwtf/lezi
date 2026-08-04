@@ -93,6 +93,12 @@ class JournalThemeAndDockPolicyContractTest {
                 "LeziPrimaryButtonMode.Enabled -> MaterialTheme.colorScheme.primary",
             ),
         )
+        // Flat primary: no warm float elevation and no journal hard-edge strip.
+        assertTrue(primaryButton.contains("shadowElevation = LeziElevation.None"))
+        assertFalse(primaryButton.contains("JournalHardEdge"))
+        assertFalse(primaryButton.contains("ButtonWarm"))
+        assertFalse(primaryButton.contains("hardEdge"))
+        assertFalse(primaryButton.contains("hardShadow"))
     }
 
     private fun repositoryRoot(): File = generateSequence(
