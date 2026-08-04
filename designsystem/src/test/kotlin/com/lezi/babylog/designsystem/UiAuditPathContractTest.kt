@@ -10,6 +10,10 @@ import org.junit.Test
  * Structural contracts for the 2026-08-04 UI-audit path: leftover closures and
  * the two regressions fixed after P3 (onboarding multi-root layout, bottom nav).
  * These assert against the shipped sources so a reintroduction fails the suite.
+ *
+ * Ticket 05 Phase A chrome gate lives in [DesignsystemSourceFixtures] /
+ * [BareMaterialWhitelistContractTest] (sole scan-policy owner). This suite keeps
+ * a thin wiring assertion so the audit path still fails if the seam is deleted.
  */
 class UiAuditPathContractTest {
     @Test
@@ -51,56 +55,16 @@ class UiAuditPathContractTest {
 
     @Test
     fun `feature and app modules do not call raw Material buttons or chips`() {
-        val banned = listOf(
-            Regex("""(?<![A-Za-z])TextButton\("""),
-            Regex("""(?<![A-Za-z])OutlinedButton\("""),
-            Regex("""(?<![A-Za-z])FilterChip\("""),
-            // Bare Button( — not LeziPrimaryButton / LeziSecondaryButton / LeziTextButton
-            Regex("""(?<![A-Za-z.])Button\("""),
-            Regex("""(?<![A-Za-z])OutlinedTextField\("""),
-            Regex("""(?<![A-Za-z])IconButton\("""),
-            Regex("""(?<![A-Za-z])DatePickerDialog\("""),
-            // Bare Switch( — not LeziSwitch
-            Regex("""(?<![A-Za-z.])Switch\("""),
+        // Scan policy owner: BareMaterialWhitelistContractTest. Thin audit wiring.
+        val offenders = DesignsystemSourceFixtures.scanBareMaterialOffenders(
+            roots = listOf("app/src/main", "feature", "core/ui/src/main"),
+            enforceOnDesignsystem = false,
         )
-        val importBanned = listOf(
-            "import androidx.compose.material3.TextButton",
-            "import androidx.compose.material3.OutlinedButton",
-            "import androidx.compose.material3.FilterChip",
-            "import androidx.compose.material3.Button",
-            "import androidx.compose.material3.OutlinedTextField",
-            "import androidx.compose.material3.Switch",
-            "import androidx.compose.material3.IconButton",
-            "import androidx.compose.material3.DatePickerDialog",
-        )
-        val offenders = mutableListOf<String>()
-        for (root in listOf("app/src/main", "feature", "core/ui/src/main")) {
-            val dir = repositoryRoot().resolve(root)
-            if (!dir.isDirectory) continue
-            dir.walkTopDown()
-                .filter {
-                    it.isFile &&
-                        it.extension == "kt" &&
-                        "src/main" in it.invariantSeparatorsPath
-                }
-                .forEach { file ->
-                    val text = file.readText()
-                    val rel = file.relativeTo(repositoryRoot()).path
-                    for (imp in importBanned) {
-                        if (imp in text) offenders += "$rel imports $imp"
-                    }
-                    for (rx in banned) {
-                        if (rx.containsMatchIn(text)) {
-                            offenders += "$rel matches ${rx.pattern}"
-                        }
-                    }
-                }
-        }
         assertTrue(
             "raw Material controls remain in product UI:\n${offenders.joinToString("\n")}",
             offenders.isEmpty(),
         )
-        // Designsystem owns the chrome.
+        // Designsystem owns the chrome symbols product should call.
         assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
             .contains("fun LeziTextButton("))
         assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
@@ -118,40 +82,41 @@ class UiAuditPathContractTest {
     }
 
     @Test
-    fun `product dialogs prefer LeziAlertDialog over raw Material dialog`() {
-        val mainRoots = listOf(
-            "app/src/main",
-            "core/ui/src/main",
-            "feature",
-            "designsystem/src/main",
+    fun `designsystem bans bare Material outside documented wrapper whitelist`() {
+        // Ticket 05 scan policy is owned by BareMaterialWhitelistContractTest.
+        // Keep one audit-path pointer so deleting the seam still fails this suite.
+        assertTrue(
+            "ticket-05 Phase A allowances must remain non-empty",
+            DesignsystemSourceFixtures.MATERIAL_WRAPPER_ALLOWANCES.isNotEmpty(),
         )
-        val offenders = mutableListOf<String>()
-        val bareCall = Regex("""(?<![A-Za-z])AlertDialog\(""")
-        for (root in mainRoots) {
-            val dir = repositoryRoot().resolve(root)
-            if (!dir.isDirectory) continue
-            dir.walkTopDown()
-                .filter {
-                    it.isFile &&
-                        it.extension == "kt" &&
-                        it.name != "LeziAlertDialog.kt" &&
-                        "src/main" in it.invariantSeparatorsPath
-                }
-                .forEach { file ->
-                    if (bareCall.containsMatchIn(file.readText())) {
-                        offenders += file.relativeTo(repositoryRoot()).path
-                    }
-                }
-        }
+        val offenders = DesignsystemSourceFixtures.scanBareMaterialOffenders(
+            roots = listOf("designsystem/src/main"),
+        )
+        assertTrue(
+            "bare Material outside wrapper allowances:\n${offenders.joinToString("\n")}",
+            offenders.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `product dialogs prefer LeziAlertDialog over raw Material dialog`() {
+        // AlertDialog is Phase A; only LeziAlertDialog.kt may host bare AlertDialog.
+        val offenders = DesignsystemSourceFixtures.scanBareMaterialOffenders(
+            roots = listOf(
+                "app/src/main",
+                "core/ui/src/main",
+                "feature",
+                "designsystem/src/main",
+            ),
+        ).filter { it.contains("AlertDialog") }
         assertTrue(
             "raw Material dialog call sites remain:\n${offenders.joinToString("\n")}",
             offenders.isEmpty(),
         )
         assertTrue(
-            repositoryRoot()
-                .resolve("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/LeziAlertDialog.kt")
-                .readText()
-                .contains("shape = LeziThemeExt.dialogShape"),
+            DesignsystemSourceFixtures.read(
+                "designsystem/src/main/kotlin/com/lezi/babylog/designsystem/LeziAlertDialog.kt",
+            ).contains("shape = LeziThemeExt.dialogShape"),
         )
     }
 
