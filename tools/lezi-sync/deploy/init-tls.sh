@@ -17,9 +17,14 @@ certificate="${tls_directory}/server.crt"
 private_key="${tls_directory}/server.key"
 host_openssl="${LEZI_TLS_USE_HOST_OPENSSL:-0}"
 allow_tls_bootstrap="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
+inspect_only="${LEZI_TLS_INSPECT_ONLY:-0}"
 
 if [[ "${allow_tls_bootstrap}" != "0" && "${allow_tls_bootstrap}" != "1" ]]; then
   echo "error: LEZI_ALLOW_TLS_BOOTSTRAP must be 0 or 1" >&2
+  exit 1
+fi
+if [[ "${inspect_only}" != "0" && "${inspect_only}" != "1" ]]; then
+  echo "error: LEZI_TLS_INSPECT_ONLY must be 0 or 1" >&2
   exit 1
 fi
 
@@ -68,13 +73,34 @@ run_file_tool() {
   fi
 }
 
-file_exists() {
+file_state() {
   local host_path="$1"
   local container_path="$2"
   if [[ "${host_openssl}" == "1" ]]; then
-    [[ -f "${host_path}" ]]
+    if [[ -L "${host_path}" ]]; then
+      printf 'unsafe\n'
+    elif [[ -f "${host_path}" ]]; then
+      printf 'present\n'
+    elif [[ -e "${host_path}" ]]; then
+      printf 'unsafe\n'
+    else
+      printf 'absent\n'
+    fi
   else
-    run_file_tool test -f "${container_path}"
+    docker run --rm \
+      --user 10001:10001 \
+      -v "${data_root}:/data" \
+      --entrypoint /bin/sh \
+      "${image}" \
+      -c 'if [ -L "$1" ]; then
+  printf "unsafe\n"
+elif [ -f "$1" ]; then
+  printf "present\n"
+elif [ -e "$1" ]; then
+  printf "unsafe\n"
+else
+  printf "absent\n"
+fi' sh "${container_path}"
   fi
 }
 
@@ -107,16 +133,24 @@ print_spki_fingerprint() {
   echo "==> TLS SPKI SHA-256: ${fingerprint}"
 }
 
-certificate_exists=0
-private_key_exists=0
-file_exists "${certificate}" "${certificate_arg}" && certificate_exists=1
-file_exists "${private_key}" "${private_key_arg}" && private_key_exists=1
-if [[ "${certificate_exists}" -ne "${private_key_exists}" ]]; then
+certificate_state="$(file_state "${certificate}" "${certificate_arg}")"
+private_key_state="$(file_state "${private_key}" "${private_key_arg}")"
+if [[ "${certificate_state}" == "unsafe" \
+    || "${private_key_state}" == "unsafe" ]]; then
+  echo "error: TLS identity paths must be regular non-symlink files" >&2
+  exit 1
+fi
+if [[ "${certificate_state}" != "${private_key_state}" ]]; then
   echo "error: partial TLS identity found under ${tls_directory}; refusing automatic replacement" >&2
   exit 1
 fi
 
-if [[ "${certificate_exists}" -eq 1 ]]; then
+if [[ "${inspect_only}" == "1" ]]; then
+  printf '%s\n' "${certificate_state}"
+  exit 0
+fi
+
+if [[ "${certificate_state}" == "present" ]]; then
   validate_identity
   echo "==> reusing persistent TLS identity"
   print_spki_fingerprint

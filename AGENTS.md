@@ -43,14 +43,14 @@ pre/post-CD certificate SHA-256 plus SPKI comparison only.
 ### Pipeline (locked decisions)
 
 1. **Dev machine**: Rust gates → `./build-image.sh` → `linux/amd64` image `lezi-sync:<Cargo.toml version>`.
-2. **Package**: `tools/lezi-sync/deploy/package-nas.sh` writes gitignored `dist/lezi-sync-<ver>-nas/` (image tar, zdocker-friendly compose, `MANIFEST.json`, `remote-deploy.sh`).
-3. **Ship + replace**: `tools/lezi-sync/deploy/push-and-deploy.sh` scp’s the package over SSH and runs `remote-deploy.sh` on the NAS.
+2. **Package**: `tools/lezi-sync/deploy/package-nas.sh` requires the locally inspectable linux/amd64 `lezi-sync:<ver>` image and writes gitignored `dist/lezi-sync-<ver>-nas/` with its complete image id, one manifest-selected tar, zdocker-friendly compose, current guarded helpers, and a closed inventory/checksum set. Never reuse an unattested old tar merely because it exists in `dist/`.
+3. **Ship + protect + replace**: `tools/lezi-sync/deploy/push-and-deploy.sh` validates the exact package, pinned APK signer, and measured linux/amd64 image; acquires one data-bind-derived NAS owner-token lease; uploads to a fresh mode-`700` staging directory; streams the live root secret + TLS pair into developer-machine off-repo `age`; then replaces and promotes the validated package to the stable remote path. Ordinary CD aborts before stop/rm when backup fails; signer/image/platform/running-container drift, stale/extra artifacts, health-version drift, or a competing lease are fatal. Production `remote-deploy.sh` requires this outer token and must not be run directly.
 4. **NAS engine**: prefer Zspace **zdocker** binary  
    `/zspace/applications/services/zdocker/bin/docker-compose` (Compose v2.33.x). Fallback is plain `docker run` if that binary is missing.
-5. **Secret**: inherit `LEZI_BOOTSTRAP_SECRET` from the live `lezi-sync` container env; write NAS-local `.env` mode `600` only. Fail if neither env nor live container provides a ≥16-char secret.
+5. **Secret**: during ordinary CD the live `LEZI_BOOTSTRAP_SECRET` is authoritative and must byte-match the persistent NAS sibling file `config/lezi-sync.env` (directory `700`, file `600`); seed a missing file atomically before replace. Compose and docker-run receive the exact validated value only through process-environment pass-through—never dotenv/YAML interpolation or a secret-bearing argv. No live container means fail unless explicit persistent-file recovery or explicit fresh/cutover secret flow is authorized; never silently overwrite or rotate.
 6. **Data**: bind-mount host path (default  
    `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data`) → `/data`. Stop/rm container must **not** delete that directory. Container user `10001:10001`; host dir must be writable by that uid.
-7. **Publish**: host `0.0.0.0:8765` for LAN; never map 8765 to the public internet without a deliberate firewall exception.
+7. **Publish**: host `0.0.0.0:8765` for LAN HTTPS sync and `0.0.0.0:8767` for isolated LAN HTTP invite-install; never map either port to the public internet without a deliberate firewall exception. Container-internal HTTP 8766 is not published.
 8. **Remote package dir**: default  
    `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` because Zspace SSH `HOME` is often `/home/` (not writable). Prefer a persistent path via `NAS_REMOTE_DIR` when available.
 
@@ -90,12 +90,19 @@ ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 | `NAS_SSH` / `NAS_SSH_PORT` | SSH target (default `13096920600@192.168.50.4`, port `10000`) |
 | `NAS_REMOTE_DIR` | Unpack + deploy directory on NAS |
 | `LEZI_DATA_HOST_PATH` | Host bind for `/data` when packaging |
+| `LEZI_SECRET_FILE` | NAS-side persistent bootstrap file; defaults to data bind sibling `../config/lezi-sync.env`; overrides use a normalized portable absolute-path character set |
+| `LEZI_ALLOW_SECRET_RECOVERY=1` | Explicit incident authorization to use the persistent file when no live container exists; ordinary CD leaves unset |
+| `LEZI_ALLOW_SECRET_RESEED=1` | Explicit maintenance-only replacement of a conflicting file; live container must be absent and a new secret explicitly forwarded |
+| `LEZI_FORWARD_BOOTSTRAP_SECRET=1` | Explicit fresh/cutover-only SSH-stdin forwarding of `LEZI_BOOTSTRAP_SECRET`; ordinary CD leaves unset |
 | `LEZI_TLS_HOST` | Certificate SAN host (default `192.168.50.4`) |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time TLS generation on an operator-verified fresh data root only; ordinary CD/rollback/tests must leave unset |
-| `LEZI_FORCE_PACKAGE=1` | Rebuild package even if `dist/` exists |
-| `LEZI_SKIP_PACKAGE=1` | Deploy existing package only |
+| `LEZI_SKIP_PACKAGE=1` | Explicitly reuse an existing local package; default push repackages. Reuse still requires matching local image config digest/OS/architecture and re-attests data/TLS/origin, helpers/inventory/hashes, plus APK signer, application/version, metadata, and local-data contract. |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
 | `LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1` | Validate release APK + `app-update.json` only (no docker save); CI smoke: `./deploy/test-package-nas-app-update.sh` |
+| `LEZI_AGE_RECIPIENTS_FILE` | Public age recipients file; default `~/.config/lezi/age-recipients.txt`; required by production push/CD |
+| `LEZI_CREDENTIAL_BACKUP_DIR` | Absolute off-repo encrypted backup directory; default `~/.config/lezi/backups/` |
+| `LEZI_AGE_IDENTITY_FILE` | Offline/private age identity for restore staging only; never needed by CD or stored in the repo |
+| `LEZI_EXPECTED_CERTIFICATE_SHA256` / `LEZI_EXPECTED_SPKI_SHA256` | Independent production pins required for restore staging; never trust only digests carried inside the same ciphertext |
 
 ### Agent workflow: Rust gates → CD → 联调
 
@@ -104,7 +111,7 @@ ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 **1. Rust gates (dev machine)** — `cargo fmt --all -- --check`, `cargo test --locked`, and `cargo clippy --all-targets --all-features -- -D warnings` under `tools/lezi-sync/`.
 
 **2. Propose CD — wait for confirmation before deploy.**
-Explain that the next step will build a `linux/amd64` image, package (or reuse `dist/`), scp to the NAS, and **stop/rm + replace** container `lezi-sync` (compose project `lezi`). The data bind is kept; a live family may briefly lose sync during replace.
+Explain that the next step will build a `linux/amd64` image, package (or reuse `dist/`), scp to the NAS, create the required local off-repo `age`-encrypted credential backup, and **stop/rm + replace** container `lezi-sync` (compose project `lezi`). The data bind is kept; a live family may briefly lose sync during replace. Confirm `age` plus the public recipients file are configured before requesting the window; never request or copy the decrypt identity into the repository.
 
 Also state the **protocol cutover risk**: a measured family NAS ran **plaintext HTTP on 8765** (no `/data/tls`, no host `8766`). Only a separately confirmed first TLS cutover on a verified fresh/no-TLS data root may create the one persistent identity. Every later `remote-deploy.sh` run must reuse that exact identity while keeping readiness on **container-internal** HTTP `8766` (not published on the host). Clients must switch endpoint scheme and may need TOFU/SPKI confirmation only for the first cutover or an independently authorized certificate-rotation maintenance window. **Do not** run `./deploy/push-and-deploy.sh` until the user confirms.
 
@@ -128,12 +135,13 @@ After confirmation:
 ./deploy/push-and-deploy.sh
 ```
 
-Before ordinary CD, record the live certificate fingerprint and SPKI with read-only commands. After
+Before ordinary CD, record the live certificate fingerprint and SPKI with read-only commands. The
+push script must also complete its direct-to-age credential export before stop/rm. After
 CD, recompute both and require exact equality before declaring success. If the live identity cannot be
 read through `docker exec` as uid `10001`, stop before container replacement; do not infer that it is
 absent from the SSH user's inability to traverse the mode-`700` bind.
 
-Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.apk` must match `tools/lezi-sync/deploy/app-update.json` `sha256` (or set `LEZI_RELEASE_APK` / `LEZI_APP_UPDATE_JSON`). Use `LEZI_SKIP_PACKAGE=1` only when an existing `dist/lezi-sync-<ver>-nas` already embeds the **current** server image; if server code changed, rebuild the image and force a new package (`LEZI_FORCE_PACKAGE=1`). Never invent `LEZI_BOOTSTRAP_SECRET` (inherit from the live container). Never print bootstrap secrets from `docker inspect`/logs in reports—redact them. Never commit secrets, NAS `.env`, or `dist/` tarballs.
+Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.apk` must match `tools/lezi-sync/deploy/app-update.json` `sha256` and tracked public signer digest `config/release-apk-signer-sha256.txt` (or set APK/metadata paths; the signer pin has no routine override). `LEZI_SKIP_PACKAGE=1` skips rebuilding only: push still verifies the actual APK signer, selected image must be deliberate, helpers must byte-match, and every package hash must pass locally/remotely. If server/deploy code changed, run `build-image.sh` and use default fresh packaging. Never invent `LEZI_BOOTSTRAP_SECRET` (ordinary CD validates live + persistent sources). Never print bootstrap secrets/private keys from `docker inspect`, files, SSH argv, logs, or reports. Never commit signing keys, secrets, NAS `.env`, age identity/ciphertext backups, or `dist/` tarballs.
 
 **3. 前后端联调 (minimal smoke after deploy)**
 
@@ -141,7 +149,7 @@ Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.ap
 2. **Client**: device or emulator on the same LAN as the NAS. Emulator → NAS uses the real LAN IP, **not** `10.0.2.2` (`10.0.2.2` is only for host-local compose). Install the client if needed (`./gradlew :app:installDebug` or an existing APK). Point the endpoint at the **scheme that health proved** (`https://192.168.50.4:8765` after TLS CD; plaintext only if still on the pre-TLS image). Complete TOFU/SPKI when the trusted-HTTPS path applies. Smoke **only paths touched by the change** (e.g. setup-status, create/join, push-pull, app-update)—not a full dual-device matrix unless the ticket requires it.
 3. **Report** gates, deployed version/package, which health URLs worked, protocol (HTTP vs HTTPS), and client smoke result (or the blocker).
 
-Production replace stops/removes the existing `lezi-sync` container then `compose up` project `lezi`. That replace is the step gated by the propose-then-confirm rule above. Rollback: re-run `remote-deploy.sh` from a previous package directory on the NAS (after that version’s image tar is still loadable).
+Production replace requires stop and rm to succeed, starts compose project `lezi`, and proves the running container image id equals the manifest. That replace is gated by the propose-then-confirm rule above. For an ordinary same-schema image rollback, repackage the deliberately selected old image with the **current** guarded deploy helpers, then run `push-and-deploy.sh`; it creates a fresh encrypted credential backup before replacement. Never execute a legacy package's bundled `remote-deploy.sh` directly. The exceptional pre-TLS/schema cutover rollback cannot use this current TLS harness; follow its dedicated runbook and do not begin that cutover unless its independently authenticated state pin and an executable, audited recreation procedure are complete.
 
 Schema is fresh-only / current `user_version`; mismatched DBs fail closed—do not invent migrations in deploy scripts.
 

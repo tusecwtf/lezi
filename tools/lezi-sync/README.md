@@ -52,7 +52,8 @@ $LEZI_DATA_DIR/
 
 ## NAS / Docker Compose
 
-SSH 自动部署（打包 + scp + 极空间 **zdocker 自带 compose**，secret 从现网容器继承）见
+SSH 自动部署（打包 + scp + 极空间 **zdocker 自带 compose**；普通 CD 以现网 secret 为权威、
+核对 NAS 持久副本并先做仓库外 age 加密灾备）见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)：
 
 ```bash
@@ -68,7 +69,9 @@ LEZI_SYNC_VERSION=0.3.5 ./build-image.sh
 | 容器用户 | `10001:10001`（`lezi`） | 非 root |
 | 主机端口映射 | `127.0.0.1:8765:8765` | 仅 loopback；手机经反代或显式覆盖访问 |
 | TLS identity | `/data/tls/` | 自签名证书和私钥随数据卷持久化；不进入镜像或 release manifest |
-| 引导密钥 | Compose 必填 | 缺失或空值时 Compose 拒绝启动（见下） |
+| 引导密钥 | live 容器 + 持久 `config/lezi-sync.env` | 普通 CD 必须一致；Compose/docker-run 只从进程环境逐字节透传，不生成 secret `.env` |
+| CD lease | 持久 config 同级锁 | 一个 owner-token lease 覆盖 scp、age 备份、替换和恢复后备份；并发发布/导出失败关闭 |
+| NAS package | 单一 manifest tar + 完整 image config digest | 使用 `docker load`/运行容器一致的 config 身份，不把本地 OCI manifest-list digest 当成远端 image id；inventory/SHA 必须闭合；远端残留旧 tar、`.env` 或其它文件时不会猜测或加载 |
 
 普通 NAS CD、回滚和容器重启不得替换已有 TLS identity；下面的 `init-tls.sh` 生成路径只用于
 经确认的全新空数据根。已有家庭的数据根若证书缺失、无效、错配或容器内不可读，应停止部署，
@@ -141,7 +144,7 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 `EPERM`、`EACCES`、`EOPNOTSUPP` 会记录警告后继续。只读挂载以及实际持久化 I/O
 失败无论是否开启 skip 都会阻止启动。
 
-如果 NAS 不适合本机编译，可在开发机导出镜像：
+NAS 生产路径禁止本机编译；只在开发机生成并导出已验证的 `linux/amd64` 镜像：
 
 ```bash
 docker save lezi-sync:0.3.5 | gzip > lezi-sync-0.3.5.tar.gz
@@ -152,20 +155,21 @@ gzip -dc lezi-sync-0.3.5.tar.gz | docker load
 构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
 不会读取宿主机上可能由容器 uid 拥有的 `data-*` 目录。
 
-## 多架构镜像
+## 非生产多架构实验
 
-在已配置 buildx 的机器上可直接为常见 NAS 架构构建：
+下面仅用于开发者自有环境，不是家庭 NAS CD。生产发版固定由开发机生成单一
+`linux/amd64` 镜像，并经 `package-nas.sh` 实测 `.Os/.Architecture`：
 
 ```bash
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/arm64 \
   --build-arg LEZI_SYNC_VERSION=0.3.5 \
   -t your-registry/lezi-sync:0.3.5 \
   --push .
 ```
 
-不使用 registry 时，在目标 NAS 上运行 `./build-image.sh` 会自动构建其原生
-架构镜像。
+不要在目标 NAS 运行 `build-image.sh`、`docker build` 或 `cargo`。需要实验其它架构时，
+在开发机使用 buildx 导出/推送到隔离环境；它不能进入生产 `package-nas` 流程。
 
 ## 配置
 
@@ -471,8 +475,9 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 
 ## 备份与恢复
 
+完整家庭数据（SQLite、`server.secret`、媒体与 TLS）仍需整体快照/备份；凭据密文不能替代它：
+
 ```bash
-export LEZI_BOOTSTRAP_SECRET="<deployment bootstrap secret>"
 docker compose stop
 cp -a /volume1/docker/lezi /volume1/backup/lezi-$(date +%F)
 docker compose start
@@ -480,6 +485,14 @@ docker compose start
 
 恢复时同样替换整个数据根并重启容器。数据库回滚会由 cursor/generation
 恢复协议通知 Android 执行全量重新汇合。
+
+另外，生产 `push-and-deploy.sh` 在普通容器替换前会把管理员根密码与 TLS
+`server.crt`/`server.key` 成对流式写入开发机仓库外的 `age` 密文；明文不会落在开发机，
+失败会在 stop/rm 前终止。无 live 容器的首次部署/灾备只能在显式授权下部署，并在健康后立即
+补密文。恢复脚本只解密到仓库外的新 staging，并要求 exact certificate SHA-256、SPKI
+同时匹配仓库文档中独立记录的生产 pins 和密文内一致性值；证书/私钥必须匹配，不会覆盖 NAS。
+权威路径、权限、状态矩阵和命令见
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md) § Secret handling / Credential backup and restore。
 
 ### 离线 v3→current 切割（`lezi-sync offline-migrate`）
 

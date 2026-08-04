@@ -23,6 +23,24 @@ out/
 keystore.properties
 *.jks
 *.keystore
+.env
+.env.*
+*.env
+*.env.*
+!/tools/lezi-sync/deploy/.env.example
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+*.age
+*.age.sha256
+*age-identity*.txt
+*age-recipients*.txt
+bootstrap-secret
+docker-inspect.json
+/.local-secrets/
 .pytest_cache/
 **/.pytest_cache/
 

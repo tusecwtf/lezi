@@ -134,11 +134,14 @@ pub(crate) fn cutover_help_text() -> String {
 #   MANDATORY for this cutover (container already removed in step 1 — no live inherit):
 #     export LEZI_BOOTSTRAP_SECRET='…migration-time new root password…'
 #     export LEZI_FORWARD_BOOTSTRAP_SECRET=1
+#     export LEZI_ALLOW_SECRET_RESEED=1
+#     export LEZI_ALLOW_TLS_BOOTSTRAP=1
 #     # same value as LEZI_MIGRATE_NEW_ROOT_PASSWORD / --new-root-password
 #     # NEVER inherit pre-cutover container env; NEVER leave unset for cutover
-#     # Unset both after cutover so ordinary CD returns to live inherit.
+#     # Unset all four after cutover so ordinary CD returns to guarded live inherit.
 #   cd tools/lezi-sync && ./build-image.sh && ./deploy/push-and-deploy.sh
-#   Or LEZI_SKIP_PACKAGE=1 when dist/ already embeds the intended image.
+#   Or LEZI_SKIP_PACKAGE=1 only when dist/ embeds the intended image plus current
+#   guarded helpers and valid SHA256SUMS.
 #   push-and-deploy forwards LEZI_BOOTSTRAP_SECRET into remote-deploy only when
 #   LEZI_FORWARD_BOOTSTRAP_SECRET=1 (opt-in; ordinary CD never injects a local secret).
 #   Protocol cutover risk: live may still be HTTP :8765; current tree publishes HTTPS :8765
@@ -305,6 +308,10 @@ mod tests {
             "must document opt-in forward flag: {text}"
         );
         assert!(
+            text.contains("LEZI_ALLOW_SECRET_RESEED=1"),
+            "cutover must explicitly authorize replacing the pre-cutover persistent secret: {text}"
+        );
+        assert!(
             text.contains("forwards LEZI_BOOTSTRAP_SECRET")
                 || text.contains("forwarding LEZI_BOOTSTRAP_SECRET")
                 || text.contains("forwards LEZI_BOOTSTRAP_SECRET into remote-deploy"),
@@ -329,6 +336,10 @@ mod tests {
             COPY_BACK_RUNBOOK_SRC.contains("LEZI_FORWARD_BOOTSTRAP_SECRET=1")
                 || COPY_BACK_RUNBOOK_SRC.contains("export LEZI_FORWARD_BOOTSTRAP_SECRET"),
             "runbook must require opt-in LEZI_FORWARD_BOOTSTRAP_SECRET for cutover forward"
+        );
+        assert!(
+            COPY_BACK_RUNBOOK_SRC.contains("LEZI_ALLOW_SECRET_RESEED=1"),
+            "runbook must authorize the migration-time secret reseed"
         );
         assert!(
             COPY_BACK_RUNBOOK_SRC.contains("NEVER inherit")
@@ -378,8 +389,8 @@ mod tests {
             "script must pin version unless dual override"
         );
         assert!(
-            COPY_BACK_SCRIPT_SRC.contains("docker inspect"),
-            "script must probe remote container"
+            COPY_BACK_SCRIPT_SRC.contains("docker ps -a --filter"),
+            "script must positively prove the remote container is absent"
         );
         assert!(
             COPY_BACK_SCRIPT_SRC.contains("LEZI_NAS_BACKUP_PATH"),

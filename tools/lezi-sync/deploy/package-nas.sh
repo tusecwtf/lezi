@@ -16,9 +16,34 @@ if [[ -z "${version}" ]]; then
   echo "error: could not determine LEZI_SYNC_VERSION" >&2
   exit 1
 fi
+if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+  echo "error: LEZI_SYNC_VERSION is outside the release-version contract" >&2
+  exit 1
+fi
 
 image="${LEZI_SYNC_IMAGE:-lezi-sync:${version}}"
+if [[ "${image}" != "lezi-sync:${version}" ]]; then
+  echo "error: LEZI_SYNC_IMAGE must be lezi-sync:${version}" >&2
+  exit 1
+fi
 data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
+if [[ "${data_host_path}" != /* \
+    || "${data_host_path}" == "/" \
+    || ! "${data_host_path}" =~ ^/[A-Za-z0-9._/-]+$ \
+    || "${data_host_path}" == *'//'* \
+    || "${data_host_path}" == */./* \
+    || "${data_host_path}" == */../* \
+    || "${data_host_path}" == */. \
+    || "${data_host_path}" == */.. ]]; then
+  echo "error: LEZI_DATA_HOST_PATH must be a normalized absolute NAS path using only A-Z a-z 0-9 . _ / -" >&2
+  exit 1
+fi
+case "${data_host_path}" in
+  /etc|/usr|/var|/home|/root|/tmp|/opt|/srv)
+    echo "error: refusing a broad/system LEZI_DATA_HOST_PATH target" >&2
+    exit 1
+    ;;
+esac
 tls_host="${LEZI_TLS_HOST:-192.168.50.4}"
 if [[ ! "${tls_host}" =~ ^[A-Za-z0-9.:-]+$ ]] || [[ "${#tls_host}" -gt 253 ]]; then
   echo "error: LEZI_TLS_HOST must be a plain DNS name or IP address" >&2
@@ -72,8 +97,30 @@ then
   echo "error: LEZI_LAN_APK_DOWNLOAD_ORIGIN must be http://<IPv4-or-DNS LEZI_TLS_HOST>:8767 with no userinfo, path, query, or fragment" >&2
   exit 1
 fi
+# The accepted origin is semantically same-host; persist one canonical spelling
+# so later closed-package validation does not disagree on DNS case.
+lan_apk_download_origin="http://${tls_host}:8767"
 out_root="${LEZI_NAS_PACKAGE_DIR:-${REPO_ROOT}/dist/lezi-sync-${version}-nas}"
+if [[ -L "${out_root}" ]]; then
+  echo "error: LEZI_NAS_PACKAGE_DIR must not be a symlink" >&2
+  exit 1
+fi
+out_root="$(realpath -m -- "${out_root}")"
+if [[ "$(basename -- "${out_root}")" != "lezi-sync-${version}-nas" ]]; then
+  echo "error: LEZI_NAS_PACKAGE_DIR basename must be lezi-sync-${version}-nas" >&2
+  exit 1
+fi
+case "${out_root}" in
+  /|"${REPO_ROOT}"|"${SYNC_ROOT}"|"${SCRIPT_DIR}")
+    echo "error: refusing a broad LEZI_NAS_PACKAGE_DIR target" >&2
+    exit 1
+    ;;
+esac
 platform="${LEZI_SYNC_PLATFORM:-linux-amd64}"
+if [[ "${platform}" != "linux-amd64" ]]; then
+  echo "error: LEZI_SYNC_PLATFORM must be linux-amd64 for NAS release packages" >&2
+  exit 1
+fi
 tar_name="lezi-sync-${version}-${platform}.tar"
 build_image="${LEZI_PACKAGE_BUILD_IMAGE:-0}"
 
@@ -82,6 +129,7 @@ build_image="${LEZI_PACKAGE_BUILD_IMAGE:-0}"
 release_apk="${LEZI_RELEASE_APK:-${REPO_ROOT}/app/build/outputs/apk/release/app-release.apk}"
 app_update_json="${LEZI_APP_UPDATE_JSON:-${SCRIPT_DIR}/app-update.json}"
 local_data_contract_json="${REPO_ROOT}/config/local-data-contracts.json"
+release_signer_sha256_file="${REPO_ROOT}/config/release-apk-signer-sha256.txt"
 apk_analyzer="${LEZI_APK_ANALYZER:-}"
 if [[ -z "${apk_analyzer}" ]]; then
   sdk_dir="$(sed -n 's/^sdk.dir=//p' "${REPO_ROOT}/local.properties" 2>/dev/null | head -1)"
@@ -139,6 +187,11 @@ require_app_update_inputs() {
     echo "error: local-data contract ledger missing: ${local_data_contract_json}" >&2
     exit 1
   fi
+  if [[ ! -f "${release_signer_sha256_file}" \
+      || -L "${release_signer_sha256_file}" ]]; then
+    echo "error: tracked release APK signer pin is missing or unsafe: ${release_signer_sha256_file}" >&2
+    exit 1
+  fi
   if [[ -z "${apk_analyzer}" || ! -x "${apk_analyzer}" ]]; then
     echo "error: apkanalyzer is required to verify APK local-data contract metadata" >&2
     exit 1
@@ -152,8 +205,21 @@ require_app_update_inputs() {
 validate_and_stage_app_update() {
   local dest_dir="$1"
   mkdir -p "${dest_dir}"
-  if ! "${apk_signer}" verify --verbose "${release_apk}"; then
+  local signer_output
+  local -a signer_sha256_values=()
+  if ! signer_output="$(
+    "${apk_signer}" verify --verbose --print-certs "${release_apk}" 2>&1
+  )"; then
     echo "error: release APK signature verification failed: ${release_apk}" >&2
+    exit 1
+  fi
+  mapfile -t signer_sha256_values < <(
+    printf '%s\n' "${signer_output}" \
+      | sed -nE 's/^Signer #[0-9]+ certificate SHA-256 digest: ([0-9A-Fa-f]{64})$/\L\1/p'
+  )
+  if [[ "${#signer_sha256_values[@]}" -ne 1 \
+      || "${signer_sha256_values[0]}" != "${expected_signer_sha256}" ]]; then
+    echo "error: release APK signer certificate does not match the tracked Lezi release signer" >&2
     exit 1
   fi
   local manifest_file contract_values apk_identity apk_package apk_version_code apk_version_name
@@ -351,6 +417,13 @@ PY
 }
 
 require_app_update_inputs
+mapfile -t expected_signer_sha256_values <"${release_signer_sha256_file}"
+if [[ "${#expected_signer_sha256_values[@]}" -ne 1 \
+    || ! "${expected_signer_sha256_values[0]}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "error: release APK signer pin must contain exactly one lowercase SHA-256 digest" >&2
+  exit 1
+fi
+expected_signer_sha256="${expected_signer_sha256_values[0]}"
 
 # Lightweight gate for CI / local smoke without docker save (see test-package-nas-app-update.sh).
 if [[ "${LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY:-0}" == "1" ]]; then
@@ -376,25 +449,31 @@ if ! docker image inspect "${image}" >/dev/null 2>&1; then
     echo "error: image ${image} not found locally." >&2
     echo "  run: LEZI_SYNC_VERSION=${version} ${SYNC_ROOT}/build-image.sh" >&2
     echo "  or:  LEZI_PACKAGE_BUILD_IMAGE=1 $0" >&2
-    # Reuse existing dist tar if present (no retag).
-    existing_tar="${REPO_ROOT}/dist/${tar_name}"
-    if [[ -f "${existing_tar}" ]]; then
-      echo "  note: found ${existing_tar}; will copy without docker save" >&2
-    else
-      exit 1
-    fi
+    echo "  an existing tar is not sufficient because its image identity cannot be re-attested" >&2
+    exit 1
   fi
+fi
+
+image_id="$(
+  docker image inspect "${image}" \
+    --format '{{index .Descriptor.Annotations "config.digest"}}'
+)"
+if [[ ! "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "error: docker returned an invalid or incomplete config digest for ${image}" >&2
+  exit 1
+fi
+image_os="$(docker image inspect "${image}" --format '{{.Os}}')"
+image_architecture="$(docker image inspect "${image}" --format '{{.Architecture}}')"
+if [[ "${image_os}" != "linux" || "${image_architecture}" != "amd64" ]]; then
+  echo "error: NAS release image must be linux/amd64, got ${image_os}/${image_architecture}" >&2
+  exit 1
 fi
 
 rm -rf "${out_root}"
 mkdir -p "${out_root}"
 
-if docker image inspect "${image}" >/dev/null 2>&1; then
-  echo "==> docker save ${image}"
-  docker save "${image}" -o "${out_root}/${tar_name}"
-else
-  cp -a "${REPO_ROOT}/dist/${tar_name}" "${out_root}/${tar_name}"
-fi
+echo "==> docker save ${image}"
+docker save "${image}" -o "${out_root}/${tar_name}"
 
 echo "==> stage app-update artifacts (fail-closed)"
 validate_and_stage_app_update "${out_root}/app-update"
@@ -408,19 +487,24 @@ sed \
   > "${out_root}/docker-compose.yml"
 
 cp -a "${SCRIPT_DIR}/.env.example" "${out_root}/.env.example"
+cp -a "${SCRIPT_DIR}/credential-deploy-lock.sh" "${out_root}/credential-deploy-lock.sh"
+cp -a "${SCRIPT_DIR}/docker-compose.nas.yml.tpl" "${out_root}/docker-compose.nas.yml.tpl"
 cp -a "${SCRIPT_DIR}/remote-deploy.sh" "${out_root}/remote-deploy.sh"
+cp -a "${SCRIPT_DIR}/export-nas-credentials.sh" "${out_root}/export-nas-credentials.sh"
 cp -a "${SCRIPT_DIR}/init-tls.sh" "${out_root}/init-tls.sh"
+cp -a "${SCRIPT_DIR}/promote-nas-package.sh" "${out_root}/promote-nas-package.sh"
 cp -a "${SCRIPT_DIR}/tls-certificate-sha256.sh" "${out_root}/tls-certificate-sha256.sh"
 cp -a "${SCRIPT_DIR}/tls-spki.sh" "${out_root}/tls-spki.sh"
+cp -a "${SCRIPT_DIR}/validate-nas-package.sh" "${out_root}/validate-nas-package.sh"
+cp -a "${SCRIPT_DIR}/DEPLOY.md" "${out_root}/DEPLOY.md"
 chmod +x "${out_root}/remote-deploy.sh"
+chmod +x "${out_root}/credential-deploy-lock.sh"
+chmod +x "${out_root}/export-nas-credentials.sh"
 chmod +x "${out_root}/init-tls.sh"
+chmod +x "${out_root}/promote-nas-package.sh"
 chmod +x "${out_root}/tls-certificate-sha256.sh"
 chmod +x "${out_root}/tls-spki.sh"
-
-image_id=""
-if docker image inspect "${image}" >/dev/null 2>&1; then
-  image_id="$(docker image inspect "${image}" --format '{{.Id}}')"
-fi
+chmod +x "${out_root}/validate-nas-package.sh"
 git_sha="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 apk_sha="$(sha256sum "${out_root}/app-update/app-release.apk" | awk '{print $1}')"
@@ -432,6 +516,9 @@ cat > "${out_root}/MANIFEST.json" <<EOF
   "image": "${image}",
   "image_id": "${image_id}",
   "platform": "${platform}",
+  "os": "${image_os}",
+  "architecture": "${image_architecture}",
+  "apk_signer_certificate_sha256": "${expected_signer_sha256}",
   "tar": "${tar_name}",
   "data_host_path": "${data_host_path}",
   "tls_host": "${tls_host}",
@@ -449,13 +536,17 @@ EOF
 
 (
   cd "${out_root}"
-  sha256sum "${tar_name}" docker-compose.yml MANIFEST.json remote-deploy.sh init-tls.sh \
-    tls-certificate-sha256.sh tls-spki.sh \
+  sha256sum .env.example DEPLOY.md MANIFEST.json \
     app-update/app-release.apk app-update/app-update.json \
+    credential-deploy-lock.sh docker-compose.nas.yml.tpl docker-compose.yml \
+    export-nas-credentials.sh init-tls.sh \
+    "${tar_name}" promote-nas-package.sh remote-deploy.sh \
+    tls-certificate-sha256.sh tls-spki.sh \
+    validate-nas-package.sh \
     > SHA256SUMS
 )
 
-cp -a "${SCRIPT_DIR}/DEPLOY.md" "${out_root}/DEPLOY.md" 2>/dev/null || true
+"${SCRIPT_DIR}/validate-nas-package.sh" "${out_root}" "${version}" >/dev/null
 
 echo "==> package ready: ${out_root}"
 ls -la "${out_root}"

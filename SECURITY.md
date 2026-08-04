@@ -45,9 +45,24 @@ secrets.
 | Secret | Where it lives | Git? |
 |--------|----------------|------|
 | Release keystore + passwords | `*.jks` / `keystore.properties` (local) | **Never** (gitignored) |
+| Release APK signer certificate SHA-256 | `config/release-apk-signer-sha256.txt` (public pin only) | **Yes**; changing it requires an authorized signing-key rotation |
 | Android SDK path | `local.properties` | **Never** (gitignored) |
 | Family owner / member tokens | App encrypted storage + NAS volume | **Never** in git |
-| `LEZI_BOOTSTRAP_SECRET` | NAS / compose env | **Never** in git |
+| `LEZI_BOOTSTRAP_SECRET` | Persistent NAS `config/lezi-sync.env`; exact process-env pass-through at start; `age` ciphertext off-repo | **Never** plaintext or ciphertext backup in git |
+| NAS TLS certificate | Persistent `/data/tls/server.crt`; public SHA-256/SPKI pins may be documented separately | **Never** commit the production certificate file; keep the exact pair in encrypted backup |
+| NAS TLS private key | Persistent `/data/tls/server.key`; integrity-protected `age` ciphertext off-repo, restored only against independent public pins | **Never** in git, image, release package, or logs |
+
+The decrypting age identity is kept separately in a password manager or offline medium. The
+developer machine needs only its public recipients file for CD backups. Recipient encryption alone
+does not authenticate who created a backup, so restore also requires the independently recorded
+production certificate SHA-256 and SPKI pins. Pre-TLS rollback-state restore likewise requires the
+independently recorded ciphertext SHA-256 printed at capture time; a checksum stored beside the
+ciphertext is not an authenticity anchor. See
+[`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md) § Credential backup and restore.
+
+The tracked `.env.example` deliberately leaves `LEZI_BOOTSTRAP_SECRET` empty. Generate a local
+random value when an explicitly authorized fresh deployment needs one; never reuse a public example
+placeholder as an owner password.
 
 If a secret was committed: rotate it immediately, purge history on every
 remote, and treat any published APK signed with a leaked keystore as untrusted.
@@ -57,9 +72,10 @@ remote, and treat any published APK signed with a leaked keystore as untrusted.
 - Sync trusts an explicit HTTPS endpoint (system PKI or a user-confirmed SPKI
   pin) and uses independent, revocable device sessions. SSID/BSSID is not read
   or used as an identity boundary; synchronization remains foreground-only.
-- Do not map port `8765` to the public internet without an operator-reviewed
-  firewall and certificate setup. The loopback-only plaintext health port is
-  operational infrastructure, not a business API.
+- Do not map LAN sync port `8765` or anonymous plaintext invite-install port
+  `8767` to the public internet without an operator-reviewed firewall exception.
+  Plaintext readiness port `8766` is container-internal only and is not
+  published on the NAS host.
 - Details: [`docs/prd/sync-trusted-endpoint.md`](docs/prd/sync-trusted-endpoint.md).
 
 ## Medical disclaimer

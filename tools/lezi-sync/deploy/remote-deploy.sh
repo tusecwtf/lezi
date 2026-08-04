@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs ON the NAS inside an unpacked release directory.
 # - docker load image tar
-# - inherit LEZI_BOOTSTRAP_SECRET from live lezi-sync when present
+# - validate live/persistent LEZI_BOOTSTRAP_SECRET sources before replacement
 # - prefer zdocker bundled docker-compose; fall back to docker run
 # - health-check; does not delete the data bind mount
 set -euo pipefail
@@ -18,25 +18,65 @@ EXPECTED_VERSION="${LEZI_SYNC_VERSION:-}"
 TLS_HOST="${LEZI_TLS_HOST:-192.168.50.4}"
 LAN_APK_DOWNLOAD_ORIGIN="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-}"
 ALLOW_TLS_BOOTSTRAP="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
+ALLOW_SECRET_RECOVERY="${LEZI_ALLOW_SECRET_RECOVERY:-0}"
+ALLOW_SECRET_RESEED="${LEZI_ALLOW_SECRET_RESEED:-0}"
+BOOTSTRAP_SECRET_STDIN="${LEZI_BOOTSTRAP_SECRET_STDIN:-0}"
+DEPLOY_LOCK_TOKEN="${LEZI_DEPLOY_LOCK_TOKEN:-}"
 
 if [[ "${ALLOW_TLS_BOOTSTRAP}" != "0" && "${ALLOW_TLS_BOOTSTRAP}" != "1" ]]; then
   echo "error: LEZI_ALLOW_TLS_BOOTSTRAP must be 0 or 1" >&2
   exit 1
 fi
-
-if [[ -f MANIFEST.json ]]; then
-  if command -v python3 >/dev/null 2>&1; then
-    EXPECTED_VERSION="$(python3 -c 'import json,sys; print(json.load(open("MANIFEST.json"))["version"])' 2>/dev/null || true)"
-  fi
-  if [[ -z "${EXPECTED_VERSION}" ]]; then
-    EXPECTED_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
-  fi
-  manifest_tls_host="$(sed -n 's/.*"tls_host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
-  [[ -n "${manifest_tls_host}" ]] && TLS_HOST="${manifest_tls_host}"
-  manifest_lan_apk_download_origin="$(sed -n 's/.*"lan_apk_download_origin"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
-  [[ -n "${manifest_lan_apk_download_origin}" ]] \
-    && LAN_APK_DOWNLOAD_ORIGIN="${manifest_lan_apk_download_origin}"
+if [[ "${ALLOW_SECRET_RECOVERY}" != "0" && "${ALLOW_SECRET_RECOVERY}" != "1" ]]; then
+  echo "error: LEZI_ALLOW_SECRET_RECOVERY must be 0 or 1" >&2
+  exit 1
 fi
+if [[ "${ALLOW_SECRET_RESEED}" != "0" && "${ALLOW_SECRET_RESEED}" != "1" ]]; then
+  echo "error: LEZI_ALLOW_SECRET_RESEED must be 0 or 1" >&2
+  exit 1
+fi
+if [[ "${BOOTSTRAP_SECRET_STDIN}" != "0" && "${BOOTSTRAP_SECRET_STDIN}" != "1" ]]; then
+  echo "error: LEZI_BOOTSTRAP_SECRET_STDIN must be 0 or 1" >&2
+  exit 1
+fi
+if [[ -n "${DEPLOY_LOCK_TOKEN}" \
+    && ! "${DEPLOY_LOCK_TOKEN}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "error: LEZI_DEPLOY_LOCK_TOKEN must be 64 lowercase hexadecimal characters" >&2
+  exit 1
+fi
+if [[ "${ALLOW_SECRET_RECOVERY}" == "1" \
+    && ( "${ALLOW_SECRET_RESEED}" == "1" \
+      || "${ALLOW_TLS_BOOTSTRAP}" == "1" ) ]]; then
+  echo "error: secret recovery cannot be combined with secret reseed or TLS bootstrap" >&2
+  exit 1
+fi
+
+if [[ ! -x "${DIR}/validate-nas-package.sh" ]]; then
+  echo "error: package is missing executable validate-nas-package.sh" >&2
+  exit 1
+fi
+# This must be the first package-dependent operation. It rejects stale files
+# left by a previous scp before secret persistence, image load, or replacement.
+"${DIR}/validate-nas-package.sh" "${DIR}" "${EXPECTED_VERSION}" >/dev/null
+
+manifest_string() {
+  local key="$1"
+  sed -nE \
+    "s/^[[:space:]]*\"${key}\"[[:space:]]*:[[:space:]]*\"([^\"]*)\"[[:space:]]*,?[[:space:]]*$/\\1/p" \
+    MANIFEST.json
+}
+
+EXPECTED_VERSION="$(manifest_string version)"
+image="$(manifest_string image)"
+expected_image_id="$(manifest_string image_id)"
+expected_image_os="$(manifest_string os)"
+expected_image_architecture="$(manifest_string architecture)"
+tar_file="$(manifest_string tar)"
+manifest_tls_host="$(manifest_string tls_host)"
+[[ -n "${manifest_tls_host}" ]] && TLS_HOST="${manifest_tls_host}"
+manifest_lan_apk_download_origin="$(manifest_string lan_apk_download_origin)"
+[[ -n "${manifest_lan_apk_download_origin}" ]] \
+  && LAN_APK_DOWNLOAD_ORIGIN="${manifest_lan_apk_download_origin}"
 if [[ -z "${LAN_APK_DOWNLOAD_ORIGIN}" ]]; then
   lan_apk_download_host="${TLS_HOST}"
   if [[ "${lan_apk_download_host}" == *:* ]]; then
@@ -45,16 +85,29 @@ if [[ -z "${LAN_APK_DOWNLOAD_ORIGIN}" ]]; then
   LAN_APK_DOWNLOAD_ORIGIN="http://${lan_apk_download_host}:8767"
 fi
 
-tar_file="$(ls -1 lezi-sync-*-linux-amd64.tar 2>/dev/null | head -1 || true)"
-if [[ -z "${tar_file}" ]]; then
-  echo "error: no lezi-sync-*-linux-amd64.tar in ${DIR}" >&2
+# Bind source before ":/data" on the volume line. Resolve this before the
+# bootstrap secret so the durable secret file can live beside (not inside) the
+# persistent data bind.
+data_path="$(
+  grep -E '^[[:space:]]*-[[:space:]]+[^#]+:/data' docker-compose.yml \
+    | head -1 \
+    | sed -E 's/^[[:space:]]*-[[:space:]]+//; s,:/data.*,,; s/[[:space:]]*$//'
+)"
+if [[ -z "${data_path}" || "${data_path}" != /* || "${data_path}" == "/" ]]; then
+  echo "error: compose /data bind source must be a safe absolute host path" >&2
   exit 1
 fi
-
-image="lezi-sync:${EXPECTED_VERSION:-unknown}"
-if [[ -f MANIFEST.json ]]; then
-  img_line="$(sed -n 's/.*"image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
-  [[ -n "${img_line}" ]] && image="${img_line}"
+SECRET_FILE="${LEZI_SECRET_FILE:-$(dirname -- "${data_path}")/config/lezi-sync.env}"
+if [[ "${SECRET_FILE}" != /* \
+    || "${SECRET_FILE}" == "/" \
+    || ! "${SECRET_FILE}" =~ ^/[A-Za-z0-9._/-]+$ \
+    || "${SECRET_FILE}" == *'//'* \
+    || "${SECRET_FILE}" == */./* \
+    || "${SECRET_FILE}" == */../* \
+    || "${SECRET_FILE}" == */. \
+    || "${SECRET_FILE}" == */.. ]]; then
+  echo "error: LEZI_SECRET_FILE must be a normalized absolute NAS path using only A-Z a-z 0-9 . _ / -" >&2
+  exit 1
 fi
 
 echo "==> remote deploy in ${DIR}"
@@ -63,51 +116,311 @@ echo "    image:   ${image}"
 echo "    project: ${COMPOSE_PROJECT}"
 echo "    apk LAN: ${LAN_APK_DOWNLOAD_ORIGIN}"
 
-echo "==> docker load"
-docker load -i "${tar_file}"
-
-inherit_secret() {
-  if [[ -n "${LEZI_BOOTSTRAP_SECRET:-}" ]]; then
-    echo "${LEZI_BOOTSTRAP_SECRET}"
-    return 0
+validate_secret_value() {
+  local value="$1" source_name="$2"
+  if [[ -z "${value}" || "${#value}" -lt 16 ]]; then
+    echo "error: ${source_name} must contain a bootstrap secret of at least 16 characters" >&2
+    exit 1
   fi
-  if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
-    docker inspect "${CONTAINER_NAME}" \
-      --format '{{range .Config.Env}}{{println .}}{{end}}' \
-      | sed -n 's/^LEZI_BOOTSTRAP_SECRET=//p' \
-      | head -1
-    return 0
+  if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]]; then
+    echo "error: ${source_name} must not contain newline characters" >&2
+    exit 1
   fi
-  return 1
 }
 
-secret="$(inherit_secret || true)"
-if [[ -z "${secret}" ]]; then
-  echo "error: LEZI_BOOTSTRAP_SECRET not set and container ${CONTAINER_NAME} not found/has no secret" >&2
-  echo "  export LEZI_BOOTSTRAP_SECRET=... and re-run" >&2
+prepare_secret_directory() {
+  local secret_directory
+  secret_directory="$(dirname -- "${SECRET_FILE}")"
+  if [[ -L "${secret_directory}" ]]; then
+    echo "error: persistent bootstrap secret directory must not be a symlink" >&2
+    exit 1
+  fi
+  if [[ ! -e "${secret_directory}" ]]; then
+    install -d -m 700 "${secret_directory}"
+  fi
+  if [[ ! -d "${secret_directory}" ]]; then
+    echo "error: persistent bootstrap secret parent is not a directory" >&2
+    exit 1
+  elif [[ "$(stat -c '%a' "${secret_directory}")" != "700" ]]; then
+    echo "error: persistent bootstrap secret directory must have mode 700" >&2
+    exit 1
+  fi
+}
+
+credential_deploy_lock="$(dirname -- "${data_path}")/config/.lezi-sync-credential-deploy.lock"
+acquire_credential_deploy_lock() {
+  if [[ -z "${DEPLOY_LOCK_TOKEN}" ]]; then
+    echo "error: production remote-deploy requires the outer push-and-deploy lease and encrypted backup" >&2
+    echo "  run push-and-deploy.sh; direct production execution is forbidden" >&2
+    exit 1
+  fi
+  if [[ ! -x "${DIR}/credential-deploy-lock.sh" ]]; then
+    echo "error: package is missing executable credential-deploy-lock.sh" >&2
+    exit 1
+  fi
+  "${DIR}/credential-deploy-lock.sh" \
+    validate "${credential_deploy_lock}" "${DEPLOY_LOCK_TOKEN}"
+}
+
+persistent_secret=""
+read_persistent_secret() {
+  local -a secret_lines=()
+  if [[ ! -e "${SECRET_FILE}" && ! -L "${SECRET_FILE}" ]]; then
+    return 1
+  fi
+  if [[ -L "${SECRET_FILE}" || ! -f "${SECRET_FILE}" ]]; then
+    echo "error: persistent bootstrap secret path must be a regular non-symlink file" >&2
+    exit 1
+  fi
+  if [[ "$(stat -c '%a' "${SECRET_FILE}")" != "600" ]]; then
+    echo "error: persistent bootstrap secret file must have mode 600" >&2
+    exit 1
+  fi
+  mapfile -t secret_lines <"${SECRET_FILE}"
+  if [[ "${#secret_lines[@]}" -ne 1 \
+      || "${secret_lines[0]}" != LEZI_BOOTSTRAP_SECRET=* ]]; then
+    echo "error: persistent bootstrap secret file must contain exactly one LEZI_BOOTSTRAP_SECRET entry" >&2
+    exit 1
+  fi
+  persistent_secret="${secret_lines[0]#LEZI_BOOTSTRAP_SECRET=}"
+  validate_secret_value "${persistent_secret}" "persistent bootstrap secret file"
+}
+
+persist_secret_if_missing() {
+  local secret_directory secret_temporary
+  secret_directory="$(dirname -- "${SECRET_FILE}")"
+
+  if [[ -e "${SECRET_FILE}" || -L "${SECRET_FILE}" ]]; then
+    return 0
+  fi
+  if [[ ! -e "${secret_directory}" ]]; then
+    install -d -m 700 "${secret_directory}"
+  fi
+
+  secret_temporary="$(mktemp "${secret_directory}/.lezi-sync.env.tmp.XXXXXX")"
+  printf 'LEZI_BOOTSTRAP_SECRET=%s\n' "${secret}" >"${secret_temporary}"
+  chmod 600 "${secret_temporary}"
+  if ! ln "${secret_temporary}" "${SECRET_FILE}" 2>/dev/null; then
+    rm -f -- "${secret_temporary}"
+    echo "error: persistent bootstrap secret file appeared during atomic seed" >&2
+    exit 1
+  fi
+  rm -f -- "${secret_temporary}"
+  echo "==> seeded persistent bootstrap secret file: ${SECRET_FILE}"
+}
+
+replace_persistent_secret() {
+  local secret_temporary
+  secret_temporary="$(mktemp "$(dirname -- "${SECRET_FILE}")/.lezi-sync.env.tmp.XXXXXX")"
+  printf 'LEZI_BOOTSTRAP_SECRET=%s\n' "$1" >"${secret_temporary}"
+  chmod 600 "${secret_temporary}"
+  mv -f -- "${secret_temporary}" "${SECRET_FILE}"
+  echo "==> reseeded persistent bootstrap secret file after explicit maintenance authorization"
+}
+
+prepare_secret_directory
+acquire_credential_deploy_lock
+"${DIR}/validate-nas-package.sh" "${DIR}" "${EXPECTED_VERSION}" >/dev/null
+echo "==> package integrity revalidated under credential/deploy lease"
+has_persistent_secret=0
+if read_persistent_secret; then
+  has_persistent_secret=1
+fi
+
+container_exists=0
+container_running=0
+container_configured_secret=""
+live_secret=""
+if ! container_names_output="$(
+  docker ps -a \
+    --filter "name=^/${CONTAINER_NAME}$" \
+    --format '{{.Names}}'
+)"; then
+  echo "error: could not enumerate existing containers before deployment" >&2
   exit 1
 fi
-if [[ "${#secret}" -lt 16 ]]; then
-  echo "error: LEZI_BOOTSTRAP_SECRET must be at least 16 characters" >&2
+container_names=()
+if [[ -n "${container_names_output}" ]]; then
+  mapfile -t container_names < <(printf '%s\n' "${container_names_output}")
+fi
+if [[ "${#container_names[@]}" -gt 1 \
+    || ( "${#container_names[@]}" -eq 1 \
+      && "${container_names[0]}" != "${CONTAINER_NAME}" ) ]]; then
+  echo "error: container enumeration returned an ambiguous result" >&2
+  exit 1
+fi
+if [[ "${#container_names[@]}" -eq 1 ]]; then
+  container_exists=1
+  if ! container_running_value="$(
+    docker inspect "${CONTAINER_NAME}" --format '{{.State.Running}}'
+  )"; then
+    echo "error: could not inspect existing container state" >&2
+    exit 1
+  fi
+  case "${container_running_value}" in
+    true)
+      container_running=1
+      ;;
+    false)
+      ;;
+    *)
+      echo "error: could not establish whether container ${CONTAINER_NAME} is running" >&2
+      exit 1
+      ;;
+  esac
+  if ! container_environment="$(
+    docker inspect "${CONTAINER_NAME}" \
+      --format '{{range .Config.Env}}{{println .}}{{end}}'
+  )"; then
+    echo "error: could not inspect existing container environment" >&2
+    exit 1
+  fi
+  mapfile -t container_configured_secret_lines < <(
+    printf '%s\n' "${container_environment}" \
+      | sed -n 's/^LEZI_BOOTSTRAP_SECRET=//p'
+  )
+  if [[ "${#container_configured_secret_lines[@]}" -ne 1 ]]; then
+    echo "error: existing container must contain exactly one LEZI_BOOTSTRAP_SECRET entry" >&2
+    exit 1
+  fi
+  container_configured_secret="${container_configured_secret_lines[0]}"
+  validate_secret_value \
+    "${container_configured_secret}" "existing container LEZI_BOOTSTRAP_SECRET"
+fi
+if [[ "${container_running}" == "1" ]]; then
+  live_secret="${container_configured_secret}"
+  validate_secret_value "${live_secret}" "live container LEZI_BOOTSTRAP_SECRET"
+fi
+if [[ "${ALLOW_TLS_BOOTSTRAP}" == "1" && "${container_exists}" == "1" ]]; then
+  echo "error: TLS bootstrap requires the live container to be absent on a verified fresh data root" >&2
+  exit 1
+fi
+if [[ "${ALLOW_SECRET_RECOVERY}" == "1" && "${container_running}" == "1" ]]; then
+  echo "error: LEZI_ALLOW_SECRET_RECOVERY requires the live container to be absent or stopped" >&2
   exit 1
 fi
 
-# .env for compose interpolation (mode 600)
-umask 077
-printf 'LEZI_BOOTSTRAP_SECRET=%s\n' "${secret}" > .env
-chmod 600 .env
-echo "==> wrote .env (secret inherited; not printed)"
-
-# Bind source before ":/data" on the volume line.
-data_path="$(
-  grep -E '^[[:space:]]*-[[:space:]]+[^#]+:/data' docker-compose.yml \
-    | head -1 \
-    | sed -E 's/^[[:space:]]*-[[:space:]]+//; s,:/data.*,,; s/[[:space:]]*$//'
-)"
-if [[ -z "${data_path}" || "${data_path}" != /* ]]; then
-  echo "error: compose /data bind source must be an absolute host path" >&2
+explicit_secret="${LEZI_BOOTSTRAP_SECRET:-}"
+if [[ "${BOOTSTRAP_SECRET_STDIN}" == "1" ]]; then
+  if [[ -n "${explicit_secret}" ]]; then
+    echo "error: provide the explicit bootstrap secret through env or stdin, not both" >&2
+    exit 1
+  fi
+  if ! IFS= read -r explicit_secret; then
+    echo "error: LEZI_BOOTSTRAP_SECRET_STDIN=1 requires one secret line on stdin" >&2
+    exit 1
+  fi
+  if IFS= read -r _unexpected_secret_input; then
+    echo "error: bootstrap secret stdin must contain exactly one line" >&2
+    exit 1
+  fi
+fi
+if [[ -n "${explicit_secret}" ]]; then
+  validate_secret_value "${explicit_secret}" "LEZI_BOOTSTRAP_SECRET"
+fi
+if [[ "${ALLOW_SECRET_RECOVERY}" == "1" && -n "${explicit_secret}" ]]; then
+  echo "error: secret recovery cannot be combined with an explicit bootstrap secret" >&2
   exit 1
 fi
+if [[ "${ALLOW_SECRET_RESEED}" == "1" && "${container_exists}" == "1" ]]; then
+  echo "error: LEZI_ALLOW_SECRET_RESEED requires the live container to be absent" >&2
+  exit 1
+fi
+if [[ "${ALLOW_SECRET_RESEED}" == "1" && -z "${explicit_secret}" ]]; then
+  echo "error: LEZI_ALLOW_SECRET_RESEED=1 requires an explicit bootstrap secret" >&2
+  exit 1
+fi
+
+if [[ "${container_running}" == "1" ]]; then
+  secret="${live_secret}"
+  if [[ -n "${explicit_secret}" && "${explicit_secret}" != "${live_secret}" ]]; then
+    echo "error: explicit LEZI_BOOTSTRAP_SECRET does not match the live container" >&2
+    exit 1
+  fi
+  if [[ "${has_persistent_secret}" == "1" \
+      && "${persistent_secret}" != "${live_secret}" ]]; then
+    echo "error: persistent bootstrap secret does not match the live container" >&2
+    exit 1
+  fi
+elif [[ "${has_persistent_secret}" == "1" \
+    && "${ALLOW_SECRET_RECOVERY}" == "1" ]]; then
+  if [[ "${container_exists}" == "1" \
+      && "${persistent_secret}" != "${container_configured_secret}" ]]; then
+    echo "error: persistent bootstrap secret does not match the stopped container configuration" >&2
+    exit 1
+  fi
+  secret="${persistent_secret}"
+  if [[ "${container_exists}" == "1" ]]; then
+    echo "==> recovered bootstrap secret from persistent file while the existing container is stopped (value not printed)"
+  else
+    echo "==> recovered bootstrap secret from persistent file (value not printed)"
+  fi
+elif [[ "${container_exists}" == "1" ]]; then
+  echo "error: container ${CONTAINER_NAME} exists but is not running; no live secret authority is available" >&2
+  echo "  verify the persistent secret and TLS pair, then set LEZI_ALLOW_SECRET_RECOVERY=1" >&2
+  exit 1
+elif [[ -n "${explicit_secret}" ]]; then
+  secret="${explicit_secret}"
+  if [[ "${has_persistent_secret}" == "1" \
+      && "${persistent_secret}" != "${explicit_secret}" ]]; then
+    if [[ "${ALLOW_SECRET_RESEED}" != "1" ]]; then
+      echo "error: explicit LEZI_BOOTSTRAP_SECRET does not match the persistent file" >&2
+      exit 1
+    fi
+    replace_persistent_secret "${explicit_secret}"
+    persistent_secret="${explicit_secret}"
+  fi
+else
+  echo "error: container ${CONTAINER_NAME} is absent; persistent secret recovery is not authorized" >&2
+  echo "  verify the incident, then set LEZI_ALLOW_SECRET_RECOVERY=1 to use ${SECRET_FILE}" >&2
+  exit 1
+fi
+
+if [[ "${has_persistent_secret}" == "0" ]]; then
+  persist_secret_if_missing
+fi
+
+echo "==> bootstrap secret sources validated (values not printed)"
+
+# A pre-hardening release may have left a second plaintext copy beside the
+# package. It is never authoritative: fail instead of silently deleting an
+# unexpected artifact inside the package while a deployment is in progress.
+if [[ -e .env || -L .env ]]; then
+  echo "error: unexpected legacy .env in the NAS package directory" >&2
+  echo "  inspect and remove it deliberately, then transfer an exact package" >&2
+  exit 1
+fi
+
+"${DIR}/validate-nas-package.sh" "${DIR}" "${EXPECTED_VERSION}" >/dev/null
+echo "==> package integrity revalidated immediately before image load"
+echo "==> docker load"
+docker load -i "${tar_file}"
+if ! loaded_image_id="$(docker image inspect "${image}" --format '{{.Id}}')"; then
+  echo "error: loaded archive did not provide manifest image ${image}" >&2
+  exit 1
+fi
+if [[ "${loaded_image_id}" != "${expected_image_id}" ]]; then
+  echo "error: loaded image id does not match MANIFEST.json" >&2
+  echo "  expected: ${expected_image_id}" >&2
+  echo "  actual:   ${loaded_image_id:-missing}" >&2
+  exit 1
+fi
+loaded_image_os="$(docker image inspect "${image}" --format '{{.Os}}')"
+loaded_image_architecture="$(docker image inspect "${image}" --format '{{.Architecture}}')"
+if [[ "${loaded_image_os}" != "${expected_image_os}" \
+    || "${loaded_image_architecture}" != "${expected_image_architecture}" \
+    || "${loaded_image_os}" != "linux" \
+    || "${loaded_image_architecture}" != "amd64" ]]; then
+  echo "error: loaded image platform does not match the linux/amd64 manifest" >&2
+  echo "  actual: ${loaded_image_os:-missing}/${loaded_image_architecture:-missing}" >&2
+  exit 1
+fi
+echo "==> loaded image identity/platform validated: ${expected_image_id} linux/amd64"
+
+# Compose and docker-run inherit the already validated value through their
+# process environment. This preserves arbitrary non-newline characters exactly
+# and keeps the secret out of dotenv interpolation and command arguments.
+
 if [[ -n "${data_path}" && -d "${data_path}" ]]; then
   echo "==> data path exists: ${data_path}"
 else
@@ -116,32 +429,44 @@ else
 fi
 
 echo "==> initialize or validate persistent TLS identity"
-tls_certificate_sha256_before="$(
-  "${DIR}/tls-certificate-sha256.sh" "${data_path}" "${image}" 2>/dev/null || true
+tls_identity_state_before="$(
+  LEZI_TLS_INSPECT_ONLY=1 \
+    "${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
 )"
-tls_spki_before="$(
-  "${DIR}/tls-spki.sh" "${data_path}" "${image}" 2>/dev/null || true
-)"
+case "${tls_identity_state_before}" in
+  present)
+    tls_certificate_sha256_before="$(
+      "${DIR}/tls-certificate-sha256.sh" "${data_path}" "${image}"
+    )"
+    tls_spki_before="$(
+      "${DIR}/tls-spki.sh" "${data_path}" "${image}"
+    )"
+    ;;
+  absent)
+    if [[ "${ALLOW_TLS_BOOTSTRAP}" != "1" ]]; then
+      echo "error: ordinary CD requires a complete pre-existing TLS identity" >&2
+      exit 1
+    fi
+    tls_certificate_sha256_before=""
+    tls_spki_before=""
+    ;;
+  *)
+    echo "error: TLS identity inspection returned an invalid state" >&2
+    exit 1
+    ;;
+esac
 "${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
 tls_certificate_sha256_expected="$(
   "${DIR}/tls-certificate-sha256.sh" "${data_path}" "${image}"
 )"
 tls_spki_expected="$("${DIR}/tls-spki.sh" "${data_path}" "${image}")"
-if [[ -n "${tls_certificate_sha256_before}" || -n "${tls_spki_before}" ]]; then
-  if [[ -z "${tls_certificate_sha256_before}" || -z "${tls_spki_before}" ]]; then
-    echo "error: could not establish both TLS certificate and SPKI identity before deploy" >&2
-    exit 1
-  fi
+if [[ "${tls_identity_state_before}" == "present" ]]; then
   "${DIR}/tls-spki.sh" "${data_path}" "${image}" "${tls_spki_before}" >/dev/null
   "${DIR}/tls-certificate-sha256.sh" \
     "${data_path}" "${image}" "${tls_certificate_sha256_before}" >/dev/null
   echo "==> pre-replace TLS certificate preserved: ${tls_certificate_sha256_expected}"
   echo "==> pre-replace TLS SPKI preserved: ${tls_spki_expected}"
 else
-  if [[ "${ALLOW_TLS_BOOTSTRAP}" != "1" ]]; then
-    echo "error: ordinary CD could not establish the pre-existing TLS identity" >&2
-    exit 1
-  fi
   echo "==> bootstrapped TLS certificate: ${tls_certificate_sha256_expected}"
   echo "==> bootstrapped TLS SPKI: ${tls_spki_expected}"
 fi
@@ -183,8 +508,14 @@ docker run --rm \
 
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
-  docker stop "${CONTAINER_NAME}" >/dev/null || true
-  docker rm "${CONTAINER_NAME}" >/dev/null || true
+  if ! docker stop "${CONTAINER_NAME}" >/dev/null; then
+    echo "error: failed to stop existing container ${CONTAINER_NAME}; replacement aborted" >&2
+    exit 1
+  fi
+  if ! docker rm "${CONTAINER_NAME}" >/dev/null; then
+    echo "error: failed to remove stopped container ${CONTAINER_NAME}; replacement aborted" >&2
+    exit 1
+  fi
 fi
 
 use_zdocker_compose=0
@@ -198,10 +529,11 @@ fi
 
 if [[ "${use_zdocker_compose}" -eq 1 ]]; then
   # Project name only; container_name in yaml pins lezi-sync.
-  "${ZDOCKER_COMPOSE}" -f docker-compose.yml --env-file .env -p "${COMPOSE_PROJECT}" up -d
+  LEZI_BOOTSTRAP_SECRET="${secret}" \
+    "${ZDOCKER_COMPOSE}" -f docker-compose.yml -p "${COMPOSE_PROJECT}" up -d
 else
   # Fallback mirrors the nas compose (keep in sync with template).
-  docker run -d \
+  LEZI_BOOTSTRAP_SECRET="${secret}" docker run -d \
     --name "${CONTAINER_NAME}" \
     --user 10001:10001 \
     --restart unless-stopped \
@@ -223,7 +555,7 @@ else
     -e LEZI_MAX_PENDING_MEMBER_REQUESTS=32 \
     -e LEZI_RATE_LIMIT_WINDOW_SECONDS=60 \
     -e LEZI_ALLOW_PERMISSION_HARDENING_SKIP=0 \
-    -e "LEZI_BOOTSTRAP_SECRET=${secret}" \
+    -e LEZI_BOOTSTRAP_SECRET \
     -v "${data_path}:/data" \
     -p 0.0.0.0:8765:8765 \
     -p 0.0.0.0:8767:8767 \
@@ -268,15 +600,23 @@ if [[ "${ok}" -ne 1 ]]; then
   exit 1
 fi
 
+running_image_id="$(docker inspect "${CONTAINER_NAME}" --format '{{.Image}}')"
+if [[ "${running_image_id}" != "${expected_image_id}" ]]; then
+  echo "error: running container image id does not match MANIFEST.json" >&2
+  echo "  expected: ${expected_image_id}" >&2
+  echo "  actual:   ${running_image_id:-missing}" >&2
+  exit 1
+fi
+echo "==> running container image identity validated: ${running_image_id}"
+
 echo "==> health: $(cat /tmp/lezi-health.out)"
 echo "==> ready:  $(cat /tmp/lezi-ready.out)"
 
-if [[ -n "${EXPECTED_VERSION}" ]]; then
-  if ! grep -q "\"version\":\"${EXPECTED_VERSION}\"" /tmp/lezi-health.out \
-    && ! grep -q "\"version\": \"${EXPECTED_VERSION}\"" /tmp/lezi-health.out; then
-    echo "warn: /health version did not match expected ${EXPECTED_VERSION}" >&2
-    cat /tmp/lezi-health.out >&2 || true
-  fi
+if ! grep -Fq "\"version\":\"${EXPECTED_VERSION}\"" /tmp/lezi-health.out \
+  && ! grep -Fq "\"version\": \"${EXPECTED_VERSION}\"" /tmp/lezi-health.out; then
+  echo "error: /health version did not match expected ${EXPECTED_VERSION}" >&2
+  cat /tmp/lezi-health.out >&2 || true
+  exit 1
 fi
 
 "${DIR}/tls-spki.sh" "${data_path}" "${image}" "${tls_spki_expected}" >/dev/null

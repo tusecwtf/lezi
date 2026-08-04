@@ -167,14 +167,14 @@ echo "  dry_run=          ${LEZI_COPY_BACK_DRY_RUN}" >&2
 echo "  user_version_exp= ${EXPECTED_USER_VERSION}" >&2
 echo "  nas_backup=       ${LEZI_NAS_BACKUP_PATH:-"(dry-run may omit)"}" >&2
 echo "  transport=        rsync --delete via staging+rename (scp refused)" >&2
-echo "  next after copy:  export LEZI_BOOTSTRAP_SECRET=<migration new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_TLS_BOOTSTRAP=1; push-and-deploy (no inherit; one-time TLS create)" >&2
+echo "  next after copy:  export LEZI_BOOTSTRAP_SECRET=<migration new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_SECRET_RESEED=1 LEZI_ALLOW_TLS_BOOTSTRAP=1; push-and-deploy (no inherit; explicit persistent-secret replacement; one-time TLS create)" >&2
 echo "  ticket 07 owns live cutover success claims" >&2
 
 if [[ "${LEZI_COPY_BACK_DRY_RUN}" == "1" ]]; then
   echo "copy-back dry-run ok (no network write)"
   echo "out=${OUT}"
   echo "nas=${NAS_SSH}:${LEZI_DATA_HOST_PATH}/"
-  echo "next: LEZI_COPY_BACK_DRY_RUN=0 + LEZI_NAS_BACKUP_PATH=… then rsync staging swap; then CD TLS with LEZI_BOOTSTRAP_SECRET + LEZI_FORWARD_BOOTSTRAP_SECRET=1 + LEZI_ALLOW_TLS_BOOTSTRAP=1"
+  echo "next: LEZI_COPY_BACK_DRY_RUN=0 + LEZI_NAS_BACKUP_PATH=… then rsync staging swap; then CD TLS with LEZI_BOOTSTRAP_SECRET + LEZI_FORWARD_BOOTSTRAP_SECRET=1 + LEZI_ALLOW_SECRET_RESEED=1 + LEZI_ALLOW_TLS_BOOTSTRAP=1"
   exit 0
 fi
 
@@ -189,11 +189,12 @@ fi
 
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=15 -p "${NAS_SSH_PORT}")
 
-# Probe: container must be absent (not merely "operator claimed stopped").
-if ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
-  "docker inspect '${LEZI_CONTAINER_NAME}' >/dev/null 2>&1"; then
-  die "remote container ${LEZI_CONTAINER_NAME} still present; stop/rm before copy-back (data bind kept)"
-fi
+# Positive absence proof: `docker ps` itself must succeed. An SSH/auth/daemon/
+# permission failure is not allowed to masquerade as Docker's "not found".
+printf -v container_name_q '%q' "${LEZI_CONTAINER_NAME}"
+ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
+  "names=\$(docker ps -a --filter name=^/${container_name_q}\$ --format '{{.Names}}') && test -z \"\${names}\"" \
+  || die "could not positively prove remote container ${LEZI_CONTAINER_NAME} is absent; stop/rm it and verify Docker access before copy-back"
 
 # Probe: NAS-side backup exists with v3 lezi.db.
 ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s <<REMOTE_BACKUP_CHECK
@@ -366,7 +367,7 @@ echo "copy-back ok"
 echo "out=${OUT}"
 echo "nas=${NAS_SSH}:${LEZI_DATA_HOST_PATH}/"
 echo "previous_tree_remote=${PREV}"
-echo "next: export LEZI_BOOTSTRAP_SECRET=<migration-time new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_TLS_BOOTSTRAP=1 (NEVER inherit pre-cutover container env; one-time TLS create)"
+echo "next: export LEZI_BOOTSTRAP_SECRET=<migration-time new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_SECRET_RESEED=1 LEZI_ALLOW_TLS_BOOTSTRAP=1 (NEVER inherit pre-cutover container env; explicit secret replacement; one-time TLS create)"
 echo "then: cd tools/lezi-sync && ./deploy/push-and-deploy.sh  # forwards secret only with LEZI_FORWARD_BOOTSTRAP_SECRET=1"
-echo "then: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET LEZI_ALLOW_TLS_BOOTSTRAP after cutover; probe health/ready (see copy-back-tls-cutover-runbook.md)"
+echo "then: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET LEZI_ALLOW_SECRET_RESEED LEZI_ALLOW_TLS_BOOTSTRAP after cutover; probe health/ready (see copy-back-tls-cutover-runbook.md)"
 echo "note: this script does NOT claim live cutover success (ticket 07)"

@@ -1,6 +1,8 @@
 # lezi-sync NAS package (zdocker / Docker Compose v2 friendly).
 # Rendered by package-nas.sh — no YAML anchors, no build:.
-# LEZI_BOOTSTRAP_SECRET comes from deploy-time .env (inherited from live container).
+# LEZI_BOOTSTRAP_SECRET is passed through from remote-deploy's process
+# environment only after live/persistent sources pass validation. Do not replace
+# the bare list entry with dotenv/YAML interpolation.
 #
 # image: lezi-sync:__LEZI_SYNC_VERSION__
 # data:  __LEZI_DATA_HOST_PATH__
@@ -14,21 +16,21 @@ services:
     stop_grace_period: 30s
     init: true
     environment:
-      LEZI_DATA_DIR: /data
-      LEZI_HOST: "0.0.0.0"
-      LEZI_PORT: "8765"
-      LEZI_INTERNAL_PORT: "8766"
-      LEZI_LAN_APK_DOWNLOAD_ORIGIN: "__LEZI_LAN_APK_DOWNLOAD_ORIGIN__"
-      LEZI_TLS_CERTFILE: /data/tls/server.crt
-      LEZI_TLS_KEYFILE: /data/tls/server.key
-      LEZI_MAX_MEDIA_BYTES: "10485760"
-      LEZI_CREATE_RATE_LIMIT: "20"
-      LEZI_MEMBER_REQUEST_RATE_LIMIT: "10"
-      LEZI_MEMBER_REQUEST_TTL_HOURS: "24"
-      LEZI_MAX_PENDING_MEMBER_REQUESTS: "32"
-      LEZI_RATE_LIMIT_WINDOW_SECONDS: "60"
-      LEZI_ALLOW_PERMISSION_HARDENING_SKIP: "0"
-      LEZI_BOOTSTRAP_SECRET: ${LEZI_BOOTSTRAP_SECRET}
+      - LEZI_DATA_DIR=/data
+      - LEZI_HOST=0.0.0.0
+      - LEZI_PORT=8765
+      - LEZI_INTERNAL_PORT=8766
+      - LEZI_LAN_APK_DOWNLOAD_ORIGIN=__LEZI_LAN_APK_DOWNLOAD_ORIGIN__
+      - LEZI_TLS_CERTFILE=/data/tls/server.crt
+      - LEZI_TLS_KEYFILE=/data/tls/server.key
+      - LEZI_MAX_MEDIA_BYTES=10485760
+      - LEZI_CREATE_RATE_LIMIT=20
+      - LEZI_MEMBER_REQUEST_RATE_LIMIT=10
+      - LEZI_MEMBER_REQUEST_TTL_HOURS=24
+      - LEZI_MAX_PENDING_MEMBER_REQUESTS=32
+      - LEZI_RATE_LIMIT_WINDOW_SECONDS=60
+      - LEZI_ALLOW_PERMISSION_HARDENING_SKIP=0
+      - LEZI_BOOTSTRAP_SECRET
     volumes:
       - __LEZI_DATA_HOST_PATH__:/data
     ports:
