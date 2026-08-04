@@ -946,6 +946,145 @@ async fn disaster_restore_rejects_a_configured_server_even_with_the_root_passwor
     assert!(body.to_string().contains("empty"), "{body}");
 }
 
+/// Seeds a verified app-update channel (min=8) on an empty server for restore version-gate tests.
+fn seed_verified_app_update_on_empty(rig: &Rig, apk_bytes: &[u8]) {
+    let sha256 = hex::encode(Sha256::digest(apk_bytes));
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 9,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 8,
+            "sha256": sha256,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+}
+
+#[tokio::test]
+async fn disaster_restore_write_paths_require_supported_client_version() {
+    let root = "restore-version-gate-root-password";
+    let apk_bytes = b"restore-version-gate-apk-bytes";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    seed_verified_app_update_on_empty(&rig, apk_bytes);
+
+    let start_body = json!({
+        "request_id": "restore-version-gate-start-000000000001",
+        "family_id": Uuid::new_v4(),
+        "family_name": "恢复家庭",
+        "owner_display_name": "妈妈",
+        "device_name": "恢复手机",
+    });
+
+    // Missing version header → same client_update_required as sync gate.
+    let (missing_status, missing_body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start_body.clone(),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
+    assert_eq!(missing_body["code"], json!("client_update_required"));
+
+    // Below min → gate.
+    let (low_status, low_body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start_body.clone(),
+        &[
+            ("x-lezi-bootstrap-secret", root),
+            ("x-lezi-client-version-code", "7"),
+        ],
+    )
+    .await;
+    assert_eq!(low_status, StatusCode::FORBIDDEN, "{low_body}");
+    assert_eq!(low_body["code"], json!("client_update_required"));
+
+    // At min → start allowed (empty family).
+    let (ok_status, ok_body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start_body,
+        &[
+            ("x-lezi-bootstrap-secret", root),
+            ("x-lezi-client-version-code", "8"),
+        ],
+    )
+    .await;
+    assert!(
+        ok_status == StatusCode::CREATED || ok_status == StatusCode::OK,
+        "{ok_body}"
+    );
+    assert_ne!(ok_body["code"], json!("client_update_required"));
+    let batch_id = ok_body["batch_id"].as_str().expect("batch_id");
+    let recovery = ok_body["recovery_token"].as_str().expect("recovery_token");
+
+    // Manifest write also gated (recovery token as bearer; low version still CUR).
+    let (manifest_low_status, manifest_low_body) = json_request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/disaster-restore/batches/{batch_id}/manifest"),
+        Some(recovery),
+        json!({
+            "request_id": "restore-version-gate-manifest-00000001",
+            "entities": [],
+            "media": [],
+        }),
+        &[("x-lezi-client-version-code", "1")],
+    )
+    .await;
+    assert_eq!(
+        manifest_low_status,
+        StatusCode::FORBIDDEN,
+        "{manifest_low_body}"
+    );
+    assert_eq!(manifest_low_body["code"], json!("client_update_required"));
+
+    // App-update routes remain ungated by min so force upgrade is not deadlocked
+    // (no family session on empty server; version gate must not be the failure mode
+    // for public health either).
+    let (health_status, health_body) = get_json(&rig.app, "/health", None).await;
+    assert_eq!(health_status, StatusCode::OK, "{health_body}");
+}
+
+#[tokio::test]
+async fn disaster_restore_write_paths_fail_open_without_verified_channel() {
+    // No app-update pair → same fail-open as sync version gate.
+    let root = "restore-failopen-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+
+    let (status, body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-failopen-start-000000000001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::OK,
+        "{body}"
+    );
+    assert_ne!(body["code"], json!("client_update_required"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn family_create_and_disaster_restore_have_exactly_one_provisioning_winner() {
     let root = "concurrent-provisioning-root-password";

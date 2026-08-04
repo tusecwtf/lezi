@@ -67,6 +67,7 @@ import com.lezi.babylog.sync.appupdate.StagedApkIdentity
 import com.lezi.babylog.sync.appupdate.appUpdateStagingApk
 import com.lezi.babylog.sync.appupdate.appUpdateStagingDir
 import com.lezi.babylog.sync.appupdate.appUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
 import com.lezi.babylog.sync.backend.AnonymousHealth
@@ -876,32 +877,34 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun syncClientUpdateRequiredKeepsForceShellWhenMetadataClassifiesNonForced() = runTest {
-        // Server gate says CUR, but advertised minSupported is below local (divergence).
-        val metadata = sampleAppUpdateMetadata(
-            versionCode = 9,
-            versionName = "0.4.0",
-            minSupportedVersionCode = 6,
-        )
-        val rig = SyncRig(
-            session = joinedSession("family-a"),
-            clientAppVersion = ClientAppVersion(versionCode = 8, versionName = "0.3.5"),
-        )
-        rig.awaitStartupRecovery()
-        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+    fun syncClientUpdateRequiredWithNewerPackagePublishesInstallableEvenWhenDualTierOptional() =
+        runTest {
+            // Server gate says CUR; dual-tier alone would be optional (min <= local < version).
+            // Ticket 01: versionCode > local after CUR must still be installable WithPackage.
+            val metadata = sampleAppUpdateMetadata(
+                versionCode = 9,
+                versionName = "0.4.0",
+                minSupportedVersionCode = 6,
+            )
+            val rig = SyncRig(
+                session = joinedSession("family-a"),
+                clientAppVersion = ClientAppVersion(versionCode = 8, versionName = "0.3.5"),
+            )
+            rig.awaitStartupRecovery()
+            assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
 
-        rig.backend.appUpdateMetadata = metadata
-        rig.backend.pullFailures += ClientUpdateRequiredException()
+            rig.backend.appUpdateMetadata = metadata
+            rig.backend.pullFailures += ClientUpdateRequiredException()
 
-        val result = rig.port.sync(SyncTrigger.PullToRefresh)
-        assertThat(result.isFailure).isTrue()
-        assertThat(result.exceptionOrNull())
-            .isInstanceOf(ClientUpdateRequiredException::class.java)
-        // Must not clear to silent Idle: keep PackageUnknown (or prior package).
-        assertThat(rig.port.availableForcedAppUpdate().first())
-            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
-        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
-    }
+            val result = rig.port.sync(SyncTrigger.PullToRefresh)
+            assertThat(result.isFailure).isTrue()
+            assertThat(result.exceptionOrNull())
+                .isInstanceOf(ClientUpdateRequiredException::class.java)
+            assertThat(rig.port.availableForcedAppUpdate().first())
+                .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
+            assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+            assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        }
 
     /**
      * AUDIT-20260801-P1-01: force-shell "retry" shares [SyncPort.checkAppUpdate] with Settings.
@@ -979,7 +982,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun checkAppUpdateAfterPackageUnknownKeepsForceShellWithoutOptionalBanner() = runTest {
+    fun checkAppUpdateAfterPackageUnknownPromotesNewerPackageToInstallableForced() = runTest {
         val optionalMetadata = sampleAppUpdateMetadata(
             versionCode = 9,
             versionName = "0.4.0",
@@ -999,33 +1002,33 @@ class RealSyncPortTest {
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.PackageUnknown)
 
-        // Optional-classifying metadata after CUR must not demote force or show optional banner.
-        // Result must not be OptionalUpdate (would open dismissible "稍后" secondary dialog).
+        // Optional-classifying but versionCode > local under force shell → installable Forced,
+        // never optional banner / dismissible "稍后".
         rig.backend.getAppUpdateMetadataFailure = null
         rig.backend.appUpdateMetadata = optionalMetadata
         val checkResult = rig.port.checkAppUpdate().getOrThrow()
-        assertThat(checkResult).isEqualTo(AppUpdateCheckResult.ForcedPackageUnknown)
+        assertThat(checkResult).isEqualTo(AppUpdateCheckResult.ForcedUpdate(optionalMetadata))
         assertThat(
             appUpdateUiOutcome(
                 result = Result.success(checkResult),
                 failureCopy = { "unused" },
             ),
-        ).isEqualTo(AppUpdateUiOutcome.ForcedUpdatePackageUnknown)
+        ).isEqualTo(AppUpdateUiOutcome.ForcedUpdate(optionalMetadata))
 
         assertThat(rig.port.availableForcedAppUpdate().first())
-            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+            .isEqualTo(ForcedAppUpdateState.WithPackage(optionalMetadata))
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
     @Test
-    fun checkAppUpdatePreservesWithPackageWhenMetadataClassifiesNonForced() = runTest {
+    fun checkAppUpdateUnderForcePromotesNewerNonForcedMetadataToInstallablePackage() = runTest {
         val forcedPackage = sampleAppUpdateMetadata(
             versionCode = 9,
             versionName = "0.4.0",
             minSupportedVersionCode = 8,
         )
-        val nonForcedMetadata = sampleAppUpdateMetadata(
+        val newerInstallable = sampleAppUpdateMetadata(
             versionCode = 10,
             versionName = "0.4.1",
             minSupportedVersionCode = 1,
@@ -1041,18 +1044,50 @@ class RealSyncPortTest {
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
 
-        // Temporary divergence / non-Forced metadata must keep the last installable package
-        // and return ForcedUpdate (not Optional) so UI cannot offer dismissible dialog.
-        rig.backend.appUpdateMetadata = nonForcedMetadata
+        // versionCode > local under force shell → installable Forced of the newer package
+        // (not optional banner, not demote to bare UpToDate).
+        rig.backend.appUpdateMetadata = newerInstallable
         val checkResult = rig.port.checkAppUpdate().getOrThrow()
-        assertThat(checkResult).isEqualTo(AppUpdateCheckResult.ForcedUpdate(forcedPackage))
+        assertThat(checkResult).isEqualTo(AppUpdateCheckResult.ForcedUpdate(newerInstallable))
         assertThat(
             appUpdateUiOutcome(
                 result = Result.success(checkResult),
                 failureCopy = { "unused" },
             ),
-        ).isEqualTo(AppUpdateUiOutcome.ForcedUpdate(forcedPackage))
+        ).isEqualTo(AppUpdateUiOutcome.ForcedUpdate(newerInstallable))
 
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(newerInstallable))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun checkAppUpdatePreservesWithPackageWhenMetadataIsNotNewer() = runTest {
+        val forcedPackage = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+        )
+        val notNewer = sampleAppUpdateMetadata(
+            versionCode = 6,
+            versionName = "0.3.0",
+            minSupportedVersionCode = 1,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = forcedPackage
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
+
+        // UpToDate-classifying metadata must not tear down the last installable package.
+        rig.backend.appUpdateMetadata = notNewer
+        val checkResult = rig.port.checkAppUpdate().getOrThrow()
+        assertThat(checkResult).isEqualTo(AppUpdateCheckResult.ForcedUpdate(forcedPackage))
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
@@ -1121,6 +1156,8 @@ class RealSyncPortTest {
         assertThat(rig.port.availableForcedAppUpdate().first())
             .isEqualTo(ForcedAppUpdateState.WithPackage(forcedPackage))
 
+        // Failed non-CUR sync must not piggyback-discover with preserve=false;
+        // shell stays on the last installable forced package.
         rig.backend.appUpdateMetadata = nonForcedMetadata
         rig.backend.pullFailures += SyncHttpException(
             503,
@@ -1377,6 +1414,68 @@ class RealSyncPortTest {
         assertThat(installer.installCalls.single().fileExistedAtCall).isTrue()
         assertThat(appUpdateStagingDir(cacheDir).exists()).isFalse()
         assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+    }
+
+    @Test
+    fun forceShellRetainedThroughReauthAndInstallProceedsAfterRejoin() = runTest {
+        val apkBytes = "lezi-force-reauth-apk".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-force-reauth-install")
+        val original = joinedSession("family-a")
+        val rig = SyncRig(
+            session = original,
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            apkIdentityReader = FakeAppUpdateApkIdentityReader(versionCode = 9),
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+        rig.backend.appUpdateApkBytes = apkBytes
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
+
+        // Session recovery under force shell: credentials cleared, force retained.
+        rig.preferences.clearDeviceCredentialsForReauth()
+        runCurrent()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
+        assertThat(rig.port.session().first().isJoined).isFalse()
+        assertThat(
+            forceShellNeedsSessionRecovery(
+                isJoined = false,
+                reauthRequired = true,
+                retainsFamilyIdentity = true,
+            ),
+        ).isTrue()
+        // Install is blocked until joined again.
+        assertThat(rig.port.installAvailableAppUpdate(metadata).isFailure).isTrue()
+
+        // Rejoin with same family identity; force shell still present.
+        rig.preferences.saveSession(
+            original.copy(
+                accessToken = "access-after-reauth",
+                refreshToken = "refresh-after-reauth",
+                reauthRequired = false,
+            ),
+        )
+        runCurrent()
+        assertThat(rig.port.session().first().isJoined).isTrue()
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
+
+        val result = rig.port.installAvailableAppUpdate(metadata).getOrThrow()
+        assertThat(result).isEqualTo(AppUpdateInstallResult.SessionStarted)
+        assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(1)
+        assertThat(installer.installCalls).hasSize(1)
     }
 
     @Test

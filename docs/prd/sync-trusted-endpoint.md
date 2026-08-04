@@ -283,12 +283,13 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 | 项 | 合同 |
 |----|------|
 | 请求头 | 权威同步与其它需门槛的受保护请求携带 `X-Lezi-Client-Version-Code`（十进制整数） |
-| 门槛判定 | 仅当**已验证**自托管更新通道可用（部署元数据 + 与 `sha256` 一致的 APK）时读取 `min_supported_version_code`；头缺失/非法或 `< min` 时拒绝权威 sync 写/拉 |
+| 门槛判定 | 仅当**已验证**自托管更新通道可用（部署元数据 + 与 `sha256` 一致的 APK）时读取 `min_supported_version_code`；头缺失/非法或 `< min` 时拒绝权威 sync 写/拉 **与灾难恢复写路径** |
 | 诚实客户端闸 | 见 [tech.md §4.2 诚实客户端闸](./tech.md)（本表不重复展开，避免双源漂移） |
 | 错误语义 | HTTP 失败 body 含稳定 `code=client_update_required`；客户端映射强制升级，不重试当普通网络错误 |
 | 放行 | 同一有效会话下 `GET /v1/app-update` 与 `GET /v1/app-update/apk` **不**走门槛拒绝，避免升级死锁 |
-| 缺通道 / 半通道 | 未部署 `app-update.json`、仅有元数据无 APK、或 APK 完整性失败时同步** fail-open**（不砖掉家庭进强制升级却无包可装）；元数据/APK 路由对已鉴权调用诚实 404/500 |
-| 客户端强制壳 | 权威路径已返回 `client_update_required` 时：拉到元数据且 local &lt; min → 可安装强制全屏；拉元数据失败或分类非强制 → 仍发布 **PackageUnknown** 强制壳（重试检查更新），`SyncStatus` 保持 Idle，文案区分于泛同步故障。强制壳上的「重试检查更新」走同一 `checkAppUpdate`：已有 `PackageUnknown`/`WithPackage` 时非 Forced 元数据不得拆壳或展示 optional；Result 通道与 `availableForcedAppUpdate` 同为 force-honest（`ForcedPackageUnknown` / 保留的 `ForcedUpdate`），不得 bare UpToDate/Optional 文案；失败同步（网络/5xx）不得 piggyback 拆壳；仅新的合法 Forced 可替换已验证包；权威同步成功后的 piggyback 才可清过期壳 |
+| 缺通道 / 半通道 | 未部署 `app-update.json`、仅有元数据无 APK、或 APK 完整性失败时同步/restore **fail-open**（不砖掉家庭进强制升级却无包可装）；元数据/APK 路由对已鉴权调用诚实 404/500 |
+| 客户端强制壳 | 权威路径已返回 `client_update_required` 时：拉到元数据且 **versionCode &gt; local** → 可安装强制全屏（即使双档会判 optional）；拉元数据失败或无更高 versionCode → 仍发布 **PackageUnknown** 强制壳（重试检查更新），`SyncStatus` 保持 Idle，文案区分于泛同步故障。强制壳上的「重试检查更新」走同一 `checkAppUpdate`：已有壳时 `versionCode &gt; local` 升为可安装 Forced，否则不得拆壳或展示 optional；Result 通道与 `availableForcedAppUpdate` 同为 force-honest（`ForcedPackageUnknown` / `ForcedUpdate`），不得 bare UpToDate/Optional 文案；失败同步（网络/5xx）不得 piggyback 拆壳；权威同步成功后的 piggyback 才可清过期壳。壳内允许 reauth；APK 下载 access **401** 时 refresh 后重试下载 **一次**；鉴权通道不可用且 origin 已知时给出 LAN **8767** 邀请安装引导 |
+| wire-break | 破坏封闭 wire / schema / allowlist 前必须先抬 min + 发布已验证包；**无** dual-read。见 [tech.md §4.2.1](./tech.md) |
 | 资格 | 本节应用内更新仅限已加入且会话有效；ADR-0015 的 LAN 邀请首装是隔离的匿名分发面，不得用于同步或既有设备更新 |
 | 发现 | 前台握手/同步顺带 best-effort 检查；菜单关于区手动检查；可选更新可横幅提示（会话内稍后抑制） |
 

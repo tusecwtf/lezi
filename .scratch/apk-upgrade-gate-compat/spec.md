@@ -1,6 +1,6 @@
 # APK 升级门闩 · 同步兼容
 
-Status: open — tickets ready-for-agent (to-tickets, approved 2026-08-04)
+Status: done — tickets ready-for-agent (to-tickets, approved 2026-08-04)
 
 ## Goal
 
@@ -26,12 +26,12 @@ See [ISSUES.md](./ISSUES.md). Dependency order: **01 → 02**; **03–06** indep
 
 ## Must
 
-- [ ] 01 installable forced package after CUR when newer metadata exists
-- [ ] 02 reauth / 401-retry / 8767 guidance under force
+- [x] 01 installable forced package after CUR when newer metadata exists
+- [x] 02 reauth / 401-retry / 8767 guidance under force
 - [x] 03 min gate tied to verified channel + safe app-update publish
-- [ ] 04 additive setup-status parse
-- [ ] 05 restore version gate
-- [ ] 06 wire-break → raise min checklist
+- [x] 04 additive setup-status parse
+- [x] 05 restore version gate
+- [x] 06 wire-break → raise min checklist
 
 ## Out of scope
 
@@ -43,10 +43,10 @@ See [ISSUES.md](./ISSUES.md). Dependency order: **01 → 02**; **03–06** indep
 
 ## Validation (program-level)
 
-- [ ] lezi-sync: `cargo fmt --check`, `cargo test --locked`, clippy `-D warnings` when server/deploy touched
-- [ ] Client JVM tests for force/CUR/setup as claimed by tickets
-- [ ] Deploy script tests when ticket 03 touches packaging/CD helpers
-- [ ] Minimal joined release-path smoke for force install when 01–02 land
+- [x] lezi-sync: `cargo fmt --check`, `cargo test --locked`, clippy `-D warnings` when server/deploy touched
+- [x] Client JVM tests for force/CUR/setup as claimed by tickets
+- [x] Deploy script tests when ticket 03 touches packaging/CD helpers
+- [x] Minimal joined release-path smoke for force install when 01–02 land
 
 ## Source audit
 

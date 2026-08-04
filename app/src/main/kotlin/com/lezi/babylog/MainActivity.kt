@@ -134,10 +134,16 @@ import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.ForcedAppUpdateState
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.forcedUpdateDialogBody
+import com.lezi.babylog.sync.appupdate.forcedUpdateLanInviteGuidance
+import com.lezi.babylog.sync.appupdate.forcedUpdateLanInviteOpenLabel
 import com.lezi.babylog.sync.appupdate.forcedUpdatePackageUnknownBody
 import com.lezi.babylog.sync.appupdate.forcedUpdateRetryCheckLabel
+import com.lezi.babylog.sync.appupdate.forcedUpdateSessionRecoveryLabel
 import com.lezi.babylog.sync.appupdate.forcedUpdateTitle
+import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
+import com.lezi.babylog.sync.backend.ReauthRequiredException
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Duration
@@ -150,6 +156,7 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -160,7 +167,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
@@ -395,6 +401,32 @@ class RootViewModel @Inject constructor(
         syncPort.availableForcedAppUpdate()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /**
+     * Session snapshot for force-shell recovery / LAN invite guidance.
+     * Force shell is retained across reauth; UI must still allow re-login.
+     */
+    val forcedUpdateSessionRecovery: StateFlow<ForcedUpdateSessionRecovery> =
+        syncPort.session()
+            .map { session ->
+                val inviteUrl = lanInviteApkDownloadUrl(session.serverHost)
+                ForcedUpdateSessionRecovery(
+                    needsSessionRecovery = forceShellNeedsSessionRecovery(
+                        isJoined = session.isJoined,
+                        reauthRequired = session.reauthRequired,
+                        retainsFamilyIdentity = session.reauthRequired &&
+                            session.familyId.isNotBlank() &&
+                            session.membershipId.isNotBlank() &&
+                            session.baseUrl.isNotBlank(),
+                    ),
+                    lanInviteApkUrl = inviteUrl,
+                )
+            }
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                ForcedUpdateSessionRecovery(),
+            )
+
     private val _forcedUpdateBusy = MutableStateFlow(false)
     val forcedUpdateBusy: StateFlow<Boolean> = _forcedUpdateBusy.asStateFlow()
     private val _forcedUpdateMessage = MutableStateFlow<String?>(null)
@@ -403,6 +435,24 @@ class RootViewModel @Inject constructor(
     val forcedUpdateNeedsInstallPermission: StateFlow<Boolean> =
         _forcedUpdateNeedsInstallPermission.asStateFlow()
 
+    /**
+     * When true, full-screen force sink is lowered so account/onboarding reauth UI
+     * under the shell remains usable. Force state itself is never cleared here.
+     */
+    private val _forceShellSessionRecoveryExpanded = MutableStateFlow(false)
+    val forceShellSessionRecoveryExpanded: StateFlow<Boolean> =
+        _forceShellSessionRecoveryExpanded.asStateFlow()
+
+    fun expandForceShellSessionRecovery() {
+        _forceShellSessionRecoveryExpanded.value = true
+        _forcedUpdateMessage.value =
+            "请在下方完成重新登录或信任校验；完成后可继续安装更新。强制更新不会取消。"
+    }
+
+    fun collapseForceShellSessionRecovery() {
+        _forceShellSessionRecoveryExpanded.value = false
+    }
+
     fun installForcedAppUpdate(metadata: AppUpdateMetadata) {
         if (_forcedUpdateBusy.value) return
         viewModelScope.launch {
@@ -410,6 +460,14 @@ class RootViewModel @Inject constructor(
             _forcedUpdateNeedsInstallPermission.value = false
             _forcedUpdateMessage.value = "正在从家庭服务器下载更新包…"
             try {
+                val session = syncPort.session().first()
+                if (!session.isJoined) {
+                    _forcedUpdateNeedsInstallPermission.value = false
+                    _forcedUpdateMessage.value =
+                        "登录已失效，请先重新登录家庭后再安装更新。"
+                    _forceShellSessionRecoveryExpanded.value = true
+                    return@launch
+                }
                 val result = syncPort.installAvailableAppUpdate(metadata)
                 result.fold(
                     onSuccess = { install ->
@@ -428,8 +486,20 @@ class RootViewModel @Inject constructor(
                     },
                     onFailure = { error ->
                         _forcedUpdateNeedsInstallPermission.value = false
-                        _forcedUpdateMessage.value =
-                            productUiError(error, "下载或安装失败，请稍后重试")
+                        if (error is ReauthRequiredException) {
+                            _forceShellSessionRecoveryExpanded.value = true
+                            _forcedUpdateMessage.value =
+                                "登录已失效，请先重新登录家庭后再安装更新。"
+                        } else {
+                            val invite = lanInviteApkDownloadUrl(session.serverHost)
+                            _forcedUpdateMessage.value = buildString {
+                                append(productUiError(error, "下载或安装失败，请稍后重试"))
+                                if (invite != null) {
+                                    append('\n')
+                                    append(forcedUpdateLanInviteGuidance(invite))
+                                }
+                            }
+                        }
                     },
                 )
             } finally {
@@ -738,11 +808,21 @@ private fun RootForcedAppUpdateLayer(vm: RootViewModel) {
     val forcedBusy by vm.forcedUpdateBusy.collectAsStateWithLifecycle()
     val forcedMessage by vm.forcedUpdateMessage.collectAsStateWithLifecycle()
     val needsInstallPermission by vm.forcedUpdateNeedsInstallPermission.collectAsStateWithLifecycle()
+    val sessionRecovery by vm.forcedUpdateSessionRecovery.collectAsStateWithLifecycle()
+    val recoveryExpanded by vm.forceShellSessionRecoveryExpanded.collectAsStateWithLifecycle()
+    // Auto-collapse recovery mode once the session is joined again so install returns.
+    LaunchedEffect(sessionRecovery.needsSessionRecovery, forcedUpdate) {
+        if (forcedUpdate != null && !sessionRecovery.needsSessionRecovery) {
+            vm.collapseForceShellSessionRecovery()
+        }
+    }
     // Keep the last non-null shell so the exit fade still has content to animate.
     var lastForced by remember { mutableStateOf<ForcedAppUpdateState?>(null) }
     forcedUpdate?.let { lastForced = it }
+    val showFullShell = forcedUpdate != null &&
+        !(recoveryExpanded && sessionRecovery.needsSessionRecovery)
     AnimatedVisibility(
-        visible = forcedUpdate != null,
+        visible = showFullShell,
         enter = fadeIn(animationSpec = tween(durationMillis = 200)),
         exit = fadeOut(animationSpec = tween(durationMillis = 160)),
         label = "forcedAppUpdateOverlay",
@@ -753,12 +833,29 @@ private fun RootForcedAppUpdateLayer(vm: RootViewModel) {
                 busy = forcedBusy,
                 message = forcedMessage,
                 needsInstallPermission = needsInstallPermission,
+                needsSessionRecovery = sessionRecovery.needsSessionRecovery,
+                lanInviteApkUrl = sessionRecovery.lanInviteApkUrl,
                 onInstall = { metadata -> vm.installForcedAppUpdate(metadata) },
                 onRetryCheck = vm::retryForcedAppUpdateCheck,
+                onRecoverSession = vm::expandForceShellSessionRecovery,
             )
         }
     }
+    // Compact non-blocking banner while reauth/onboarding under the shell is usable.
+    if (forcedUpdate != null && recoveryExpanded && sessionRecovery.needsSessionRecovery) {
+        ForcedAppUpdateRecoveryBanner(
+            message = forcedMessage
+                ?: "须更新乐记。请先完成重新登录，然后再回到强制更新安装。",
+            onReturnToForceShell = vm::collapseForceShellSessionRecovery,
+        )
+    }
 }
+
+/** Session recovery + LAN invite facts for the force-update shell. */
+data class ForcedUpdateSessionRecovery(
+    val needsSessionRecovery: Boolean = false,
+    val lanInviteApkUrl: String? = null,
+)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1253,9 +1350,12 @@ private fun LeziMainScaffold(
 
 /**
  * Full-screen, non-dismissible force-update gate (no "稍后").
- * Covers the whole activity content so log/summary/account cannot be used to bypass.
+ * Covers the whole activity content so log/summary/account cannot be used to bypass
+ * main features. Session recovery is an intentional exception: when credentials are
+ * gone, the shell offers re-login (temporarily lowers the sink) and LAN invite-install
+ * guidance on port 8767 without clearing the force state.
  * System back is consumed and the surface sinks pointer events so taps cannot reach
- * the scaffold or onboarding underneath.
+ * the scaffold or onboarding underneath (except after explicit recovery expand).
  */
 @Composable
 private fun ForcedAppUpdateOverlay(
@@ -1263,8 +1363,11 @@ private fun ForcedAppUpdateOverlay(
     busy: Boolean,
     message: String?,
     needsInstallPermission: Boolean,
+    needsSessionRecovery: Boolean,
+    lanInviteApkUrl: String?,
     onInstall: (AppUpdateMetadata) -> Unit,
     onRetryCheck: () -> Unit,
+    onRecoverSession: () -> Unit,
 ) {
     val context = LocalContext.current
     // Consume system back while forced — no "稍后" and no back-to-main bypass.
@@ -1314,6 +1417,16 @@ private fun ForcedAppUpdateOverlay(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (lanInviteApkUrl != null &&
+                (forced is ForcedAppUpdateState.PackageUnknown || needsSessionRecovery)
+            ) {
+                Spacer(Modifier.height(LeziSpacing.Md))
+                Text(
+                    forcedUpdateLanInviteGuidance(lanInviteApkUrl),
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Spacer(Modifier.height(LeziSpacing.Xl))
             when (forced) {
                 is ForcedAppUpdateState.WithPackage -> {
@@ -1339,6 +1452,26 @@ private fun ForcedAppUpdateOverlay(
                     )
                 }
             }
+            if (needsSessionRecovery) {
+                Spacer(Modifier.height(LeziSpacing.Sm))
+                LeziTextButton(
+                    label = forcedUpdateSessionRecoveryLabel(),
+                    onClick = onRecoverSession,
+                    enabled = !busy,
+                    tone = LeziTextButtonTone.Primary,
+                )
+            }
+            if (lanInviteApkUrl != null) {
+                Spacer(Modifier.height(LeziSpacing.Sm))
+                LeziTextButton(
+                    label = forcedUpdateLanInviteOpenLabel(),
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(lanInviteApkUrl))
+                        runCatching { context.startActivity(intent) }
+                    },
+                    enabled = !busy,
+                )
+            }
             if (needsInstallPermission) {
                 Spacer(Modifier.height(LeziSpacing.Sm))
                 LeziTextButton(
@@ -1353,6 +1486,46 @@ private fun ForcedAppUpdateOverlay(
                     tone = LeziTextButtonTone.Primary,
                 )
             }
+        }
+    }
+}
+
+/** Non-blocking banner while force state is retained and session recovery UI is usable. */
+@Composable
+private fun ForcedAppUpdateRecoveryBanner(
+    message: String,
+    onReturnToForceShell: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .statusBarsPadding()
+            .semantics { contentDescription = "强制更新会话恢复" }
+            .testTag("forced_app_update_recovery_banner"),
+        color = MaterialTheme.colorScheme.errorContainer,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(LeziSpacing.Md),
+        ) {
+            Text(
+                forcedUpdateTitle(),
+                style = LeziTypography.BodyStrong,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Spacer(Modifier.height(LeziSpacing.Xs))
+            Text(
+                message,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+            )
+            Spacer(Modifier.height(LeziSpacing.Sm))
+            LeziTextButton(
+                label = "返回强制更新",
+                onClick = onReturnToForceShell,
+                tone = LeziTextButtonTone.Primary,
+            )
         }
     }
 }

@@ -28,8 +28,9 @@ use crate::model::{
 };
 use crate::store::{DisasterRestoreIdentityInput, StoreError};
 use crate::{
-    constant_time_eq, derive_token, json_body, require_owner_root_password, run_blocking,
-    secure_directory, secure_file, sync_directory, write_private_file, ApiError, AppState,
+    constant_time_eq, derive_token, json_body, require_owner_root_password,
+    require_supported_client, run_blocking, secure_directory, secure_file, sync_directory,
+    write_private_file, ApiError, AppState,
 };
 
 const RESTORE_PROTOCOL_VERSION: u16 = 1;
@@ -104,6 +105,8 @@ pub(crate) async fn start(
     headers: HeaderMap,
     body: Result<Json<StartRestoreRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    // Same honest client version floor as authoritative sync when a verified channel exists.
+    require_supported_client(&state, &headers).await?;
     let store = state.store.clone();
     if run_blocking(move || Ok(!store.family_ids()?.is_empty())).await? {
         return Err(ApiError::conflict(
@@ -197,6 +200,7 @@ pub(crate) async fn put_manifest(
     headers: HeaderMap,
     body: Result<Json<RestoreManifestRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    require_supported_client(&state, &headers).await?;
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
     let blocking_state = state.clone();
@@ -237,6 +241,7 @@ pub(crate) async fn put_media(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Json<Value>, ApiError> {
+    require_supported_client(&state, &headers).await?;
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
     let blocking_state = state.clone();
@@ -312,6 +317,7 @@ pub(crate) async fn commit(
     headers: HeaderMap,
     body: Result<Json<RestoreCommitRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    require_supported_client(&state, &headers).await?;
     let batch_lock = state.family_lock(&batch_lock_key(&batch_id)?).await;
     let _batch_guard = batch_lock.lock().await;
     let blocking_state = state.clone();

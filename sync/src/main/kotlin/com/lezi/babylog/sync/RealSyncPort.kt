@@ -1501,11 +1501,14 @@ class RealSyncPort @Inject constructor(
      * Rejects metadata whose packageName is not this process applicationId so UI
      * never offers install of a different app.
      *
-     * When [preserveExistingForceShell] is true and classification is not Forced,
-     * an existing force surface is left intact, optional is not published, and the
-     * **returned** [AppUpdateCheckResult] stays force-honest ([ForcedUpdate] for a
-     * retained package, [ForcedPackageUnknown] otherwise) — never bare UpToDate/
-     * Optional, so Settings/Family/retry UI cannot claim 假正常 while the shell blocks.
+     * When [preserveExistingForceShell] is true (active force shell, or CUR resolve):
+     * - any metadata with `versionCode > local` publishes installable
+     *   [ForcedAppUpdateState.WithPackage] (even if dual-tier would be optional-only);
+     * - otherwise an existing force surface is left intact, optional is not published,
+     *   and the **returned** [AppUpdateCheckResult] stays force-honest
+     *   ([ForcedUpdate] for a retained package, [ForcedPackageUnknown] otherwise) —
+     *   never bare UpToDate/Optional, so Settings/Family/retry UI cannot claim 假正常
+     *   while the shell blocks.
      * Handshake piggyback after a successful sync keeps the default (false) so a
      * genuine non-gated client can clear a stale shell.
      */
@@ -1519,15 +1522,23 @@ class RealSyncPort @Inject constructor(
             throw mismatch
         }
         val local = clientAppVersion.versionCode
+        // Dual-tier forced (local < min) always installs the advertised package.
         if (local < metadata.minSupportedVersionCode) {
             optionalAppUpdateState.value = null
             forcedAppUpdateState.value = ForcedAppUpdateState.WithPackage(metadata)
             return AppUpdateCheckResult.ForcedUpdate(metadata)
         }
         if (preserveExistingForceShell) {
+            // CUR / active force shell: versionCode > local is always installable,
+            // even when minSupported alone would leave dual-tier optional-only.
+            if (local < metadata.versionCode) {
+                optionalAppUpdateState.value = null
+                forcedAppUpdateState.value = ForcedAppUpdateState.WithPackage(metadata)
+                return AppUpdateCheckResult.ForcedUpdate(metadata)
+            }
             when (val existing = forcedAppUpdateState.value) {
                 is ForcedAppUpdateState.WithPackage -> {
-                    // Fail closed: keep last installable package; Result matches shell.
+                    // Nothing newer to install — keep last installable package.
                     optionalAppUpdateState.value = null
                     return AppUpdateCheckResult.ForcedUpdate(existing.metadata)
                 }
@@ -1589,12 +1600,14 @@ class RealSyncPort @Inject constructor(
 
     /**
      * Single owner of CUR → metadata → force-shell policy for both sync handling and
-     * [checkAppUpdate] recover. Best-effort load so force UI can install; only accept
-     * [AppUpdateCheckResult.ForcedUpdate]. Optional/up-to-date after CUR would clear
-     * force and reintroduce silent Idle — fail closed with a force shell instead.
+     * [checkAppUpdate] recover. Best-effort load so force UI can install.
+     * After CUR, any reachable metadata with `versionCode > local` becomes installable
+     * [ForcedUpdate] (even dual-tier optional-only); metadata/channel failure or
+     * nothing newer than local still leaves a non-silent force shell
+     * ([PackageUnknown] or a prior [WithPackage]).
      *
-     * @return installable ForcedUpdate when classification succeeded; null when a
-     * force shell was published without accepting ForcedUpdate (caller rethrows CUR).
+     * @return installable ForcedUpdate when a package was accepted; null when a
+     * force shell was published without an installable package (caller rethrows CUR).
      */
     private suspend fun resolveForceShellAfterClientUpdateRequired():
         AppUpdateCheckResult.ForcedUpdate? {
@@ -1610,8 +1623,8 @@ class RealSyncPort @Inject constructor(
                 )
                 if (decision == ForegroundSyncDecision.Allowed) {
                     val metadata = backend.getAppUpdateMetadata(session)
-                    // Never tear shell on non-Forced classification while resolving CUR —
-                    // same policy as checkAppUpdate retry under an active force surface.
+                    // preserveExistingForceShell=true: CUR treats versionCode > local as
+                    // installable ForcedUpdate (not optional banner / PackageUnknown).
                     val classified = classifyAndPublishAppUpdate(
                         metadata = metadata,
                         respectOptionalDismissal = false,

@@ -413,7 +413,9 @@ private fun parseSetupStatus(
     val json = runCatching {
         Json.parseToJsonElement(body.toString(Charsets.UTF_8)) as? JsonObject
     }.getOrNull() ?: return SetupProbeResult.Failed.NotLezi
-    if (json.keys != SETUP_STATUS_FIELDS) return SetupProbeResult.Failed.NotLezi
+    // Required known fields must be present; extra unknown keys are ignored so the
+    // server may grow setup-status without bricking existing clients as NotLezi.
+    if (!json.keys.containsAll(SETUP_STATUS_FIELDS)) return SetupProbeResult.Failed.NotLezi
     val protocolVersion = (json["protocol_version"] as? JsonPrimitive)?.intOrNull
         ?: return SetupProbeResult.Failed.NotLezi
     val capabilityValues = json["capabilities"] as? JsonArray

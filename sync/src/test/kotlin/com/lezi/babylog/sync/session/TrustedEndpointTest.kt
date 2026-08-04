@@ -124,15 +124,16 @@ class TrustedEndpointTest {
             ) to SetupProbeResult.Failed.Incompatible,
             SetupHttpResponse(
                 200,
-                (currentSetupStatus("empty").dropLast(1) + ",\"family_name\":\"secret\"}")
-                    .toByteArray(),
-            ) to SetupProbeResult.Failed.NotLezi,
-            SetupHttpResponse(
-                200,
                 currentSetupStatus("empty").replace(
                     "\"record_membership_author\"",
                     "\"record_membership_author\",7",
                 )
+                    .toByteArray(),
+            ) to SetupProbeResult.Failed.NotLezi,
+            SetupHttpResponse(
+                200,
+                // Missing required family_state key → still NotLezi (not additive).
+                """{"protocol_version":1,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author","device_disaster_restore_v1"]}"""
                     .toByteArray(),
             ) to SetupProbeResult.Failed.NotLezi,
         )
@@ -143,6 +144,64 @@ class TrustedEndpointTest {
         }
 
         assertThat(transport.requests).hasSize(cases.size)
+    }
+
+    @Test
+    fun setupStatusWithExtraUnknownFieldsStillRoutesReady() = runTest {
+        val transport = RecordingSetupHttpTransport(
+            response = SetupHttpResponse(
+                statusCode = 200,
+                body = (
+                    currentSetupStatus("empty").dropLast(1) +
+                        ",\"server_build\":\"0.4.0\",\"probe_hint\":true}"
+                    ).toByteArray(),
+            ),
+        )
+        val probe = HttpSetupProbe(transport)
+
+        val result = probe.probe("https://family.example.com")
+
+        assertThat(result).isEqualTo(
+            SetupProbeResult.Ready(
+                endpoint = TrustedEndpointProfile.systemPki("https://family.example.com"),
+                familyState = SetupFamilyState.Empty,
+            ),
+        )
+    }
+
+    @Test
+    fun setupStatusExtraFieldsDoNotMaskMissingCapabilities() = runTest {
+        val transport = RecordingSetupHttpTransport(
+            response = SetupHttpResponse(
+                statusCode = 200,
+                body = (
+                    """{"protocol_version":1,"capabilities":["trusted_https_endpoint_v1"],""" +
+                        """"family_state":"empty","extra":"ignored"}"""
+                    ).toByteArray(),
+            ),
+        )
+        val probe = HttpSetupProbe(transport)
+
+        assertThat(probe.probe("https://family.example.com"))
+            .isEqualTo(SetupProbeResult.Failed.Incompatible)
+    }
+
+    @Test
+    fun exactThreeFieldSetupStatusStillRoutesReady() = runTest {
+        val transport = RecordingSetupHttpTransport(
+            response = SetupHttpResponse(
+                statusCode = 200,
+                body = currentSetupStatus("configured").toByteArray(),
+            ),
+        )
+        val probe = HttpSetupProbe(transport)
+
+        assertThat(probe.probe("https://family.example.com")).isEqualTo(
+            SetupProbeResult.Ready(
+                endpoint = TrustedEndpointProfile.systemPki("https://family.example.com"),
+                familyState = SetupFamilyState.Configured,
+            ),
+        )
     }
 }
 

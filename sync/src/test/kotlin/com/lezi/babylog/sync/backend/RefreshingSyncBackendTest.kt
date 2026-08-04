@@ -319,6 +319,39 @@ class RefreshingSyncBackendTest {
         assertThat(delegate.pullTokens).containsExactly("access-old", "access-new").inOrder()
         assertThat(preferences.current().reauthRequired).isTrue()
     }
+
+    @Test
+    fun appUpdateDownload401RefreshesAndRetriesDownloadExactlyOnce() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val delegate = RefreshRecordingBackend().apply { failFirstDownloadWith401 = true }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+
+        val bytes = backend.downloadAppUpdateApk(preferences.current())
+
+        assertThat(bytes).isEqualTo("release-apk".toByteArray())
+        assertThat(delegate.refreshTokens).containsExactly("refresh-old")
+        assertThat(delegate.downloadTokens)
+            .containsExactly("access-old", "access-new")
+            .inOrder()
+    }
+
+    @Test
+    fun appUpdateDownload401AfterRefreshRequiresReauthWithoutThirdAttempt() = runTest {
+        val preferences = MemorySyncPreferences(joinedSession())
+        val delegate = RefreshRecordingBackend().apply { alwaysFailDownloadWith401 = true }
+        val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
+
+        val failure = runCatching {
+            backend.downloadAppUpdateApk(preferences.current())
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(ReauthRequiredException::class.java)
+        assertThat(delegate.refreshTokens).containsExactly("refresh-old")
+        assertThat(delegate.downloadTokens)
+            .containsExactly("access-old", "access-new")
+            .inOrder()
+        assertThat(preferences.current().reauthRequired).isTrue()
+    }
 }
 
 private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
@@ -331,10 +364,13 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
     val grantClaimCalls = mutableListOf<Triple<TrustedEndpointProfile, String, String>>()
     var failFirstPullWith401 = false
     var alwaysFailPullWith401 = false
+    var failFirstDownloadWith401 = false
+    var alwaysFailDownloadWith401 = false
     var refreshFailure: Throwable? = null
     var pullFailure: Throwable? = null
     var downloadStarted: CompletableDeferred<Unit>? = null
     var releaseDownload: CompletableDeferred<Unit>? = null
+    val downloadTokens = mutableListOf<String>()
 
     override suspend fun refresh(baseUrl: String, refreshToken: String): SessionRefreshResult {
         refreshTokens += refreshToken
@@ -396,6 +432,12 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
     }
 
     override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray {
+        downloadTokens += session.accessToken
+        if (alwaysFailDownloadWith401 ||
+            (failFirstDownloadWith401 && downloadTokens.size == 1)
+        ) {
+            throw SyncHttpException(401)
+        }
         downloadStarted?.complete(Unit)
         releaseDownload?.await()
         return "release-apk".toByteArray()

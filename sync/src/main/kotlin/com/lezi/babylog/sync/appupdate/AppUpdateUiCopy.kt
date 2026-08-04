@@ -169,6 +169,47 @@ fun forcedUpdateRetryCheckLabel(): String = "重试检查更新"
 
 fun forcedUpdateTitle(): String = "必须更新乐记"
 
+/** Force-shell CTA when session credentials need recovery before install download. */
+fun forcedUpdateSessionRecoveryLabel(): String = "重新登录家庭"
+
+/**
+ * Force-shell guidance when authenticated app-update cannot supply a package but the
+ * family server origin is known — LAN invite-install port 8767 serves the same verified APK.
+ */
+fun forcedUpdateLanInviteGuidance(downloadUrl: String): String =
+    "若无法通过已登录会话下载，可在同一家庭局域网用浏览器打开：\n$downloadUrl\n" +
+        "（端口 8767 邀请安装页，无家庭 API；装好后须重新登录家庭。）"
+
+/** Secondary CTA label for opening the LAN invite-install download URL. */
+fun forcedUpdateLanInviteOpenLabel(): String = "打开局域网安装页"
+
+/**
+ * Builds the anonymous LAN invite-install APK URL for a known family server host.
+ * Port is fixed at 8767 (ADR-0015); scheme is always http on the trusted LAN.
+ * Returns null when [serverHost] is blank.
+ */
+fun lanInviteApkDownloadUrl(serverHost: String): String? {
+    val host = serverHost.trim()
+    if (host.isEmpty()) return null
+    // IPv6 literals need brackets in URLs.
+    val authority = if (host.contains(':') && !host.startsWith('[')) {
+        "[$host]"
+    } else {
+        host
+    }
+    return "http://$authority:8767/download/lezi.apk"
+}
+
+/**
+ * True when the force shell should offer session recovery (re-login / re-trust)
+ * without abandoning the force path. Install download requires a joined session.
+ */
+fun forceShellNeedsSessionRecovery(
+    isJoined: Boolean,
+    reauthRequired: Boolean,
+    retainsFamilyIdentity: Boolean,
+): Boolean = !isJoined && (reauthRequired || retainsFamilyIdentity)
+
 fun appUpdateInstallUiOutcome(
     result: Result<AppUpdateInstallResult>,
     failureCopy: (Throwable) -> String,

@@ -1,19 +1,19 @@
 # APK 升级门闩 · 同步兼容
 
-Status: open — to-tickets rewrite 2026-08-04 (approved vertical slices)
+Status: done — tickets closed 2026-08-04
 
 | # | Issue | Status | Blocked by |
 |---|-------|--------|------------|
-| 01 | [强制升级总能落到可安装包](./issues/01-forced-update-installable-package.md) | ready-for-agent | — |
-| 02 | [强制壳下可恢复会话并完成安装](./issues/02-force-shell-session-recovery-install.md) | ready-for-agent | 01 |
+| 01 | [强制升级总能落到可安装包](./issues/01-forced-update-installable-package.md) | done | — |
+| 02 | [强制壳下可恢复会话并完成安装](./issues/02-force-shell-session-recovery-install.md) | done | 01 |
 | 03 | [仅在更新通道可用时抬高版本门槛](./issues/03-min-supported-only-when-channel-verified.md) | done | — |
-| 04 | [setup 探测容忍服务端加字段](./issues/04-setup-status-additive-fields.md) | ready-for-agent | — |
-| 05 | [灾难恢复也走客户端版本门槛](./issues/05-disaster-restore-client-version-gate.md) | ready-for-agent | — |
-| 06 | [破坏性 wire 变更必须先抬 min_supported](./issues/06-wire-break-raises-min-supported.md) | ready-for-agent | — |
+| 04 | [setup 探测容忍服务端加字段](./issues/04-setup-status-additive-fields.md) | done | — |
+| 05 | [灾难恢复也走客户端版本门槛](./issues/05-disaster-restore-client-version-gate.md) | done | — |
+| 06 | [破坏性 wire 变更必须先抬 min_supported](./issues/06-wire-break-raises-min-supported.md) | done | — |
 
 ## Frontier
 
-Work any ticket whose blockers are done. Today: **01, 04, 05, 06** (03 done). After 01: **02**.
+All tickets done.
 
 ```text
 01 可安装包 ──► 02 壳下恢复+安装

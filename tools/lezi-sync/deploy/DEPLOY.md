@@ -181,17 +181,41 @@ Metadata contract (`app-update.json`, snake_case):
   clients are never forced above the package on the channel).
 - `sha256` must match `sha256sum` of the APK byte-for-byte (64 lowercase hex).
 - Raise `min_supported_version_code` only for **breaking** client contracts; clients below that
-  value get `code=client_update_required` on authoritative sync paths, but can still call the
-  app-update routes with a valid session.
+  value get `code=client_update_required` on authoritative sync paths **and disaster-restore
+  write paths**, but can still call the app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
 - On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
-- The server enforces `min_supported_version_code` on authoritative sync **only** when the on-disk channel is verified (metadata + APK sha256). Metadata-only or integrity-failing packages fail open for sync (do not brick into forced upgrade with nothing to install).
+- The server enforces `min_supported_version_code` on authoritative sync and disaster-restore
+  writes **only** when the on-disk channel is verified (metadata + APK sha256). Metadata-only
+  or integrity-failing packages fail open (do not brick into forced upgrade with nothing to install).
 - Joined clients use authenticated `GET /v1/app-update` (JSON) and
   `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
   server-side). Separately, the LAN-only invite-install listener anonymously serves the same
   verified APK at `http://<LEZI_TLS_HOST>:8767/download/lezi.apk`; it exposes no family API.
 - Product channel is **self-hosted sideload** (Android `PackageInstaller`), **not** Google Play
   In-App Updates. See [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.
+
+### Wire-break checklist (raise min before new shapes)
+
+Closed family wire (ADR-0008): **no** dual-read / skip-unknown runtime protocol. Multi-device
+home LAN safety is entirely the min floor + installable package:
+
+1. **Is this a wire break?** New entity type, closed key-set change, record/care_plan
+   `schema_version` bump, or server allowlist that older clients cannot parse
+   (`requireExactKeys` / closed type fails the whole pull page).
+2. **Raise `min_supported_version_code`** in `app-update.json` to the lowest official
+   `versionCode` that understands the new shape.
+3. **Ship a verified installable package first:** signed release APK whose
+   `version_code` ≥ new floor, `sha256` matches, atomic pair publish (APK then metadata).
+   Confirm `load_verified` / invite-install download before enabling new writes.
+4. **Only then** publish server/client code that emits the new shape on the wire.
+5. **Supported range = wire frozen:** between the current floor and the latest shipped
+   versionCode, treat schema/allowlist/entity set as frozen. Do not rely on older phones
+   skipping unknown keys. Next break → repeat 2–4.
+
+Relationship to today's baseline: e.g. floor `6` means versionCodes in the supported range
+share one frozen wire; raising the floor is how a home LAN forces upgrades before silent
+pull stalls. Product narrative: [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
 
 Invite-install smoke after deploy is separate from readiness: `curl -fsS
 http://<LEZI_TLS_HOST>:8767/join` must return the branded page, and

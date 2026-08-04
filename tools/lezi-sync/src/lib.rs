@@ -739,7 +739,7 @@ async fn authenticate(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Prin
 /// integrity-failing package must not brick the family into forced upgrade with nothing
 /// to install. Missing metadata still fails open. App-update metadata/APK routes never
 /// call this.
-async fn require_supported_client(
+pub(crate) async fn require_supported_client(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {

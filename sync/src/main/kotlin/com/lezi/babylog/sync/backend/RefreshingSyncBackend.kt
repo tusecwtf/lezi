@@ -198,15 +198,16 @@ internal class RefreshingSyncBackend(
 
     /**
      * Resolves one usable credential snapshot under the refresh-rotation mutex, then releases it
-     * before the potentially long-running operation. APK bodies are intentionally not replayed on
-     * an access 401: a second large transfer would hide the first failure and block unrelated
-     * authenticated work for no security benefit.
+     * before the potentially long-running operation (APK download). On an unexpected access 401,
+     * refresh once under the mutex and retry the download **exactly once** so a near-expiry token
+     * does not force a full reauth under the force-update shell. A second 401 after that refresh
+     * still maps to reauth (same as [authenticated]).
      */
     private suspend fun <T> authenticatedOnceOutsideMutex(
         requested: SyncSession,
         operation: suspend (SyncSession) -> T,
     ): T {
-        val current = sessionMutex.withLock {
+        var current = sessionMutex.withLock {
             val stored = currentCredentialsFor(requested)
             if (stored.reauthRequired) throw ReauthRequiredException()
             if (stored.hasUsableAccess()) stored else refreshOrRequireReauth(stored)
@@ -218,7 +219,21 @@ internal class RefreshingSyncBackend(
         } catch (failure: SyncHttpException) {
             failure.remoteTerminalRemovalOrNull()?.let { throw it }
             failure.clientUpdateRequiredOrNull()?.let { throw it }
-            throw failure
+            if (failure.statusCode != 401) throw failure
+            // One refresh + one download retry; mutex is not held across the large transfer.
+            current = sessionMutex.withLock {
+                refreshOrRequireReauth(currentCredentialsFor(requested))
+            }
+            try {
+                operation(current)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (retryFailure: SyncHttpException) {
+                retryFailure.remoteTerminalRemovalOrNull()?.let { throw it }
+                retryFailure.clientUpdateRequiredOrNull()?.let { throw it }
+                if (retryFailure.statusCode == 401) requireReauth()
+                throw retryFailure
+            }
         }
     }
 
