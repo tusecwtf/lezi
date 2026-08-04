@@ -143,12 +143,16 @@ pub(crate) async fn reconcile_entities(
             .reconcile_units(
                 &principal,
                 units,
-                now.saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS),
+                now.saturating_mul(1_000)
+                    .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS),
                 now,
             )
             .map_err(|error| match error {
                 StoreError::InvalidReconcileBatch => {
                     ApiError::unprocessable("authoritative reconcile batch is invalid")
+                }
+                StoreError::TimestampOutOfRange => {
+                    ApiError::unprocessable("updated_at is outside the accepted server time window")
                 }
                 other => other.into(),
             })

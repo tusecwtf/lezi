@@ -9195,7 +9195,7 @@ async fn authoritative_reconcile_is_authenticated_bounded_and_generation_scoped(
         "root": {
             "type": "baby",
             "client_uuid": baby_id,
-            "updated_at": 1000,
+            "updated_at": 1_753_418_400_000_i64,
             "deleted_at": null,
             "payload": baby_payload("年年", None),
         },
@@ -9217,6 +9217,33 @@ async fn authoritative_reconcile_is_authenticated_bounded_and_generation_scoped(
     assert_eq!(
         body["results"][0]["request_content_hash"],
         "frozen-local-hash"
+    );
+
+    let (future_timestamp, future_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/reconcile",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "units": [{
+                "content_hash": "future-timestamp-hash",
+                "root": {
+                    "type": "baby",
+                    "client_uuid": Uuid::new_v4(),
+                    "updated_at": 1_753_504_800_001_i64,
+                    "deleted_at": null,
+                    "payload": baby_payload("小宝", None),
+                },
+                "media": [],
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(
+        future_timestamp,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{future_body}"
     );
 
     let (unauthenticated, _) = json_request(
