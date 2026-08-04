@@ -474,37 +474,49 @@ tls_certificate="${data_path}/tls/server.crt"
 
 # Self-hosted app update: copy release APK + metadata into the data bind mount
 # so lezi-sync can serve GET /v1/app-update and /v1/app-update/apk.
+#
+# Atomic pair publish: stage both files completely, then rename APK into place
+# before metadata. That way a running service never observes "new min_supported
+# + missing/old/broken APK" under the final paths (server also enforces the
+# version floor only on a verified channel).
 if [[ ! -f "${DIR}/app-update/app-release.apk" || ! -f "${DIR}/app-update/app-update.json" ]]; then
   echo "error: package missing app-update/app-release.apk or app-update/app-update.json" >&2
   echo "  repackage with package-nas.sh (fail-closed on release APK + metadata)" >&2
   exit 1
 fi
-echo "==> install app-update artifacts into ${data_path}"
+echo "==> install app-update artifacts into ${data_path} (atomic pair: APK then metadata)"
 # Data bind is often mode 700 uid 10001 (SSH user cannot write). Prefer direct
 # install; fall back to docker as uid 10001 with a bind of the package app-update/.
+app_update_apk_staging="${data_path}/app-release.apk.lezi-staging"
+app_update_meta_staging="${data_path}/app-update.json.lezi-staging"
 if mkdir -p "${data_path}" 2>/dev/null \
-  && install -m 644 "${DIR}/app-update/app-update.json" "${data_path}/app-update.json" 2>/dev/null \
-  && install -m 644 "${DIR}/app-update/app-release.apk" "${data_path}/app-release.apk" 2>/dev/null; then
+  && install -m 644 "${DIR}/app-update/app-release.apk" "${app_update_apk_staging}" 2>/dev/null \
+  && install -m 644 "${DIR}/app-update/app-update.json" "${app_update_meta_staging}" 2>/dev/null \
+  && mv -f "${app_update_apk_staging}" "${data_path}/app-release.apk" \
+  && mv -f "${app_update_meta_staging}" "${data_path}/app-update.json"; then
   if command -v chown >/dev/null 2>&1; then
     chown 10001:10001 "${data_path}/app-update.json" "${data_path}/app-release.apk" 2>/dev/null || true
   fi
 else
-  echo "    direct install not writable; docker-copy as 10001:10001" >&2
+  # Clean any partial direct staging before the docker fallback.
+  rm -f -- "${app_update_apk_staging}" "${app_update_meta_staging}" 2>/dev/null || true
+  echo "    direct install not writable; docker-copy as 10001:10001 (atomic pair)" >&2
   docker run --rm \
     --user 10001:10001 \
     -v "${data_path}:/data" \
     -v "${DIR}/app-update:/src:ro" \
     --entrypoint /bin/sh \
     "${image}" \
-    -ec 'cp /src/app-update.json /data/app-update.json && cp /src/app-release.apk /data/app-release.apk && chmod 644 /data/app-update.json /data/app-release.apk'
+    -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && chmod 644 /data/app-update.json /data/app-release.apk'
 fi
-# Fail closed: artifacts must exist under the bind (via docker stat as 10001).
+# Fail closed: final artifacts must exist under the bind (via docker stat as 10001),
+# and no staging leftovers may remain as the live names.
 docker run --rm \
   --user 10001:10001 \
   -v "${data_path}:/data:ro" \
   --entrypoint /bin/sh \
   "${image}" \
-  -ec 'test -f /data/app-update.json && test -f /data/app-release.apk'
+  -ec 'test -f /data/app-update.json && test -f /data/app-release.apk && test ! -e /data/app-update.json.lezi-staging && test ! -e /data/app-release.apk.lezi-staging'
 
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then

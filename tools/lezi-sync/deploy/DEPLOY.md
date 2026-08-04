@@ -184,7 +184,8 @@ Metadata contract (`app-update.json`, snake_case):
   value get `code=client_update_required` on authoritative sync paths, but can still call the
   app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
-- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`).
+- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
+- The server enforces `min_supported_version_code` on authoritative sync **only** when the on-disk channel is verified (metadata + APK sha256). Metadata-only or integrity-failing packages fail open for sync (do not brick into forced upgrade with nothing to install).
 - Joined clients use authenticated `GET /v1/app-update` (JSON) and
   `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
   server-side). Separately, the LAN-only invite-install listener anonymously serves the same

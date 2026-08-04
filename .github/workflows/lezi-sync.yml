@@ -49,3 +49,6 @@ jobs:
       # Invoke via bash so a non-executable commit mode still runs on Actions.
       - name: package-nas app-update inputs
         run: bash deploy/test-package-nas-app-update.sh
+
+      - name: remote-deploy app-update atomic pair
+        run: bash deploy/test-remote-deploy-app-update-atomic.sh

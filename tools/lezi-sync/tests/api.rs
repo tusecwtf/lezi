@@ -2029,6 +2029,89 @@ async fn client_version_gate_fail_open_without_app_update_metadata() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// Metadata alone is not a verified update channel: do not raise the version floor
+/// into `client_update_required` when the APK is missing (nothing installable).
+#[tokio::test]
+async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
+    let rig = Rig::new();
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 9,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 8,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Intentionally no app-release.apk.
+    let owner = create_family(
+        &rig.app,
+        "client-update-meta-only-owner",
+        "client-update-meta-only-owner-req-001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (status, body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &[("x-lezi-client-version-code", "1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(body["code"], json!("client_update_required"));
+    assert!(body.get("entities").is_some(), "{body}");
+}
+
+/// Integrity-failing APK is not a verified channel: same fail-open as missing package.
+#[tokio::test]
+async fn client_version_gate_fail_open_when_apk_sha256_mismatches_metadata() {
+    let rig = Rig::new();
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 9,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 8,
+            "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        rig.directory.path().join("app-release.apk"),
+        b"apk-bytes-that-do-not-match-metadata-sha256",
+    )
+    .unwrap();
+    let owner = create_family(
+        &rig.app,
+        "client-update-bad-sha-owner",
+        "client-update-bad-sha-owner-req-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (status, body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &[("x-lezi-client-version-code", "1")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_ne!(body["code"], json!("client_update_required"));
+    assert!(body.get("entities").is_some(), "{body}");
+}
+
 #[tokio::test]
 async fn legacy_invite_and_join_routes_are_absent() {
     let rig = Rig::new();

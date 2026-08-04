@@ -734,25 +734,30 @@ async fn authenticate(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Prin
 
 /// Reject authoritative sync write/pull when the client omits or is below minSupported.
 ///
-/// Fail-open when deploy metadata is missing so an unfinished app-update channel does not
-/// brick an otherwise healthy family server. App-update metadata/APK routes never call this.
+/// Enforce the floor only when a **verified** app-update channel is available (metadata
+/// present and the on-disk APK matches its sha256). Metadata alone, a missing APK, or an
+/// integrity-failing package must not brick the family into forced upgrade with nothing
+/// to install. Missing metadata still fails open. App-update metadata/APK routes never
+/// call this.
 async fn require_supported_client(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let blocking_state = state.clone();
     let min_supported = match run_blocking(move || {
-        blocking_state
-            .app_update_cache
-            .load_metadata(&blocking_state.app_update_metadata_path)
+        blocking_state.app_update_cache.load_verified(
+            &blocking_state.app_update_metadata_path,
+            &blocking_state.app_update_apk_path,
+        )
     })
     .await
     {
-        Ok(metadata) => metadata
+        Ok(verified) => verified
+            .metadata
             .get("min_supported_version_code")
             .and_then(Value::as_u64)
             .unwrap_or(0),
-        // No deploy package / unreadable metadata → do not gate sync.
+        // No deploy package, metadata-only, hash mismatch, or unreadable channel → do not gate.
         Err(_) => return Ok(()),
     };
     let client_version = match parse_client_version_code(headers) {
