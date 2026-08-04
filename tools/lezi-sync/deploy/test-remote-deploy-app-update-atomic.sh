@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Contract + direct-path smoke: remote-deploy publishes app-update as an atomic
+# Contract + functional harness: remote-deploy publishes app-update as an atomic
 # APK-then-metadata pair so a running service never sees "new min + bad package".
+#
+# Covers:
+# 1) Static structural contract on remote-deploy.sh (staging names, promote order,
+#    direct-then-docker if/else, post-check).
+# 2) Direct-path stage→promote sequence (no docker).
+# 3) Full if/else chain with mocked docker: simulated direct-write failure must
+#    recover via the docker-copy path without leaving new min + old APK on finals.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -18,20 +25,33 @@ fail() {
 
 [[ -f "${REMOTE_DEPLOY}" ]] || fail "missing remote-deploy.sh"
 
-# --- Static contract on remote-deploy.sh ---
+# --- Static structural contract on remote-deploy.sh ---
+# Assert executable install markers (not comment prose alone).
 grep -q 'app-release.apk.lezi-staging' "${REMOTE_DEPLOY}" \
   || fail "remote-deploy must stage APK under app-release.apk.lezi-staging"
 grep -q 'app-update.json.lezi-staging' "${REMOTE_DEPLOY}" \
   || fail "remote-deploy must stage metadata under app-update.json.lezi-staging"
-grep -q 'atomic pair' "${REMOTE_DEPLOY}" \
-  || fail "remote-deploy must document atomic pair publish for app-update"
+grep -q 'mv -f "${app_update_apk_staging}" "${data_path}/app-release.apk"' "${REMOTE_DEPLOY}" \
+  || fail "direct path must promote staged APK with mv -f"
+grep -q 'mv -f "${app_update_meta_staging}" "${data_path}/app-update.json"' "${REMOTE_DEPLOY}" \
+  || fail "direct path must promote staged metadata with mv -f"
+grep -q 'cp /src/app-release.apk /data/app-release.apk.lezi-staging' "${REMOTE_DEPLOY}" \
+  || fail "docker-copy path must stage APK from /src"
+grep -q 'mv -f /data/app-release.apk.lezi-staging /data/app-release.apk' "${REMOTE_DEPLOY}" \
+  || fail "docker-copy path must promote staged APK"
+grep -q 'mv -f /data/app-update.json.lezi-staging /data/app-update.json' "${REMOTE_DEPLOY}" \
+  || fail "docker-copy path must promote staged metadata"
+grep -q 'test ! -e /data/app-update.json.lezi-staging' "${REMOTE_DEPLOY}" \
+  || fail "post-install check must assert metadata staging leftover is gone"
+grep -q 'test ! -e /data/app-release.apk.lezi-staging' "${REMOTE_DEPLOY}" \
+  || fail "post-install check must assert APK staging leftover is gone"
 
 # Direct path must write both staging files before either final rename, and
 # promote APK before metadata (so new min never lands ahead of matching APK).
 direct_block="$(
   awk '
     /install app-update artifacts/ { in_block = 1 }
-    in_block && /docker-copy as 10001/ { exit }
+    in_block && /direct install not writable/ { exit }
     in_block { print }
   ' "${REMOTE_DEPLOY}"
 )"
@@ -62,7 +82,6 @@ docker_ec_line="$(
 docker_ec_body="${docker_ec_line#*:}"
 printf '%s\n' "${docker_ec_body}" | grep -q 'app-update.json.lezi-staging' \
   || fail "docker-copy path must stage metadata in the same -ec body"
-# Order of mv in the single -ec string: APK before metadata.
 apk_mv_pos="$(
   printf '%s' "${docker_ec_body}" \
     | python3 -c 'import sys; s=sys.stdin.read(); print(s.find("mv -f /data/app-release.apk.lezi-staging"))'
@@ -76,14 +95,9 @@ meta_mv_pos="$(
 [[ "${apk_mv_pos}" -lt "${meta_mv_pos}" ]] \
   || fail "docker-copy path must promote APK before metadata"
 
-# Fail-closed post-check must reject leftover staging names on the bind.
-grep -q 'app-update.json.lezi-staging' "${REMOTE_DEPLOY}" \
-  && grep -q '! -e /data/app-update.json.lezi-staging' "${REMOTE_DEPLOY}" \
-  || fail "post-install check must assert staging leftovers are gone"
-
 # --- Functional smoke of the direct install sequence (no docker) ---
 package_dir="${test_root}/package/app-update"
-data_path="${test_root}/data"
+data_path="${test_root}/data-direct"
 mkdir -p "${package_dir}" "${data_path}"
 printf 'new-apk-bytes-v2\n' >"${package_dir}/app-release.apk"
 printf '{"min_supported_version_code":9,"version_code":10}\n' >"${package_dir}/app-update.json"
@@ -113,5 +127,112 @@ grep -q '"min_supported_version_code":9' "${data_path}/app-update.json" \
   || fail "staging leftovers must be gone after promote"
 grep -qx 'new-apk-bytes-v2' "${data_path}/app-release.apk" \
   || fail "final APK content wrong"
+
+# --- Full if/else chain with mocked docker (direct failure → docker recovery) ---
+# Runs the real install fragment from remote-deploy.sh: direct install attempt, on
+# failure clean staging and docker-copy, then post-check. Mock `install` forces
+# the direct path to fail while the data bind stays writable for the mock docker
+# body (so recovery can complete and post-check can pass).
+data_path_fallback="${test_root}/data-fallback"
+mkdir -p "${data_path_fallback}"
+printf 'old-apk-bytes-v1\n' >"${data_path_fallback}/app-release.apk"
+printf '{"min_supported_version_code":6,"version_code":7}\n' >"${data_path_fallback}/app-update.json"
+
+mock_bin="${test_root}/mock-bin"
+mkdir -p "${mock_bin}"
+
+# Force direct path failure without making the bind unwritable for docker recovery.
+cat >"${mock_bin}/install" <<'MOCK_INSTALL'
+#!/usr/bin/env bash
+echo "mock install: simulating non-writable data bind" >&2
+exit 1
+MOCK_INSTALL
+chmod +x "${mock_bin}/install"
+
+cat >"${mock_bin}/docker" <<'MOCK_DOCKER'
+#!/usr/bin/env bash
+set -euo pipefail
+# Parse: docker run --rm --user … -v host:container[:ro] … --entrypoint /bin/sh IMAGE -ec 'body'
+# Executes the shell body with /data and /src rewritten to host bind sources.
+data_host=""
+src_host=""
+ec_body=""
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    -v)
+      i=$((i + 1))
+      spec="${args[$i]}"
+      host="${spec%%:*}"
+      rest="${spec#*:}"
+      container="${rest%%:*}"
+      case "${container}" in
+        /data) data_host="${host}" ;;
+        /src) src_host="${host}" ;;
+      esac
+      ;;
+    -ec|-c)
+      i=$((i + 1))
+      ec_body="${args[$i]}"
+      ;;
+  esac
+  i=$((i + 1))
+done
+[[ -n "${ec_body}" ]] || { echo "mock docker: missing -ec body" >&2; exit 2; }
+[[ -n "${data_host}" ]] || { echo "mock docker: missing /data bind" >&2; exit 2; }
+# Rewrite container paths to host binds for the install / post-check bodies.
+rewritten="${ec_body//\/data\//${data_host}/}"
+if [[ -n "${src_host}" ]]; then
+  rewritten="${rewritten//\/src\//${src_host}/}"
+fi
+/bin/sh -ec "${rewritten}"
+MOCK_DOCKER
+chmod +x "${mock_bin}/docker"
+
+# Extract the install + post-check fragment from remote-deploy.sh so the real
+# if/else chain and post-check run (not a reimplemented twin that can drift).
+install_fragment="${test_root}/install-fragment.sh"
+python3 - "${REMOTE_DEPLOY}" "${install_fragment}" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src, encoding="utf-8").read().splitlines()
+start = end = None
+for i, line in enumerate(text):
+    if start is None and "install app-update artifacts into" in line:
+        start = i
+    if start is not None and "stop/remove existing container" in line:
+        end = i
+        break
+if start is None or end is None:
+    raise SystemExit("could not isolate app-update install fragment from remote-deploy.sh")
+open(dst, "w", encoding="utf-8").write(
+    "#!/usr/bin/env bash\nset -euo pipefail\n" + "\n".join(text[start:end]) + "\n"
+)
+PY
+
+DIR="${test_root}/package"
+data_path="${data_path_fallback}"
+image="lezi-sync:test-mock"
+export DIR data_path image
+
+if ! (
+  PATH="${mock_bin}:${PATH}"
+  # shellcheck disable=SC1090
+  source "${install_fragment}"
+); then
+  fail "install fragment with mock docker failed"
+fi
+
+# After docker recovery: finals must be the new pair; no staging leftovers; never
+# new min with old APK.
+grep -qx 'new-apk-bytes-v2' "${data_path_fallback}/app-release.apk" \
+  || fail "docker fallback must install new APK"
+grep -q '"min_supported_version_code":9' "${data_path_fallback}/app-update.json" \
+  || fail "docker fallback must install new metadata"
+[[ ! -e "${data_path_fallback}/app-release.apk.lezi-staging" ]] \
+  || fail "APK staging leftover after docker fallback"
+[[ ! -e "${data_path_fallback}/app-update.json.lezi-staging" ]] \
+  || fail "metadata staging leftover after docker fallback"
 
 echo "remote-deploy app-update atomic pair publish smoke passed"

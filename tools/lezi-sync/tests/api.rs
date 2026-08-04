@@ -1610,12 +1610,14 @@ async fn disaster_restore_rejects_manifest_tampering_without_activating_a_family
 #[tokio::test]
 async fn app_update_metadata_requires_session_and_returns_deploy_file() {
     let rig = Rig::new();
+    let apk_bytes = b"app-update-metadata-route-apk-bytes";
+    let sha256 = hex::encode(Sha256::digest(apk_bytes));
     let metadata = json!({
         "package_name": "com.lezi.babylog",
         "version_code": 7,
         "version_name": "0.3.1",
         "min_supported_version_code": 6,
-        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "sha256": sha256,
         "release_notes": "  修复同步  ",
     });
     fs::write(
@@ -1623,6 +1625,8 @@ async fn app_update_metadata_requires_session_and_returns_deploy_file() {
         metadata.to_string(),
     )
     .unwrap();
+    // Metadata GET only after the APK verifies — no force floor without a package.
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
 
     let (unauth_status, unauth_body) = get_json(&rig.app, "/v1/app-update", None).await;
     assert_eq!(unauth_status, StatusCode::UNAUTHORIZED, "{unauth_body}");
@@ -1643,7 +1647,7 @@ async fn app_update_metadata_requires_session_and_returns_deploy_file() {
             "version_code": 7,
             "version_name": "0.3.1",
             "min_supported_version_code": 6,
-            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sha256": sha256,
             "release_notes": "修复同步",
         })
     );
@@ -1673,18 +1677,20 @@ async fn app_update_metadata_rejects_min_supported_above_version_code() {
     let rig = Rig::new();
     // Deadlock config: force floor above the package on the channel — must not serve as
     // a valid update channel (no 200 body clients would treat as installable latest).
+    let apk_bytes = b"min-gt-version-deadlock-apk";
     let metadata = json!({
         "package_name": "com.lezi.babylog",
         "version_code": 7,
         "version_name": "0.3.1",
         "min_supported_version_code": 8,
-        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "sha256": hex::encode(Sha256::digest(apk_bytes)),
     });
     fs::write(
         rig.directory.path().join("app-update.json"),
         metadata.to_string(),
     )
     .unwrap();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
 
     let owner = create_family(
         &rig.app,
@@ -2168,10 +2174,13 @@ async fn client_version_gate_fail_open_without_app_update_metadata() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
-/// Metadata alone is not a verified update channel: do not raise the version floor
-/// into `client_update_required` when the APK is missing (nothing installable).
-#[tokio::test]
-async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
+/// Shared seed for unverified-channel fail-open cases (metadata present; package broken).
+async fn seed_unverified_channel_family(
+    device_id: &str,
+    request_id: &str,
+    apk_bytes: Option<&[u8]>,
+    metadata_sha256: &str,
+) -> (Rig, String) {
     let rig = Rig::new();
     fs::write(
         rig.directory.path().join("app-update.json"),
@@ -2180,25 +2189,37 @@ async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
             "version_code": 9,
             "version_name": "0.4.0",
             "min_supported_version_code": 8,
-            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "sha256": metadata_sha256,
         })
         .to_string(),
     )
     .unwrap();
-    // Intentionally no app-release.apk.
-    let owner = create_family(
-        &rig.app,
+    if let Some(bytes) = apk_bytes {
+        fs::write(rig.directory.path().join("app-release.apk"), bytes).unwrap();
+    }
+    let owner = create_family(&rig.app, device_id, request_id).await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    (rig, token)
+}
+
+/// Metadata alone is not a verified update channel: do not raise the version floor
+/// into `client_update_required` when the APK is missing (nothing installable).
+/// GET /v1/app-update must also refuse to advertise min_supported without a package.
+#[tokio::test]
+async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
+    let (rig, token) = seed_unverified_channel_family(
         "client-update-meta-only-owner",
         "client-update-meta-only-owner-req-001",
+        None,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     )
     .await;
-    let token = owner["access_token"].as_str().unwrap();
 
     let (status, body) = raw_json_request_with_headers(
         &rig.app,
         Method::GET,
         "/v1/pull?cursor=0&generation=generation-a",
-        Some(token),
+        Some(&token),
         json!({}),
         &[("x-lezi-client-version-code", "1")],
     )
@@ -2206,42 +2227,37 @@ async fn client_version_gate_fail_open_when_metadata_present_but_apk_missing() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_ne!(body["code"], json!("client_update_required"));
     assert!(body.get("entities").is_some(), "{body}");
+
+    // Metadata-only must not return a 200 force floor clients would dual-tier on.
+    let (meta_status, meta_body) = get_json(&rig.app, "/v1/app-update", Some(&token)).await;
+    assert_ne!(meta_status, StatusCode::OK, "{meta_body}");
+    assert!(
+        meta_status == StatusCode::NOT_FOUND || meta_status.is_server_error(),
+        "expected channel-broken status, got {meta_status}: {meta_body}"
+    );
+    assert!(
+        meta_body.get("min_supported_version_code").is_none(),
+        "must not advertise min_supported without installable package: {meta_body}"
+    );
 }
 
 /// Integrity-failing APK is not a verified channel: same fail-open as missing package.
+/// GET /v1/app-update must not return a 200 body clients treat as a force floor.
 #[tokio::test]
 async fn client_version_gate_fail_open_when_apk_sha256_mismatches_metadata() {
-    let rig = Rig::new();
-    fs::write(
-        rig.directory.path().join("app-update.json"),
-        json!({
-            "package_name": "com.lezi.babylog",
-            "version_code": 9,
-            "version_name": "0.4.0",
-            "min_supported_version_code": 8,
-            "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        })
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        rig.directory.path().join("app-release.apk"),
-        b"apk-bytes-that-do-not-match-metadata-sha256",
-    )
-    .unwrap();
-    let owner = create_family(
-        &rig.app,
+    let (rig, token) = seed_unverified_channel_family(
         "client-update-bad-sha-owner",
         "client-update-bad-sha-owner-req-00001",
+        Some(b"apk-bytes-that-do-not-match-metadata-sha256"),
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     )
     .await;
-    let token = owner["access_token"].as_str().unwrap();
 
     let (status, body) = raw_json_request_with_headers(
         &rig.app,
         Method::GET,
         "/v1/pull?cursor=0&generation=generation-a",
-        Some(token),
+        Some(&token),
         json!({}),
         &[("x-lezi-client-version-code", "1")],
     )
@@ -2249,6 +2265,17 @@ async fn client_version_gate_fail_open_when_apk_sha256_mismatches_metadata() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_ne!(body["code"], json!("client_update_required"));
     assert!(body.get("entities").is_some(), "{body}");
+
+    let (meta_status, meta_body) = get_json(&rig.app, "/v1/app-update", Some(&token)).await;
+    assert_ne!(meta_status, StatusCode::OK, "{meta_body}");
+    assert!(
+        meta_status.is_server_error() || meta_status == StatusCode::NOT_FOUND,
+        "expected channel-broken status, got {meta_status}: {meta_body}"
+    );
+    assert!(
+        meta_body.get("min_supported_version_code").is_none(),
+        "must not advertise min_supported for integrity-failing package: {meta_body}"
+    );
 }
 
 #[tokio::test]

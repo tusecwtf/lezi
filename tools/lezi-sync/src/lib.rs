@@ -734,31 +734,31 @@ async fn authenticate(state: &Arc<AppState>, headers: &HeaderMap) -> Result<Prin
 
 /// Reject authoritative sync write/pull when the client omits or is below minSupported.
 ///
-/// Enforce the floor only when a **verified** app-update channel is available (metadata
-/// present and the on-disk APK matches its sha256). Metadata alone, a missing APK, or an
-/// integrity-failing package must not brick the family into forced upgrade with nothing
-/// to install. Missing metadata still fails open. App-update metadata/APK routes never
-/// call this.
+/// Enforce the floor when a **verified** app-update channel is available (metadata
+/// present and the on-disk APK matches its sha256), or when a last-known-good floor
+/// is retained across a mid-promote integrity miss. Metadata alone, a missing APK
+/// with no prior verified pair, or a never-verified channel must not brick the family
+/// into forced upgrade with nothing to install. Missing metadata still fails open.
+/// App-update metadata/APK routes never call this.
+///
+/// Negative channel failures are stamp-cached so a permanent half-deploy does not
+/// re-hash the APK on every gated request; the gate logs once per stamp pair when
+/// fail-open or retaining last-known-good (see `AppUpdateCache::min_supported_if_verified`).
 pub(crate) async fn require_supported_client(
     state: &Arc<AppState>,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let blocking_state = state.clone();
-    let min_supported = match run_blocking(move || {
-        blocking_state.app_update_cache.load_verified(
+    let min_supported = run_blocking(move || {
+        Ok::<_, ApiError>(blocking_state.app_update_cache.min_supported_if_verified(
             &blocking_state.app_update_metadata_path,
             &blocking_state.app_update_apk_path,
-        )
+        ))
     })
-    .await
-    {
-        Ok(verified) => verified
-            .metadata
-            .get("min_supported_version_code")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        // No deploy package, metadata-only, hash mismatch, or unreadable channel → do not gate.
-        Err(_) => return Ok(()),
+    .await?;
+    let Some(min_supported) = min_supported else {
+        // Never verified, channel gone, or fail-open with no last-known-good.
+        return Ok(());
     };
     let client_version = match parse_client_version_code(headers) {
         Some(value) => value,
@@ -1105,7 +1105,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, detail: impl Into<Value>) -> Self {
+    pub(crate) fn new(status: StatusCode, detail: impl Into<Value>) -> Self {
         Self {
             status,
             detail: detail.into(),

@@ -26,20 +26,49 @@ struct CachedMetadata {
     value: Value,
 }
 
+/// Positive or negative release-channel cache entry, keyed by mtime+len stamps.
+/// Negative entries avoid re-reading/re-hashing a permanently half-deployed APK
+/// on every gated pull/media/bundle request.
 #[derive(Clone)]
-struct CachedRelease {
-    metadata_stamp: FileStamp,
-    apk_stamp: FileStamp,
-    value: VerifiedAppUpdate,
+enum CachedRelease {
+    Verified {
+        metadata_stamp: FileStamp,
+        apk_stamp: FileStamp,
+        value: VerifiedAppUpdate,
+    },
+    /// Integrity/content failure for this stamp pair. Do not re-hash until stamps change.
+    Unverified {
+        metadata_stamp: FileStamp,
+        apk_stamp: FileStamp,
+        status: axum::http::StatusCode,
+        detail: Arc<str>,
+    },
+}
+
+/// Policy floor from a successfully verified package pair (no APK payload).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VerifiedChannelFloor {
+    pub(crate) min_supported_version_code: u64,
+    pub(crate) version_code: u64,
 }
 
 /// Per-process deploy artifact cache. Files are revalidated by mtime+length so
 /// an atomic package replacement becomes visible without restarting the NAS
 /// service, while steady-state requests avoid full JSON reads and APK hashing.
+///
+/// Negative (unverified) stamp pairs are cached so a permanent half-deploy does
+/// not re-stat + re-read + re-hash the full APK on every request. A last-known-good
+/// floor is retained across mid-promote windows (new APK + old metadata) so the
+/// version gate keeps enforcing the previous verified floor until the new pair
+/// verifies; fail-open only when no prior verified pair exists or the channel
+/// files are gone.
 #[derive(Default)]
 pub(crate) struct AppUpdateCache {
     metadata: Mutex<Option<CachedMetadata>>,
     release: Mutex<Option<CachedRelease>>,
+    last_good_floor: Mutex<Option<VerifiedChannelFloor>>,
+    /// Stamp pair for which we already emitted a gate fail-open / retain warn.
+    gate_logged: Mutex<Option<(FileStamp, FileStamp)>>,
 }
 
 impl AppUpdateCache {
@@ -78,33 +107,165 @@ impl AppUpdateCache {
             .lock()
             .map_err(|_| ApiError::internal("App update package cache is unavailable"))?
             .as_ref()
-            .filter(|cached| {
-                cached.metadata_stamp == metadata_stamp && cached.apk_stamp == apk_stamp
-            })
         {
-            return Ok(cached.value.clone());
+            match cached {
+                CachedRelease::Verified {
+                    metadata_stamp: ms,
+                    apk_stamp: as_,
+                    value,
+                } if *ms == metadata_stamp && *as_ == apk_stamp => {
+                    return Ok(value.clone());
+                }
+                CachedRelease::Unverified {
+                    metadata_stamp: ms,
+                    apk_stamp: as_,
+                    status,
+                    detail,
+                } if *ms == metadata_stamp && *as_ == apk_stamp => {
+                    return Err(ApiError::new(*status, detail.as_ref()));
+                }
+                _ => {}
+            }
         }
         let metadata = self.load_metadata(metadata_path)?;
-        let value = load_verified_app_update_from_metadata(metadata, apk_path)?;
-        *self
-            .release
-            .lock()
-            .map_err(|_| ApiError::internal("App update package cache is unavailable"))? =
-            Some(CachedRelease {
-                metadata_stamp,
-                apk_stamp,
-                value: value.clone(),
-            });
-        Ok(value)
+        match load_verified_app_update_from_metadata(metadata, apk_path) {
+            Ok(value) => {
+                let floor = value.floor();
+                *self
+                    .last_good_floor
+                    .lock()
+                    .map_err(|_| ApiError::internal("App update package cache is unavailable"))? =
+                    Some(floor);
+                *self
+                    .release
+                    .lock()
+                    .map_err(|_| ApiError::internal("App update package cache is unavailable"))? =
+                    Some(CachedRelease::Verified {
+                        metadata_stamp,
+                        apk_stamp,
+                        value: value.clone(),
+                    });
+                // Clear fail-open log latch so a later breakage re-warns.
+                *self
+                    .gate_logged
+                    .lock()
+                    .map_err(|_| ApiError::internal("App update package cache is unavailable"))? =
+                    None;
+                Ok(value)
+            }
+            Err(error) => {
+                // Cache integrity/content failures for this stamp pair only.
+                // NotFound on missing files is handled before stamps exist; here
+                // both files are present so negative cache is safe and correct.
+                *self
+                    .release
+                    .lock()
+                    .map_err(|_| ApiError::internal("App update package cache is unavailable"))? =
+                    Some(CachedRelease::Unverified {
+                        metadata_stamp,
+                        apk_stamp,
+                        status: error.status,
+                        detail: detail_arc(&error.detail),
+                    });
+                Err(error)
+            }
+        }
+    }
+
+    /// Version-gate seam: enforce min_supported only when a verified channel is
+    /// available, or retain the last successfully verified floor during a brief
+    /// mid-promote integrity miss. Returns `None` to fail-open (never verified,
+    /// or channel files absent). Logs once per negative stamp pair.
+    pub(crate) fn min_supported_if_verified(
+        &self,
+        metadata_path: &Path,
+        apk_path: &Path,
+    ) -> Option<u64> {
+        match self.load_verified(metadata_path, apk_path) {
+            Ok(verified) => Some(verified.min_supported_version_code),
+            Err(error) => {
+                // Channel files absent → no floor (and drop last-good so a removed
+                // channel cannot keep bricking clients without an install path).
+                if error.status == axum::http::StatusCode::NOT_FOUND {
+                    if let Ok(mut last) = self.last_good_floor.lock() {
+                        if last.is_some() {
+                            tracing::warn!(
+                                detail = %error.detail,
+                                "app-update channel gone; clearing last-known-good version floor (gate fail-open)"
+                            );
+                            *last = None;
+                        }
+                    }
+                    let _ = self.gate_logged.lock().map(|mut g| *g = None);
+                    return None;
+                }
+
+                // Integrity / I/O failure with stamps present: retain last-good if any.
+                let stamps = match (metadata_stamp(metadata_path).ok(), apk_stamp(apk_path).ok()) {
+                    (Some(ms), Some(as_)) => Some((ms, as_)),
+                    _ => None,
+                };
+
+                let retained = self
+                    .last_good_floor
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().copied());
+
+                if let Some((ms, as_)) = stamps {
+                    self.log_gate_once(ms, as_, &error, retained);
+                } else {
+                    tracing::warn!(
+                        detail = %error.detail,
+                        retained_min = retained.map(|f| f.min_supported_version_code),
+                        "app-update channel unverified; gate fail-open or retaining last-known-good floor"
+                    );
+                }
+
+                retained.map(|f| f.min_supported_version_code)
+            }
+        }
+    }
+
+    fn log_gate_once(
+        &self,
+        metadata_stamp: FileStamp,
+        apk_stamp: FileStamp,
+        error: &ApiError,
+        retained: Option<VerifiedChannelFloor>,
+    ) {
+        let Ok(mut logged) = self.gate_logged.lock() else {
+            return;
+        };
+        let pair = (metadata_stamp, apk_stamp);
+        if logged.as_ref() == Some(&pair) {
+            return;
+        }
+        *logged = Some(pair);
+        match retained {
+            Some(floor) => {
+                tracing::warn!(
+                    detail = %error.detail,
+                    retained_min = floor.min_supported_version_code,
+                    retained_version = floor.version_code,
+                    "app-update channel unverified; retaining last-known-good version floor until a new pair verifies"
+                );
+            }
+            None => {
+                tracing::warn!(
+                    detail = %error.detail,
+                    "app-update channel unverified; gate not enforcing min_supported (fail-open, never verified)"
+                );
+            }
+        }
     }
 }
 
 /// Authenticated app-update metadata for already-joined family devices.
-/// Loads deploy-readable JSON from [AppState::app_update_metadata_path]
-/// (default `{data_dir}/app-update.json`). Unauthenticated callers receive 401.
-/// Missing file → 404 so clients can fail honestly; unreadable I/O, invalid JSON,
-/// or structurally illegal metadata (including `min_supported > version_code`) → 500
-/// as server misconfiguration (not a valid update channel).
+/// Served only when the on-disk APK verifies against metadata sha256 so clients
+/// never receive a force-floor without an installable package. Missing metadata
+/// or missing APK → 404; unreadable I/O, invalid JSON, structural illegal metadata,
+/// or hash mismatch → 500 as server misconfiguration.
 ///
 /// HTTP route entrypoint — `pub(crate)` for crate-root domain-path assembly.
 pub(crate) async fn get_app_update(
@@ -113,13 +274,14 @@ pub(crate) async fn get_app_update(
 ) -> Result<Json<Value>, ApiError> {
     let _principal = authenticate(&state, &headers).await?;
     let blocking_state = state.clone();
-    let metadata = run_blocking(move || {
-        blocking_state
-            .app_update_cache
-            .load_metadata(&blocking_state.app_update_metadata_path)
+    let verified = run_blocking(move || {
+        blocking_state.app_update_cache.load_verified(
+            &blocking_state.app_update_metadata_path,
+            &blocking_state.app_update_apk_path,
+        )
     })
     .await?;
-    Ok(Json(metadata))
+    Ok(Json(verified.metadata))
 }
 
 /// Authenticated release APK download for already-joined family devices.
@@ -151,6 +313,17 @@ pub(crate) async fn get_app_update_apk(
 pub(crate) struct VerifiedAppUpdate {
     pub(crate) metadata: Value,
     pub(crate) bytes: Bytes,
+    pub(crate) min_supported_version_code: u64,
+    pub(crate) version_code: u64,
+}
+
+impl VerifiedAppUpdate {
+    fn floor(&self) -> VerifiedChannelFloor {
+        VerifiedChannelFloor {
+            min_supported_version_code: self.min_supported_version_code,
+            version_code: self.version_code,
+        }
+    }
 }
 
 fn load_verified_app_update_from_metadata(
@@ -161,6 +334,16 @@ fn load_verified_app_update_from_metadata(
         .get("sha256")
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("App update metadata is missing sha256"))?;
+    let min_supported_version_code = metadata
+        .get("min_supported_version_code")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            ApiError::internal("App update metadata is missing min_supported_version_code")
+        })?;
+    let version_code = metadata
+        .get("version_code")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| ApiError::internal("App update metadata is missing version_code"))?;
     let bytes = match fs::read(apk_path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -175,6 +358,7 @@ fn load_verified_app_update_from_metadata(
     }
     let actual_sha256 = hex_sha256(&bytes);
     if actual_sha256 != expected_sha256 {
+        // Logged once per stamp pair via negative cache (caller stores Unverified).
         tracing::error!(
             expected = %expected_sha256,
             actual = %actual_sha256,
@@ -188,7 +372,16 @@ fn load_verified_app_update_from_metadata(
     Ok(VerifiedAppUpdate {
         metadata,
         bytes: Bytes::from(bytes),
+        min_supported_version_code,
+        version_code,
     })
+}
+
+fn detail_arc(detail: &Value) -> Arc<str> {
+    match detail {
+        Value::String(s) => Arc::from(s.as_str()),
+        other => Arc::from(other.to_string()),
+    }
 }
 
 fn metadata_stamp(path: &Path) -> Result<FileStamp, ApiError> {
@@ -395,6 +588,7 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use serde_json::json;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn sample_app_update_metadata(version_code: u64, min_supported: u64) -> Value {
         json!({
@@ -423,5 +617,101 @@ mod tests {
             .expect("min_supported == version_code is a legal force floor");
         assert_eq!(body["version_code"], json!(7));
         assert_eq!(body["min_supported_version_code"], json!(7));
+    }
+
+    #[test]
+    fn negative_release_cache_skips_rehash_for_same_stamp_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta_path = dir.path().join("app-update.json");
+        let apk_path = dir.path().join("app-release.apk");
+        let apk_bytes = b"negative-cache-apk-bytes";
+        // Wrong sha so verify fails.
+        let metadata = json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 9,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 8,
+            "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        });
+        fs::write(&meta_path, metadata.to_string()).unwrap();
+        fs::write(&apk_path, apk_bytes).unwrap();
+
+        let cache = AppUpdateCache::default();
+        let first = match cache.load_verified(&meta_path, &apk_path) {
+            Ok(_) => panic!("hash mismatch must fail verify"),
+            Err(error) => error,
+        };
+        assert_eq!(first.status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Second call must hit negative cache (same stamps) without needing a
+        // file change; still Err with the same integrity detail.
+        let second = match cache.load_verified(&meta_path, &apk_path) {
+            Ok(_) => panic!("cached unverified must still fail"),
+            Err(error) => error,
+        };
+        assert_eq!(second.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            second.detail,
+            json!("App update package integrity check failed")
+        );
+
+        // Gate fail-open with no prior verified floor.
+        assert_eq!(cache.min_supported_if_verified(&meta_path, &apk_path), None);
+    }
+
+    #[test]
+    fn last_good_floor_retained_across_integrity_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta_path = dir.path().join("app-update.json");
+        let apk_path = dir.path().join("app-release.apk");
+        let good_apk = b"good-verified-apk-v1";
+        let good_meta = json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 9,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 8,
+            "sha256": hex::encode(Sha256::digest(good_apk)),
+        });
+        fs::write(&meta_path, good_meta.to_string()).unwrap();
+        fs::write(&apk_path, good_apk).unwrap();
+
+        let cache = AppUpdateCache::default();
+        let verified = cache.load_verified(&meta_path, &apk_path).unwrap();
+        assert_eq!(verified.min_supported_version_code, 8);
+        assert_eq!(
+            cache.min_supported_if_verified(&meta_path, &apk_path),
+            Some(8)
+        );
+
+        // Mid-promote-ish: replace APK with bytes that do not match still-old metadata.
+        // Length change ensures stamp differs on coarse mtime filesystems.
+        let bad_apk = b"bad-apk-bytes-different-length-xx";
+        fs::write(&apk_path, bad_apk).unwrap();
+        // Bump mtime if needed so stamps always change even on same-length FS quirks.
+        filetime_touch(&apk_path);
+
+        assert!(cache.load_verified(&meta_path, &apk_path).is_err());
+        // Retain last-known-good floor rather than fail-open to zero.
+        assert_eq!(
+            cache.min_supported_if_verified(&meta_path, &apk_path),
+            Some(8)
+        );
+    }
+
+    fn filetime_touch(path: &Path) {
+        // Prefer setting mtime into the future so stamps differ even when the
+        // filesystem has 1s resolution and the write is in the same second.
+        let later = UNIX_EPOCH
+            + Duration::from_secs(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    + 5,
+            );
+        let _ = fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_modified(later));
     }
 }

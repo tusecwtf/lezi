@@ -14,6 +14,6 @@
 
 ## Design notes (public seams)
 
-1. **HTTP version gate seam** — `require_supported_client` on pull / media / bundles: enforces `min_supported_version_code` only after `AppUpdateCache::load_verified` succeeds (metadata + APK sha256). Metadata-only or hash mismatch → fail-open (no `client_update_required`).
-2. **App-update routes** — still ungated for clients below min when a verified package exists (existing allowlist).
-3. **CD seam** — `remote-deploy.sh` atomic pair publish: stage both artifacts, promote APK then metadata; smoke `deploy/test-remote-deploy-app-update-atomic.sh`.
+1. **HTTP version gate seam** — `require_supported_client` on pull / media / bundles: enforces via `AppUpdateCache::min_supported_if_verified` (verified pair, or last-known-good floor retained across mid-promote integrity miss). Metadata-only / never-verified / channel gone → fail-open. Negative stamp cache avoids re-hashing a permanent half-deploy on every request; gate logs once per stamp pair on fail-open or retain.
+2. **App-update routes** — still ungated for clients below min when a verified package exists. `GET /v1/app-update` and APK both require `load_verified` so clients never dual-tier a force floor without an installable package.
+3. **CD seam** — `remote-deploy.sh` atomic pair publish: stage both artifacts, promote APK then metadata; smoke `deploy/test-remote-deploy-app-update-atomic.sh` (static contract + direct path + mock-docker direct-fail→fallback recovery).
