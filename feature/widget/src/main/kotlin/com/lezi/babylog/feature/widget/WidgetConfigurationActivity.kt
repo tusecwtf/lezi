@@ -31,7 +31,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.lezi.babylog.core.common.LocalDataGate
 import com.lezi.babylog.core.model.RecordType
@@ -40,6 +39,7 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.designsystem.LeziAlphas
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import dagger.Lazy
 import dagger.hilt.android.AndroidEntryPoint
@@ -184,13 +184,13 @@ private fun WidgetConfigurationScreen(
             .padding(LeziSpacing.Page),
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
-        Text("设置乐记小组件", style = MaterialTheme.typography.headlineSmall)
-        Text("选择宝宝", style = MaterialTheme.typography.titleMedium)
+        Text("设置乐记小组件", style = LeziTypography.Title)
+        Text("选择宝宝", style = LeziTypography.TitleSm)
         state.babies.forEach { baby ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
+                    .heightIn(min = WidgetChrome.configRowMinHeight)
                     .clickable { onStateChange(state.selectBaby(baby.id)) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -198,12 +198,12 @@ private fun WidgetConfigurationScreen(
                     selected = state.selectedBabyId == baby.id,
                     onClick = null,
                 )
-                Text(baby.nickname)
+                Text(baby.nickname, style = LeziTypography.Body)
             }
         }
         Text(
             "快捷记录（已选 ${state.selectedTypes.size}/$MAX_WIDGET_QUICK_TYPES）",
-            style = MaterialTheme.typography.titleMedium,
+            style = LeziTypography.TitleSm,
         )
         CONFIGURABLE_WIDGET_QUICK_TYPES.forEach { type ->
             val enabled = type in state.selectedTypes ||
@@ -211,7 +211,7 @@ private fun WidgetConfigurationScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
+                    .heightIn(min = WidgetChrome.configRowMinHeight)
                     .clickable(enabled = enabled) {
                         onStateChange(state.toggle(type))
                     },
@@ -224,6 +224,7 @@ private fun WidgetConfigurationScreen(
                 )
                 Text(
                     type.presentation.label,
+                    style = LeziTypography.Body,
                     color = if (enabled) {
                         MaterialTheme.colorScheme.onSurface
                     } else {

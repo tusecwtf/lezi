@@ -3,6 +3,11 @@ package com.lezi.babylog.feature.export
 import android.content.ClipData
 import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,7 +17,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -38,13 +42,13 @@ import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziDatePickerDialog
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
-import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziSwitch
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.export.ExportPort
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -62,12 +66,38 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Primary (PDF) / secondary (TXT) action chrome for the export surface.
+ * Only the active format owns busy label + spinner; the other stays idle but disabled.
+ */
+internal data class ExportActionChrome(
+    val txtLabel: String,
+    val pdfLabel: String,
+    val txtBusy: Boolean,
+    val pdfBusy: Boolean,
+    val controlsEnabled: Boolean,
+)
+
+/** Pure presentation seam — no domain/export IO. */
+internal fun exportActionChrome(busyFormat: ExportFormat?): ExportActionChrome {
+    val busy = busyFormat != null
+    return ExportActionChrome(
+        txtLabel = if (busyFormat == ExportFormat.Txt) "正在生成…" else "导出 TXT 并分享",
+        pdfLabel = if (busyFormat == ExportFormat.Pdf) "正在生成…" else "导出 PDF 并分享",
+        txtBusy = busyFormat == ExportFormat.Txt,
+        pdfBusy = busyFormat == ExportFormat.Pdf,
+        controlsEnabled = !busy,
+    )
+}
+
 internal data class ExportUiState(
-    val busy: Boolean = false,
+    val busyFormat: ExportFormat? = null,
     val preview: String? = null,
     val pendingShare: PreparedExport? = null,
     val error: String? = null,
-)
+) {
+    val busy: Boolean get() = busyFormat != null
+}
 
 @HiltViewModel
 class ExportViewModel @Inject constructor(
@@ -85,7 +115,9 @@ class ExportViewModel @Inject constructor(
         includePhotos: Boolean,
     ) {
         if (_state.value.busy) return
-        _state.update { it.copy(busy = true, preview = null, pendingShare = null, error = null) }
+        _state.update {
+            it.copy(busyFormat = format, preview = null, pendingShare = null, error = null)
+        }
         viewModelScope.launch {
             val result = try {
                 withContext(Dispatchers.IO) {
@@ -104,7 +136,7 @@ class ExportViewModel @Inject constructor(
             } catch (error: Throwable) {
                 _state.update {
                     it.copy(
-                        busy = false,
+                        busyFormat = null,
                         error = productUiError(error, "导出失败，请重试"),
                     )
                 }
@@ -123,14 +155,14 @@ class ExportViewModel @Inject constructor(
     internal fun shareLaunched() {
         // The Sharesheet may stay open indefinitely before a target reads the URI. Keep the
         // cache file until age-based startup/next-export cleanup instead of racing that read.
-        _state.update { it.copy(busy = false, pendingShare = null) }
+        _state.update { it.copy(busyFormat = null, pendingShare = null) }
     }
 
     internal fun shareFailed(error: Throwable) {
         _state.value.pendingShare?.let(fileGenerator::discard)
         _state.update {
             it.copy(
-                busy = false,
+                busyFormat = null,
                 pendingShare = null,
                 error = productUiError(error, "无法打开系统分享，请重试"),
             )
@@ -178,6 +210,10 @@ fun ExportRoute(
         vm.exportRange(fromDate, toDate, format, includePhotos)
     }
 
+    val actions = exportActionChrome(state.busyFormat)
+    val previewEnterMs = leziMotionMillis(LeziMotion.Base)
+    val previewExitMs = leziMotionMillis(LeziMotion.Fast)
+
     Scaffold(
         topBar = {
             LeziDetailTopBar(title = "导出记录", onBack = onBack)
@@ -201,13 +237,13 @@ fun ExportRoute(
                     LeziSecondaryButton(
                         label = "选择开始日期",
                         onClick = { dateTarget = ExportDateTarget.From },
-                        enabled = !state.busy,
+                        enabled = actions.controlsEnabled,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     LeziSecondaryButton(
                         label = "选择结束日期",
                         onClick = { dateTarget = ExportDateTarget.To },
-                        enabled = !state.busy,
+                        enabled = actions.controlsEnabled,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -221,27 +257,34 @@ fun ExportRoute(
                 LeziSwitch(
                     checked = includePhotos,
                     onCheckedChange = { includePhotos = it },
-                    enabled = !state.busy,
+                    enabled = actions.controlsEnabled,
                 )
             }
+            // Secondary TXT first; primary PDF below — hierarchy matches Lezi patterns.
             LeziSecondaryButton(
-                label = if (state.busy) "正在生成…" else "导出 TXT 并分享",
+                label = actions.txtLabel,
                 onClick = { request(ExportFormat.Txt) },
-                enabled = !state.busy,
-                busy = state.busy,
+                enabled = actions.controlsEnabled,
+                busy = actions.txtBusy,
                 modifier = Modifier.fillMaxWidth(),
             )
             LeziPrimaryButton(
-                label = if (state.busy) "正在生成…" else "导出 PDF 并分享",
+                label = actions.pdfLabel,
                 onClick = { request(ExportFormat.Pdf) },
-                enabled = !state.busy,
-                busy = state.busy,
+                enabled = actions.controlsEnabled,
+                busy = actions.pdfBusy,
                 modifier = Modifier.fillMaxWidth(),
             )
             (inputError ?: state.error)?.let {
                 Text(it, color = MaterialTheme.colorScheme.error)
             }
-            AnimatedVisibility(visible = state.preview != null) {
+            AnimatedVisibility(
+                visible = state.preview != null,
+                enter = fadeIn(animationSpec = tween(durationMillis = previewEnterMs)) +
+                    expandVertically(animationSpec = tween(durationMillis = previewEnterMs)),
+                exit = fadeOut(animationSpec = tween(durationMillis = previewExitMs)) +
+                    shrinkVertically(animationSpec = tween(durationMillis = previewExitMs)),
+            ) {
                 LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                     Text("预览", style = LeziTypography.TitleSm)
                     Spacer(Modifier.height(LeziSpacing.Xs))

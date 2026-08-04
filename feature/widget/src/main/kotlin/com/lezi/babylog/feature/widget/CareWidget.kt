@@ -5,7 +5,6 @@ import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.glance.LocalSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
 import androidx.glance.GlanceTheme
@@ -82,7 +81,10 @@ private fun WidgetContent(
         modifier = GlanceModifier
             .fillMaxSize()
             .background(GlanceTheme.colors.background)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(
+                horizontal = WidgetChrome.padHorizontal,
+                vertical = WidgetChrome.padVertical,
+            )
             .clickable(
                 actionStartActivity(
                     WidgetComposerContract.createOpenAppIntent(context, model.widgetId),
@@ -93,13 +95,16 @@ private fun WidgetContent(
     ) {
         Text(
             text = if (model.isStale) "${model.title} · 待刷新" else model.title,
-            style = TextStyle(fontWeight = FontWeight.Bold, fontSize = 14.sp),
+            style = TextStyle(
+                fontWeight = FontWeight.Bold,
+                fontSize = WidgetChrome.titleFontSize,
+            ),
             maxLines = 1,
         )
         Text(
             text = model.primarySummary,
             style = TextStyle(
-                fontSize = 12.sp,
+                fontSize = WidgetChrome.bodyFontSize,
                 color = GlanceTheme.colors.onSurfaceVariant,
             ),
             maxLines = 1,
@@ -107,7 +112,7 @@ private fun WidgetContent(
         Text(
             text = model.secondarySummary,
             style = TextStyle(
-                fontSize = 12.sp,
+                fontSize = WidgetChrome.bodyFontSize,
                 color = GlanceTheme.colors.onSurfaceVariant,
             ),
             maxLines = 1,
@@ -117,16 +122,19 @@ private fun WidgetContent(
             model.babyId != null &&
             model.quickActions.isNotEmpty()
         ) {
-            Spacer(GlanceModifier.height(4.dp))
+            Spacer(GlanceModifier.height(WidgetChrome.stackGap))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 model.quickActions.take(visibleQuickActionCount).forEachIndexed { index, action ->
-                    if (index > 0) Spacer(GlanceModifier.width(4.dp))
+                    if (index > 0) Spacer(GlanceModifier.width(WidgetChrome.actionGap))
                     Text(
                         text = "+${action.label}",
                         modifier = GlanceModifier
                             .defaultWeight()
                             .background(GlanceTheme.colors.primaryContainer)
-                            .padding(horizontal = 12.dp, vertical = 16.dp)
+                            .padding(
+                                horizontal = WidgetChrome.actionPadHorizontal,
+                                vertical = WidgetChrome.actionPadVertical,
+                            )
                             .clickable(
                                 actionStartActivity(
                                     WidgetComposerContract.createIntent(
@@ -137,7 +145,7 @@ private fun WidgetContent(
                                 ),
                             ),
                         style = TextStyle(
-                            fontSize = 12.sp,
+                            fontSize = WidgetChrome.bodyFontSize,
                             fontWeight = FontWeight.Medium,
                             color = GlanceTheme.colors.onPrimaryContainer,
                         ),

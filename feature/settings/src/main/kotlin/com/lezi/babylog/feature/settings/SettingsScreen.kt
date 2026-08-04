@@ -31,17 +31,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Brightness6
-import androidx.compose.material.icons.filled.CalendarMonth
-import androidx.compose.material.icons.filled.ChildCare
-import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Brightness6
+import androidx.compose.material.icons.outlined.CalendarMonth
+import androidx.compose.material.icons.outlined.ChildCare
+import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.PersonAdd
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Upload
 import com.lezi.babylog.designsystem.LeziAlertDialog
+import com.lezi.babylog.designsystem.LeziMenuIcon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -596,21 +597,21 @@ fun SettingsRoute(
             SettingsMenuRow(
                 "搜索全部记录",
                 "按类型、详情或备注查找",
-                icon = Icons.Filled.Search,
+                icon = Icons.Outlined.Search,
                 actionLabel = "搜索全部记录",
                 onClick = onOpenSearch,
             )
             SettingsMenuRow(
                 "导出数据",
                 "TXT 文本预览与分享",
-                icon = Icons.Filled.Upload,
+                icon = Icons.Outlined.Upload,
                 actionLabel = "打开数据导出",
                 onClick = onOpenExport,
             )
             SettingsMenuRow(
                 "日程",
                 "本机提醒与日程列表",
-                icon = Icons.Filled.CalendarMonth,
+                icon = Icons.Outlined.CalendarMonth,
                 actionLabel = "打开日程",
                 onClick = onOpenCalendar,
             )
@@ -624,28 +625,28 @@ fun SettingsRoute(
                     "light" -> "浅色"
                     else -> "跟随系统"
                 }}",
-                icon = Icons.Filled.DarkMode,
+                icon = Icons.Outlined.DarkMode,
                 actionLabel = "打开显示设置调整深色模式",
                 onClick = { showDisplay = true },
             )
             SettingsMenuRow(
                 "记录设置",
                 "分项目参数、护理计划与系统日历",
-                icon = Icons.Filled.Menu,
+                icon = Icons.Outlined.Menu,
                 actionLabel = "打开记录设置",
                 onClick = { showRecordSettings = true },
             )
             SettingsMenuRow(
                 "自定义项目",
                 "创建、重命名、图标与本机显示",
-                icon = Icons.Filled.Add,
+                icon = Icons.Outlined.Add,
                 actionLabel = "管理自定义项目",
                 onClick = { showCustomItems = true },
             )
             SettingsMenuRow(
                 "显示设置",
                 "界面模板与主题",
-                icon = Icons.Filled.Brightness6,
+                icon = Icons.Outlined.Brightness6,
                 actionLabel = "打开显示设置",
                 onClick = { showDisplay = true },
             )
@@ -665,19 +666,19 @@ fun SettingsRoute(
                 SettingsMenuRow(
                     "添加宝宝",
                     "新建本机宝宝档案",
-                    icon = Icons.Filled.PersonAdd,
+                    icon = Icons.Outlined.PersonAdd,
                     actionLabel = "添加宝宝",
                     onClick = { showAdd = true },
                 )
             } else {
-                SettingsMenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = Icons.Filled.ChildCare)
+                SettingsMenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = Icons.Outlined.ChildCare)
             }
 
             SectionHeading(title = "数据")
             SettingsMenuRow(
                 title = "清除全部记录",
                 subtitle = "不删除宝宝档案",
-                icon = Icons.Filled.DeleteForever,
+                icon = Icons.Outlined.DeleteForever,
                 actionLabel = "清除全部记录",
                 onClick = vm::requestClearRecords,
                 danger = true,
@@ -1240,7 +1241,7 @@ internal fun SettingsMenuRow(
             } else {
                 Box(
                     Modifier
-                        .size(40.dp)
+                        .size(LeziMenuIcon.WellSize)
                         .clip(CircleShape)
                         .background(
                             if (danger) {
@@ -1255,6 +1256,7 @@ internal fun SettingsMenuRow(
                         Icon(
                             icon,
                             contentDescription = null,
+                            modifier = Modifier.size(LeziMenuIcon.GlyphSize),
                             tint = if (danger) {
                                 MaterialTheme.colorScheme.error
                             } else {

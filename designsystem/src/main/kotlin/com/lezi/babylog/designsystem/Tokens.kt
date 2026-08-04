@@ -132,6 +132,19 @@ object LeziSpacing {
 }
 
 /**
+ * Menu / settings row leading-icon treatment — one well + glyph size so every
+ * row paints the same optical weight (ticket 11 weak-surface polish).
+ * Glyph uses [LeziSpacing.Lg] (20dp); well is 10×4dp grid (40dp).
+ */
+@Immutable
+object LeziMenuIcon {
+    /** Circular well behind the menu glyph. */
+    val WellSize: Dp = 40.dp
+    /** Fixed glyph box; apply via `Modifier.size(GlyphSize)` on Material Icon. */
+    val GlyphSize: Dp = LeziSpacing.Lg
+}
+
+/**
  * Shared motion durations in **milliseconds** for [androidx.compose.animation.core.tween]
  * `durationMillis` (and equivalent APIs). Main-transition vocabulary for:
  * nav host fades, layout-edit, wizard steps, content crossfades, range-tab feedback,
