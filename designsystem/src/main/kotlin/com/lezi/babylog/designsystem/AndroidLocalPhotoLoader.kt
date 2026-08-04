@@ -18,17 +18,22 @@ import kotlinx.coroutines.runInterruptible
 
 private val localPhotoDecodeDispatcher = Dispatchers.IO.limitedParallelism(2)
 
+private val androidLocalPhotoCache = LocalPhotoMemoryCache<ImageBitmap>(
+    release = AndroidLocalPhotoDecodeSource::release,
+)
+
 private val androidLocalPhotoLoader = BoundedLocalPhotoLoader(
     source = AndroidLocalPhotoDecodeSource,
     decodeContext = localPhotoDecodeDispatcher,
+    cache = androidLocalPhotoCache,
 )
 
 /**
  * Cancellable Compose entry point for app-private record-photo thumbnails and previews.
  *
  * A path or target change cancels and disposes the previous result before the new producer wins.
- * There is deliberately no global bitmap cache; [LocalPhotoCacheKey] remains the stable identity
- * if a bounded cache is introduced later.
+ * Decoded bitmaps are retained only in the shared [LocalPhotoMemoryCache] behind this API;
+ * leaving composition unpins the entry so LRU eviction can recycle it.
  */
 // Compose runtime 1.7.6 reports a false positive although the producer assigns both states below;
 // cancellation and stale-key disposal remain covered by loader tests and the API 35 device smoke.
@@ -45,10 +50,10 @@ fun rememberLocalPhoto(
     ) {
         value = LocalPhotoLoadResult.Loading
         val loaded = androidLocalPhotoLoader.load(request)
-        val ownedReady = loaded as? LocalPhotoLoadResult.Ready<ImageBitmap>
+        val readyKey = (loaded as? LocalPhotoLoadResult.Ready)?.plan?.cacheKey
         value = loaded
         awaitDispose {
-            ownedReady?.value?.let(AndroidLocalPhotoDecodeSource::release)
+            readyKey?.let(androidLocalPhotoCache::unpin)
         }
     }
 }

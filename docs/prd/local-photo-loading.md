@@ -47,6 +47,20 @@
   都收敛为 `LocalPhotoLoadResult.Unavailable`。缩略图显示稳定的“无法读取”，全屏显示
   “无法预览图片”，不让异常退出进程。
 
-当前不设全局 Bitmap cache，避免无界驻留和替换泄漏。`LocalPhotoCacheKey` 固定包含 path、target、
-源宽高与方向；若未来确有性能证据需要缓存，必须使用该 identity、明确容量，并在 eviction/替换时
-释放 Bitmap。
+## 有界内存缓存
+
+预览结果通过共享加载 API 背后的进程内 LRU 复用，**不**引入磁盘 cache 或第三方图片栈。
+`LocalPhotoCacheKey` 固定包含 path、target、源宽高与方向；源 identity 任一字段变化都视为未命中，
+避免 EXIF/尺寸变化后继续展示陈旧 Bitmap。
+
+| 维度 | 策略 |
+|---|---|
+| 缩略图条目 | 最多 `LocalPhotoCachePolicy.MAX_THUMBNAIL_ENTRIES`（24） |
+| 全屏条目 | 最多 `LocalPhotoCachePolicy.MAX_FULLSCREEN_ENTRIES`（2） |
+| 解码字节预算 | 共享最多 `LocalPhotoCachePolicy.MAX_DECODED_BYTES`（24 MiB，按 ARGB_8888 4 B/px 计） |
+| 淘汰 | 仅淘汰 **unpin** 后的 LRU 条目，并在淘汰时 `recycle`/release Bitmap |
+| 钉住 | Compose/`rememberLocalPhoto` 在 Ready 期间持有 pin；离开 composition 时 unpin |
+| 取消 | 进行中的 decode 取消不写入 cache；已 pin 但未把 Ready 交给调用方时必须 unpin |
+
+双约束同时生效：条目上限与字节预算任一触顶即淘汰未钉住条目。Cache 只挂在
+`BoundedLocalPhotoLoader` / `rememberLocalPhoto` 共享缝上；功能模块不得再维护平行预览缓存。

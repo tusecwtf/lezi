@@ -214,6 +214,167 @@ class LocalPhotoLoaderTest {
             assertSame(LocalPhotoLoadResult.Unavailable, result)
             assertEquals(listOf("oversized-bitmap"), source.released)
         }
+
+    @Test
+    fun `cache hit reuses decoded value and identity miss re-decodes`() = runBlocking {
+        val source = RecordingPhotoSource(
+            inspections = mapOf(
+                "a.jpg" to LocalPhotoSourceInfo(200, 100, LocalPhotoOrientation.NORMAL),
+                "b.jpg" to LocalPhotoSourceInfo(200, 100, LocalPhotoOrientation.NORMAL),
+            ),
+        )
+        val released = mutableListOf<String>()
+        val cache = LocalPhotoMemoryCache<String>(release = { released += it })
+        val loader = BoundedLocalPhotoLoader(source, cache = cache)
+
+        val first = loader.load(
+            LocalPhotoDecodeRequest("a.jpg", LocalPhotoTarget.THUMBNAIL),
+        ) as LocalPhotoLoadResult.Ready<String>
+        val second = loader.load(
+            LocalPhotoDecodeRequest("a.jpg", LocalPhotoTarget.THUMBNAIL),
+        ) as LocalPhotoLoadResult.Ready<String>
+        val orientationMiss = loader.load(
+            LocalPhotoDecodeRequest("a.jpg", LocalPhotoTarget.THUMBNAIL),
+        )
+        // Force identity miss by loading a path whose plan key differs via target.
+        val targetMiss = loader.load(
+            LocalPhotoDecodeRequest("a.jpg", LocalPhotoTarget.FULLSCREEN),
+        ) as LocalPhotoLoadResult.Ready<String>
+        val pathMiss = loader.load(
+            LocalPhotoDecodeRequest("b.jpg", LocalPhotoTarget.THUMBNAIL),
+        ) as LocalPhotoLoadResult.Ready<String>
+
+        assertSame(first.value, second.value)
+        assertSame(
+            first.value,
+            (orientationMiss as LocalPhotoLoadResult.Ready<String>).value,
+        )
+        // Same path is decoded once per target identity (thumb hit + fullscreen miss).
+        assertEquals(2, source.decodeCountFor("a.jpg"))
+        assertEquals(1, source.decodeCountFor("b.jpg"))
+        assertNotEquals(first.plan.cacheKey, targetMiss.plan.cacheKey)
+        assertNotEquals(first.plan.cacheKey, pathMiss.plan.cacheKey)
+        assertEquals(LocalPhotoTarget.FULLSCREEN, targetMiss.plan.cacheKey.target)
+        // orientation identity is part of the key even when value would otherwise match
+        assertNotEquals(
+            first.plan.cacheKey,
+            first.plan.cacheKey.copy(orientation = LocalPhotoOrientation.ROTATE_90),
+        )
+        assertTrue(released.isEmpty())
+        cache.unpin(first.plan.cacheKey)
+        cache.unpin(second.plan.cacheKey)
+        cache.unpin(orientationMiss.plan.cacheKey)
+        cache.unpin(targetMiss.plan.cacheKey)
+        cache.unpin(pathMiss.plan.cacheKey)
+    }
+
+    @Test
+    fun `thumbnail entry and byte budgets evict least-recent unpinned values`() = runBlocking {
+        val inspections = (0 until 30).associate { index ->
+            "t$index.jpg" to LocalPhotoSourceInfo(64, 64, LocalPhotoOrientation.NORMAL)
+        }
+        val source = RecordingPhotoSource(inspections = inspections)
+        val released = mutableListOf<String>()
+        val cache = LocalPhotoMemoryCache<String>(
+            maxThumbnailEntries = 3,
+            maxFullscreenEntries = 2,
+            maxDecodedBytes = 64L * 64L * LocalPhotoCachePolicy.BYTES_PER_PIXEL * 3,
+            release = { released += it },
+        )
+        val loader = BoundedLocalPhotoLoader(source, cache = cache)
+
+        val keys = mutableListOf<LocalPhotoCacheKey>()
+        for (index in 0 until 4) {
+            val ready = loader.load(
+                LocalPhotoDecodeRequest("t$index.jpg", LocalPhotoTarget.THUMBNAIL),
+            ) as LocalPhotoLoadResult.Ready<String>
+            keys += ready.plan.cacheKey
+            cache.unpin(ready.plan.cacheKey)
+        }
+
+        // Entry cap 3: loading the 4th unpinned thumbnail evicts the least-recent (t0).
+        assertTrue(released.any { it.startsWith("t0.jpg@") })
+        assertEquals(3, cache.thumbnailEntryCount)
+        assertTrue(cache.decodedByteSize <= cache.maxDecodedBytes)
+
+        // Fullscreen cap 2 with explicit tiny byte room still recycles on third.
+        val fullSource = RecordingPhotoSource(
+            inspections = mapOf(
+                "f0.jpg" to LocalPhotoSourceInfo(100, 100, LocalPhotoOrientation.NORMAL),
+                "f1.jpg" to LocalPhotoSourceInfo(100, 100, LocalPhotoOrientation.NORMAL),
+                "f2.jpg" to LocalPhotoSourceInfo(100, 100, LocalPhotoOrientation.NORMAL),
+            ),
+        )
+        val fullReleased = mutableListOf<String>()
+        val fullCache = LocalPhotoMemoryCache<String>(
+            maxThumbnailEntries = 24,
+            maxFullscreenEntries = 2,
+            maxDecodedBytes = 32L * 1024 * 1024,
+            release = { fullReleased += it },
+        )
+        val fullLoader = BoundedLocalPhotoLoader(fullSource, cache = fullCache)
+        val fullKeys = (0 until 3).map { index ->
+            val ready = fullLoader.load(
+                LocalPhotoDecodeRequest("f$index.jpg", LocalPhotoTarget.FULLSCREEN),
+            ) as LocalPhotoLoadResult.Ready<String>
+            fullCache.unpin(ready.plan.cacheKey)
+            ready.plan.cacheKey
+        }
+        assertTrue(fullReleased.any { it.startsWith("f0.jpg@") })
+        assertEquals(2, fullCache.fullscreenEntryCount)
+        assertEquals(3, fullKeys.size)
+
+        // Pure byte budget (entry cap high): third 64×64 ARGB thumb forces LRU release.
+        val byteSource = RecordingPhotoSource(
+            inspections = mapOf(
+                "b0.jpg" to LocalPhotoSourceInfo(64, 64, LocalPhotoOrientation.NORMAL),
+                "b1.jpg" to LocalPhotoSourceInfo(64, 64, LocalPhotoOrientation.NORMAL),
+                "b2.jpg" to LocalPhotoSourceInfo(64, 64, LocalPhotoOrientation.NORMAL),
+            ),
+        )
+        val byteReleased = mutableListOf<String>()
+        val oneThumbBytes = 64L * 64L * LocalPhotoCachePolicy.BYTES_PER_PIXEL
+        val byteCache = LocalPhotoMemoryCache<String>(
+            maxThumbnailEntries = LocalPhotoCachePolicy.MAX_THUMBNAIL_ENTRIES,
+            maxFullscreenEntries = LocalPhotoCachePolicy.MAX_FULLSCREEN_ENTRIES,
+            maxDecodedBytes = oneThumbBytes * 2,
+            release = { byteReleased += it },
+        )
+        val byteLoader = BoundedLocalPhotoLoader(byteSource, cache = byteCache)
+        repeat(3) { index ->
+            val ready = byteLoader.load(
+                LocalPhotoDecodeRequest("b$index.jpg", LocalPhotoTarget.THUMBNAIL),
+            ) as LocalPhotoLoadResult.Ready<String>
+            byteCache.unpin(ready.plan.cacheKey)
+        }
+        assertTrue(byteReleased.any { it.startsWith("b0.jpg@") })
+        assertTrue(byteCache.decodedByteSize <= oneThumbBytes * 2)
+        assertEquals(2, byteCache.thumbnailEntryCount)
+    }
+
+    @Test
+    fun `cancelled decode does not populate cache and does not poison a later load`() = runBlocking {
+        val source = SwitchingPhotoSource()
+        val cache = LocalPhotoMemoryCache<String>(release = { })
+        val loader = BoundedLocalPhotoLoader(source, cache = cache)
+
+        val stale = async {
+            loader.load(LocalPhotoDecodeRequest("a.jpg", LocalPhotoTarget.FULLSCREEN))
+        }
+        source.staleOrientationStarted.await()
+        stale.cancelAndJoin()
+
+        assertTrue(stale.isCancelled)
+        assertEquals(0, cache.totalEntryCount)
+        assertEquals(listOf("a.jpg@1"), source.released)
+
+        val ready = loader.load(
+            LocalPhotoDecodeRequest("b.jpg", LocalPhotoTarget.FULLSCREEN),
+        ) as LocalPhotoLoadResult.Ready<String>
+        assertEquals("b.jpg@1", ready.value)
+        assertEquals(1, cache.totalEntryCount)
+        cache.unpin(ready.plan.cacheKey)
+    }
 }
 
 private class RecordingPhotoSource(
@@ -221,11 +382,15 @@ private class RecordingPhotoSource(
 ) : LocalPhotoDecodeSource<String> {
     val requestedSampleSizes = mutableListOf<Int>()
     val appliedOrientations = mutableListOf<LocalPhotoOrientation>()
+    private val decodeCounts = mutableMapOf<String, Int>()
+
+    fun decodeCountFor(path: String): Int = decodeCounts[path] ?: 0
 
     override suspend fun inspect(path: String): LocalPhotoSourceInfo? = inspections[path]
 
     override suspend fun decode(path: String, sampleSize: Int): LocalPhotoDecoded<String>? {
         requestedSampleSizes += sampleSize
+        decodeCounts[path] = (decodeCounts[path] ?: 0) + 1
         val info = inspections[path] ?: return null
         return LocalPhotoDecoded(
             value = "$path@$sampleSize",
