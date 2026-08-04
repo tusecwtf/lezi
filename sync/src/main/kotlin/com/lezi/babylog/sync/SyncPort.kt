@@ -511,6 +511,17 @@ interface SyncPort {
         kotlinx.coroutines.flow.flowOf(null)
 
     /**
+     * Preferred host for force-shell LAN 8767 invite-install guidance.
+     *
+     * Null means "use the joined session host". Non-null after disaster-restore
+     * write paths hit `client_update_required` so the shell points at the restore
+     * candidate origin (empty CD'd server) rather than a retained old session host.
+     * Cleared when the force shell is cleared.
+     */
+    fun forcedUpdateLanInviteHost(): Flow<String?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    /**
      * Process-session "稍后": hide the optional banner for [versionCode] until the
      * process dies. Does not block a later explicit [checkAppUpdate] dialog path.
      * Does not apply to forced updates.
@@ -602,6 +613,9 @@ class NoOpSyncPort : SyncPort {
         kotlinx.coroutines.flow.flowOf(null)
 
     override fun availableForcedAppUpdate(): Flow<ForcedAppUpdateState?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    override fun forcedUpdateLanInviteHost(): Flow<String?> =
         kotlinx.coroutines.flow.flowOf(null)
 
     override fun dismissOptionalAppUpdate(versionCode: Int) = Unit

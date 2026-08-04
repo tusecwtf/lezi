@@ -155,6 +155,11 @@ class RealSyncPort @Inject constructor(
         MutableStateFlow<AppUpdateMetadata?>(null)
     private val forcedAppUpdateState =
         MutableStateFlow<ForcedAppUpdateState?>(null)
+    /**
+     * Host override for force-shell 8767 invite guidance after restore-path CUR
+     * (candidate / checkpoint origin). Null → UI falls back to session.serverHost.
+     */
+    private val forcedUpdateLanInviteHostState = MutableStateFlow<String?>(null)
     /** Process-session "稍后" suppressions keyed by server package versionCode. */
     private val dismissedOptionalUpdateVersionCodes =
         java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
@@ -260,7 +265,7 @@ class RealSyncPort @Inject constructor(
                     currentStatus.value = SyncStatus.Disabled
                     // Unjoined devices never show optional/forced update surfaces.
                     optionalAppUpdateState.value = null
-                    forcedAppUpdateState.value = null
+                    clearForcedAppUpdateState()
                 } else if (currentStatus.value == SyncStatus.Disabled) {
                     currentStatus.value = SyncStatus.Idle
                 }
@@ -468,6 +473,9 @@ class RealSyncPort @Inject constructor(
 
     override fun availableForcedAppUpdate(): Flow<ForcedAppUpdateState?> =
         forcedAppUpdateState
+
+    override fun forcedUpdateLanInviteHost(): Flow<String?> =
+        forcedUpdateLanInviteHostState
 
     override suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
         setupProbe.probe(endpointDraft, preferences.verifiedEndpoint.first())
@@ -755,121 +763,140 @@ class RealSyncPort @Inject constructor(
         ownerDisplayName: String,
         deviceName: String,
         rootPassword: String,
-    ): Result<DisasterRecoveryProgress> = runCatching {
-        require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
-        syncMutex.withLock {
-            preferences.disasterRestoreCheckpoint.first()?.let {
-                return@withLock resumeDisasterRecoveryLocked(it)
+    ): Result<DisasterRecoveryProgress> = mapDisasterRecoveryClientUpdateRequired(
+        inviteHostHint = hostForLanInvite(endpoint),
+        result = runCatching {
+            require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
+            syncMutex.withLock {
+                preferences.disasterRestoreCheckpoint.first()?.let {
+                    return@withLock resumeDisasterRecoveryLocked(it)
+                }
+                val previous = requireRetainedOwnerSession()
+                val probe = probeReconnectCandidate(endpoint.origin, endpoint)
+                require(
+                    probe is SetupProbeResult.Ready &&
+                        probe.familyState == com.lezi.babylog.sync.session.SetupFamilyState.Empty,
+                ) { "家庭灾难恢复只适用于已校验的空服务器" }
+                val familyName = requireNotNull(
+                    previous.familyName?.trim()?.takeIf(String::isNotEmpty),
+                ) {
+                    "本机缺少旧家庭名称，无法安全恢复"
+                }
+                val requestIds = preferences.ensureDisasterRestoreRequestIds()
+                disasterRecoverySnapshotBuilder.build().use { snapshot ->
+                    val batch = backend.startDisasterRestore(
+                        endpoint = endpoint,
+                        requestId = requestIds.start,
+                        familyId = previous.familyId,
+                        familyName = familyName,
+                        ownerDisplayName = requireMemberDisplayName(ownerDisplayName),
+                        deviceName = requireDeviceName(deviceName),
+                        rootPassword = rootPassword,
+                    )
+                    var checkpoint = DisasterRestoreCheckpoint(
+                        batchId = batch.batchId,
+                        endpoint = endpoint,
+                        familyId = previous.familyId,
+                        startRequestId = requestIds.start,
+                        manifestRequestId = requestIds.manifest,
+                        commitRequestId = requestIds.commit,
+                        expiresAtEpochSeconds = batch.expiresAtEpochSeconds,
+                        status = batch.status,
+                        entityVersions = snapshot.retirementVersions,
+                    )
+                    preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
+                    val status = uploadDisasterRecoverySnapshot(
+                        checkpoint,
+                        batch.recoveryToken,
+                        snapshot,
+                        uploadManifest = true,
+                    )
+                    checkpoint = checkpoint.copy(
+                        status = status.status,
+                        expiresAtEpochSeconds = status.expiresAtEpochSeconds,
+                    )
+                    preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
+                    DisasterRecoveryProgress(
+                        summary = snapshot.summary,
+                        status = status.status,
+                        expiresAtEpochSeconds = status.expiresAtEpochSeconds,
+                    )
+                }
             }
-            val previous = requireRetainedOwnerSession()
-            val probe = probeReconnectCandidate(endpoint.origin, endpoint)
-            require(
-                probe is SetupProbeResult.Ready &&
-                    probe.familyState == com.lezi.babylog.sync.session.SetupFamilyState.Empty,
-            ) { "家庭灾难恢复只适用于已校验的空服务器" }
-            val familyName = requireNotNull(previous.familyName?.trim()?.takeIf(String::isNotEmpty)) {
-                "本机缺少旧家庭名称，无法安全恢复"
-            }
-            val requestIds = preferences.ensureDisasterRestoreRequestIds()
-            disasterRecoverySnapshotBuilder.build().use { snapshot ->
-                val batch = backend.startDisasterRestore(
-                    endpoint = endpoint,
-                    requestId = requestIds.start,
-                    familyId = previous.familyId,
-                    familyName = familyName,
-                    ownerDisplayName = requireMemberDisplayName(ownerDisplayName),
-                    deviceName = requireDeviceName(deviceName),
-                    rootPassword = rootPassword,
-                )
-                var checkpoint = DisasterRestoreCheckpoint(
-                    batchId = batch.batchId,
-                    endpoint = endpoint,
-                    familyId = previous.familyId,
-                    startRequestId = requestIds.start,
-                    manifestRequestId = requestIds.manifest,
-                    commitRequestId = requestIds.commit,
-                    expiresAtEpochSeconds = batch.expiresAtEpochSeconds,
-                    status = batch.status,
-                    entityVersions = snapshot.retirementVersions,
-                )
-                preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
-                val status = uploadDisasterRecoverySnapshot(
-                    checkpoint,
-                    batch.recoveryToken,
-                    snapshot,
-                    uploadManifest = true,
-                )
-                checkpoint = checkpoint.copy(
-                    status = status.status,
-                    expiresAtEpochSeconds = status.expiresAtEpochSeconds,
-                )
-                preferences.saveDisasterRestoreCheckpoint(checkpoint, batch.recoveryToken)
-                DisasterRecoveryProgress(
-                    summary = snapshot.summary,
-                    status = status.status,
-                    expiresAtEpochSeconds = status.expiresAtEpochSeconds,
-                )
-            }
-        }
-    }
+        },
+    )
 
-    override suspend fun resumeDisasterRecovery(): Result<DisasterRecoveryProgress> = runCatching {
-        syncMutex.withLock {
-            val checkpoint = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
-                "没有可继续的家庭恢复批次"
-            }
-            resumeDisasterRecoveryLocked(checkpoint)
-        }
+    override suspend fun resumeDisasterRecovery(): Result<DisasterRecoveryProgress> {
+        val checkpoint = preferences.disasterRestoreCheckpoint.first()
+        return mapDisasterRecoveryClientUpdateRequired(
+            inviteHostHint = checkpoint?.let { hostForLanInvite(it.endpoint) },
+            result = runCatching {
+                syncMutex.withLock {
+                    val current = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
+                        "没有可继续的家庭恢复批次"
+                    }
+                    resumeDisasterRecoveryLocked(current)
+                }
+            },
+        )
     }
 
     override suspend fun commitDisasterRecovery(
         rootPassword: String,
-    ): Result<OwnerLoginResult> = runCatching {
-        require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
-        syncMutex.withLock {
-            val checkpoint = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
-                "没有等待提交的家庭恢复批次"
-            }
-            val token = preferences.disasterRestoreToken().also {
-                require(it.isNotBlank()) { "家庭恢复凭据已丢失，请取消后重新开始" }
-            }
-            val previous = requireRetainedOwnerSession()
-            require(previous.familyId == checkpoint.familyId) {
-                "本机家庭身份已变化，恢复已停止"
-            }
-            val joined = backend.commitDisasterRestore(
-                endpoint = checkpoint.endpoint,
-                batchId = checkpoint.batchId,
-                recoveryToken = token,
-                requestId = checkpoint.commitRequestId,
-                rootPassword = rootPassword,
-            )
-            require(joined.role == FamilyRole.Owner) { "家庭恢复响应角色无效" }
-            if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
-            val config = FamilyEndpointConfig.fromBaseUrl(checkpoint.endpoint.origin).withNormalized()
-            val session = SyncSession(
-                familyId = joined.familyId,
-                accessToken = joined.accessToken,
-                refreshToken = joined.refreshToken,
-                accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
-                deviceId = joined.deviceId,
-                role = joined.role,
-                pullCursor = 0L,
-                pullGeneration = joined.generation,
-                serverHost = config.host,
-                serverPort = config.port,
-                serverScheme = config.scheme,
-                familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
-                membershipId = joined.membershipId.trim(),
-            )
-            retireDisasterRestoreReceipts(session, checkpoint)
-            preferences.saveReconnectedSession(session, checkpoint.endpoint)
-            preferences.clearDisasterRestoreCheckpoint()
-            publishSession(session)
-            currentAvailability.value = FamilyServerAvailability.Disabled
-            requestSync(SyncTrigger.Foreground)
-            OwnerLoginResult(session, InitialFamilyDataRecovery.Complete)
-        }
+    ): Result<OwnerLoginResult> {
+        val checkpoint = preferences.disasterRestoreCheckpoint.first()
+        return mapDisasterRecoveryClientUpdateRequired(
+            inviteHostHint = checkpoint?.let { hostForLanInvite(it.endpoint) },
+            result = runCatching {
+                require(rootPassword.isNotBlank()) { "请输入新服务器管理员根密码" }
+                syncMutex.withLock {
+                    val current = requireNotNull(preferences.disasterRestoreCheckpoint.first()) {
+                        "没有等待提交的家庭恢复批次"
+                    }
+                    val token = preferences.disasterRestoreToken().also {
+                        require(it.isNotBlank()) { "家庭恢复凭据已丢失，请取消后重新开始" }
+                    }
+                    val previous = requireRetainedOwnerSession()
+                    require(previous.familyId == current.familyId) {
+                        "本机家庭身份已变化，恢复已停止"
+                    }
+                    val joined = backend.commitDisasterRestore(
+                        endpoint = current.endpoint,
+                        batchId = current.batchId,
+                        recoveryToken = token,
+                        requestId = current.commitRequestId,
+                        rootPassword = rootPassword,
+                    )
+                    require(joined.role == FamilyRole.Owner) { "家庭恢复响应角色无效" }
+                    if (joined.familyId != previous.familyId) throw DifferentFamilyServerException()
+                    val config = FamilyEndpointConfig
+                        .fromBaseUrl(current.endpoint.origin)
+                        .withNormalized()
+                    val session = SyncSession(
+                        familyId = joined.familyId,
+                        accessToken = joined.accessToken,
+                        refreshToken = joined.refreshToken,
+                        accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+                        deviceId = joined.deviceId,
+                        role = joined.role,
+                        pullCursor = 0L,
+                        pullGeneration = joined.generation,
+                        serverHost = config.host,
+                        serverPort = config.port,
+                        serverScheme = config.scheme,
+                        familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
+                        membershipId = joined.membershipId.trim(),
+                    )
+                    retireDisasterRestoreReceipts(session, current)
+                    preferences.saveReconnectedSession(session, current.endpoint)
+                    preferences.clearDisasterRestoreCheckpoint()
+                    publishSession(session)
+                    currentAvailability.value = FamilyServerAvailability.Disabled
+                    requestSync(SyncTrigger.Foreground)
+                    OwnerLoginResult(session, InitialFamilyDataRecovery.Complete)
+                }
+            },
+        )
     }
 
     override suspend fun cancelDisasterRecovery(): Result<Unit> = runCatching {
@@ -1293,7 +1320,7 @@ class RealSyncPort @Inject constructor(
             optionalAppUpdateState.value = null
             val retainedForce = forcedAppUpdateState.value
                 .takeIf { session.retainsFamilyIdentityForReauth() }
-            if (retainedForce == null) forcedAppUpdateState.value = null
+            if (retainedForce == null) clearForcedAppUpdateState()
             return Result.success(
                 when (retainedForce) {
                     is ForcedAppUpdateState.WithPackage ->
@@ -1475,7 +1502,7 @@ class RealSyncPort @Inject constructor(
             if (!session.isJoined) {
                 optionalAppUpdateState.value = null
                 if (!session.retainsFamilyIdentityForReauth()) {
-                    forcedAppUpdateState.value = null
+                    clearForcedAppUpdateState()
                 }
                 return
             }
@@ -1551,7 +1578,7 @@ class RealSyncPort @Inject constructor(
                 }
             }
         }
-        forcedAppUpdateState.value = null
+        clearForcedAppUpdateState()
         if (local >= metadata.versionCode) {
             optionalAppUpdateState.value = null
             return AppUpdateCheckResult.UpToDate
@@ -1661,6 +1688,40 @@ class RealSyncPort @Inject constructor(
             updateFailureStatus(error)
         }
         return Result.failure(error)
+    }
+
+    /**
+     * Disaster-restore writes are not wrapped by [RefreshingSyncBackend]'s CUR mapping.
+     * Map wire `client_update_required` to [ClientUpdateRequiredException], publish the
+     * same force shell as sync, and prefer the restore candidate host for 8767 guidance.
+     */
+    private suspend fun <T> mapDisasterRecoveryClientUpdateRequired(
+        inviteHostHint: String?,
+        result: Result<T>,
+    ): Result<T> {
+        val failure = result.exceptionOrNull() ?: return result
+        val required = when (failure) {
+            is ClientUpdateRequiredException -> failure
+            is SyncHttpException -> failure.clientUpdateRequiredOrNull()
+            else -> null
+        } ?: return result
+        val host = inviteHostHint?.trim()?.takeIf { it.isNotEmpty() }
+        if (host != null) {
+            forcedUpdateLanInviteHostState.value = host
+        }
+        resolveForceShellAfterClientUpdateRequired()
+        return Result.failure(required)
+    }
+
+    private fun hostForLanInvite(endpoint: TrustedEndpointProfile): String? =
+        runCatching {
+            FamilyEndpointConfig.fromBaseUrl(endpoint.origin).withNormalized().host
+        }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+
+    /** Clears force shell and any restore-candidate invite-host override together. */
+    private fun clearForcedAppUpdateState() {
+        forcedAppUpdateState.value = null
+        forcedUpdateLanInviteHostState.value = null
     }
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */

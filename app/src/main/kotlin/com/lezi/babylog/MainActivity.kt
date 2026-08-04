@@ -404,23 +404,29 @@ class RootViewModel @Inject constructor(
     /**
      * Session snapshot for force-shell recovery / LAN invite guidance.
      * Force shell is retained across reauth; UI must still allow re-login.
+     * Prefer [SyncPort.forcedUpdateLanInviteHost] (restore-candidate origin after CUR)
+     * over the retained session host so empty-server restore can still offer 8767.
      */
     val forcedUpdateSessionRecovery: StateFlow<ForcedUpdateSessionRecovery> =
-        syncPort.session()
-            .map { session ->
-                val inviteUrl = lanInviteApkDownloadUrl(session.serverHost)
-                ForcedUpdateSessionRecovery(
-                    needsSessionRecovery = forceShellNeedsSessionRecovery(
-                        isJoined = session.isJoined,
-                        reauthRequired = session.reauthRequired,
-                        retainsFamilyIdentity = session.reauthRequired &&
-                            session.familyId.isNotBlank() &&
-                            session.membershipId.isNotBlank() &&
-                            session.baseUrl.isNotBlank(),
-                    ),
-                    lanInviteApkUrl = inviteUrl,
-                )
-            }
+        combine(
+            syncPort.session(),
+            syncPort.forcedUpdateLanInviteHost(),
+        ) { session, inviteHostOverride ->
+            val inviteHost = inviteHostOverride?.trim()?.takeIf { it.isNotEmpty() }
+                ?: session.serverHost
+            val inviteUrl = lanInviteApkDownloadUrl(inviteHost)
+            ForcedUpdateSessionRecovery(
+                needsSessionRecovery = forceShellNeedsSessionRecovery(
+                    isJoined = session.isJoined,
+                    reauthRequired = session.reauthRequired,
+                    retainsFamilyIdentity = session.reauthRequired &&
+                        session.familyId.isNotBlank() &&
+                        session.membershipId.isNotBlank() &&
+                        session.baseUrl.isNotBlank(),
+                ),
+                lanInviteApkUrl = inviteUrl,
+            )
+        }
             .stateIn(
                 viewModelScope,
                 SharingStarted.WhileSubscribed(5_000),
@@ -491,7 +497,10 @@ class RootViewModel @Inject constructor(
                             _forcedUpdateMessage.value =
                                 "登录已失效，请先重新登录家庭后再安装更新。"
                         } else {
-                            val invite = lanInviteApkDownloadUrl(session.serverHost)
+                            val inviteHost = syncPort.forcedUpdateLanInviteHost().first()
+                                ?.trim()?.takeIf { it.isNotEmpty() }
+                                ?: session.serverHost
+                            val invite = lanInviteApkDownloadUrl(inviteHost)
                             _forcedUpdateMessage.value = buildString {
                                 append(productUiError(error, "下载或安装失败，请稍后重试"))
                                 if (invite != null) {

@@ -68,6 +68,7 @@ import com.lezi.babylog.sync.appupdate.appUpdateStagingApk
 import com.lezi.babylog.sync.appupdate.appUpdateStagingDir
 import com.lezi.babylog.sync.appupdate.appUpdateUiOutcome
 import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
+import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
 import com.lezi.babylog.sync.backend.AnonymousHealth
@@ -432,6 +433,53 @@ class RealSyncPortTest {
         ).isTrue()
         remoteRelease.complete(Unit)
     }
+
+    @Test
+    fun disasterRestoreStartClientUpdateRequiredPublishesForceShellAndCandidateLanInvite() =
+        runTest {
+            val candidate = TrustedEndpointProfile.systemPki(
+                "https://192.168.50.4:8765",
+            )
+            val rig = SyncRig(
+                session = joinedSession("family-a"),
+                clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+                setupProbe = SetupProbe { _, trusted ->
+                    SetupProbeResult.Ready(requireNotNull(trusted), SetupFamilyState.Empty)
+                },
+            )
+            rig.awaitStartupRecovery()
+            // Snapshot builder requires at least one baby before the network start call.
+            rig.babies.seed(localBaby())
+            // Empty restore candidate gates writes with the same client_update_required floor
+            // as sync; no joined session on that origin → PackageUnknown + 8767 guidance.
+            rig.backend.disasterRestoreStartFailure = SyncHttpException(
+                statusCode = 403,
+                responseBody = """{"code":"client_update_required","detail":"too old"}""",
+            )
+            // Old session metadata must not be required for the force shell to publish.
+            rig.backend.getAppUpdateMetadataFailure =
+                SyncHttpException(500, """{"detail":"old origin unreachable"}""")
+
+            val result = rig.port.startDisasterRecovery(
+                endpoint = candidate,
+                ownerDisplayName = "管理员",
+                deviceName = "新管理员手机",
+                rootPassword = "start-root-secret",
+            )
+
+            assertThat(result.isFailure).isTrue()
+            assertThat(result.exceptionOrNull())
+                .isInstanceOf(ClientUpdateRequiredException::class.java)
+            assertThat(rig.port.availableForcedAppUpdate().first())
+                .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+            assertThat(rig.port.forcedUpdateLanInviteHost().first())
+                .isEqualTo("192.168.50.4")
+            assertThat(lanInviteApkDownloadUrl(rig.port.forcedUpdateLanInviteHost().first()!!))
+                .isEqualTo("http://192.168.50.4:8767/download/lezi.apk")
+            // Retain the old joined session; restore did not switch endpoint.
+            assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
+            assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
+        }
 
     @Test
     fun ownerRestoresCompleteLocalSnapshotBeforeAtomicallyRetiringOldReplica() = runTest {
@@ -8949,6 +8997,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val disasterRestoreManifestMedia = mutableListOf<List<DisasterRestoreMediaSpec>>()
     val disasterRestoreMediaUuids = mutableListOf<String>()
     val disasterRestoreCommitRootPasswords = mutableListOf<String>()
+    var disasterRestoreStartFailure: Throwable? = null
     var disasterRestoreStatus = DisasterRestoreStatus(
         batchId = "restore-batch-a",
         status = "ready_to_commit",
@@ -9002,6 +9051,7 @@ internal class RecordingSyncBackend : SyncBackend {
         disasterRestoreStartRequestIds += requestId
         disasterRestoreStartFamilyIds += familyId
         disasterRestoreStartRootPasswords += rootPassword
+        disasterRestoreStartFailure?.let { throw it }
         return DisasterRestoreBatch(
             batchId = disasterRestoreStatus.batchId,
             recoveryToken = "recovery-token-secret",
