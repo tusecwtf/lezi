@@ -1,24 +1,21 @@
 package com.lezi.babylog.feature.growth
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -26,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -275,7 +271,7 @@ fun GrowthRoute(
     var showMeasureClock by rememberSaveable { mutableStateOf(false) }
     val zone = ZoneId.systemDefault()
     val history = remember(ui.points) {
-        ui.points.sortedByDescending(MeasurePoint::measuredAt)
+        growthHistoryNewestFirst(ui.points)
     }
 
     fun openNewMeasurement() {
@@ -319,118 +315,140 @@ fun GrowthRoute(
             onRefresh = vm::refresh,
             modifier = Modifier.fillMaxSize(),
         ) {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(LeziSpacing.Page),
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(LeziSpacing.Page),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                com.lezi.babylog.designsystem.PageHero(
-                eyebrow = "",
-                title = "成长",
-                trailing = {
-                    LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
-                },
-            )
-
-            Text(
-                shallowSyncStatus.text,
-                style = LeziTypography.Meta,
-                color = if (
-                    shallowSyncStatus.state in setOf(
-                        ShallowSyncState.Error,
-                        ShallowSyncState.ReauthRequired,
+                item(key = "growth_hero", contentType = "growth_hero") {
+                    com.lezi.babylog.designsystem.PageHero(
+                        eyebrow = "",
+                        title = "成长",
+                        trailing = {
+                            LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
+                        },
                     )
-                ) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                modifier = Modifier.testTag("growth_shallow_sync_status"),
-            )
+                }
 
-            LeziRangeTabs(
-                items = GrowthMetric.entries,
-                selected = ui.metric,
-                onSelect = vm::setMetric,
-                label = {
-                    when (it) {
-                        GrowthMetric.WEIGHT -> "体重"
-                        GrowthMetric.HEIGHT -> "身长/身高"
-                    }
-                },
-            )
+                item(key = "growth_sync", contentType = "growth_sync") {
+                    Text(
+                        shallowSyncStatus.text,
+                        style = LeziTypography.Meta,
+                        color = if (
+                            shallowSyncStatus.state in setOf(
+                                ShallowSyncState.Error,
+                                ShallowSyncState.ReauthRequired,
+                            )
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.testTag("growth_shallow_sync_status"),
+                    )
+                }
 
-            AnimatedContent(
-                targetState = ui.metric,
-                transitionSpec = { fadeIn() togetherWith fadeOut() },
-                label = "growth_metric_content",
-            ) {
+                item(key = "growth_metric_tabs", contentType = "growth_metric_tabs") {
+                    LeziRangeTabs(
+                        items = GrowthMetric.entries,
+                        selected = ui.metric,
+                        onSelect = vm::setMetric,
+                        label = {
+                            when (it) {
+                                GrowthMetric.WEIGHT -> "体重"
+                                GrowthMetric.HEIGHT -> "身长/身高"
+                            }
+                        },
+                    )
+                }
+
                 if (ui.points.isEmpty()) {
-                    StateContainer(
-                        kind = StateKind.Empty,
-                        title = "还没有测量",
-                        message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
-                        actionLabel = "去录入",
-                        onAction = { openNewMeasurement() },
-                    )
+                    item(key = "growth_empty", contentType = "growth_empty") {
+                        StateContainer(
+                            kind = StateKind.Empty,
+                            title = "还没有测量",
+                            message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
+                            actionLabel = "去录入",
+                            onAction = { openNewMeasurement() },
+                        )
+                    }
                 } else {
-                    val latest = ui.points.last()
-                    LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
-                        Text(
-                            when (ui.metric) {
-                                GrowthMetric.WEIGHT -> "最新体重"
-                                GrowthMetric.HEIGHT -> "最新${ui.birthday?.let { birthday ->
-                                    growthLinearMeasurementLabel(birthday, latest.measuredAt, zone)
-                                } ?: "身长/身高"}"
-                            },
-                            style = LeziTypography.Meta,
-                        )
-                        Text(
-                            formatMeasurementValue(ui.metric, latest.value),
-                            style = LeziTypography.Metric,
-                        )
-                        GrowthChart(points = ui.points, bands = bands, metric = ui.metric)
-                        latest.referenceWarning?.let { warning ->
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                                shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
-                            ) {
-                                Text(
-                                    warning,
-                                    modifier = Modifier.padding(LeziSpacing.Sm),
-                                    style = LeziTypography.Meta,
-                                )
+                    item(key = "growth_chart_${ui.metric}", contentType = "growth_chart") {
+                        val latest = ui.points.last()
+                        LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                            Text(
+                                when (ui.metric) {
+                                    GrowthMetric.WEIGHT -> "最新体重"
+                                    GrowthMetric.HEIGHT -> "最新${ui.birthday?.let { birthday ->
+                                        growthLinearMeasurementLabel(
+                                            birthday,
+                                            latest.measuredAt,
+                                            zone,
+                                        )
+                                    } ?: "身长/身高"}"
+                                },
+                                style = LeziTypography.Meta,
+                            )
+                            Text(
+                                formatMeasurementValue(ui.metric, latest.value),
+                                style = LeziTypography.Metric,
+                            )
+                            GrowthChart(points = ui.points, bands = bands, metric = ui.metric)
+                            latest.referenceWarning?.let { warning ->
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = MaterialTheme.colorScheme.errorContainer,
+                                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                    shape = LeziThemeExt.controlShape,
+                                ) {
+                                    Text(
+                                        warning,
+                                        modifier = Modifier.padding(LeziSpacing.Sm),
+                                        style = LeziTypography.Meta,
+                                    )
+                                }
                             }
-                        }
-                        if (bands.isNotEmpty()) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Text("— P3", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.outline)
-                                Text("— P50", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.secondary)
-                                Text("— P97", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.outline)
+                            if (bands.isNotEmpty()) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                ) {
+                                    Text(
+                                        "— P3",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.outline,
+                                    )
+                                    Text(
+                                        "— P50",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.secondary,
+                                    )
+                                    Text(
+                                        "— P97",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.outline,
+                                    )
+                                }
                             }
                         }
                     }
 
-                    SectionHeading(
-                        title = "测量记录",
-                    )
-                    LeziSurfacePanel(
-                        Modifier
-                            .fillMaxWidth()
-                            .animateContentSize(),
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                        bottomBand = true,
-                    ) {
-                        history.forEachIndexed { index, point ->
-                            if (index > 0) {
-                                HorizontalDivider(
-                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                                )
-                            }
+                    item(key = "growth_history_heading", contentType = "growth_history_heading") {
+                        SectionHeading(title = "测量记录")
+                    }
+
+                    items(
+                        items = history,
+                        key = { point -> point.recordId },
+                        contentType = { "history_row" },
+                    ) { point ->
+                        LeziSurfacePanel(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .animateItem(),
+                            bottomBand = true,
+                            bottomDivider = false,
+                        ) {
                             MeasurementHistoryRow(
                                 metric = ui.metric,
                                 point = point,
@@ -441,24 +459,28 @@ fun GrowthRoute(
                     }
                 }
 
-                Text(
-                    text = listOfNotNull(
-                        growthReferenceNotice(
-                            sex = ui.sex,
-                            hasReferenceBands = bands.isNotEmpty(),
-                            hasMeasurementsOutsideReference =
-                                ui.referenceValidUntilMonthExclusive?.let { exclusive ->
-                                    ui.points.any { it.monthAge >= exclusive }
-                                } == true,
-                        ),
-                        "WS/T 423—2022 · 按性别 P3/P50/P97 参考带 · " +
-                            "早产或特殊疾病请遵医嘱 · 非医疗诊断",
-                    ).joinToString("\n"),
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Spacer(Modifier.height(LeziSpacing.Xxl))
+                item(key = "growth_reference_notice", contentType = "growth_reference_notice") {
+                    Text(
+                        text = listOfNotNull(
+                            growthReferenceNotice(
+                                sex = ui.sex,
+                                hasReferenceBands = bands.isNotEmpty(),
+                                hasMeasurementsOutsideReference =
+                                    ui.referenceValidUntilMonthExclusive?.let { exclusive ->
+                                        ui.points.any { it.monthAge >= exclusive }
+                                    } == true,
+                            ),
+                            "WS/T 423—2022 · 按性别 P3/P50/P97 参考带 · " +
+                                "早产或特殊疾病请遵医嘱 · 非医疗诊断",
+                        ).joinToString("\n"),
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                item(key = "growth_bottom_spacer", contentType = "growth_bottom_spacer") {
+                    Spacer(Modifier.height(LeziSpacing.Xxl))
+                }
             }
         }
     }
@@ -711,21 +733,25 @@ fun GrowthRoute(
     }
 }
 
+/** Newest measurements first — public order for the growth history list. */
+internal fun growthHistoryNewestFirst(points: List<MeasurePoint>): List<MeasurePoint> =
+    points.sortedByDescending(MeasurePoint::measuredAt)
+
 @Composable
 private fun MeasurementHistoryRow(
     metric: GrowthMetric,
     point: MeasurePoint,
     zone: ZoneId,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val whenText = Instant.ofEpochMilli(point.measuredAt)
         .atZone(zone)
         .format(DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm"))
     Column(
-        Modifier
+        modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = LeziSpacing.Sm),
+            .clickable(onClick = onClick),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         Row(
