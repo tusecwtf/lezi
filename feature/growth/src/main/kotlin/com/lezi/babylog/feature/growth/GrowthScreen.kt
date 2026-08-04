@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.growth
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -76,6 +77,7 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.leziHairlineColor
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.domain.CareLog
@@ -437,25 +439,20 @@ fun GrowthRoute(
                         SectionHeading(title = "测量记录")
                     }
 
+                    // Row chrome + hairline (RecordRow-style), not per-item section
+                    // panels: bottomBand is reserved for true section shells (chart).
                     items(
                         items = history,
                         key = { point -> point.recordId },
                         contentType = { "history_row" },
                     ) { point ->
-                        LeziSurfacePanel(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .animateItem(),
-                            bottomBand = true,
-                            bottomDivider = false,
-                        ) {
-                            MeasurementHistoryRow(
-                                metric = ui.metric,
-                                point = point,
-                                zone = zone,
-                                onClick = { openEditMeasurement(point) },
-                            )
-                        }
+                        MeasurementHistoryRow(
+                            metric = ui.metric,
+                            point = point,
+                            zone = zone,
+                            onClick = { openEditMeasurement(point) },
+                            modifier = Modifier.animateItem(),
+                        )
                     }
                 }
 
@@ -737,6 +734,11 @@ fun GrowthRoute(
 internal fun growthHistoryNewestFirst(points: List<MeasurePoint>): List<MeasurePoint> =
     points.sortedByDescending(MeasurePoint::measuredAt)
 
+/**
+ * Lazy history row chrome: flat list language (surface + hairline), not a
+ * section [LeziSurfacePanel]. Matches search/timeline row separators; journal
+ * bottomBand stays on the chart / section shells only.
+ */
 @Composable
 private fun MeasurementHistoryRow(
     metric: GrowthMetric,
@@ -748,43 +750,67 @@ private fun MeasurementHistoryRow(
     val whenText = Instant.ofEpochMilli(point.measuredAt)
         .atZone(zone)
         .format(DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm"))
+    val journal = LeziThemeExt.isJournal
     Column(
         modifier
             .fillMaxWidth()
+            .then(
+                if (journal) {
+                    Modifier.background(MaterialTheme.colorScheme.surface)
+                } else {
+                    Modifier
+                },
+            )
             .clickable(onClick = onClick),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = LeziSpacing.Sm),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Text(formatMeasurementValue(metric, point.value), style = LeziTypography.BodyStrong)
             Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
             ) {
-                Text("修改", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.primary)
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp),
-                )
+                Text(formatMeasurementValue(metric, point.value), style = LeziTypography.BodyStrong)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs),
+                ) {
+                    Text(
+                        "修改",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
-        }
-        Text(
-            whenText,
-            style = LeziTypography.Meta,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        point.note?.takeIf { it.isNotBlank() }?.let { note ->
             Text(
-                note,
+                whenText,
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            point.note?.takeIf { it.isNotBlank() }?.let { note ->
+                Text(
+                    note,
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
+        Spacer(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(leziHairlineColor()),
+        )
     }
 }
 
