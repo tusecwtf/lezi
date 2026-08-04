@@ -49,7 +49,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -79,6 +78,7 @@ import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.readableContentColor
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.core.ui.BabyAvatar
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -588,15 +588,8 @@ internal fun HeaderCalendarDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    TextButton(
-                        onClick = { onSelect(today) },
-                        enabled = selectedDate != today,
-                    ) {
-                        Text("回到今天")
-                    }
-                    TextButton(onClick = onDismiss) {
-                        Text("关闭")
-                    }
+                    LeziTextButton(label = "回到今天", onClick = { onSelect(today) }, enabled = selectedDate != today,)
+                    LeziTextButton(label = "关闭", onClick = onDismiss)
                 }
             }
         }

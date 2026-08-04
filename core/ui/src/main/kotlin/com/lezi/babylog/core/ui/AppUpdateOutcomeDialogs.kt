@@ -8,11 +8,12 @@ import androidx.compose.foundation.layout.Column
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
 import com.lezi.babylog.sync.appupdate.forcedUpdateDialogBody
@@ -50,12 +51,12 @@ fun AppUpdateOutcomeDialogs(
                 title = { Text(outcome.title) },
                 text = { Text(outcome.body) },
                 confirmButton = {
-                    TextButton(
+                    LeziTextButton(
+                        label = if (installingAppUpdate) "请稍候" else "知道了",
                         onClick = onDismissOutcome,
                         enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "请稍候" else "知道了")
-                    }
+                        tone = LeziTextButtonTone.Primary,
+                    )
                 },
             )
         }
@@ -67,20 +68,15 @@ fun AppUpdateOutcomeDialogs(
                 title = { Text("发现新版本") },
                 text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
                 confirmButton = {
-                    TextButton(
+                    LeziTextButton(
+                        label = if (installingAppUpdate) "安装中…" else "立即更新",
                         onClick = { onInstallUpdate(outcome.metadata) },
                         enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
-                    }
+                        tone = LeziTextButtonTone.Primary,
+                    )
                 },
                 dismissButton = {
-                    TextButton(
-                        onClick = onDismissOutcome,
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text("稍后")
-                    }
+                    LeziTextButton(label = "稍后", onClick = onDismissOutcome, enabled = !installingAppUpdate)
                 },
             )
         }
@@ -110,7 +106,12 @@ fun AppUpdateOutcomeDialogs(
                     }
                 },
                 confirmButton = {
-                    TextButton(
+                    LeziTextButton(
+                        label = when {
+                            installingAppUpdate -> "安装中…"
+                            forcedInstallPermissionRequired -> "去授权安装"
+                            else -> "立即更新"
+                        },
                         onClick = {
                             if (forcedInstallPermissionRequired) {
                                 val intent = Intent(
@@ -124,15 +125,8 @@ fun AppUpdateOutcomeDialogs(
                             }
                         },
                         enabled = !installingAppUpdate,
-                    ) {
-                        Text(
-                            when {
-                                installingAppUpdate -> "安装中…"
-                                forcedInstallPermissionRequired -> "去授权安装"
-                                else -> "立即更新"
-                            },
-                        )
-                    }
+                        tone = LeziTextButtonTone.Primary,
+                    )
                 },
             )
         }
@@ -147,18 +141,16 @@ fun AppUpdateOutcomeDialogs(
                 title = { Text(forcedUpdateTitle()) },
                 text = { Text(forcedUpdatePackageUnknownBody()) },
                 confirmButton = {
-                    TextButton(
+                    LeziTextButton(
+                        label = if (checkingAppUpdate) {
+                            "检查中…"
+                        } else {
+                            forcedUpdateRetryCheckLabel()
+                        },
                         onClick = onRetryCheck,
                         enabled = !checkingAppUpdate && !installingAppUpdate,
-                    ) {
-                        Text(
-                            if (checkingAppUpdate) {
-                                "检查中…"
-                            } else {
-                                forcedUpdateRetryCheckLabel()
-                            },
-                        )
-                    }
+                        tone = LeziTextButtonTone.Primary,
+                    )
                 },
             )
         }
@@ -170,7 +162,8 @@ fun AppUpdateOutcomeDialogs(
                     Text("请允许乐记安装应用，然后再试一次立即更新。")
                 },
                 confirmButton = {
-                    TextButton(
+                    LeziTextButton(
+                        label = "去设置",
                         onClick = {
                             val intent = Intent(
                                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -179,14 +172,11 @@ fun AppUpdateOutcomeDialogs(
                             runCatching { context.startActivity(intent) }
                             onDismissOutcome()
                         },
-                    ) {
-                        Text("去设置")
-                    }
+                        tone = LeziTextButtonTone.Primary,
+                    )
                 },
                 dismissButton = {
-                    TextButton(onClick = onDismissOutcome) {
-                        Text("取消")
-                    }
+                    LeziTextButton(label = "取消", onClick = onDismissOutcome)
                 },
             )
         }

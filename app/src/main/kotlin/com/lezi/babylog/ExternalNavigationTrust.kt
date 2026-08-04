@@ -2,11 +2,12 @@ package com.lezi.babylog
 
 import android.content.Intent
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import com.lezi.babylog.designsystem.LeziAlertDialog
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.feature.settings.calendar.CarePlanReminderReceiver
 import com.lezi.babylog.feature.widget.WidgetComposerContract
 import com.lezi.babylog.feature.widget.WidgetComposerTarget
@@ -152,20 +153,19 @@ internal fun UntrustedExternalNavigationConfirmationDialog(
         title = { Text(title) },
         text = { Text(body) },
         confirmButton = {
-            TextButton(
-                modifier = Modifier.testTag(UNTRUSTED_NAVIGATION_CONFIRM_TAG),
+            LeziTextButton(
+                label = "继续",
                 onClick = onConfirm,
-            ) {
-                Text("继续")
-            }
+                modifier = Modifier.testTag(UNTRUSTED_NAVIGATION_CONFIRM_TAG),
+                tone = LeziTextButtonTone.Primary,
+            )
         },
         dismissButton = {
-            TextButton(
-                modifier = Modifier.testTag(UNTRUSTED_NAVIGATION_CANCEL_TAG),
+            LeziTextButton(
+                label = "取消",
                 onClick = onDismiss,
-            ) {
-                Text("取消")
-            }
+                modifier = Modifier.testTag(UNTRUSTED_NAVIGATION_CANCEL_TAG),
+            )
         },
     )
 }

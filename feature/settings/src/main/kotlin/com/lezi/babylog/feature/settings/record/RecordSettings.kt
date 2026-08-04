@@ -10,11 +10,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,6 +20,8 @@ import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziFilterChip
 
 /**
  * Single-page 记录设置: 分项目 + 护理计划/日历 in one dialog.
@@ -82,7 +82,7 @@ internal fun RecordSettingsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("完成") }
+            LeziTextButton(label = "完成", onClick = onDismiss)
         },
     )
 }
@@ -113,16 +113,8 @@ internal fun PerItemSettingsBody(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        FilterChip(
-            selected = settings.recordAtStartOrEnd == "start",
-            onClick = { onRecordAt("start") },
-            label = { Text("开始") },
-        )
-        FilterChip(
-            selected = settings.recordAtStartOrEnd == "end",
-            onClick = { onRecordAt("end") },
-            label = { Text("结束") },
-        )
+        LeziFilterChip(selected = settings.recordAtStartOrEnd == "start", onClick = { onRecordAt("start") }, label = "开始")
+        LeziFilterChip(selected = settings.recordAtStartOrEnd == "end", onClick = { onRecordAt("end") }, label = "结束")
     }
     Text("下次喂奶间隔（分钟）", style = LeziTypography.Meta)
     FlowRow(
@@ -130,11 +122,7 @@ internal fun PerItemSettingsBody(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         listOf(120, 150, 180, 210, 240).forEach { m ->
-            FilterChip(
-                selected = settings.nursingIntervalMin == m,
-                onClick = { onInterval(m) },
-                label = { Text("$m") },
-            )
+            LeziFilterChip(selected = settings.nursingIntervalMin == m, onClick = { onInterval(m) }, label = "$m")
         }
     }
     Text("配方奶 / 挤出乳 / 母乳瓶喂", style = LeziTypography.BodyStrong)
@@ -144,11 +132,7 @@ internal fun PerItemSettingsBody(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         listOf(5, 10, 15).forEach { s ->
-            FilterChip(
-                selected = settings.amountStepMl == s,
-                onClick = { onAmountStep(s) },
-                label = { Text("$s") },
-            )
+            LeziFilterChip(selected = settings.amountStepMl == s, onClick = { onAmountStep(s) }, label = "$s")
         }
     }
     Text("体温", style = LeziTypography.BodyStrong)
@@ -209,9 +193,7 @@ internal fun PlanCalendarSettingsBody(
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.error,
             )
-            TextButton(onClick = onOpenNotificationSettings) {
-                Text("去通知设置")
-            }
+            LeziTextButton(label = "去通知设置", onClick = onOpenNotificationSettings)
         }
     }
     Column(Modifier.fillMaxWidth()) {
@@ -225,8 +207,6 @@ internal fun PlanCalendarSettingsBody(
             style = LeziTypography.Meta,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        TextButton(onClick = onConfigureSystemCalendar) {
-            Text(if (systemCalendarEnabled) "更改系统日历与披露" else "配置系统日历")
-        }
+        LeziTextButton(label = if (systemCalendarEnabled) "更改系统日历与披露" else "配置系统日历", onClick = onConfigureSystemCalendar)
     }
 }

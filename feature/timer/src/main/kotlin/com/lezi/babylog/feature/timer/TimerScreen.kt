@@ -33,7 +33,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
@@ -64,8 +63,10 @@ import com.lezi.babylog.core.model.TimerHandoffSeed
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
+import com.lezi.babylog.designsystem.LeziTextButton
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -235,9 +236,7 @@ fun TimerRoute(
                         state.serviceState == TimerServiceState.FAILED ||
                         state.serviceState == TimerServiceState.RECOVERABLE
                     ) {
-                        TextButton(onClick = vm::retryServiceStart) {
-                            Text("重试启动")
-                        }
+                        LeziTextButton(label = "重试启动", onClick = vm::retryServiceStart)
                     }
                 }
             }
@@ -289,7 +288,8 @@ fun TimerRoute(
                         .fillMaxWidth()
                         .height(56.dp),
                 )
-                TextButton(
+                LeziTextButton(
+                    label = "丢弃",
                     enabled = !completionUi.hasPostSaveStage,
                     onClick = {
                         if (state.hasTimerData()) {
@@ -299,7 +299,8 @@ fun TimerRoute(
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("丢弃") }
+                    tone = LeziTextButtonTone.Destructive,
+                )
             }
         }
     }
@@ -310,22 +311,17 @@ fun TimerRoute(
             title = { Text("丢弃本次计时？") },
             text = { Text("已累计的喂奶计时将不会保存，此操作无法撤销。") },
             confirmButton = {
-                TextButton(
+                LeziTextButton(
+                    label = "确认丢弃",
                     onClick = {
                         showDiscardConfirmation = false
                         vm.clear(onDone)
                     },
-                ) {
-                    Text(
-                        "确认丢弃",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                    tone = LeziTextButtonTone.Destructive,
+                )
             },
             dismissButton = {
-                TextButton(onClick = { showDiscardConfirmation = false }) {
-                    Text("继续计时")
-                }
+                LeziTextButton(label = "继续计时", onClick = { showDiscardConfirmation = false })
             },
         )
     }

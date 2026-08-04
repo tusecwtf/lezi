@@ -7,12 +7,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +25,8 @@ import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.timeline.*
 import com.lezi.babylog.feature.log.dock.*
@@ -179,17 +179,11 @@ private fun BabyFoodGuidancePanel(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     guidance.stage.suggestions.forEach { item ->
-                        FilterChip(
-                            selected = selectedContent == item,
-                            onClick = { onSuggestionClick(item) },
-                            label = { Text(item) },
-                        )
+                        LeziFilterChip(selected = selectedContent == item, onClick = { onSuggestionClick(item) }, label = item)
                     }
                 }
             }
-            TextButton(onClick = { expanded = !expanded }) {
-                Text(if (expanded) "收起阶段说明" else "为什么这样建议")
-            }
+            LeziTextButton(label = if (expanded) "收起阶段说明" else "为什么这样建议", onClick = { expanded = !expanded })
             AnimatedVisibility(visible = expanded) {
                 Text(
                     guidance.stage.explanation,

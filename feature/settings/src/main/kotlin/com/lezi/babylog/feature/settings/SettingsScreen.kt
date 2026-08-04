@@ -43,13 +43,10 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Upload
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -94,6 +91,10 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
@@ -790,11 +791,7 @@ fun SettingsRoute(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         listOf("warm" to "温暖卡片", "journal" to "紧凑记录簿").forEach { (key, label) ->
-                            FilterChip(
-                                selected = ui.settings.visualStyle == key,
-                                onClick = { vm.setVisualStyle(key) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.visualStyle == key, onClick = { vm.setVisualStyle(key) }, label = label)
                         }
                     }
                     Text("单手操作 · 惯用手", style = LeziTypography.Label)
@@ -808,11 +805,7 @@ fun SettingsRoute(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         listOf("left" to "左手", "right" to "右手").forEach { (key, label) ->
-                            FilterChip(
-                                selected = ui.settings.preferredHand == key,
-                                onClick = { vm.setPreferredHand(key) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.preferredHand == key, onClick = { vm.setPreferredHand(key) }, label = label)
                         }
                     }
                     Text("深色模式", style = LeziTypography.Label)
@@ -821,11 +814,7 @@ fun SettingsRoute(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (k, label) ->
-                            FilterChip(
-                                selected = ui.settings.darkMode == k,
-                                onClick = { vm.setDark(k) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.darkMode == k, onClick = { vm.setDark(k) }, label = label)
                         }
                     }
                     Text("时间选择方式", style = LeziTypography.Label)
@@ -837,11 +826,7 @@ fun SettingsRoute(
                             "dropdown" to "数字时钟",
                             "dial" to "指针时钟",
                         ).forEach { (key, label) ->
-                            FilterChip(
-                                selected = ui.settings.timePickerStyle == key,
-                                onClick = { vm.setTimePickerStyle(key) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.timePickerStyle == key, onClick = { vm.setTimePickerStyle(key) }, label = label)
                         }
                     }
                     Text("时间选择分钟步进", style = LeziTypography.Label)
@@ -850,11 +835,7 @@ fun SettingsRoute(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         listOf(1 to "1 分钟", 5 to "5 分钟").forEach { (step, label) ->
-                            FilterChip(
-                                selected = ui.settings.timeStepMin == step,
-                                onClick = { vm.setTimeStep(step) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.timeStepMin == step, onClick = { vm.setTimeStep(step) }, label = label)
                         }
                     }
                     Text("时间轴顺序", style = LeziTypography.Label)
@@ -866,11 +847,7 @@ fun SettingsRoute(
                             "newest_first" to "新→旧",
                             "oldest_first" to "旧→新",
                         ).forEach { (key, label) ->
-                            FilterChip(
-                                selected = ui.settings.timelineOrder == key,
-                                onClick = { vm.setTimelineOrder(key) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.timelineOrder == key, onClick = { vm.setTimelineOrder(key) }, label = label)
                         }
                     }
                     Text("汇总周起始日", style = LeziTypography.Label)
@@ -879,11 +856,7 @@ fun SettingsRoute(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         listOf(1 to "周一", 7 to "周日").forEach { (day, label) ->
-                            FilterChip(
-                                selected = ui.settings.weekStart == day,
-                                onClick = { vm.setWeekStart(day) },
-                                label = { Text(label) },
-                            )
+                            LeziFilterChip(selected = ui.settings.weekStart == day, onClick = { vm.setWeekStart(day) }, label = label)
                         }
                     }
                     Row(
@@ -910,7 +883,7 @@ fun SettingsRoute(
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showDisplay = false }) { Text("完成") } },
+            confirmButton = { LeziTextButton(label = "完成", onClick = { showDisplay = false }) },
         )
     }
 
@@ -929,9 +902,7 @@ fun SettingsRoute(
                         if (ui.current?.id == baby.id) {
                             Text("当前宝宝", style = LeziTypography.Label)
                         } else {
-                            OutlinedButton(onClick = { vm.setCurrent(baby.id) }) {
-                                Text("设为当前宝宝")
-                            }
+                            LeziSecondaryButton(label = "设为当前宝宝", onClick = { vm.setCurrent(baby.id) })
                         }
                         Text("主题色", style = LeziTypography.Label)
                         FlowRow(
@@ -955,18 +926,12 @@ fun SettingsRoute(
                             }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(
-                                enabled = position > 0,
-                                onClick = {
+                            LeziSecondaryButton(label = "前移", onClick = {
                                     vm.moveBabyLocal(baby.id, -1) { localPreferenceError = it }
-                                },
-                            ) { Text("前移") }
-                            OutlinedButton(
-                                enabled = position in 0 until ui.babies.lastIndex,
-                                onClick = {
+                                }, enabled = position > 0)
+                            LeziSecondaryButton(label = "后移", onClick = {
                                     vm.moveBabyLocal(baby.id, 1) { localPreferenceError = it }
-                                },
-                            ) { Text("后移") }
+                                }, enabled = position in 0 until ui.babies.lastIndex)
                         }
                         localPreferenceError?.let {
                             Text(it, color = MaterialTheme.colorScheme.error)
@@ -974,7 +939,7 @@ fun SettingsRoute(
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { localPreferenceBabyId = null }) { Text("完成") }
+                    LeziTextButton(label = "完成", onClick = { localPreferenceBabyId = null })
                 },
             )
         }
@@ -1025,22 +990,20 @@ fun SettingsRoute(
                 }
             },
             confirmButton = {
-                TextButton(
-                    enabled = addBabyPrimary.enabled,
-                    onClick = {
+                LeziTextButton(label = addBabyPrimary.label, onClick = {
                         if (newName.isBlank()) {
                             addError = "请填写昵称"
-                            return@TextButton
+                            return@LeziTextButton
                         }
                         val grams = newWeight.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()
                             ?.let { (it * 1000).toInt() }
                         if (newWeight.isNotBlank() && grams == null) {
                             addError = "出生体重格式不正确"
-                            return@TextButton
+                            return@LeziTextButton
                         }
                         birthWeightValidationError(grams)?.let {
                             addError = it
-                            return@TextButton
+                            return@LeziTextButton
                         }
                         vm.addBaby(
                             nickname = newName.trim(),
@@ -1060,14 +1023,10 @@ fun SettingsRoute(
                                 addError = err
                             }
                         }
-                    },
-                ) { Text(addBabyPrimary.label) }
+                    }, enabled = addBabyPrimary.enabled)
             },
             dismissButton = {
-                TextButton(
-                    enabled = addBabyPrimary.dismissible,
-                    onClick = ::finishAddBabyDialog,
-                ) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { }, enabled = addBabyPrimary.dismissible)
             },
         )
     }
@@ -1124,12 +1083,10 @@ fun SettingsRoute(
                 Text(clearRecordsCopy.firstPrompt)
             },
             confirmButton = {
-                TextButton(onClick = vm::continueClearRecords) {
-                    Text("继续", color = MaterialTheme.colorScheme.error)
-                }
+                LeziTextButton(label = "继续", onClick = vm::confirmClearRecords, tone = LeziTextButtonTone.Destructive)
             },
             dismissButton = {
-                TextButton(onClick = vm::dismissClearRecords) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = vm::dismissClearRecords)
             },
         )
     }
@@ -1148,21 +1105,15 @@ fun SettingsRoute(
                 }
             },
             confirmButton = {
-                TextButton(
-                    enabled = !clearRecordsState.clearing,
+                LeziTextButton(
+                    label = if (clearRecordsState.clearing) "清除中…" else "清除记录",
                     onClick = vm::confirmClearRecords,
-                ) {
-                    Text(
-                        if (clearRecordsState.clearing) "清除中…" else "清除记录",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                    enabled = !clearRecordsState.clearing,
+                    tone = LeziTextButtonTone.Destructive,
+                )
             },
             dismissButton = {
-                TextButton(
-                    enabled = !clearRecordsState.clearing,
-                    onClick = vm::dismissClearRecords,
-                ) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = vm::dismissClearRecords, enabled = !clearRecordsState.clearing)
             },
         )
     }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,6 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -34,6 +37,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -183,16 +190,19 @@ fun LeziPrimaryButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    mode: LeziPrimaryButtonMode = if (enabled) {
+    busy: Boolean = false,
+    mode: LeziPrimaryButtonMode = if (enabled && !busy) {
         LeziPrimaryButtonMode.Enabled
-    } else {
+    } else if (!enabled) {
         LeziPrimaryButtonMode.Disabled
+    } else {
+        LeziPrimaryButtonMode.Enabled
     },
 ) {
     val journal = LeziThemeExt.isJournal
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val clickable = mode != LeziPrimaryButtonMode.Disabled
+    val clickable = mode != LeziPrimaryButtonMode.Disabled && !busy
     val shape = LeziThemeExt.buttonShape
     val fillColor = when (mode) {
         LeziPrimaryButtonMode.Enabled -> MaterialTheme.colorScheme.primary
@@ -265,10 +275,21 @@ fun LeziPrimaryButton(
             contentColor = labelColor,
             shadowElevation = elevation,
         ) {
-            Box(
-                Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-                contentAlignment = Alignment.Center,
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = labelColor,
+                    )
+                    Spacer(Modifier.width(LeziSpacing.Xs))
+                }
                 Text(label, style = LeziTypography.Label, maxLines = 1)
             }
         }
@@ -277,6 +298,91 @@ fun LeziPrimaryButton(
 
 @Composable
 fun LeziSecondaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    busy: Boolean = false,
+    leadingIcon: (@Composable () -> Unit)? = null,
+) {
+    val shape = LeziThemeExt.buttonShape
+    val contentColor = MaterialTheme.colorScheme.onSurface.copy(
+        alpha = if (enabled) 1f else 0.38f,
+    )
+    Surface(
+        modifier = modifier
+            .heightIn(min = LeziSpacing.Touch)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(
+                    alpha = if (enabled) 1f else 0.45f,
+                ),
+                shape = shape,
+            )
+            .clickable(enabled = enabled && !busy, onClick = onClick),
+        shape = shape,
+        color = if (enabled) {
+            MaterialTheme.colorScheme.surface
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        },
+        contentColor = contentColor,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (busy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = contentColor,
+                )
+                Spacer(Modifier.width(LeziSpacing.Xs))
+            } else if (leadingIcon != null) {
+                leadingIcon()
+                Spacer(Modifier.width(LeziSpacing.Xs))
+            }
+            Text(label, style = LeziTypography.Label, maxLines = 1)
+        }
+    }
+}
+
+/** Icon-only control with [LeziSpacing.Touch] min size (month chevrons, overflow, …). */
+@Composable
+fun LeziIconButton(
+    onClick: () -> Unit,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .defaultMinSize(minWidth = LeziSpacing.Touch, minHeight = LeziSpacing.Touch)
+            .clip(LeziThemeExt.buttonShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics {
+                role = Role.Button
+                if (contentDescription != null) {
+                    this.contentDescription = contentDescription
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+/**
+ * Outlined secondary shape with error content color — the single product
+ * language for destructive actions outside dialogs (delete family, leave, …).
+ */
+@Composable
+fun LeziDestructiveButton(
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -293,15 +399,12 @@ fun LeziSecondaryButton(
                 ),
                 shape = shape,
             )
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { role = Role.Button },
         shape = shape,
-        color = if (enabled) {
-            MaterialTheme.colorScheme.surface
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        },
-        contentColor = MaterialTheme.colorScheme.onSurface.copy(
-            alpha = if (enabled) 1f else 0.38f,
+        color = MaterialTheme.colorScheme.surface,
+        contentColor = MaterialTheme.colorScheme.error.copy(
+            alpha = if (enabled) 1f else LeziAlphas.Disabled,
         ),
     ) {
         Box(
@@ -313,6 +416,102 @@ fun LeziSecondaryButton(
     }
 }
 
+/** Tone for compact text actions (dialog slots, inline links). */
+enum class LeziTextButtonTone {
+    /** onSurface / default dialog action. */
+    Neutral,
+
+    /** Primary-colored affirmative (confirm, continue). */
+    Primary,
+
+    /** Error-colored destructive confirm. */
+    Destructive,
+}
+
+/**
+ * Compact text action used in dialog button slots and quiet inline rows.
+ * Always meets [LeziSpacing.Touch] min height; shape/typeface come from tokens.
+ */
+@Composable
+fun LeziTextButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tone: LeziTextButtonTone = LeziTextButtonTone.Neutral,
+) {
+    val color = when (tone) {
+        LeziTextButtonTone.Neutral -> MaterialTheme.colorScheme.onSurface
+        LeziTextButtonTone.Primary -> MaterialTheme.colorScheme.primary
+        LeziTextButtonTone.Destructive -> MaterialTheme.colorScheme.error
+    }.copy(alpha = if (enabled) 1f else LeziAlphas.Disabled)
+    Box(
+        modifier = modifier
+            .defaultMinSize(minHeight = LeziSpacing.Touch)
+            .clip(LeziThemeExt.buttonShape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .semantics { role = Role.Button }
+            .padding(horizontal = LeziSpacing.Sm, vertical = LeziSpacing.Xs),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = LeziTypography.Label,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/**
+ * Single-select chip for settings/onboarding choices. Enforces [LeziSpacing.Touch]
+ * min height so FilterChip defaults (~32dp) never ship as product touch targets.
+ */
+@Composable
+fun LeziFilterChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    LeziFilterChip(
+        selected = selected,
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        label = { Text(label, style = LeziTypography.Label, maxLines = 1) },
+    )
+}
+
+/** Composable-label overload for glyph / icon chips (custom item icon picker). */
+@Composable
+fun LeziFilterChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        enabled = enabled,
+        label = label,
+        modifier = modifier.heightIn(min = LeziSpacing.Touch),
+        shape = LeziThemeExt.controlShape,
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ),
+    )
+}
+
+/**
+ * Page / panel section title (TitleSm, optional eyebrow + meta + trailing).
+ * Sheet-local quiet labels use [LeziSectionLabel] instead — do not invent a third tier.
+ */
 @Composable
 fun SectionHeading(
     eyebrow: String? = null,

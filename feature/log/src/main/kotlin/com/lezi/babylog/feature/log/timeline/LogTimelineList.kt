@@ -14,7 +14,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +54,7 @@ import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.SwipeEditDeleteRow
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.carelog.DayChartCategory
 import com.lezi.babylog.domain.carelog.formatClock
 import com.lezi.babylog.domain.carelog.relativeTimeLabel
@@ -491,19 +491,11 @@ internal fun LogTimelineList(
                                 )
                                 // Skip lives in the card trailing area, next to the swipe actions.
                                 if (canSkipPlan) {
-                                    TextButton(
-                                        onClick = { skipPlanAction() },
-                                        enabled = !skipBlocked,
-                                        modifier = Modifier.testTag("care_plan_skip_${plan.id}"),
-                                    ) {
-                                        Text(
-                                            when {
+                                    LeziTextButton(label = when {
                                                 skipRunning -> "跳过中…"
                                                 skipFeedback != null -> "重试跳过"
                                                 else -> "跳过"
-                                            },
-                                        )
-                                    }
+                                            }, onClick = { skipPlanAction() }, enabled = !skipBlocked, modifier = Modifier.testTag("care_plan_skip_${plan.id}"))
                                 }
                             }
                         }

@@ -18,16 +18,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.QrCodeScanner
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,9 +41,13 @@ import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.LeziBabyTheme
+import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.normalizeBabyThemeArgb
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.onboarding.OnboardingCreateBabySource
@@ -100,40 +100,27 @@ internal fun OnboardingChooseFamilyStep(
             )
         }
     }
-    Button(
-        onClick = onConnectOrResume,
-        modifier = Modifier.fillMaxWidth().height(52.dp),
-    ) {
-        Text(
-            when {
+    LeziPrimaryButton(label = when {
                 pendingMemberLogin != null -> "查看加入申请"
                 verifiedEndpoint == null -> onboardingConnectFamilyAction()
                 else -> "继续登录"
+            }, onClick = onConnectOrResume, modifier = Modifier.fillMaxWidth().height(52.dp))
+    if (pendingMemberLogin == null) {
+        LeziSecondaryButton(
+            label = "扫描成员登录二维码",
+            onClick = onScanMemberLogin,
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            leadingIcon = {
+                Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
             },
         )
     }
-    if (pendingMemberLogin == null) {
-        OutlinedButton(
-            onClick = onScanMemberLogin,
-            modifier = Modifier.fillMaxWidth().height(52.dp),
-        ) {
-            Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
-            Spacer(Modifier.size(LeziSpacing.Xs))
-            Text("扫描成员登录二维码")
-        }
-    }
     if (verifiedEndpoint != null) {
-        TextButton(
-            onClick = onForgetEndpoint,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("忘记此服务器") }
+        LeziTextButton(label = "忘记此服务器", onClick = onForgetEndpoint, modifier = Modifier.fillMaxWidth())
     }
-    TextButton(
-        onClick = onOfflineMode,
-        modifier = Modifier
+    LeziTextButton(label = "离线模式", onClick = onOfflineMode, modifier = Modifier
             .fillMaxWidth()
-            .testTag(UiTags.ONBOARDING_OFFLINE_MODE),
-    ) { Text("离线模式") }
+            .testTag(UiTags.ONBOARDING_OFFLINE_MODE))
 }
 
 @Composable
@@ -183,33 +170,22 @@ internal fun OnboardingConnectServerStep(
         }
     }
     model.failureMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Button(
-        enabled = model.primaryEnabled(familyWizardBusy, endpointDraft),
+    LeziPrimaryButton(
+        label = model.primaryLabel(familyWizardBusy),
         onClick = onPrimaryAction,
+        busy = familyWizardBusy,
+        enabled = model.primaryEnabled(familyWizardBusy, endpointDraft),
         modifier = Modifier.fillMaxWidth().height(52.dp),
-    ) {
-        if (familyWizardBusy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-            )
-            Spacer(Modifier.size(LeziSpacing.Xs))
-        }
-        Text(model.primaryLabel(familyWizardBusy))
-    }
+    )
     if (model.primary is ConnectServerPrimary.Trust) {
-        TextButton(
-            onClick = onReturnToAddress,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("返回修改地址") }
+        LeziTextButton(label = "返回修改地址", onClick = onReturnToAddress, modifier = Modifier.fillMaxWidth())
     }
-    TextButton(
-        enabled = model.keepOfflineEnabled,
+    LeziTextButton(
+        label = model.keepOfflineLabel,
         onClick = onKeepOffline,
+        enabled = model.keepOfflineEnabled,
         modifier = Modifier.fillMaxWidth(),
-    ) {
-        Text(model.keepOfflineLabel)
-    }
+    )
 }
 
 @Composable
@@ -272,33 +248,14 @@ internal fun OnboardingCreateFamilyStep(
         modifier = Modifier.fillMaxWidth(),
     )
     formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Button(
-        enabled = !familyWizardBusy,
-        onClick = onSubmit,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp),
-    ) {
-        if (familyWizardBusy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-            )
-            Spacer(Modifier.size(LeziSpacing.Xs))
-        }
-        Text(
-            if (familyWizardBusy) {
+    LeziPrimaryButton(label = if (familyWizardBusy) {
                 "正在连接…"
             } else {
                 "新建并登录"
-            },
-        )
-    }
-    TextButton(
-        enabled = !familyWizardBusy,
-        onClick = onBack,
-        modifier = Modifier.fillMaxWidth(),
-    ) { Text("返回") }
+            }, onClick = onSubmit, busy = familyWizardBusy, enabled = !familyWizardBusy, modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp))
+    LeziTextButton(label = "返回", onClick = onBack, enabled = !familyWizardBusy, modifier = Modifier.fillMaxWidth())
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -341,12 +298,7 @@ internal fun OnboardingCreateBabyStep(
     ) {
         listOf(null to "未设置", "female" to "女", "male" to "男")
             .forEach { (value, label) ->
-                FilterChip(
-                    selected = sex == value,
-                    onClick = { onSexChange(value) },
-                    label = { Text(label) },
-                    modifier = Modifier.heightIn(min = LeziSpacing.Touch),
-                )
+                LeziFilterChip(selected = sex == value, onClick = { onSexChange(value) }, label = label)
             }
     }
     OutlinedTextField(
@@ -415,22 +367,14 @@ internal fun OnboardingCreateBabyStep(
         }
     }
     formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-    Button(
-        enabled = primary.enabled,
-        onClick = {
+    LeziPrimaryButton(label = primary.label, onClick = {
             val grams = weightText.toIntOrNull()
             onSubmit(ThemePalette[themeIdx], grams)
-        },
-        modifier = Modifier
+        }, enabled = primary.enabled, modifier = Modifier
             .fillMaxWidth()
-            .height(52.dp),
-    ) { Text(primary.label) }
+            .height(52.dp))
     if (createBabySource == OnboardingCreateBabySource.OfflineMode) {
-        TextButton(
-            enabled = !creatingBaby,
-            onClick = onBack,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("返回") }
+        LeziTextButton(label = "返回", onClick = onBack, enabled = !creatingBaby, modifier = Modifier.fillMaxWidth())
     }
 }
 
@@ -451,28 +395,13 @@ internal fun OnboardingRecoveryPendingStep(
             color = MaterialTheme.colorScheme.error,
         )
     }
-    Button(
-        enabled = !familyWizardBusy,
-        onClick = onRetry,
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp),
-    ) {
-        if (familyWizardBusy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-            )
-            Spacer(Modifier.size(LeziSpacing.Xs))
-        }
-        Text(
-            if (familyWizardBusy) {
+    LeziPrimaryButton(label = if (familyWizardBusy) {
                 "正在恢复…"
             } else {
                 "重试恢复"
-            },
-        )
-    }
+            }, onClick = onRetry, busy = familyWizardBusy, enabled = !familyWizardBusy, modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp))
 }
 
 @Composable

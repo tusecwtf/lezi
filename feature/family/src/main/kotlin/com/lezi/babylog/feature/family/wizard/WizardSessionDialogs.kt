@@ -17,7 +17,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +41,8 @@ import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
@@ -116,16 +117,19 @@ internal fun FamilyEndpointConnectionDialog(
                     Text(it.message, color = MaterialTheme.colorScheme.error)
                 }
                 if (endpointDraft.isNotBlank() && ready == null && approval == null && !certificateChanged) {
-                    TextButton(enabled = !probing, onClick = onForget) {
-                        Text("忘记此服务器")
-                    }
+                    LeziTextButton(label = "忘记此服务器", onClick = onForget, enabled = !probing)
                 }
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = !probing &&
-                    (approval != null || certificateChanged || ready != null || endpointDraft.isNotBlank()),
+            LeziTextButton(
+                label = when {
+                    approval != null -> "信任此证书"
+                    certificateChanged -> "忘记此服务器并重新连接"
+                    ready?.snapshot?.mode == FamilyWizardMode.Create -> "新建家庭"
+                    ready?.snapshot?.mode == FamilyWizardMode.Join -> "加入家庭"
+                    else -> if (probing) "正在连接…" else "连接"
+                },
                 onClick = {
                     when {
                         approval != null -> onTrustCertificate(approval.candidate)
@@ -134,28 +138,19 @@ internal fun FamilyEndpointConnectionDialog(
                         else -> onConnect()
                     }
                 },
-            ) {
-                Text(
-                    when {
-                        approval != null -> "信任此证书"
-                        certificateChanged -> "忘记此服务器并重新连接"
-                        ready?.snapshot?.mode == FamilyWizardMode.Create -> "新建家庭"
-                        ready?.snapshot?.mode == FamilyWizardMode.Join -> "加入家庭"
-                        else -> if (probing) "正在连接…" else "连接"
-                    },
-                )
-            }
+                enabled = !probing,
+                tone = LeziTextButtonTone.Primary,
+            )
         },
         dismissButton = {
             Column(horizontalAlignment = Alignment.End) {
                 if (approval != null) {
-                    TextButton(onClick = onReturnToAddress) {
-                        Text("返回修改地址")
-                    }
+                    LeziTextButton(label = "返回修改地址", onClick = onReturnToAddress)
                 }
-                TextButton(onClick = onKeepOffline) {
-                    Text(if (certificateChanged) "返回账户" else "暂不连接，保持离线")
-                }
+                LeziTextButton(
+                    label = if (certificateChanged) "返回账户" else "暂不连接，保持离线",
+                    onClick = onKeepOffline,
+                )
             }
         },
     )
@@ -218,13 +213,13 @@ internal fun FamilyVerifiedEndpointDialog(
                 FamilyWizardStepHeader(mode, FamilyWizardStep.Endpoint, endpoint.isNotBlank())
                 FamilyScopeRow("本机", "家庭服务器", "受信任的 HTTPS 地址仅存本机，可中断后继续")
                 Text(endpoint.ifBlank { "尚未确认家庭服务器" })
-                TextButton(onClick = onChangeEndpoint) { Text("重新确认家庭服务器") }
+                LeziTextButton(label = "重新确认家庭服务器", onClick = onChangeEndpoint)
             }
         },
         confirmButton = {
-            TextButton(onClick = onContinue, enabled = endpoint.isNotBlank()) { Text("下一步") }
+            LeziTextButton(label = "下一步", onClick = onContinue, enabled = endpoint.isNotBlank(), tone = LeziTextButtonTone.Primary)
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("稍后再说") } },
+        dismissButton = { LeziTextButton(label = "稍后再说", onClick = onDismiss) },
     )
 }
 
@@ -266,7 +261,7 @@ internal fun FamilyJoinRoleDialog(
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onBackToEndpoint, enabled = !busy) { Text("上一步") }
+            LeziTextButton(label = "上一步", onClick = onBackToEndpoint, enabled = !busy)
         },
     )
 }
@@ -325,20 +320,14 @@ internal fun OwnerLoginDialog(
                     visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                TextButton(
-                    onClick = onTakeover,
-                    enabled = !submitting,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("丢失设备并接管…") }
+                LeziTextButton(label = "丢失设备并接管…", onClick = onTakeover, enabled = !submitting, modifier = Modifier.fillMaxWidth())
             }
         },
         confirmButton = {
-            TextButton(onClick = onLogin, enabled = !submitting) {
-                Text(if (submitting) "正在登录…" else "登录这台设备")
-            }
+            LeziTextButton(label = if (submitting) "正在登录…" else "登录这台设备", onClick = onLogin, enabled = !submitting)
         },
         dismissButton = {
-            TextButton(onClick = onBackToRole, enabled = !submitting) { Text("上一步") }
+            LeziTextButton(label = "上一步", onClick = onBackToRole, enabled = !submitting)
         },
     )
 }
@@ -357,12 +346,10 @@ internal fun OwnerTakeoverConfirmationDialog(
             Text("所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。")
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !submitting) {
-                Text(if (submitting) "正在接管…" else "确认接管")
-            }
+            LeziTextButton(label = if (submitting) "正在接管…" else "确认接管", onClick = onConfirm, enabled = !submitting)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !submitting)
         },
     )
 }
@@ -423,21 +410,14 @@ internal fun MemberLoginRequestDialog(
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(onClick = onKeepOffline, enabled = !submitting) {
-                    Text("暂不连接，保持离线")
-                }
+                LeziTextButton(label = "暂不连接，保持离线", onClick = onKeepOffline, enabled = !submitting)
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = onConfirm,
-                enabled = !submitting && displayName.isNotBlank() && deviceName.isNotBlank(),
-            ) {
-                Text(if (submitting) "正在发送…" else "发送确认请求")
-            }
+            LeziTextButton(label = if (submitting) "正在发送…" else "发送确认请求", onClick = onConfirm, enabled = !submitting && displayName.isNotBlank() && deviceName.isNotBlank())
         },
         dismissButton = {
-            TextButton(onClick = onBackToRole, enabled = !submitting) { Text("上一步") }
+            LeziTextButton(label = "上一步", onClick = onBackToRole, enabled = !submitting)
         },
     )
 }
@@ -468,24 +448,16 @@ internal fun MemberApprovalWaitingDialog(
                 feedback?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }
-                TextButton(onClick = onCancel, enabled = !busy) {
-                    Text("在这台设备放弃等待")
-                }
-                TextButton(onClick = onKeepOffline, enabled = !busy) {
-                    Text("暂不连接，保持离线")
-                }
+                LeziTextButton(label = "在这台设备放弃等待", onClick = onCancel, enabled = !busy)
+                LeziTextButton(label = "暂不连接，保持离线", onClick = onKeepOffline, enabled = !busy)
             }
         },
         confirmButton = {
-            TextButton(onClick = onCheck, enabled = !busy) {
-                Text(
-                    when {
+            LeziTextButton(label = when {
                         cancelling -> "正在取消…"
                         busy -> "正在检查…"
                         else -> "检查结果"
-                    },
-                )
-            }
+                    }, onClick = onCheck, enabled = !busy)
         },
     )
 }
@@ -591,15 +563,13 @@ internal fun CreateFamilyDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !creating) {
-                Text(if (creating) "创建中…" else "新建并登录")
-            }
+            LeziTextButton(label = if (creating) "创建中…" else "新建并登录", onClick = onConfirm, enabled = !creating)
         },
         dismissButton = {
             if (onBackToEndpoint != null) {
-                TextButton(onClick = onBackToEndpoint, enabled = !creating) { Text("上一步") }
+                LeziTextButton(label = "上一步", onClick = onBackToEndpoint, enabled = !creating)
             } else {
-                TextButton(onClick = onDismiss, enabled = !creating) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = onDismiss, enabled = !creating)
             }
         },
     )

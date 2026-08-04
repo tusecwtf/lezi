@@ -25,7 +25,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -80,6 +79,8 @@ import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.domain.CustomRecordItem
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.coroutines.coroutineContext
@@ -523,9 +524,7 @@ internal fun LayoutEditCanvas(
                         .weight(1f)
                         .testTag("layout_edit_title"),
                 )
-                TextButton(
-                    onClick = onDragGuidanceHelp,
-                    modifier = Modifier
+                LeziTextButton(label = "帮助", onClick = onDragGuidanceHelp, modifier = Modifier
                         .heightIn(min = LeziSpacing.Touch)
                         .testTag("layout_edit_guidance_help")
                         .semantics {
@@ -533,13 +532,8 @@ internal fun LayoutEditCanvas(
                                 onDragGuidanceHelp()
                                 true
                             }
-                        },
-                ) {
-                    Text("帮助")
-                }
-                TextButton(
-                    onClick = onDone,
-                    modifier = Modifier
+                        })
+                LeziTextButton(label = "完成", onClick = onDone, modifier = Modifier
                         .heightIn(min = LeziSpacing.Touch)
                         .testTag("layout_edit_done")
                         .focusRequester(doneFocusRequester)
@@ -548,10 +542,7 @@ internal fun LayoutEditCanvas(
                                 onDone()
                                 true
                             }
-                        },
-                ) {
-                    Text("完成")
-                }
+                        }, tone = LeziTextButtonTone.Primary)
             }
             layoutWriteAnnouncement(prefs, writeState, hasSubmittedIntent)?.let { announcement ->
                 Text(
@@ -590,9 +581,7 @@ internal fun LayoutEditCanvas(
                                 .weight(1f)
                                 .testTag("layout_edit_guidance_text"),
                         )
-                        TextButton(
-                            onClick = onDragGuidanceClose,
-                            modifier = Modifier
+                        LeziTextButton(label = "关闭", onClick = onDragGuidanceClose, modifier = Modifier
                                 .heightIn(min = LeziSpacing.Touch)
                                 .testTag("layout_edit_guidance_close")
                                 .semantics {
@@ -600,10 +589,7 @@ internal fun LayoutEditCanvas(
                                         onDragGuidanceClose()
                                         true
                                     }
-                                },
-                        ) {
-                            Text("关闭")
-                        }
+                                })
                     }
                 }
             }

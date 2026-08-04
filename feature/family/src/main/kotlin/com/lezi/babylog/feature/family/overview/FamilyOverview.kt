@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,6 +29,7 @@ import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.carelog.babyAgeLabel
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.feature.family.components.FamilyDestructiveButton
@@ -97,7 +97,7 @@ internal fun FamilyOverview(
             title = "宝宝档案",
             trailing = {
                 if (canManage) {
-                    TextButton(onClick = onAddBaby) { Text("添加宝宝") }
+                    LeziTextButton(label = "添加宝宝", onClick = onAddBaby)
                 } else {
                     Text("家庭管理员管理", style = LeziTypography.Meta)
                 }

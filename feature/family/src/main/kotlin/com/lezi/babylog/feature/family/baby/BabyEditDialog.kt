@@ -15,9 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -41,6 +39,9 @@ import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziSecondaryButton
 
 @Composable
 internal fun BabyEditDialog(
@@ -163,44 +164,27 @@ internal fun BabyEditDialog(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         if (canEditAvatar) {
-                            OutlinedButton(
-                                enabled = !saving,
-                                onClick = {
+                            LeziSecondaryButton(label = if (hasAvatar) "相册更换" else "从相册选择", onClick = {
                                     avatarError = null
                                     avatarPicker.launch(
                                         PickVisualMediaRequest(
                                             ActivityResultContracts.PickVisualMedia.ImageOnly,
                                         ),
                                     )
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(if (hasAvatar) "相册更换" else "从相册选择")
-                            }
-                            OutlinedButton(
-                                enabled = !saving,
-                                onClick = {
+                                }, enabled = !saving, modifier = Modifier.fillMaxWidth())
+                            LeziSecondaryButton(label = "拍照", onClick = {
                                     if (CameraCapture.hasPermission(avatarContext)) {
                                         launchAvatarCamera()
                                     } else {
                                         avatarCameraPermission.launch(CameraCapture.PERMISSION)
                                     }
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text("拍照")
-                            }
+                                }, enabled = !saving, modifier = Modifier.fillMaxWidth())
                         }
                         if (canEditAvatar && hasAvatar) {
-                            TextButton(
-                                enabled = !saving,
-                                onClick = {
+                            LeziTextButton(label = "移除照片", onClick = {
                                     croppedAvatar = null
                                     removeAvatar = true
-                                },
-                            ) {
-                                Text("移除照片")
-                            }
+                                }, enabled = !saving)
                         }
                         if (!canEditAvatar) {
                             Text(
@@ -241,24 +225,22 @@ internal fun BabyEditDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = !saving,
-                onClick = {
-                    if (saving) return@TextButton
+            LeziTextButton(label = if (saving) "保存中…" else "保存", onClick = {
+                    if (saving) return@LeziTextButton
                     if (nickname.isBlank()) {
                         localError = "请填写昵称"
-                        return@TextButton
+                        return@LeziTextButton
                     }
                     val grams = weightText.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()?.let {
                         (it * 1000).toInt()
                     }
                     if (weightText.isNotBlank() && grams == null) {
                         localError = "出生体重格式不正确"
-                        return@TextButton
+                        return@LeziTextButton
                     }
                     birthWeightValidationError(grams)?.let {
                         localError = it
-                        return@TextButton
+                        return@LeziTextButton
                     }
                     saving = true
                     onSave(
@@ -271,11 +253,10 @@ internal fun BabyEditDialog(
                     ) {
                         saving = false
                     }
-                },
-            ) { Text(if (saving) "保存中…" else "保存") }
+                }, enabled = !saving, tone = LeziTextButtonTone.Primary)
         },
         dismissButton = {
-            TextButton(enabled = !saving, onClick = onDismiss) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !saving)
         },
     )
 

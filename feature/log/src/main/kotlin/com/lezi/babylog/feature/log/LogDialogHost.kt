@@ -1,11 +1,12 @@
 package com.lezi.babylog.feature.log
 import androidx.compose.foundation.layout.Row
 import com.lezi.babylog.designsystem.LeziAlertDialog
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -105,16 +106,10 @@ internal fun LogDialogHost(
                 )
             },
             confirmButton = {
-                TextButton(
-                    enabled = !layoutExitInProgress,
-                    onClick = onRetryLayoutFailure,
-                ) { Text(if (layoutExitInProgress) "重试中…" else "重试") }
+                LeziTextButton(label = if (layoutExitInProgress) "重试中…" else "重试", onClick = onRetryLayoutFailure, enabled = !layoutExitInProgress)
             },
             dismissButton = {
-                TextButton(
-                    enabled = !layoutExitInProgress,
-                    onClick = onDismissLayoutFailure,
-                ) { Text("继续编辑") }
+                LeziTextButton(label = "继续编辑", onClick = onDismissLayoutFailure, enabled = !layoutExitInProgress)
             },
         )
     }
@@ -132,14 +127,12 @@ internal fun LogDialogHost(
                 )
             },
             confirmButton = {
-                TextButton(onClick = onRetryPublishChrome) { Text("重试同步") }
+                LeziTextButton(label = "重试同步", onClick = onRetryPublishChrome)
             },
             dismissButton = {
                 Row {
-                    TextButton(
-                        onClick = { onEditPublishChrome(target.recordId) },
-                    ) { Text("编辑") }
-                    TextButton(onClick = onDismissPublishChrome) { Text("关闭") }
+                    LeziTextButton(label = "编辑", onClick = { onEditPublishChrome(target.recordId) })
+                    LeziTextButton(label = "关闭", onClick = onDismissPublishChrome)
                 }
             },
         )
@@ -188,12 +181,10 @@ internal fun LogDialogHost(
                 )
             },
             confirmButton = {
-                TextButton(
-                    enabled = !deleteRunning,
-                    onClick = {
+                LeziTextButton(label = if (deleteRunning) "删除中…" else "确认删除", onClick = {
                         val started = beginManagementAction(deleteActionState, deleteRequest)
                         deleteActionState = started.state
-                        if (!started.accepted) return@TextButton
+                        if (!started.accepted) return@LeziTextButton
 
                         fun finishDelete(result: Result<String>) {
                             val finished = finishManagementAction(
@@ -218,19 +209,10 @@ internal fun LogDialogHost(
                                 ::finishDelete,
                             )
                         }
-                    },
-                ) {
-                    Text(
-                        if (deleteRunning) "删除中…" else "确认删除",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                    }, enabled = !deleteRunning, tone = LeziTextButtonTone.Destructive)
             },
             dismissButton = {
-                TextButton(
-                    enabled = !deleteRunning,
-                    onClick = onDismissListDelete,
-                ) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = onDismissListDelete, enabled = !deleteRunning)
             },
         )
     }

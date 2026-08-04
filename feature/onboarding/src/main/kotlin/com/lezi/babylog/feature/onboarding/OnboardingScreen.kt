@@ -25,7 +25,6 @@ import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -51,6 +50,8 @@ import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.domain.family.FamilyWizardJoinRole
 import com.lezi.babylog.domain.family.FamilyWizardMode
 import com.lezi.babylog.domain.family.FamilyWizardState
@@ -468,17 +469,15 @@ fun OnboardingRoute(
         DatePickerDialog(
             onDismissRequest = { showDate = false },
             confirmButton = {
-                TextButton(
-                    onClick = {
+                LeziTextButton(label = "确定", onClick = {
                         state.selectedDateMillis?.let { ms ->
                             birthday = ms.datePickerMillisToEpochDay()
                         }
                         showDate = false
-                    },
-                ) { Text("确定") }
+                    }, tone = LeziTextButtonTone.Primary)
             },
             dismissButton = {
-                TextButton(onClick = { showDate = false }) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { showDate = false })
             },
         ) {
             LeziDatePicker(state = state)

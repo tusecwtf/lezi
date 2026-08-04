@@ -27,7 +27,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,6 +50,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
@@ -258,10 +258,8 @@ internal fun AvatarCropDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = bitmap != null && viewportSize > 0f && !saving,
-                onClick = {
-                    val source = bitmap ?: return@TextButton
+            LeziTextButton(label = if (saving) "处理中…" else "使用此头像", onClick = {
+                    val source = bitmap ?: return@LeziTextButton
                     val geometry = avatarCropGeometry(
                         source.width,
                         source.height,
@@ -288,15 +286,10 @@ internal fun AvatarCropDialog(
                             cropError = "头像裁剪失败，请重试。"
                         }
                     }
-                },
-            ) {
-                Text(if (saving) "处理中…" else "使用此头像")
-            }
+                }, enabled = bitmap != null && viewportSize > 0f && !saving)
         },
         dismissButton = {
-            TextButton(enabled = !saving, onClick = onDismiss) {
-                Text("取消")
-            }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !saving)
         },
     )
 }

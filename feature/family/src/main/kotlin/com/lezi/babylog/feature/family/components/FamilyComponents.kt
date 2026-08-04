@@ -98,9 +98,8 @@ internal fun FamilyGuideRow(
 }
 
 /**
- * Destructive family action entry — same outlined secondary shape as
- * LeziSecondaryButton, but error-colored like overflow-menu destructive items
- * (P3: 危险操作视觉语义统一).
+ * Family-module alias for [com.lezi.babylog.designsystem.LeziDestructiveButton].
+ * Prefer the designsystem symbol at new call sites.
  */
 @Composable
 internal fun FamilyDestructiveButton(
@@ -109,31 +108,12 @@ internal fun FamilyDestructiveButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    val shape = LeziThemeExt.buttonShape
-    Surface(
-        modifier = modifier
-            .heightIn(min = LeziSpacing.Touch)
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.outline.copy(
-                    alpha = if (enabled) 1f else 0.45f,
-                ),
-                shape = shape,
-            )
-            .clickable(enabled = enabled, onClick = onClick),
-        shape = shape,
-        color = MaterialTheme.colorScheme.surface,
-        contentColor = MaterialTheme.colorScheme.error.copy(
-            alpha = if (enabled) 1f else 0.38f,
-        ),
-    ) {
-        Box(
-            Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(label, style = LeziTypography.Label, maxLines = 1)
-        }
-    }
+    com.lezi.babylog.designsystem.LeziDestructiveButton(
+        label = label,
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+    )
 }
 
 @Composable

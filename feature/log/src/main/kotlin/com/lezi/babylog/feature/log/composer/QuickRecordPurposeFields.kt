@@ -18,12 +18,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -59,6 +57,7 @@ import com.lezi.babylog.designsystem.LeziStoolAmountMark
 import com.lezi.babylog.designsystem.LeziStoolColorMark
 import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -259,28 +258,18 @@ private fun MilkFields(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(
-            onClick = {
+        LeziTextButton(label = "−$step", onClick = {
                 onDraftChange(draft.copy(amountMl = (draft.amountMl - step).coerceAtLeast(1)))
-            },
-            modifier = Modifier.heightIn(min = LeziSpacing.Touch),
-        ) {
-            Text("−$step", style = LeziTypography.Title)
-        }
+            }, modifier = Modifier.heightIn(min = LeziSpacing.Touch))
         Text(
             "${draft.amountMl} ml",
             style = LeziTypography.Display,
             modifier = Modifier.padding(horizontal = 22.dp),
             color = if (amountError) MaterialTheme.colorScheme.error else Color.Unspecified,
         )
-        TextButton(
-            onClick = {
+        LeziTextButton(label = "+$step", onClick = {
                 onDraftChange(draft.copy(amountMl = (draft.amountMl + step).coerceAtMost(999)))
-            },
-            modifier = Modifier.heightIn(min = LeziSpacing.Touch),
-        ) {
-            Text("+$step", style = LeziTypography.Title)
-        }
+            }, modifier = Modifier.heightIn(min = LeziSpacing.Touch))
     }
     val quickAmounts = remember(draft.amountMl, draft.recentAmountMl, step) {
         (draft.recentAmountMl + listOf(

@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -32,6 +31,7 @@ import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziFilterChip
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -393,11 +393,7 @@ internal fun <T> ChoiceStrip(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             choices.forEach { (value, title) ->
-                FilterChip(
-                    selected = value == selected,
-                    onClick = { onSelected(value) },
-                    label = { Text(title) },
-                )
+                LeziFilterChip(selected = value == selected, onClick = { onSelected(value) }, label = title)
             }
         }
     }

@@ -31,6 +31,7 @@ import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon
 import com.lezi.babylog.designsystem.LeziRecordColorRole
+import com.lezi.babylog.designsystem.LeziSectionLabel
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -110,10 +111,9 @@ internal fun RecordCatalogSectionHeading(
     title: String,
     modifier: Modifier = Modifier,
 ) {
-    Text(
-        text = title,
-        style = LeziTypography.Label,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    // Sheet/catalog quiet tier — same language as LeziSectionLabel, plus catalog testTag.
+    LeziSectionLabel(
+        label = title,
         modifier = modifier.testTag("record_catalog_heading_$title"),
     )
 }

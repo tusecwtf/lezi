@@ -9,12 +9,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -25,7 +22,11 @@ import androidx.compose.ui.Modifier
 import com.lezi.babylog.core.common.LocalDataUpgradeBlockReason
 import com.lezi.babylog.core.common.LocalDataUpgradeState
 import com.lezi.babylog.designsystem.LeziAlertDialog
+import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziTypography
 
 internal data class LocalDataRecoveryCopy(
@@ -118,15 +119,16 @@ internal fun LocalDataUpgradeScreen(
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Button(onClick = onRetry, modifier = Modifier.padding(top = LeziSpacing.Xl)) {
-                        Text("重试安全检查")
-                    }
-                    OutlinedButton(
+                    LeziPrimaryButton(
+                        label = "重试安全检查",
+                        onClick = onRetry,
+                        modifier = Modifier.padding(top = LeziSpacing.Xl),
+                    )
+                    LeziSecondaryButton(
+                        label = "导出诊断",
                         onClick = onShareDiagnostics,
                         modifier = Modifier.padding(top = LeziSpacing.Xs),
-                    ) {
-                        Text("导出诊断")
-                    }
+                    )
                     ClearApplicationDataButton(
                         label = copy.resetLabel,
                         onConfirmed = onClearApplicationData,
@@ -143,12 +145,12 @@ private fun ClearApplicationDataButton(
     onConfirmed: () -> Unit,
 ) {
     var confirmationStage by remember { mutableIntStateOf(0) }
-    TextButton(
+    LeziTextButton(
+        label = label,
         onClick = { confirmationStage = 1 },
         modifier = Modifier.padding(top = LeziSpacing.Xs),
-    ) {
-        Text(label)
-    }
+        tone = LeziTextButtonTone.Destructive,
+    )
     if (confirmationStage > 0) {
         val finalConfirmation = confirmationStage == 2
         LeziAlertDialog(
@@ -164,16 +166,20 @@ private fun ClearApplicationDataButton(
                 )
             },
             confirmButton = {
-                TextButton(
+                LeziTextButton(
+                    label = if (finalConfirmation) "永久清除" else "继续",
                     onClick = {
                         if (finalConfirmation) onConfirmed() else confirmationStage = 2
                     },
-                ) {
-                    Text(if (finalConfirmation) "永久清除" else "继续")
-                }
+                    tone = if (finalConfirmation) {
+                        LeziTextButtonTone.Destructive
+                    } else {
+                        LeziTextButtonTone.Primary
+                    },
+                )
             },
             dismissButton = {
-                TextButton(onClick = { confirmationStage = 0 }) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { confirmationStage = 0 })
             },
         )
     }

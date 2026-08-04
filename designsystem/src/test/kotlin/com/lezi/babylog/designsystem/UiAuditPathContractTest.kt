@@ -50,6 +50,59 @@ class UiAuditPathContractTest {
     }
 
     @Test
+    fun `feature and app modules do not call raw Material buttons or chips`() {
+        val banned = listOf(
+            Regex("""(?<![A-Za-z])TextButton\("""),
+            Regex("""(?<![A-Za-z])OutlinedButton\("""),
+            Regex("""(?<![A-Za-z])FilterChip\("""),
+            // Bare Button( — not LeziPrimaryButton / LeziSecondaryButton / LeziTextButton
+            Regex("""(?<![A-Za-z.])Button\("""),
+        )
+        val importBanned = listOf(
+            "import androidx.compose.material3.TextButton",
+            "import androidx.compose.material3.OutlinedButton",
+            "import androidx.compose.material3.FilterChip",
+            "import androidx.compose.material3.Button",
+        )
+        val offenders = mutableListOf<String>()
+        for (root in listOf("app/src/main", "feature", "core/ui/src/main")) {
+            val dir = repositoryRoot().resolve(root)
+            if (!dir.isDirectory) continue
+            dir.walkTopDown()
+                .filter {
+                    it.isFile &&
+                        it.extension == "kt" &&
+                        "src/main" in it.invariantSeparatorsPath
+                }
+                .forEach { file ->
+                    val text = file.readText()
+                    val rel = file.relativeTo(repositoryRoot()).path
+                    for (imp in importBanned) {
+                        if (imp in text) offenders += "$rel imports $imp"
+                    }
+                    for (rx in banned) {
+                        if (rx.containsMatchIn(text)) {
+                            offenders += "$rel matches ${rx.pattern}"
+                        }
+                    }
+                }
+        }
+        assertTrue(
+            "raw Material controls remain in product UI:\n${offenders.joinToString("\n")}",
+            offenders.isEmpty(),
+        )
+        // Designsystem owns the chrome.
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
+            .contains("fun LeziTextButton("))
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
+            .contains("fun LeziDestructiveButton("))
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
+            .contains("fun LeziFilterChip("))
+        assertTrue(read("designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ActionStateComponents.kt")
+            .contains("fun LeziIconButton("))
+    }
+
+    @Test
     fun `product dialogs prefer LeziAlertDialog over raw Material dialog`() {
         val mainRoots = listOf(
             "app/src/main",

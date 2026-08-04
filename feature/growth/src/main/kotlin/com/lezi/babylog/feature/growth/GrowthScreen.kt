@@ -33,7 +33,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
@@ -72,6 +71,7 @@ import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziRangeTabs
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
@@ -81,6 +81,7 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.growth.GrowthMeasurementLifecycle
 import com.lezi.babylog.domain.growth.ObserveGrowthMeasurements
@@ -607,17 +608,12 @@ fun GrowthRoute(
                 }
             },
             confirmButton = {
-                TextButton(
+                LeziTextButton(
+                    label = if (deleting) "删除中…" else "确认删除",
                     enabled = !busy,
                     onClick = { vm.deleteMeasurement() },
-                    modifier = Modifier.heightIn(min = LeziSpacing.Touch),
-                ) {
-                    Text(
-                        if (deleting) "删除中…" else "确认删除",
-                        color = MaterialTheme.colorScheme.error,
-                        style = LeziTypography.Label,
-                    )
-                }
+                    tone = LeziTextButtonTone.Destructive,
+                )
             },
             dismissButton = {
                 LeziSecondaryButton(
@@ -640,7 +636,8 @@ fun GrowthRoute(
         DatePickerDialog(
             onDismissRequest = { if (!busy) showMeasureDate = false },
             confirmButton = {
-                TextButton(
+                LeziTextButton(
+                    label = "确定",
                     enabled = !busy,
                     onClick = {
                         dateState.selectedDateMillis?.let { millis ->
@@ -682,13 +679,11 @@ fun GrowthRoute(
                         }
                         showMeasureDate = false
                     },
-                ) { Text("确定") }
+                    tone = LeziTextButtonTone.Primary,
+                )
             },
             dismissButton = {
-                TextButton(
-                    enabled = !busy,
-                    onClick = { showMeasureDate = false },
-                ) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { showMeasureDate = false }, enabled = !busy)
             },
         ) {
             LeziDatePicker(state = dateState)

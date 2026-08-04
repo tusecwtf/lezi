@@ -7,11 +7,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -21,6 +18,10 @@ import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -69,20 +70,21 @@ fun BabyProfileFormFields(
                 "male" to "男宝",
                 null to "未设置",
             ).forEach { (key, label) ->
-                FilterChip(
+                LeziFilterChip(
                     selected = sex == key,
                     enabled = enabled,
                     onClick = { onSexChange(key) },
-                    label = { Text(label) },
+                    label = label,
                 )
             }
         }
         Text("出生日期", style = LeziTypography.Label)
-        OutlinedButton(
-            enabled = enabled,
+        LeziSecondaryButton(
+            label = dateLabel,
             onClick = onPickBirthday,
+            enabled = enabled,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text(dateLabel) }
+        )
         OutlinedTextField(
             value = weightText,
             enabled = enabled,
@@ -113,7 +115,8 @@ fun BabyBirthdayDatePickerDialog(
     DatePickerDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(
+            LeziTextButton(
+                label = "确定",
                 onClick = {
                     dateState.selectedDateMillis?.let { ms ->
                         onSelect(
@@ -125,10 +128,11 @@ fun BabyBirthdayDatePickerDialog(
                     }
                     onDismiss()
                 },
-            ) { Text("确定") }
+                tone = LeziTextButtonTone.Primary,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss)
         },
     ) {
         LeziDatePicker(state = dateState)

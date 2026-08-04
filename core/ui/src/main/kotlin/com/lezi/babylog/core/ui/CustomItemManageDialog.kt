@@ -17,14 +17,12 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import com.lezi.babylog.designsystem.LeziAlertDialog
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -42,6 +40,9 @@ import com.lezi.babylog.designsystem.CUSTOM_ITEM_GLYPH_COUNT
 import com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziTextButton
 
 /** Minimal row for the shared custom-definition manage surface. */
 data class CustomItemManageRow(
@@ -389,7 +390,7 @@ fun CustomItemManageDialog(
                 (0 until CUSTOM_ITEM_GLYPH_COUNT).chunked(4).forEach { slots ->
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         slots.forEach { slot ->
-                            FilterChip(
+                            LeziFilterChip(
                                 enabled = !externalBusy,
                                 selected = iconSlot == slot,
                                 onClick = { iconSlot = slot },
@@ -398,7 +399,14 @@ fun CustomItemManageDialog(
                         }
                     }
                 }
-                TextButton(
+                LeziTextButton(
+                    label = when {
+                        saveBusyLabel != null -> saveBusyLabel
+                        editing == null && mode == CustomItemManageMode.LayoutEdit -> "新增"
+                        editing == null -> "添加项目"
+                        mode == CustomItemManageMode.LayoutEdit -> "保存改名"
+                        else -> "保存修改"
+                    },
                     enabled = !externalBusy &&
                         name.isNotBlank() &&
                         (editing != null || items.size < 10),
@@ -406,46 +414,35 @@ fun CustomItemManageDialog(
                         val trimmed = name.trim()
                         if (trimmed.isEmpty()) {
                             error = "请输入名称"
-                            return@TextButton
-                        }
-                        val current = editing
-                        if (current == null) {
-                            onAdd(trimmed, iconSlot) { message ->
-                                if (message == null) reset() else error = message
-                            }
                         } else {
-                            onUpdate(
-                                current.copy(name = trimmed, iconSlot = iconSlot),
-                            ) { message ->
-                                if (message == null) reset() else error = message
+                            val current = editing
+                            if (current == null) {
+                                onAdd(trimmed, iconSlot) { message ->
+                                    if (message == null) reset() else error = message
+                                }
+                            } else {
+                                onUpdate(
+                                    current.copy(name = trimmed, iconSlot = iconSlot),
+                                ) { message ->
+                                    if (message == null) reset() else error = message
+                                }
                             }
                         }
                     },
                     modifier = Modifier.testTag(saveFieldTag),
-                ) {
-                    Text(
-                        when {
-                            saveBusyLabel != null -> saveBusyLabel
-                            editing == null && mode == CustomItemManageMode.LayoutEdit -> "新增"
-                            editing == null -> "添加项目"
-                            mode == CustomItemManageMode.LayoutEdit -> "保存改名"
-                            else -> "保存修改"
-                        },
-                    )
-                }
+                    tone = LeziTextButtonTone.Primary,
+                )
                 if (editing != null && mode == CustomItemManageMode.Settings) {
-                    TextButton(
+                    LeziTextButton(
+                        label = "取消修改",
                         enabled = !externalBusy,
                         onClick = { reset() },
-                    ) { Text("取消修改") }
+                    )
                 }
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = !deleteState.deleting && !externalBusy,
-                onClick = onDismiss,
-            ) { Text("完成") }
+            LeziTextButton(label = "完成", onClick = onDismiss, enabled = !deleteState.deleting && !externalBusy)
         },
     )
 
@@ -465,32 +462,30 @@ fun CustomItemManageDialog(
                 }
             },
             confirmButton = {
-                TextButton(
+                LeziTextButton(
+                    label = if (deleteState.deleting) {
+                        "删除中…"
+                    } else if (mode == CustomItemManageMode.LayoutEdit) {
+                        "删除定义"
+                    } else {
+                        "确认删除"
+                    },
                     enabled = !deleteState.deleting,
                     onClick = {
                         dispatchDelete(CustomItemDeleteAction.Confirm)
                     },
                     modifier = Modifier.testTag("custom_item_delete_confirm"),
-                ) {
-                    Text(
-                        if (deleteState.deleting) {
-                            "删除中…"
-                        } else if (mode == CustomItemManageMode.LayoutEdit) {
-                            "删除定义"
-                        } else {
-                            "确认删除"
-                        },
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                    tone = LeziTextButtonTone.Destructive,
+                )
             },
             dismissButton = {
-                TextButton(
+                LeziTextButton(
+                    label = "取消",
                     enabled = !deleteState.deleting,
                     onClick = {
                         dispatchDelete(CustomItemDeleteAction.Cancel)
                     },
-                ) { Text("取消") }
+                )
             },
         )
     }

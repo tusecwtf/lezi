@@ -29,7 +29,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -74,6 +73,8 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
 import com.lezi.babylog.designsystem.rememberLocalPhoto
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import java.time.Instant
 import java.time.ZoneId
 import com.lezi.babylog.feature.log.*
@@ -271,22 +272,9 @@ internal fun QuickRecordSheet(
                 )
                 Text(sheetTitle(draft, nowMillis), style = LeziTypography.Title)
             }
-            TextButton(
-                onClick = { onDismiss(ComposerDismissSource.HeaderClose) },
-                enabled = actionsEnabled,
-            ) {
-                Text("关闭")
-            }
+            LeziTextButton(label = "关闭", onClick = { onDismiss(ComposerDismissSource.HeaderClose) }, enabled = actionsEnabled,)
             if (onDelete != null) {
-                TextButton(
-                    onClick = onDelete,
-                    enabled = !saving && !deleting,
-                ) {
-                    Text(
-                        if (deleting) "删除中…" else "删除",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                LeziTextButton(label = if (deleting) "删除中…" else "删除", onClick = onDelete, enabled = !saving && !deleting, tone = LeziTextButtonTone.Destructive)
             }
         }
 
@@ -381,12 +369,7 @@ internal fun QuickRecordSheet(
                         .horizontalScroll(rememberScrollState()),
                 ) {
                     draft.recentNotes.forEach { candidate ->
-                        TextButton(
-                            onClick = { update(draft.copy(note = candidate)) },
-                            enabled = actionsEnabled,
-                        ) {
-                            Text(candidate, maxLines = 1)
-                        }
+                        LeziTextButton(label = candidate, onClick = { update(draft.copy(note = candidate)) }, enabled = actionsEnabled)
                     }
                 }
             }
@@ -428,11 +411,7 @@ internal fun QuickRecordSheet(
                                     }
                                 }
                             }
-                            TextButton(
-                                enabled = actionsEnabled,
-                                onClick = { onRemovePhoto(path) },
-                                modifier = Modifier.heightIn(min = LeziSpacing.Touch),
-                            ) { Text("移除") }
+                            LeziTextButton(label = "移除", onClick = { onRemovePhoto(path) }, enabled = actionsEnabled, modifier = Modifier.heightIn(min = LeziSpacing.Touch))
                         }
                     }
                 }
@@ -441,19 +420,13 @@ internal fun QuickRecordSheet(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
             ) {
-                TextButton(
-                    enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size),
-                    onClick = {
+                LeziTextButton(label = "相册", onClick = {
                         photoActionError = null
                         photoPicker.launch(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
                         )
-                    },
-                ) { Text("相册") }
-                TextButton(
-                    enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size),
-                    onClick = { launchCameraCapture() },
-                ) { Text("拍照") }
+                    }, enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size))
+                LeziTextButton(label = "拍照", onClick = { launchCameraCapture() }, enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size))
             }
             photoActionError?.let {
                 Text(
@@ -521,12 +494,7 @@ internal fun QuickRecordSheet(
                 if (draft.projectToSystemCalendar && !systemCalendarConfigured &&
                     onConfigureSystemCalendar != null
                 ) {
-                    TextButton(
-                        onClick = onConfigureSystemCalendar,
-                        enabled = actionsEnabled,
-                    ) {
-                        Text("去配置系统日历")
-                    }
+                    LeziTextButton(label = "去配置系统日历", onClick = onConfigureSystemCalendar, enabled = actionsEnabled,)
                 }
             }
             Row(

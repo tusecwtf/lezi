@@ -21,7 +21,6 @@ import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -49,6 +48,8 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import com.lezi.babylog.feature.log.*
@@ -459,8 +460,7 @@ fun RecordComposerHost(
                 )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
+                LeziTextButton(label = "开始计时", onClick = {
                         val seed = pendingTimerHandoffSeed
                         confirmTimerHandoff = false
                         pendingTimerHandoffSeed = null
@@ -468,21 +468,14 @@ fun RecordComposerHost(
                         if (seed != null) {
                             launchTimerHandoff(seed)
                         }
-                    },
-                ) {
-                    Text("开始计时")
-                }
+                    })
             },
             dismissButton = {
-                TextButton(
-                    onClick = {
+                LeziTextButton(label = "继续编辑", onClick = {
                         confirmTimerHandoff = false
                         pendingTimerHandoffSeed = null
                         timerHandoffConfirmMessage = null
-                    },
-                ) {
-                    Text("继续编辑")
-                }
+                    })
             },
         )
     }
@@ -493,9 +486,7 @@ fun RecordComposerHost(
             title = { Text("照片过多") },
             text = { Text(message) },
             confirmButton = {
-                TextButton(onClick = { timerHandoffOverflowMessage = null }) {
-                    Text("知道了")
-                }
+                LeziTextButton(label = "知道了", onClick = { timerHandoffOverflowMessage = null })
             },
         )
     }
@@ -523,9 +514,7 @@ fun RecordComposerHost(
                 )
             },
             confirmButton = {
-                TextButton(
-                    enabled = !state.deleting,
-                    onClick = {
+                LeziTextButton(label = if (state.deleting) "删除中…" else "确认删除", onClick = {
                         deleteAttempted = true
                         vm.delete { message ->
                             deleteAttempted = false
@@ -533,24 +522,13 @@ fun RecordComposerHost(
                             onPersisted()
                             onSaved(message)
                         }
-                    },
-                ) {
-                    Text(
-                        if (state.deleting) "删除中…" else "确认删除",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
+                    }, enabled = !state.deleting, tone = LeziTextButtonTone.Destructive)
             },
             dismissButton = {
-                TextButton(
-                    enabled = !state.deleting,
-                    onClick = {
+                LeziTextButton(label = "取消", onClick = {
                         deleteAttempted = false
                         confirmDelete = false
-                    },
-                ) {
-                    Text("取消")
-                }
+                    }, enabled = !state.deleting)
             },
         )
     }
@@ -567,23 +545,13 @@ fun RecordComposerHost(
                 )
             },
             confirmButton = {
-                TextButton(
-                    enabled = !state.saving,
-                    onClick = {
+                LeziTextButton(label = if (state.saving) "保存中…" else "转为护理计划", onClick = {
                         confirmConvert = false
                         vm.save()
-                    },
-                ) {
-                    Text(if (state.saving) "保存中…" else "转为护理计划")
-                }
+                    }, enabled = !state.saving)
             },
             dismissButton = {
-                TextButton(
-                    enabled = !state.saving,
-                    onClick = { confirmConvert = false },
-                ) {
-                    Text("取消")
-                }
+                LeziTextButton(label = "取消", onClick = { confirmConvert = false }, enabled = !state.saving)
             },
         )
     }

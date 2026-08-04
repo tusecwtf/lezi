@@ -16,7 +16,6 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -32,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.calendar.SystemCalendarDisclosureLevel
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.domain.calendar.SystemCalendarTarget
@@ -248,18 +248,14 @@ fun SystemCalendarSetupDialog(
                     modifier = Modifier.padding(top = LeziSpacing.Sm),
                 )
                 if (!hasPermission) {
-                    TextButton(
-                        onClick = {
+                    LeziTextButton(label = "授予日历权限", onClick = {
                             permissionLauncher.launch(
                                 arrayOf(
                                     Manifest.permission.READ_CALENDAR,
                                     Manifest.permission.WRITE_CALENDAR,
                                 ),
                             )
-                        },
-                    ) {
-                        Text("授予日历权限")
-                    }
+                        })
                 } else if (!targetsLoaded) {
                     Text(
                         "正在加载可写日历…",
@@ -311,17 +307,14 @@ fun SystemCalendarSetupDialog(
         },
         confirmButton = {
             val selection = draft.confirmedOrNull()
-            TextButton(
-                onClick = { selection?.let(onConfirm) },
-                enabled = selection != null,
-            ) { Text("保存") }
+            LeziTextButton(label = "保存", onClick = { selection?.let(onConfirm) }, enabled = selection != null,)
         },
         dismissButton = {
             Row {
                 if (currentCalendarId != null) {
-                    TextButton(onClick = onDisable) { Text("关闭同步") }
+                    LeziTextButton(label = "关闭同步", onClick = onDisable)
                 }
-                TextButton(onClick = onDismiss) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = onDismiss)
             }
         },
     )

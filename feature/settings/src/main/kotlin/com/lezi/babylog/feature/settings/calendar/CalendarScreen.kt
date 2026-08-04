@@ -31,7 +31,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -65,6 +64,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.designsystem.LeziIconButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziShapes
@@ -77,6 +77,7 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.rememberLocalPhoto
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.calendar.SYSTEM_CALENDAR_UNSYNCED_LABEL
@@ -532,8 +533,7 @@ fun CalendarRoute(
                         )
                     }
                     planableItems.forEach { item ->
-                        TextButton(
-                            onClick = {
+                        LeziTextButton(label = item.label, onClick = {
                                 val at = calendarDefaultCarePlanTimestamp(
                                     selectedDate = monthState.selectedDate,
                                     zone = zone,
@@ -542,21 +542,17 @@ fun CalendarRoute(
                                     showPlanTypePicker = false
                                     scheduleError =
                                         "所选日期已没有可安排的未来时刻，请重新选择日期和时间。"
-                                    return@TextButton
+                                    return@LeziTextButton
                                 }
                                 scheduleError = null
                                 showPlanTypePicker = false
                                 onScheduleCare(item.type, at, item.customItemId)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(item.label)
-                        }
+                            }, modifier = Modifier.fillMaxWidth())
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showPlanTypePicker = false }) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { showPlanTypePicker = false })
             },
         )
     }
@@ -629,13 +625,11 @@ fun CalendarRoute(
                 }
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
+                LeziTextButton(label = "关闭", onClick = {
                         showConflictList = false
                         vm.clearConflictAudits()
                         conflictError = null
-                    },
-                ) { Text("关闭") }
+                    })
             },
         )
     }
@@ -719,18 +713,14 @@ fun CalendarRoute(
             },
             confirmButton = {
                 if (!detail.isConverted) {
-                    TextButton(
-                        enabled = !conflictBusy,
-                        onClick = { confirmConvertCandidate = detail.candidateClientUuid },
-                        modifier = Modifier.testTag("conflict_convert_button"),
-                    ) { Text("转为独立记录") }
+                    LeziTextButton(label = "转为独立记录", onClick = { confirmConvertCandidate = detail.candidateClientUuid }, enabled = !conflictBusy, modifier = Modifier.testTag("conflict_convert_button"))
                 } else {
-                    TextButton(onClick = { vm.clearConflictDetail() }) { Text("关闭") }
+                    LeziTextButton(label = "关闭", onClick = { vm.clearConflictDetail() })
                 }
             },
             dismissButton = {
                 if (!detail.isConverted) {
-                    TextButton(onClick = { vm.clearConflictDetail() }) { Text("返回") }
+                    LeziTextButton(label = "返回", onClick = { vm.clearConflictDetail() })
                 }
             },
         )
@@ -747,9 +737,7 @@ fun CalendarRoute(
                 )
             },
             confirmButton = {
-                TextButton(
-                    enabled = !conflictBusy,
-                    onClick = {
+                LeziTextButton(label = "确认转换", onClick = {
                         vm.convertConflictToIndependentRecord(candidateUuid) { err ->
                             if (err == null) {
                                 confirmConvertCandidate = null
@@ -759,15 +747,10 @@ fun CalendarRoute(
                                 confirmConvertCandidate = null
                             }
                         }
-                    },
-                    modifier = Modifier.testTag("conflict_convert_confirm"),
-                ) { Text("确认转换") }
+                    }, enabled = !conflictBusy, modifier = Modifier.testTag("conflict_convert_confirm"))
             },
             dismissButton = {
-                TextButton(
-                    enabled = !conflictBusy,
-                    onClick = { confirmConvertCandidate = null },
-                ) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { confirmConvertCandidate = null }, enabled = !conflictBusy)
             },
         )
     }
@@ -843,11 +826,10 @@ private fun CalendarMonthPicker(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            TextButton(
+            LeziIconButton(
                 onClick = onPreviousMonth,
-                modifier = Modifier
-                    .testTag(CalendarUiTags.PreviousMonth)
-                    .semantics { contentDescription = "上个月" },
+                contentDescription = "上个月",
+                modifier = Modifier.testTag(CalendarUiTags.PreviousMonth),
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.KeyboardArrowLeft,
@@ -858,11 +840,10 @@ private fun CalendarMonthPicker(
                 "${state.visibleMonth.year}年${state.visibleMonth.monthValue}月",
                 style = LeziTypography.BodyStrong,
             )
-            TextButton(
+            LeziIconButton(
                 onClick = onNextMonth,
-                modifier = Modifier
-                    .testTag(CalendarUiTags.NextMonth)
-                    .semantics { contentDescription = "下个月" },
+                contentDescription = "下个月",
+                modifier = Modifier.testTag(CalendarUiTags.NextMonth),
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.KeyboardArrowRight,

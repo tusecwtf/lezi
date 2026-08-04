@@ -26,7 +26,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -43,6 +42,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.feature.family.components.canRemoveFamilyMember
 import com.lezi.babylog.feature.family.components.familyMemberDisplayName
 import com.lezi.babylog.feature.family.components.familyMemberSummary
@@ -300,12 +301,8 @@ private fun PendingMemberRenameRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
-            TextButton(onClick = { onApprove?.invoke() }, enabled = onApprove != null) {
-                Text("确认改名")
-            }
-            TextButton(onClick = { onReject?.invoke() }, enabled = onReject != null) {
-                Text("拒绝")
-            }
+            LeziTextButton(label = "确认改名", onClick = { onApprove?.invoke() }, enabled = onApprove != null)
+            LeziTextButton(label = "拒绝", onClick = { onReject?.invoke() }, enabled = onReject != null)
         }
     }
 }
@@ -335,9 +332,7 @@ private fun PendingMemberLoginRow(
                 color = MaterialTheme.colorScheme.primary,
             )
         }
-        TextButton(onClick = { onReview?.invoke() }, enabled = onReview != null) {
-            Text(if (awaitingClaim) "撤销批准" else "处理申请")
-        }
+        LeziTextButton(label = if (awaitingClaim) "撤销批准" else "处理申请", onClick = { onReview?.invoke() }, enabled = onReview != null)
     }
 }
 
@@ -385,12 +380,7 @@ internal fun PendingMemberDecisionDialog(
                     )
                 } else {
                     existingMembers.forEach { member ->
-                        TextButton(
-                            onClick = { onBindExisting(member.membershipId) },
-                            enabled = !busy,
-                        ) {
-                            Text("绑定到现有「${member.displayName}」")
-                        }
+                        LeziTextButton(label = "绑定到现有「${member.displayName}」", onClick = { onBindExisting(member.membershipId) }, enabled = !busy,)
                     }
                 }
                 if (!awaitingClaim && conflictsWithExisting) {
@@ -404,28 +394,18 @@ internal fun PendingMemberDecisionDialog(
         },
         confirmButton = {
             if (awaitingClaim) {
-                TextButton(onClick = onReject, enabled = !busy) {
-                    Text("撤销批准", color = MaterialTheme.colorScheme.error)
-                }
+                LeziTextButton(label = "撤销批准", onClick = onReject, tone = LeziTextButtonTone.Destructive, enabled = !busy)
             } else {
-                TextButton(onClick = onApproveNew, enabled = !busy && !conflictsWithExisting) {
-                    Text("用此称呼添加新成员")
-                }
+                LeziTextButton(label = "用此称呼添加新成员", onClick = onApproveNew, enabled = !busy && !conflictsWithExisting)
             }
         },
         dismissButton = {
             if (awaitingClaim) {
-                TextButton(onClick = onDismiss, enabled = !busy) {
-                    Text("关闭")
-                }
+                LeziTextButton(label = "关闭", onClick = onDismiss, enabled = !busy)
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
-                    TextButton(onClick = onReject, enabled = !busy) {
-                        Text("拒绝", color = MaterialTheme.colorScheme.error)
-                    }
-                    TextButton(onClick = onDismiss, enabled = !busy) {
-                        Text("取消")
-                    }
+                    LeziTextButton(label = "拒绝", onClick = onReject, tone = LeziTextButtonTone.Destructive, enabled = !busy)
+                    LeziTextButton(label = "取消", onClick = onDismiss, enabled = !busy)
                 }
             }
         },
@@ -719,15 +699,10 @@ internal fun RemoveMemberConfirmDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !removing) {
-                Text(
-                    if (removing) "删除中…" else "删除成员",
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
+            LeziTextButton(label = if (removing) "删除中…" else "删除成员", onClick = onConfirm, enabled = !removing, tone = LeziTextButtonTone.Destructive)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !removing) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !removing)
         },
     )
 }

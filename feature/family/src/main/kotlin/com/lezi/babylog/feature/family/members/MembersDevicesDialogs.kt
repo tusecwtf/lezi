@@ -15,7 +15,6 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +36,8 @@ import com.journeyapps.barcodescanner.BarcodeEncoder
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.feature.family.components.FamilyDestructiveAction
 import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
@@ -79,12 +80,10 @@ internal fun RenameFamilyDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !saving) {
-                Text(if (saving) "保存中…" else "保存")
-            }
+            LeziTextButton(label = if (saving) "保存中…" else "保存", onClick = onConfirm, enabled = !saving, tone = LeziTextButtonTone.Primary)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !saving)
         },
     )
 }
@@ -129,12 +128,10 @@ internal fun EditMyDisplayNameDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !saving) {
-                Text(if (saving) "保存中…" else confirmCopy)
-            }
+            LeziTextButton(label = if (saving) "保存中…" else confirmCopy, onClick = onConfirm, enabled = !saving)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !saving)
         },
     )
 }
@@ -201,7 +198,7 @@ internal fun MemberLoginQrCodeDialog(
                 )
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+        confirmButton = { LeziTextButton(label = "完成", onClick = onDismiss) },
     )
 }
 
@@ -225,12 +222,10 @@ internal fun LeaveFamilyDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = presentation.enabled) {
-                Text(presentation.label, color = MaterialTheme.colorScheme.error)
-            }
+            LeziTextButton(label = presentation.label, onClick = onConfirm, enabled = presentation.enabled, tone = LeziTextButtonTone.Destructive)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = presentation.dismissible)
         },
     )
 }
@@ -255,12 +250,10 @@ internal fun LogoutCurrentDeviceDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = presentation.enabled) {
-                Text(presentation.label, color = MaterialTheme.colorScheme.error)
-            }
+            LeziTextButton(label = presentation.label, onClick = onConfirm, enabled = presentation.enabled, tone = LeziTextButtonTone.Destructive)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = presentation.dismissible)
         },
     )
 }
@@ -291,12 +284,10 @@ internal fun RevokeFamilyDeviceDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = presentation.enabled) {
-                Text(presentation.label, color = MaterialTheme.colorScheme.error)
-            }
+            LeziTextButton(label = presentation.label, onClick = onConfirm, enabled = presentation.enabled, tone = LeziTextButtonTone.Destructive)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = presentation.dismissible)
         },
     )
 }
@@ -374,36 +365,35 @@ internal fun DeleteFamilyDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            LeziTextButton(
+                label = if (final) {
+                    when {
+                        expectedFamilyName.isBlank() -> "返回并刷新"
+                        deleting -> "正在删除…"
+                        else -> "永久删除家庭"
+                    }
+                } else {
+                    "继续"
+                },
                 onClick = when {
                     final && expectedFamilyName.isBlank() -> onRefreshFamilyInfo
                     final -> onConfirm
                     else -> onContinue
                 },
-                enabled = !deleting && (expectedFamilyName.isBlank() ||
-                    !final || canConfirmFamilyDeletion(
-                        expectedFamilyName,
-                        familyNameInput,
-                        rootPassword,
-                    )
-                ),
-            ) {
-                Text(
-                    if (final) {
-                        when {
-                            expectedFamilyName.isBlank() -> "返回并刷新"
-                            deleting -> "正在删除…"
-                            else -> "永久删除家庭"
-                        }
-                    } else {
-                        "继续"
-                    },
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
+                enabled = !deleting && (
+                    expectedFamilyName.isBlank() ||
+                        !final ||
+                        canConfirmFamilyDeletion(
+                            expectedFamilyName,
+                            familyNameInput,
+                            rootPassword,
+                        )
+                    ),
+                tone = LeziTextButtonTone.Destructive,
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !deleting) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !deleting)
         },
     )
 }

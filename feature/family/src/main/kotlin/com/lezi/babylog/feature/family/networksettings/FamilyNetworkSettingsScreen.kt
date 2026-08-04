@@ -15,7 +15,6 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +32,7 @@ import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SetupFamilyState
@@ -243,15 +243,13 @@ fun FamilyNetworkSettingsScreen(
                 )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
+                LeziTextButton(label = "确认接受", onClick = {
                         certificateConfirmation = null
                         onTrustCandidate(certificate)
-                    },
-                ) { Text("确认接受") }
+                    })
             },
             dismissButton = {
-                TextButton(onClick = { certificateConfirmation = null }) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { certificateConfirmation = null })
             },
         )
     }
@@ -265,16 +263,14 @@ fun FamilyNetworkSettingsScreen(
                 )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
+                LeziTextButton(label = "最终确认恢复", onClick = {
                         finalRecoveryConfirmation = false
                         onCommitDisasterRecovery(recoveryRootPassword)
                         recoveryRootPassword = ""
-                    },
-                ) { Text("最终确认恢复") }
+                    })
             },
             dismissButton = {
-                TextButton(onClick = { finalRecoveryConfirmation = false }) { Text("返回核对") }
+                LeziTextButton(label = "返回核对", onClick = { finalRecoveryConfirmation = false })
             },
         )
     }

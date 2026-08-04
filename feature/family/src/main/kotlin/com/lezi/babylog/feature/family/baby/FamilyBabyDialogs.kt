@@ -8,15 +8,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.feature.family.components.FamilyDestructiveAction
@@ -95,15 +96,10 @@ private fun DeleteBabyDialog(
         title = { Text("删除「${baby.nickname}」？") },
         text = { Text("删除后该档案不可恢复。记录仍会留在本机但不再出现在当前宝宝视图中。") },
         confirmButton = {
-            TextButton(
-                onClick = { onDelete(baby.id) },
-                enabled = presentation.enabled,
-            ) {
-                Text(presentation.label, color = MaterialTheme.colorScheme.error)
-            }
+            LeziTextButton(label = presentation.label, onClick = { onDelete(baby.id) }, enabled = presentation.enabled, tone = LeziTextButtonTone.Destructive)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = presentation.dismissible)
         },
     )
 }
@@ -124,21 +120,12 @@ private fun MergeBabyDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 babies.filter { it.id != source.id }.forEach { target ->
-                    OutlinedButton(
-                        onClick = { onPreview(source.id, target.id) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            "保留「${target.nickname}」",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    LeziSecondaryButton(label = "保留「${target.nickname}」", onClick = { onPreview(source.id, target.id) }, modifier = Modifier.fillMaxWidth())
                 }
             }
         },
         confirmButton = {},
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { LeziTextButton(label = "取消", onClick = onDismiss) },
     )
 }
 
@@ -169,15 +156,10 @@ private fun MergePreviewDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = { onMerge(preview) },
-                enabled = presentation.enabled,
-            ) {
-                Text(presentation.label, color = MaterialTheme.colorScheme.error)
-            }
+            LeziTextButton(label = presentation.label, onClick = { onMerge(preview) }, enabled = presentation.enabled, tone = LeziTextButtonTone.Destructive)
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = presentation.dismissible) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss, enabled = presentation.dismissible)
         },
     )
 }

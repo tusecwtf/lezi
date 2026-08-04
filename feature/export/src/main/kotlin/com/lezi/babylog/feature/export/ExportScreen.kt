@@ -15,15 +15,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DatePickerDialog
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,8 +39,12 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.export.ExportPort
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -198,16 +198,18 @@ fun ExportRoute(
                         "${fromDate.exportLabel()} — ${toDate.exportLabel()}",
                         style = LeziTypography.BodyStrong,
                     )
-                    OutlinedButton(
+                    LeziSecondaryButton(
+                        label = "选择开始日期",
                         onClick = { dateTarget = ExportDateTarget.From },
                         enabled = !state.busy,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("选择开始日期") }
-                    OutlinedButton(
+                    )
+                    LeziSecondaryButton(
+                        label = "选择结束日期",
                         onClick = { dateTarget = ExportDateTarget.To },
                         enabled = !state.busy,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("选择结束日期") }
+                    )
                 }
             }
             Row(
@@ -222,34 +224,20 @@ fun ExportRoute(
                     enabled = !state.busy,
                 )
             }
-            OutlinedButton(
+            LeziSecondaryButton(
+                label = if (state.busy) "正在生成…" else "导出 TXT 并分享",
                 onClick = { request(ExportFormat.Txt) },
                 enabled = !state.busy,
+                busy = state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
-                    Spacer(Modifier.size(LeziSpacing.Xs))
-                }
-                Text(if (state.busy) "正在生成…" else "导出 TXT 并分享")
-            }
-            Button(
+            )
+            LeziPrimaryButton(
+                label = if (state.busy) "正在生成…" else "导出 PDF 并分享",
                 onClick = { request(ExportFormat.Pdf) },
                 enabled = !state.busy,
+                busy = state.busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (state.busy) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                    )
-                    Spacer(Modifier.size(LeziSpacing.Xs))
-                }
-                Text(if (state.busy) "正在生成…" else "导出 PDF 并分享")
-            }
+            )
             (inputError ?: state.error)?.let {
                 Text(it, color = MaterialTheme.colorScheme.error)
             }
@@ -281,7 +269,8 @@ fun ExportRoute(
         DatePickerDialog(
             onDismissRequest = { dateTarget = null },
             confirmButton = {
-                TextButton(
+                LeziTextButton(
+                    label = "确定",
                     onClick = {
                         picker.selectedDateMillis?.let { millis ->
                             val picked = Instant.ofEpochMilli(millis)
@@ -298,10 +287,11 @@ fun ExportRoute(
                         }
                         dateTarget = null
                     },
-                ) { Text("确定") }
+                    tone = LeziTextButtonTone.Primary,
+                )
             },
             dismissButton = {
-                TextButton(onClick = { dateTarget = null }) { Text("取消") }
+                LeziTextButton(label = "取消", onClick = { dateTarget = null })
             },
         ) {
             LeziDatePicker(state = picker)

@@ -51,7 +51,6 @@ import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -63,7 +62,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -102,6 +100,9 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.AppBrandBar
+import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziTypography
@@ -1316,40 +1317,32 @@ private fun ForcedAppUpdateOverlay(
             Spacer(Modifier.height(LeziSpacing.Xl))
             when (forced) {
                 is ForcedAppUpdateState.WithPackage -> {
-                    Button(
+                    LeziPrimaryButton(
+                        label = if (busy) "安装中…" else "立即更新",
                         onClick = { onInstall(forced.metadata) },
                         enabled = !busy,
-                    ) {
-                        if (busy) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(18.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                            )
-                            Spacer(Modifier.width(LeziSpacing.Xs))
-                        }
-                        Text(if (busy) "安装中…" else "立即更新")
-                    }
+                        busy = busy,
+                    )
                     Spacer(Modifier.height(LeziSpacing.Sm))
-                    TextButton(
+                    LeziTextButton(
+                        label = forcedUpdateRetryCheckLabel(),
                         onClick = onRetryCheck,
                         enabled = !busy,
-                    ) {
-                        Text(forcedUpdateRetryCheckLabel())
-                    }
+                    )
                 }
                 ForcedAppUpdateState.PackageUnknown -> {
-                    Button(
+                    LeziPrimaryButton(
+                        label = if (busy) "检查中…" else forcedUpdateRetryCheckLabel(),
                         onClick = onRetryCheck,
                         enabled = !busy,
-                    ) {
-                        Text(if (busy) "检查中…" else forcedUpdateRetryCheckLabel())
-                    }
+                        busy = busy,
+                    )
                 }
             }
             if (needsInstallPermission) {
                 Spacer(Modifier.height(LeziSpacing.Sm))
-                TextButton(
+                LeziTextButton(
+                    label = "去设置",
                     onClick = {
                         val intent = Intent(
                             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -1357,9 +1350,8 @@ private fun ForcedAppUpdateOverlay(
                         )
                         runCatching { context.startActivity(intent) }
                     },
-                ) {
-                    Text("去设置")
-                }
+                    tone = LeziTextButtonTone.Primary,
+                )
             }
         }
     }

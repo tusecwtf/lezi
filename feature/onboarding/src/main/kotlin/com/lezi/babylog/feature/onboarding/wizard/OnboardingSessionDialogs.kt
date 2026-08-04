@@ -9,12 +9,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import com.lezi.babylog.designsystem.LeziAlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
@@ -23,6 +20,10 @@ import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.sync.PendingMemberLogin
 
@@ -39,21 +40,13 @@ internal fun OnboardingJoinRoleDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                 Text("已找到配置完成的家庭。请选择这台设备使用的身份。")
-                Button(
-                    onClick = onOwner,
-                    enabled = !familyWizardBusy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("我是家庭管理员") }
-                OutlinedButton(
-                    onClick = onMember,
-                    enabled = !familyWizardBusy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("我是家庭成员") }
+                LeziPrimaryButton(label = "我是家庭管理员", onClick = onOwner, enabled = !familyWizardBusy, modifier = Modifier.fillMaxWidth())
+                LeziSecondaryButton(label = "我是家庭成员", onClick = onMember, enabled = !familyWizardBusy, modifier = Modifier.fillMaxWidth())
             }
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onDismiss)
         },
     )
 }
@@ -105,24 +98,14 @@ internal fun OnboardingOwnerLoginDialog(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                TextButton(
-                    onClick = onTakeover,
-                    enabled = !familyWizardBusy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("丢失设备并接管…") }
+                LeziTextButton(label = "丢失设备并接管…", onClick = onTakeover, enabled = !familyWizardBusy, modifier = Modifier.fillMaxWidth())
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = onLogin,
-                enabled = !familyWizardBusy,
-            ) { Text(if (familyWizardBusy) "正在登录…" else "登录这台设备") }
+            LeziTextButton(label = if (familyWizardBusy) "正在登录…" else "登录这台设备", onClick = onLogin, enabled = !familyWizardBusy)
         },
         dismissButton = {
-            TextButton(
-                onClick = onBack,
-                enabled = !familyWizardBusy,
-            ) { Text("上一步") }
+            LeziTextButton(label = "上一步", onClick = onBack, enabled = !familyWizardBusy,)
         },
     )
 }
@@ -140,16 +123,10 @@ internal fun OnboardingOwnerTakeoverDialog(
             Text("所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。")
         },
         confirmButton = {
-            TextButton(
-                onClick = onConfirm,
-                enabled = !familyWizardBusy,
-            ) { Text(if (familyWizardBusy) "正在接管…" else "确认接管") }
+            LeziTextButton(label = if (familyWizardBusy) "正在接管…" else "确认接管", onClick = onConfirm, enabled = !familyWizardBusy)
         },
         dismissButton = {
-            TextButton(
-                onClick = onCancel,
-                enabled = !familyWizardBusy,
-            ) { Text("取消") }
+            LeziTextButton(label = "取消", onClick = onCancel, enabled = !familyWizardBusy,)
         },
     )
 }
@@ -206,17 +183,19 @@ internal fun OnboardingMemberJoinDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            LeziTextButton(
+                label = if (familyWizardBusy) "正在发送…" else "发送确认请求",
                 onClick = onSubmit,
-                enabled = !familyWizardBusy &&
-                    joinDisplayName.isNotBlank() && memberDeviceName.isNotBlank(),
-            ) { Text(if (familyWizardBusy) "正在发送…" else "发送确认请求") }
+                enabled = !familyWizardBusy,
+                tone = LeziTextButtonTone.Primary,
+            )
         },
         dismissButton = {
-            TextButton(
+            LeziTextButton(
+                label = "暂不连接，保持离线",
                 onClick = onKeepOffline,
                 enabled = !familyWizardBusy,
-            ) { Text("暂不连接，保持离线") }
+            )
         },
     )
 }
@@ -248,30 +227,17 @@ internal fun OnboardingMemberWaitingDialog(
                 (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
                     ?.feedback
                     ?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                TextButton(
-                    onClick = onCancelRequest,
-                    enabled = !familyWizardBusy,
-                ) { Text("在这台设备放弃等待") }
-                TextButton(
-                    onClick = onKeepOffline,
-                    enabled = !familyWizardBusy,
-                ) { Text("暂不连接，保持离线") }
+                LeziTextButton(label = "在这台设备放弃等待", onClick = onCancelRequest, enabled = !familyWizardBusy,)
+                LeziTextButton(label = "暂不连接，保持离线", onClick = onKeepOffline, enabled = !familyWizardBusy,)
             }
         },
         confirmButton = {
-            TextButton(
-                onClick = onCheckResult,
-                enabled = !familyWizardBusy,
-            ) {
-                Text(
-                    when {
+            LeziTextButton(label = when {
                         (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
                             ?.cancelling == true -> "正在取消…"
                         familyWizardBusy -> "正在检查…"
                         else -> "检查结果"
-                    },
-                )
-            }
+                    }, onClick = onCheckResult, enabled = !familyWizardBusy)
         },
     )
 }
