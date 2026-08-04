@@ -50,17 +50,25 @@
 ## 有界内存缓存
 
 预览结果通过共享加载 API 背后的进程内 LRU 复用，**不**引入磁盘 cache 或第三方图片栈。
-`LocalPhotoCacheKey` 固定包含 path、target、源宽高与方向；源 identity 任一字段变化都视为未命中，
-避免 EXIF/尺寸变化后继续展示陈旧 Bitmap。
+缓存键固定包含 path、target、源宽高与方向；源 identity 任一字段变化都视为未命中，
+避免 EXIF/尺寸变化后继续展示陈旧 Bitmap。策略常量与 cache 类型仅在 designsystem 内部
+（`LocalPhotoCachePolicy` / `LocalPhotoMemoryCache`），产品面只暴露
+`rememberLocalPhoto` / `BoundedLocalPhotoLoader`。
 
 | 维度 | 策略 |
 |---|---|
-| 缩略图条目 | 最多 `LocalPhotoCachePolicy.MAX_THUMBNAIL_ENTRIES`（24） |
-| 全屏条目 | 最多 `LocalPhotoCachePolicy.MAX_FULLSCREEN_ENTRIES`（2） |
-| 解码字节预算 | 共享最多 `LocalPhotoCachePolicy.MAX_DECODED_BYTES`（24 MiB，按 ARGB_8888 4 B/px 计） |
-| 淘汰 | 仅淘汰 **unpin** 后的 LRU 条目，并在淘汰时 `recycle`/release Bitmap |
+| 缩略图条目 | 最多 24（`MAX_THUMBNAIL_ENTRIES`） |
+| 全屏条目 | 最多 2（`MAX_FULLSCREEN_ENTRIES`） |
+| 解码字节预算 | 共享最多 24 MiB（`MAX_DECODED_BYTES`，按 ARGB_8888 4 B/px 计） |
+| 淘汰 | 仅淘汰 **unpin** 后的 LRU 条目，并在淘汰时 `recycle`/release Bitmap；仅某一类条目超 cap 时优先淘汰该类 peer |
 | 钉住 | Compose/`rememberLocalPhoto` 在 Ready 期间持有 pin；离开 composition 时 unpin |
 | 取消 | 进行中的 decode 取消不写入 cache；已 pin 但未把 Ready 交给调用方时必须 unpin |
 
-双约束同时生效：条目上限与字节预算任一触顶即淘汰未钉住条目。Cache 只挂在
-`BoundedLocalPhotoLoader` / `rememberLocalPhoto` 共享缝上；功能模块不得再维护平行预览缓存。
+双约束同时生效：条目上限与字节预算任一触顶即淘汰未钉住条目。**Soft cap under pin：**
+条目/字节上限只作用于可淘汰（unpinned）条目；HorizontalPager 等同时组成的多个
+`FULLSCREEN` `rememberLocalPhoto` 在仍处于 composition 时可短暂超过「最多 2 张全屏 /
+24 MiB」稳态目标——产品「at most」指 unpin 后的稳态，不是 pinned 峰值。需要硬峰值时
+应限制 offscreen page 组成，而不是在 pin 期间强制 recycle 仍在展示的 Bitmap。
+
+Cache 只挂在 `BoundedLocalPhotoLoader` / `rememberLocalPhoto` 共享缝上；功能模块不得再
+维护平行预览缓存。

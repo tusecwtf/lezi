@@ -24,16 +24,18 @@ private val androidLocalPhotoCache = LocalPhotoMemoryCache<ImageBitmap>(
 
 private val androidLocalPhotoLoader = BoundedLocalPhotoLoader(
     source = AndroidLocalPhotoDecodeSource,
-    decodeContext = localPhotoDecodeDispatcher,
     cache = androidLocalPhotoCache,
+    decodeContext = localPhotoDecodeDispatcher,
 )
 
 /**
  * Cancellable Compose entry point for app-private record-photo thumbnails and previews.
  *
  * A path or target change cancels and disposes the previous result before the new producer wins.
- * Decoded bitmaps are retained only in the shared [LocalPhotoMemoryCache] behind this API;
- * leaving composition unpins the entry so LRU eviction can recycle it.
+ * Decoded bitmaps are retained only in the process-local memory cache behind this API
+ * ([BoundedLocalPhotoLoader] + internal pin/unpin); features must not own a parallel cache.
+ * Leaving composition unpins the entry so LRU eviction can recycle it. Entry/byte caps are
+ * soft under pin — concurrent ready compositions may exceed the steady-state policy until unpin.
  */
 // Compose runtime 1.7.6 reports a false positive although the producer assigns both states below;
 // cancellation and stale-key disposal remain covered by loader tests and the API 35 device smoke.

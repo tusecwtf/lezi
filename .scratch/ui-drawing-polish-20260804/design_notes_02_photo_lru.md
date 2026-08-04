@@ -2,15 +2,17 @@
 
 ## Public seams under test
 
-1. **`LocalPhotoMemoryCache`** (designsystem)
-   - `get(key)` / `put(key, value, plan)` / `unpin(key)`
+1. **`LocalPhotoMemoryCache`** (designsystem, **internal** — not product API)
+   - `get(key)` / `put(value, plan)` (key on `plan.cacheKey`) / `unpin(key)`
    - Key: `LocalPhotoCacheKey(path, target, sourceWidth, sourceHeight, orientation)`
    - Dual bounds from `LocalPhotoCachePolicy`:
      - THUMBNAIL max entries = 24
      - FULLSCREEN max entries = 2
      - shared max decoded bytes = 24 MiB (ARGB_8888 = 4 B/px)
-   - Eviction: LRU among **unpinned** entries; `release` callback on eviction
+   - Eviction: when only one entry-cap is violated, prefer unpinned peers of that
+     target; pure/mixed byte overage uses global unpinned LRU. Soft under pin.
    - Pin: put/get grant one pin to caller; unpin balances; cancel must not leave a pin/entry for a non-returned Ready
+   - Product surface remains `rememberLocalPhoto` / `BoundedLocalPhotoLoader` only
 
 2. **`BoundedLocalPhotoLoader.load`** with optional cache
    - After inspect + plan, cache hit returns Ready without decode/orientation

@@ -50,7 +50,14 @@ data class LocalPhotoSourceInfo(
     val orientation: LocalPhotoOrientation,
 )
 
-data class LocalPhotoCacheKey(
+/**
+ * Cache identity for a decoded local photo.
+ *
+ * Includes path, display target, source dimensions, and EXIF orientation so a
+ * re-inspect that changes any of those fields misses and re-decodes.
+ * Internal: product code must not build parallel caches keyed by this type.
+ */
+internal data class LocalPhotoCacheKey(
     val path: String,
     val target: LocalPhotoTarget,
     val sourceWidth: Int,
@@ -58,154 +65,18 @@ data class LocalPhotoCacheKey(
     val orientation: LocalPhotoOrientation,
 )
 
-data class LocalPhotoDecodePlan(
+/**
+ * Decode geometry for a successful load. Constructed only inside designsystem;
+ * [cacheKey] is internal pin identity so features cannot key parallel caches.
+ */
+@ConsistentCopyVisibility
+data class LocalPhotoDecodePlan internal constructor(
     val sampleSize: Int,
     val decodedWidth: Int,
     val decodedHeight: Int,
     val decodedPixels: Long,
-    val cacheKey: LocalPhotoCacheKey,
+    internal val cacheKey: LocalPhotoCacheKey,
 )
-
-/**
- * Conservative in-memory bounds for the shared local-photo preview cache.
- *
- * Dual limits apply together: entry caps by [LocalPhotoTarget] **and** a shared
- * decoded-byte budget. Values are ARGB_8888-oriented (4 bytes/pixel).
- */
-object LocalPhotoCachePolicy {
-    const val MAX_THUMBNAIL_ENTRIES: Int = 24
-    const val MAX_FULLSCREEN_ENTRIES: Int = 2
-    /** 24 MiB shared decoded budget (within the product ~16–32 MiB band). */
-    const val MAX_DECODED_BYTES: Long = 24L * 1024L * 1024L
-    const val BYTES_PER_PIXEL: Int = 4
-
-    fun decodedBytes(width: Int, height: Int): Long =
-        width.toLong() * height.toLong() * BYTES_PER_PIXEL
-
-    fun decodedBytes(plan: LocalPhotoDecodePlan): Long =
-        decodedBytes(plan.decodedWidth, plan.decodedHeight)
-}
-
-/** Value + plan pair returned from cache get/put. */
-data class LocalPhotoCachedValue<T : Any>(
-    val value: T,
-    val plan: LocalPhotoDecodePlan,
-)
-
-/**
- * Process-local LRU for decoded record/plan photo previews.
- *
- * Callers receive one pin from [get] or [put] and must [unpin] when the value is
- * no longer displayed. Only unpinned entries are eligible for eviction; eviction
- * invokes [release] so platform bitmaps can be recycled.
- */
-class LocalPhotoMemoryCache<T : Any>(
-    val maxThumbnailEntries: Int = LocalPhotoCachePolicy.MAX_THUMBNAIL_ENTRIES,
-    val maxFullscreenEntries: Int = LocalPhotoCachePolicy.MAX_FULLSCREEN_ENTRIES,
-    val maxDecodedBytes: Long = LocalPhotoCachePolicy.MAX_DECODED_BYTES,
-    private val release: (T) -> Unit,
-) {
-    private data class Entry<T : Any>(
-        val value: T,
-        val plan: LocalPhotoDecodePlan,
-        val byteSize: Long,
-        var pins: Int,
-    )
-
-    private val lock = Any()
-    private val entries = LinkedHashMap<LocalPhotoCacheKey, Entry<T>>(16, 0.75f, /* accessOrder = */ true)
-
-    val totalEntryCount: Int
-        get() = synchronized(lock) { entries.size }
-
-    val thumbnailEntryCount: Int
-        get() = synchronized(lock) {
-            entries.keys.count { it.target == LocalPhotoTarget.THUMBNAIL }
-        }
-
-    val fullscreenEntryCount: Int
-        get() = synchronized(lock) {
-            entries.keys.count { it.target == LocalPhotoTarget.FULLSCREEN }
-        }
-
-    val decodedByteSize: Long
-        get() = synchronized(lock) { entries.values.sumOf { it.byteSize } }
-
-    /** Cache hit: moves to MRU and grants one pin. */
-    fun get(key: LocalPhotoCacheKey): LocalPhotoCachedValue<T>? = synchronized(lock) {
-        val entry = entries[key] ?: return null
-        entry.pins += 1
-        LocalPhotoCachedValue(entry.value, entry.plan)
-    }
-
-    /**
-     * Inserts [value] under [plan].cacheKey, granting the caller one pin.
-     * If another entry already won the same key, releases [value] when distinct
-     * and pins the existing entry instead.
-     */
-    fun put(value: T, plan: LocalPhotoDecodePlan): LocalPhotoCachedValue<T> = synchronized(lock) {
-        val key = plan.cacheKey
-        val existing = entries[key]
-        if (existing != null) {
-            if (value !== existing.value) {
-                releaseSafely(value)
-            }
-            existing.pins += 1
-            return LocalPhotoCachedValue(existing.value, existing.plan)
-        }
-        val byteSize = LocalPhotoCachePolicy.decodedBytes(plan)
-        entries[key] = Entry(value = value, plan = plan, byteSize = byteSize, pins = 1)
-        evictUntilWithinBoundsLocked()
-        val stored = entries[key]
-            ?: error("fresh pin must remain after eviction of unpinned peers only")
-        LocalPhotoCachedValue(stored.value, stored.plan)
-    }
-
-    fun unpin(key: LocalPhotoCacheKey) {
-        synchronized(lock) {
-            val entry = entries[key] ?: return
-            if (entry.pins > 0) {
-                entry.pins -= 1
-            }
-            evictUntilWithinBoundsLocked()
-        }
-    }
-
-    private fun evictUntilWithinBoundsLocked() {
-        while (overBudgetLocked()) {
-            val victimKey = entries.entries.firstOrNull { it.value.pins == 0 }?.key
-                ?: break
-            val victim = entries.remove(victimKey) ?: break
-            releaseSafely(victim.value)
-        }
-    }
-
-    private fun overBudgetLocked(): Boolean {
-        var thumbs = 0
-        var fulls = 0
-        var bytes = 0L
-        for ((key, entry) in entries) {
-            when (key.target) {
-                LocalPhotoTarget.THUMBNAIL -> thumbs += 1
-                LocalPhotoTarget.FULLSCREEN -> fulls += 1
-            }
-            bytes += entry.byteSize
-        }
-        return thumbs > maxThumbnailEntries ||
-            fulls > maxFullscreenEntries ||
-            bytes > maxDecodedBytes
-    }
-
-    private fun releaseSafely(value: T) {
-        try {
-            release(value)
-        } catch (_: OutOfMemoryError) {
-            // Eviction cleanup must not throw into load/unpin callers.
-        } catch (_: Exception) {
-            // Eviction cleanup must not throw into load/unpin callers.
-        }
-    }
-}
 
 sealed interface LocalPhotoLoadResult<out T : Any> {
     data object Loading : LocalPhotoLoadResult<Nothing>
@@ -242,15 +113,28 @@ interface LocalPhotoDecodeSource<T : Any> {
 /**
  * Loads one local photo on [decodeContext], bounded by the requested display budget.
  *
- * When [cache] is provided, successful results are pinned in the cache; callers
- * must [LocalPhotoMemoryCache.unpin] the [LocalPhotoDecodePlan.cacheKey] when the
- * value is no longer displayed. Cancelled loads never populate the cache.
+ * Product callers use the no-cache constructor or [rememberLocalPhoto] (which
+ * wires the process-local [LocalPhotoMemoryCache]). Same-module code may pass a
+ * cache; successful results are pinned and must be unpinned when no longer
+ * displayed. Cancelled loads never populate the cache.
  */
-class BoundedLocalPhotoLoader<T : Any>(
+class BoundedLocalPhotoLoader<T : Any> private constructor(
     private val source: LocalPhotoDecodeSource<T>,
-    private val decodeContext: CoroutineContext = Dispatchers.IO,
-    private val cache: LocalPhotoMemoryCache<T>? = null,
+    private val decodeContext: CoroutineContext,
+    private val cache: LocalPhotoMemoryCache<T>?,
 ) {
+    constructor(
+        source: LocalPhotoDecodeSource<T>,
+        decodeContext: CoroutineContext = Dispatchers.IO,
+    ) : this(source, decodeContext, cache = null)
+
+    /** Same-module shared-cache wiring (Android process cache + JVM tests). */
+    internal constructor(
+        source: LocalPhotoDecodeSource<T>,
+        cache: LocalPhotoMemoryCache<T>?,
+        decodeContext: CoroutineContext = Dispatchers.IO,
+    ) : this(source, decodeContext, cache)
+
     suspend fun load(request: LocalPhotoDecodeRequest): LocalPhotoLoadResult<T> =
         withContext(decodeContext) {
             var ownedValue: LocalPhotoDecoded<T>? = null

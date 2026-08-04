@@ -243,6 +243,68 @@ class UiAuditPathContractTest {
         assertTrue(theme.contains("LeziDensity.forStyle(visualStyle)"))
     }
 
+    @Test
+    fun `local photo cache policy bounds and shared-loader-only wiring`() {
+        assertEquals(24, LocalPhotoCachePolicy.MAX_THUMBNAIL_ENTRIES)
+        assertEquals(2, LocalPhotoCachePolicy.MAX_FULLSCREEN_ENTRIES)
+        assertEquals(24L * 1024L * 1024L, LocalPhotoCachePolicy.MAX_DECODED_BYTES)
+        assertEquals(4, LocalPhotoCachePolicy.BYTES_PER_PIXEL)
+
+        val cacheSource = read(
+            "designsystem/src/main/kotlin/com/lezi/babylog/designsystem/LocalPhotoMemoryCache.kt",
+        )
+        assertTrue(
+            "cache policy must stay internal (not a feature-level product API)",
+            cacheSource.contains("internal object LocalPhotoCachePolicy"),
+        )
+        assertTrue(
+            "memory cache must stay internal behind the shared loader seam",
+            cacheSource.contains("internal class LocalPhotoMemoryCache"),
+        )
+        assertTrue(
+            "soft-cap-under-pin must remain documented on the policy",
+            cacheSource.contains("Soft caps under pin"),
+        )
+
+        val androidLoader = read(
+            "designsystem/src/main/kotlin/com/lezi/babylog/designsystem/AndroidLocalPhotoLoader.kt",
+        )
+        assertTrue(
+            androidLoader.contains("private val androidLocalPhotoCache = LocalPhotoMemoryCache"),
+        )
+        assertTrue(
+            androidLoader.contains("BoundedLocalPhotoLoader(") &&
+                androidLoader.contains("cache = androidLocalPhotoCache"),
+        )
+        assertTrue(
+            "rememberLocalPhoto must unpin on dispose rather than release while displayed",
+            androidLoader.contains("readyKey?.let(androidLocalPhotoCache::unpin)"),
+        )
+        assertTrue(androidLoader.contains("fun rememberLocalPhoto("))
+
+        // Features must not construct a parallel LocalPhotoMemoryCache.
+        val featureOffenders = mutableListOf<String>()
+        val featureRoot = repositoryRoot().resolve("feature")
+        if (featureRoot.isDirectory) {
+            featureRoot.walkTopDown()
+                .filter { it.isFile && it.extension == "kt" && "src/main" in it.invariantSeparatorsPath }
+                .forEach { file ->
+                    val text = file.readText()
+                    if (
+                        "LocalPhotoMemoryCache" in text ||
+                        "LocalPhotoCachePolicy" in text ||
+                        "BoundedLocalPhotoLoader(" in text
+                    ) {
+                        featureOffenders += file.relativeTo(repositoryRoot()).path
+                    }
+                }
+        }
+        assertTrue(
+            "feature modules must use rememberLocalPhoto only:\n${featureOffenders.joinToString("\n")}",
+            featureOffenders.isEmpty(),
+        )
+    }
+
     private fun read(relative: String): String =
         repositoryRoot().resolve(relative).readText()
 
