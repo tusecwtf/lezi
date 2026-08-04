@@ -44,6 +44,7 @@ import com.lezi.babylog.core.ui.presentationSummary
 import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
@@ -161,6 +162,9 @@ internal fun LogTimelineList(
             }
     }
 
+    val density = LeziThemeExt.density
+    val pageHorizontal = if (journal) 0.dp else density.panelContent
+
     PullToRefreshBox(
         isRefreshing = state.refreshing,
         onRefresh = onRefresh,
@@ -171,14 +175,12 @@ internal fun LogTimelineList(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = LeziSpacing.Md),
             verticalArrangement = Arrangement.spacedBy(
-                if (journal) 0.dp else LeziSpacing.SectionGap,
+                if (journal) 0.dp else density.sectionGap,
             ),
         ) {
             item {
                 Column(
-                    Modifier.padding(
-                        horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                    ),
+                    Modifier.padding(horizontal = pageHorizontal),
                 ) {
                     Text(
                         text = state.shallowSyncLine.text,
@@ -315,9 +317,7 @@ internal fun LogTimelineList(
                         hourLabels = timelineAxis.hourLabels(),
                         onViewportStartChange = onTimelineViewportStartChange,
                         titleSecondary = "时间轴",
-                        modifier = Modifier.padding(
-                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                        ),
+                        modifier = Modifier.padding(horizontal = pageHorizontal),
                     )
                 }
             }
@@ -325,9 +325,7 @@ internal fun LogTimelineList(
             if (state.day != today) {
                 item {
                     Row(
-                        Modifier.padding(
-                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                        ),
+                        Modifier.padding(horizontal = pageHorizontal),
                     ) {
                         LeziSecondaryButton(
                             "返回今天",
@@ -341,9 +339,7 @@ internal fun LogTimelineList(
             if (state.pendingPlans.isNotEmpty()) {
                 item {
                     Column(
-                        Modifier.padding(
-                            horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                        ),
+                        Modifier.padding(horizontal = pageHorizontal),
                     ) {
                         SectionHeading(
                             eyebrow = if (journal) null else "待履行",
@@ -415,7 +411,7 @@ internal fun LogTimelineList(
                     val skipPlanAction: () -> Boolean = { requestSkip(plan.id) }
                     Column(
                         Modifier
-                            .padding(horizontal = if (journal) 0.dp else LeziSpacing.Page)
+                            .padding(horizontal = pageHorizontal)
                             .testTag("pending_care_plan_${plan.id}"),
                     ) {
                         SwipeEditDeleteRow(
@@ -514,9 +510,7 @@ internal fun LogTimelineList(
 
             item {
                 Column(
-                    Modifier.padding(
-                        horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                    ),
+                    Modifier.padding(horizontal = pageHorizontal),
                 ) {
                     SectionHeading(title = "记录")
                 }
@@ -535,18 +529,19 @@ internal fun LogTimelineList(
                                 kind = StateKind.Loading,
                                 title = "加载中",
                                 message = "正在读取当日记录…",
-                                modifier = Modifier.padding(
-                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = pageHorizontal)
+                                    .testTag("log_records_loading"),
                             )
                         } else {
+                            // Empty day: ring mark + quiet color via StateKind.Empty — not a spinner.
                             StateContainer(
                                 kind = StateKind.Empty,
                                 title = "还没有记录",
                                 message = "点下方快捷入口添加第一条记录",
-                                modifier = Modifier.padding(
-                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = pageHorizontal)
+                                    .testTag("log_records_empty"),
                             )
                         }
                     }
@@ -591,9 +586,7 @@ internal fun LogTimelineList(
                         deleteTestTag = "timeline_swipe_delete_record_${record.id}",
                         modifier = Modifier
                             .animateItem()
-                            .padding(
-                                horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                            ),
+                            .padding(horizontal = pageHorizontal),
                     ) {
                         RecordRow(
                             time = formatClock(record.timestamp, zone),

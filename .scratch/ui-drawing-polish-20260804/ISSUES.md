@@ -2,8 +2,8 @@
 
 Status: ready-for-agent
 
-Serial spine (preferred agent order). **01–05** are done; next open frontier is
-**06** (record density/empty) or **10** (shell motion) — keep work one-at-a-time
+Serial spine (preferred agent order). **01–06** are done; next open frontier is
+**07** (summary density/empty) or **10** (shell motion) — keep work one-at-a-time
 unless a human explicitly parallelizes.
 
 | # | File | Title | Blocked by | Status |
@@ -13,7 +13,7 @@ unless a human explicitly parallelizes.
 | 03 | [issues/03-chrome-dial-nursing.md](./issues/03-chrome-dial-nursing.md) | High-frequency chrome: dial + nursing | 01 | done |
 | 04 | [issues/04-chrome-nextfeed-photo-qr.md](./issues/04-chrome-nextfeed-photo-qr.md) | Remaining designsystem chrome | 03 | done |
 | 05 | [issues/05-contract-ban-bare-material.md](./issues/05-contract-ban-bare-material.md) | Contract: ban bare Material outside wrappers | 04 | done |
-| 06 | [issues/06-record-density-empty.md](./issues/06-record-density-empty.md) | Record surface density + empty language | 01, 05 | ready-for-agent |
+| 06 | [issues/06-record-density-empty.md](./issues/06-record-density-empty.md) | Record surface density + empty language | 01, 05 | done |
 | 07 | [issues/07-summary-density-empty.md](./issues/07-summary-density-empty.md) | Summary density + empty/calculating honesty | 06 | ready-for-agent |
 | 08 | [issues/08-growth-lazy-history.md](./issues/08-growth-lazy-history.md) | Growth: lazy history + surface polish | 07 | ready-for-agent |
 | 09 | [issues/09-family-lazy-members.md](./issues/09-family-lazy-members.md) | Family: lazy members/devices | 08 | ready-for-agent |

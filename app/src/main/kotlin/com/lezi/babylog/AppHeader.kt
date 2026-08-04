@@ -170,7 +170,7 @@ internal fun AppHeaderBar(
             .fillMaxWidth()
             .height(LeziSpacing.TopBarHeight)
             .background(background)
-            .padding(horizontal = LeziSpacing.TopBarHorizontal),
+            .padding(horizontal = LeziThemeExt.density.topBarHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(

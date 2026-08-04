@@ -532,9 +532,12 @@ fun TimelineRailCard(
     titleSecondary: String? = null,
 ) {
     val journal = LeziThemeExt.isJournal
-    val contentPadding = if (journal) PaddingValues(10.dp) else PaddingValues(18.dp)
-    val sectionGap = if (journal) 6.dp else 10.dp
-    val laneGap = if (journal) 6.dp else 8.dp
+    val density = LeziThemeExt.density
+    // Structural pads from template density (warm open / journal compact).
+    val contentPadding = PaddingValues(density.panelContent)
+    val sectionGap = density.sectionGap
+    // Lane gap stays on the 4/8 grid; not a named density role.
+    val laneGap = LeziSpacing.Xs
     val hourLabelStart = if (journal) 32.dp else 34.dp
     val safeViewportDuration = viewportDurationMinutes.coerceAtLeast(1)
     val resolvedHourLabels = hourLabels ?: defaultHourLabels(

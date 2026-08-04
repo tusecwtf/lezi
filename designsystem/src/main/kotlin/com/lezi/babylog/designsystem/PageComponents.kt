@@ -82,7 +82,7 @@ fun LeziDetailTopBar(
             .fillMaxWidth()
             .height(LeziSpacing.TopBarHeight)
             .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = LeziSpacing.TopBarHorizontal),
+            .padding(horizontal = LeziThemeExt.density.topBarHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         LeziIconButton(
@@ -128,7 +128,7 @@ fun AppBrandBar(
             .fillMaxWidth()
             .height(LeziSpacing.TopBarHeight)
             .background(background)
-            .padding(horizontal = LeziSpacing.TopBarHorizontal),
+            .padding(horizontal = LeziThemeExt.density.topBarHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(

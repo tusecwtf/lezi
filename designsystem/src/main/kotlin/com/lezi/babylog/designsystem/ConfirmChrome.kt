@@ -11,7 +11,6 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
 
 enum class LeziConfirmAppearance {
     Enabled,
@@ -79,7 +78,7 @@ fun LeziConfirmReasonCard(reason: String, modifier: Modifier = Modifier) {
     ) {
         Text(
             reason,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.padding(LeziThemeExt.density.cardPad),
             style = LeziTypography.BodyStrong,
         )
     }

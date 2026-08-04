@@ -49,10 +49,11 @@ internal fun QuickDockContainer(
         modifier = modifier
             .fillMaxWidth()
             .padding(
+                // Structural outer inset: journal full-bleed; warm uses density top-bar role.
                 horizontal = if (LeziThemeExt.isJournal) {
                     0.dp
                 } else {
-                    QuickDockVisualSpec.outerHorizontalWarm
+                    LeziThemeExt.density.topBarHorizontal
                 },
                 vertical = QuickDockVisualSpec.outerVertical,
             )

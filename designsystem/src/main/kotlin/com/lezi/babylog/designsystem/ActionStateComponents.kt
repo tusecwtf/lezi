@@ -141,11 +141,13 @@ fun StateContainer(
                 .padding(vertical = LeziSpacing.Lg),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Empty uses a quiet ring (onSurfaceVariant); loading alone uses primary spinner.
             val markColor = when (kind) {
                 StateKind.Error -> LocalLeziColors.current.danger
                 StateKind.Success -> LocalLeziColors.current.success
                 StateKind.Recording -> LocalLeziColors.current.fab
-                else -> MaterialTheme.colorScheme.primary
+                StateKind.Empty -> MaterialTheme.colorScheme.onSurfaceVariant
+                StateKind.Loading -> MaterialTheme.colorScheme.primary
             }
             Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
                 if (kind == StateKind.Loading) {
