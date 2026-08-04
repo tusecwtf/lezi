@@ -2,6 +2,7 @@ package com.lezi.babylog.designsystem
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -33,6 +34,7 @@ import kotlin.math.roundToInt
  *
  * The selected pill slides between equal-width slots while tab text color
  * animates, so switching reads as one continuous control instead of a snap.
+ * Indicator + text durations share [leziMotionMillis] (Fast); reduce-motion → 0 snap.
  */
 @Composable
 fun <T> LeziRangeTabs(
@@ -47,6 +49,8 @@ fun <T> LeziRangeTabs(
     val tabShape = if (LeziThemeExt.isJournal) LeziShapes.JournalSm else LeziShapes.Sm
     val selectedIndex = items.indexOf(selected).coerceAtLeast(0)
     val gap = LeziSpacing.Xxs
+    // Non-essential range-tab feedback: Fast tier; reduce-motion → 0 (snap).
+    val tabMotionMs = leziMotionMillis(LeziMotion.Fast)
     Box(
         modifier
             .fillMaxWidth()
@@ -58,6 +62,7 @@ fun <T> LeziRangeTabs(
             val tabWidth = (maxWidth - gap * (items.size - 1)) / items.size
             val indicatorOffset by animateDpAsState(
                 targetValue = (tabWidth + gap) * selectedIndex,
+                animationSpec = tween(durationMillis = tabMotionMs),
                 label = "range_tab_indicator",
             )
             Box(
@@ -85,6 +90,7 @@ fun <T> LeziRangeTabs(
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
+                        animationSpec = tween(durationMillis = tabMotionMs),
                         label = "range_tab_text",
                     )
                     Box(

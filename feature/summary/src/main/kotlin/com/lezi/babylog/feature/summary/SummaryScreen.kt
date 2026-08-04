@@ -69,6 +69,8 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageHero
 import com.lezi.babylog.designsystem.PageScaffoldBackground
+import com.lezi.babylog.designsystem.StateContainer
+import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.carelog.WeekSummary
@@ -302,8 +304,8 @@ fun SummaryRoute(
                         .padding(LeziSpacing.Page),
                     contentAlignment = Alignment.Center,
                 ) {
-                    com.lezi.babylog.designsystem.StateContainer(
-                        kind = com.lezi.babylog.designsystem.StateKind.Loading,
+                    StateContainer(
+                        kind = StateKind.Loading,
                         title = "正在计算汇总",
                         message = "正在整理护理记录，请稍候。",
                         modifier = Modifier.testTag("summary_calculating"),
@@ -394,204 +396,191 @@ private fun SummaryContent(
                     )
                 }
 
-            AnimatedContent(
-                targetState = ui.range,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(durationMillis = rangeEnterMs)) togetherWith
-                        fadeOut(animationSpec = tween(durationMillis = rangeExitMs))
-                },
-                label = "summary_range_content",
-            ) {
-                val windows = t.chartWindows
-                SummaryKpiStrip(
-                    feedValue = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
-                        "0次"
-                    } else {
-                        "${windows.dayFeedCount}次"
+                AnimatedContent(
+                    targetState = ui.range,
+                    transitionSpec = {
+                        fadeIn(animationSpec = tween(durationMillis = rangeEnterMs)) togetherWith
+                            fadeOut(animationSpec = tween(durationMillis = rangeExitMs))
                     },
-                    feedDetail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
-                        "当日暂无详情"
-                    } else {
-                        formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
-                    },
-                    sleepValue = formatRecordDuration(windows.daySleepMin),
-                    sleepDetail = if (windows.daySleepSegments == 0) {
-                        "当日 0 段"
-                    } else {
-                        "当日 ${windows.daySleepSegments} 段"
-                    },
-                    diaperValue = "${windows.dayDiaper}",
-                    diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
-                )
-
-                if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
-                    val previous = ui.previousWeekTotals
-                    LeziSurfacePanel(
-                        Modifier.fillMaxWidth(),
-                        contentPadding = chartCardPad,
-                        bottomBand = true,
+                    label = "summary_range_content",
+                ) {
+                    // Range body emits multiple siblings; keep a Column so they
+                    // retain spacedBy layout once lifted out of the outer Column
+                    // into AnimatedContent (which does not arrange multi-root content).
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(density.sectionGap),
                     ) {
-                        Text("对比上周", style = LeziTypography.TitleSm)
-                        if (previous == null) {
-                            Text(
-                                "上周暂无记录",
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        val windows = t.chartWindows
+                        SummaryKpiStrip(
+                            feedValue = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
+                                "0次"
+                            } else {
+                                "${windows.dayFeedCount}次"
+                            },
+                            feedDetail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
+                                "当日暂无详情"
+                            } else {
+                                formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
+                            },
+                            sleepValue = formatRecordDuration(windows.daySleepMin),
+                            sleepDetail = if (windows.daySleepSegments == 0) {
+                                "当日 0 段"
+                            } else {
+                                "当日 ${windows.daySleepSegments} 段"
+                            },
+                            diaperValue = "${windows.dayDiaper}",
+                            diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
+                        )
+
+                        if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
+                            val previous = ui.previousWeekTotals
+                            LeziSurfacePanel(
+                                Modifier.fillMaxWidth(),
+                                contentPadding = chartCardPad,
+                                bottomBand = true,
+                            ) {
+                                Text("对比上周", style = LeziTypography.TitleSm)
+                                if (previous == null) {
+                                    Text(
+                                        "上周暂无记录",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                } else {
+                                    Text(
+                                        "喂养 ${formatSigned(t.feedMl - previous.feedMl, "ml")} · " +
+                                            "睡眠 ${formatSigned(t.sleepMin - previous.sleepMin, "分钟")}",
+                                        style = LeziTypography.Body,
+                                    )
+                                    Text(
+                                        "尿尿 ${formatSigned(t.pee - previous.pee, "次")} · " +
+                                            "便便 ${formatSigned(t.poop - previous.poop, "次")}",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+
+                        if (journal && ui.week != null) {
+                            JournalWeekGrid(ui.week!!)
+                        }
+
+                        val feedChartTotal = when (ui.range) {
+                            SummaryRange.Day ->
+                                formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
+                            SummaryRange.Week, SummaryRange.Month ->
+                                formatFeedWindowTotal(t.feedMl, t.nursingMin)
+                        }
+                        val sleepChartTotal = when (ui.range) {
+                            SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
+                            SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
+                        }
+                        val diaperChartTotal = when (ui.range) {
+                            SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
+                            SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
+                        }
+                        val chartTotalScope = when (ui.range) {
+                            SummaryRange.Day -> "当日"
+                            SummaryRange.Week -> "本周"
+                            SummaryRange.Month -> "本月"
+                        }
+
+                        SummaryChartPanel(
+                            title = "喂养",
+                            scopeLabel = chartTotalScope,
+                            totalValue = feedChartTotal,
+                            isEmpty = t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L,
+                            emptyTitle = "范围内暂无喂养记录",
+                            emptyMessage = "换一周或去记录页添加喂养。",
+                            emptyTag = "summary_chart_empty_feed",
+                            contentPadding = chartCardPad,
+                        ) {
+                            MiniBarChart(
+                                values = t.dayValuesFeed,
+                                dates = chartDates,
+                                metricLabel = "喂养量",
+                                color = ext.laneFeed,
+                                valueFormatter = { v -> if (v <= 0f) "" else "${v.toInt()}ml" },
                             )
-                        } else {
-                            Text(
-                                "喂养 ${formatSigned(t.feedMl - previous.feedMl, "ml")} · " +
-                                    "睡眠 ${formatSigned(t.sleepMin - previous.sleepMin, "分钟")}",
-                                style = LeziTypography.Body,
+                        }
+
+                        SummaryChartPanel(
+                            title = "睡眠",
+                            scopeLabel = chartTotalScope,
+                            totalValue = sleepChartTotal,
+                            isEmpty = t.dayValuesSleep.all { it <= 0f },
+                            emptyTitle = "范围内暂无已完成睡眠记录",
+                            emptyMessage = "完成的睡眠会按天汇总到这里。",
+                            emptyTag = "summary_chart_empty_sleep",
+                            contentPadding = chartCardPad,
+                            preContent = {
+                                if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
+                                    val averageSleep =
+                                        t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
+                                    Text(
+                                        "日均睡眠 ${formatRecordDuration(averageSleep)}",
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Spacer(Modifier.height(LeziSpacing.Xs))
+                                }
+                            },
+                        ) {
+                            MiniBarChart(
+                                values = t.dayValuesSleep,
+                                dates = chartDates,
+                                metricLabel = "睡眠分钟",
+                                color = ext.laneSleep,
+                                valueFormatter = { v ->
+                                    if (v <= 0f) "" else formatRecordDuration(v.toLong())
+                                },
                             )
-                            Text(
-                                "尿尿 ${formatSigned(t.pee - previous.pee, "次")} · " +
-                                    "便便 ${formatSigned(t.poop - previous.poop, "次")}",
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        }
+
+                        SummaryChartPanel(
+                            title = "尿布",
+                            scopeLabel = chartTotalScope,
+                            totalValue = diaperChartTotal,
+                            isEmpty = t.dayValuesDiaper.all { it <= 0f },
+                            emptyTitle = "范围内暂无尿布记录",
+                            emptyMessage = "尿/便记录会按天汇总到这里。",
+                            emptyTag = "summary_chart_empty_diaper",
+                            contentPadding = chartCardPad,
+                            preContent = {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
+                                ) {
+                                    DiaperLegendDot(color = ext.laneCare, label = "尿尿")
+                                    DiaperLegendDot(color = ext.sun, label = "便便")
+                                }
+                                Spacer(Modifier.height(LeziSpacing.Xs))
+                            },
+                        ) {
+                            StackedDiaperBarChart(
+                                pee = t.dayValuesPee,
+                                poop = t.dayValuesPoop,
+                                dates = chartDates,
+                                peeColor = ext.laneCare,
+                                poopColor = ext.sun,
+                            )
+                        }
+
+                        if (t.tempAvg != null) {
+                            WeekLineChart(
+                                title = "体温",
+                                values = t.dayValuesTemp,
+                                dates = chartDates,
+                                color = ext.danger,
+                                scopeLabel = "${t.tempDays} 天有记录",
+                                totalValue = "%.1f℃".format(t.tempAvg),
                             )
                         }
                     }
                 }
 
-                if (journal && ui.week != null) {
-                    JournalWeekGrid(ui.week!!)
-                }
-
-                val feedChartTotal = when (ui.range) {
-                    SummaryRange.Day -> formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
-                    SummaryRange.Week, SummaryRange.Month ->
-                        formatFeedWindowTotal(t.feedMl, t.nursingMin)
-                }
-                val sleepChartTotal = when (ui.range) {
-                    SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
-                    SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
-                }
-                val diaperChartTotal = when (ui.range) {
-                    SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
-                    SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
-                }
-                val chartTotalScope = when (ui.range) {
-                    SummaryRange.Day -> "当日"
-                    SummaryRange.Week -> "本周"
-                    SummaryRange.Month -> "本月"
-                }
-
-                LeziSurfacePanel(
-                    Modifier.fillMaxWidth(),
-                    contentPadding = chartCardPad,
-                    bottomBand = true,
-                ) {
-                    ChartCardHeader(
-                        title = "喂养",
-                        scopeLabel = chartTotalScope,
-                        totalValue = feedChartTotal,
-                    )
-                    Spacer(Modifier.height(LeziSpacing.Xs))
-                    if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
-                        com.lezi.babylog.designsystem.StateContainer(
-                            kind = com.lezi.babylog.designsystem.StateKind.Empty,
-                            title = "范围内暂无喂养记录",
-                            message = "换一周或去记录页添加喂养。",
-                            modifier = Modifier.testTag("summary_chart_empty_feed"),
-                        )
-                    } else {
-                        MiniBarChart(
-                            values = t.dayValuesFeed,
-                            dates = chartDates,
-                            metricLabel = "喂养量",
-                            color = ext.laneFeed,
-                            valueFormatter = { v -> if (v <= 0f) "" else "${v.toInt()}ml" },
-                        )
-                    }
-                }
-
-                LeziSurfacePanel(
-                    Modifier.fillMaxWidth(),
-                    contentPadding = chartCardPad,
-                    bottomBand = true,
-                ) {
-                    ChartCardHeader(
-                        title = "睡眠",
-                        scopeLabel = chartTotalScope,
-                        totalValue = sleepChartTotal,
-                    )
-                    Spacer(Modifier.height(LeziSpacing.Xs))
-                    if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
-                        val averageSleep = t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
-                        Text(
-                            "日均睡眠 ${formatRecordDuration(averageSleep)}",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(LeziSpacing.Xs))
-                    }
-                    if (t.dayValuesSleep.all { it <= 0f }) {
-                        com.lezi.babylog.designsystem.StateContainer(
-                            kind = com.lezi.babylog.designsystem.StateKind.Empty,
-                            title = "范围内暂无已完成睡眠记录",
-                            message = "完成的睡眠会按天汇总到这里。",
-                            modifier = Modifier.testTag("summary_chart_empty_sleep"),
-                        )
-                    } else {
-                        MiniBarChart(
-                            values = t.dayValuesSleep,
-                            dates = chartDates,
-                            metricLabel = "睡眠分钟",
-                            color = ext.laneSleep,
-                            valueFormatter = { v ->
-                                if (v <= 0f) "" else formatRecordDuration(v.toLong())
-                            },
-                        )
-                    }
-                }
-
-                LeziSurfacePanel(
-                    Modifier.fillMaxWidth(),
-                    contentPadding = chartCardPad,
-                    bottomBand = true,
-                ) {
-                    ChartCardHeader(
-                        title = "尿布",
-                        scopeLabel = chartTotalScope,
-                        totalValue = diaperChartTotal,
-                    )
-                    Spacer(Modifier.height(LeziSpacing.Xs))
-                    Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Md)) {
-                        DiaperLegendDot(color = ext.laneCare, label = "尿尿")
-                        DiaperLegendDot(color = ext.sun, label = "便便")
-                    }
-                    Spacer(Modifier.height(LeziSpacing.Xs))
-                    if (t.dayValuesDiaper.all { it <= 0f }) {
-                        com.lezi.babylog.designsystem.StateContainer(
-                            kind = com.lezi.babylog.designsystem.StateKind.Empty,
-                            title = "范围内暂无尿布记录",
-                            message = "尿/便记录会按天汇总到这里。",
-                            modifier = Modifier.testTag("summary_chart_empty_diaper"),
-                        )
-                    } else {
-                        StackedDiaperBarChart(
-                            pee = t.dayValuesPee,
-                            poop = t.dayValuesPoop,
-                            dates = chartDates,
-                            peeColor = ext.laneCare,
-                            poopColor = ext.sun,
-                        )
-                    }
-                }
-                if (t.tempAvg != null) {
-                    WeekLineChart(
-                        title = "体温",
-                        values = t.dayValuesTemp,
-                        dates = chartDates,
-                        color = ext.danger,
-                        scopeLabel = "${t.tempDays} 天有记录",
-                        totalValue = "%.1f℃".format(t.tempAvg),
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(LeziSpacing.Xxl))
+                Spacer(Modifier.height(LeziSpacing.Xxl))
             }
         }
     }
@@ -709,6 +698,49 @@ private fun KpiCell(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 2,
         )
+    }
+}
+
+/**
+ * Shared chart card shell: header + optional pre-content + empty StateContainer
+ * or chart body. Keeps empty≠calculating policy (StateKind.Empty + copy/tags)
+ * in one place across feed/sleep/diaper panels.
+ */
+@Composable
+private fun SummaryChartPanel(
+    title: String,
+    scopeLabel: String,
+    totalValue: String,
+    isEmpty: Boolean,
+    emptyTitle: String,
+    emptyMessage: String,
+    emptyTag: String,
+    contentPadding: PaddingValues,
+    preContent: @Composable (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
+    LeziSurfacePanel(
+        Modifier.fillMaxWidth(),
+        contentPadding = contentPadding,
+        bottomBand = true,
+    ) {
+        ChartCardHeader(
+            title = title,
+            scopeLabel = scopeLabel,
+            totalValue = totalValue,
+        )
+        Spacer(Modifier.height(LeziSpacing.Xs))
+        preContent?.invoke()
+        if (isEmpty) {
+            StateContainer(
+                kind = StateKind.Empty,
+                title = emptyTitle,
+                message = emptyMessage,
+                modifier = Modifier.testTag(emptyTag),
+            )
+        } else {
+            content()
+        }
     }
 }
 
