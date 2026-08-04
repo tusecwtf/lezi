@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.summary
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -58,6 +60,7 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziMotion
 import com.lezi.babylog.designsystem.LeziRangeTabs
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -66,6 +69,7 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageHero
 import com.lezi.babylog.designsystem.PageScaffoldBackground
+import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.carelog.WeekSummary
 import com.lezi.babylog.domain.carelog.weekStartFor
@@ -283,8 +287,11 @@ fun SummaryRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     val shallowSyncStatus by vm.shallowSyncStatus.collectAsStateWithLifecycle()
     val isRefreshing by vm.isRefreshing.collectAsStateWithLifecycle()
+    // Non-essential calculating↔content crossfade: Base tier; reduce-motion → 0.
+    val calculatingMs = leziMotionMillis(LeziMotion.Base)
     Crossfade(
         targetState = ui.calculating,
+        animationSpec = tween(durationMillis = calculatingMs),
         label = "summary_loading",
     ) { calculating ->
         if (calculating) {
@@ -299,6 +306,7 @@ fun SummaryRoute(
                         kind = com.lezi.babylog.designsystem.StateKind.Loading,
                         title = "正在计算汇总",
                         message = "正在整理护理记录，请稍候。",
+                        modifier = Modifier.testTag("summary_calculating"),
                     )
                 }
             }
@@ -325,10 +333,15 @@ private fun SummaryContent(
 ) {
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
+    val density = LeziThemeExt.density
+    val chartCardPad = PaddingValues(density.cardPad)
     val t = ui.totals
     val chartDates = List(ui.range.dayCount) { offset ->
         ui.rangeStartDate.plusDays(offset.toLong())
     }
+    // Non-essential range swap: Base enter / Fast exit; reduce-motion → 0.
+    val rangeEnterMs = leziMotionMillis(LeziMotion.Base)
+    val rangeExitMs = leziMotionMillis(LeziMotion.Fast)
 
     // Journal panels bleed to the screen edge, so the page inset is applied
     // once to the header block instead of per-section conditional padding.
@@ -347,7 +360,7 @@ private fun SummaryContent(
                         horizontal = LeziSpacing.Page - contentHorizontal,
                         vertical = LeziSpacing.Page,
                     ),
-                verticalArrangement = Arrangement.spacedBy(if (journal) 0.dp else LeziSpacing.Sm),
+                verticalArrangement = Arrangement.spacedBy(density.sectionGap),
             ) {
                 Column(
                     Modifier.padding(horizontal = contentHorizontal),
@@ -383,7 +396,10 @@ private fun SummaryContent(
 
             AnimatedContent(
                 targetState = ui.range,
-                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                transitionSpec = {
+                    fadeIn(animationSpec = tween(durationMillis = rangeEnterMs)) togetherWith
+                        fadeOut(animationSpec = tween(durationMillis = rangeExitMs))
+                },
                 label = "summary_range_content",
             ) {
                 val windows = t.chartWindows
@@ -410,7 +426,11 @@ private fun SummaryContent(
 
                 if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
                     val previous = ui.previousWeekTotals
-                    LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                    LeziSurfacePanel(
+                        Modifier.fillMaxWidth(),
+                        contentPadding = chartCardPad,
+                        bottomBand = true,
+                    ) {
                         Text("对比上周", style = LeziTypography.TitleSm)
                         if (previous == null) {
                             Text(
@@ -457,7 +477,11 @@ private fun SummaryContent(
                     SummaryRange.Month -> "本月"
                 }
 
-                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                LeziSurfacePanel(
+                    Modifier.fillMaxWidth(),
+                    contentPadding = chartCardPad,
+                    bottomBand = true,
+                ) {
                     ChartCardHeader(
                         title = "喂养",
                         scopeLabel = chartTotalScope,
@@ -469,6 +493,7 @@ private fun SummaryContent(
                             kind = com.lezi.babylog.designsystem.StateKind.Empty,
                             title = "范围内暂无喂养记录",
                             message = "换一周或去记录页添加喂养。",
+                            modifier = Modifier.testTag("summary_chart_empty_feed"),
                         )
                     } else {
                         MiniBarChart(
@@ -481,7 +506,11 @@ private fun SummaryContent(
                     }
                 }
 
-                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                LeziSurfacePanel(
+                    Modifier.fillMaxWidth(),
+                    contentPadding = chartCardPad,
+                    bottomBand = true,
+                ) {
                     ChartCardHeader(
                         title = "睡眠",
                         scopeLabel = chartTotalScope,
@@ -502,6 +531,7 @@ private fun SummaryContent(
                             kind = com.lezi.babylog.designsystem.StateKind.Empty,
                             title = "范围内暂无已完成睡眠记录",
                             message = "完成的睡眠会按天汇总到这里。",
+                            modifier = Modifier.testTag("summary_chart_empty_sleep"),
                         )
                     } else {
                         MiniBarChart(
@@ -516,7 +546,11 @@ private fun SummaryContent(
                     }
                 }
 
-                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+                LeziSurfacePanel(
+                    Modifier.fillMaxWidth(),
+                    contentPadding = chartCardPad,
+                    bottomBand = true,
+                ) {
                     ChartCardHeader(
                         title = "尿布",
                         scopeLabel = chartTotalScope,
@@ -533,6 +567,7 @@ private fun SummaryContent(
                             kind = com.lezi.babylog.designsystem.StateKind.Empty,
                             title = "范围内暂无尿布记录",
                             message = "尿/便记录会按天汇总到这里。",
+                            modifier = Modifier.testTag("summary_chart_empty_diaper"),
                         )
                     } else {
                         StackedDiaperBarChart(
@@ -580,7 +615,7 @@ private fun SummaryKpiStrip(
     if (journal) {
         LeziSurfacePanel(
             modifier = Modifier.fillMaxWidth(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            contentPadding = PaddingValues(0.dp),
             bottomBand = true,
         ) {
             Row(
@@ -637,10 +672,7 @@ private fun CompactMetricCard(
 ) {
     LeziCard(
         modifier = modifier,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(
-            horizontal = LeziSpacing.Sm,
-            vertical = LeziSpacing.CardPad,
-        ),
+        contentPadding = PaddingValues(LeziThemeExt.density.cardPad),
     ) {
         KpiCell(
             title = title,
@@ -961,7 +993,7 @@ private fun JournalWeekGrid(summary: WeekSummary) {
     val rowHeight = 40.dp
     LeziSurfacePanel(
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(LeziSpacing.Sm),
+        contentPadding = PaddingValues(LeziThemeExt.density.panelContent),
         bottomBand = true,
     ) {
         DateAxis(
@@ -1085,7 +1117,11 @@ private fun WeekLineChart(
 ) {
     val journal = LeziThemeExt.isJournal
     val grid = LeziThemeExt.colors.chartGrid
-    LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
+    LeziSurfacePanel(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(LeziThemeExt.density.cardPad),
+        bottomBand = true,
+    ) {
         if (scopeLabel != null && totalValue != null) {
             ChartCardHeader(
                 title = title,
@@ -1095,7 +1131,7 @@ private fun WeekLineChart(
         } else {
             Text(title, style = LeziTypography.TitleSm)
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(LeziSpacing.Xs))
         val max = (values.filter { it > 0f }.maxOrNull() ?: 37f).coerceAtLeast(37.5f)
         val min = (values.filter { it > 0f }.minOrNull() ?: 36f).coerceAtMost(36f)
         Canvas(
@@ -1116,10 +1152,13 @@ private fun WeekLineChart(
             var started = false
             val dotRadius = (if (journal) 2.dp else 3.dp).toPx()
             val strokeWidth = (if (journal) 1.5.dp else 2.dp).toPx()
+            val plotBottomInset = 8.dp.toPx()
             values.forEachIndexed { i, v ->
                 if (v <= 0f) return@forEachIndexed
                 val x = size.width * (i / (values.size - 1f).coerceAtLeast(1f))
-                val y = size.height - ((v - min) / (max - min).coerceAtLeast(0.1f)) * size.height * 0.85f - 8f
+                val y = size.height -
+                    ((v - min) / (max - min).coerceAtLeast(0.1f)) * size.height * 0.85f -
+                    plotBottomInset
                 if (!started) {
                     path.moveTo(x, y)
                     started = true
