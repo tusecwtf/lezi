@@ -1,10 +1,9 @@
 # Issues — ui-drawing-polish-20260804
 
-Status: ready-for-agent
+Status: complete
 
-Serial spine (preferred agent order). **01–12** are done (**12** converged
-duration totals + birthday single-source); next open frontier is **13**
-close-out — keep work one-at-a-time unless a human explicitly parallelizes.
+Serial spine finished: **01–13** done. Ticket **13** closed the warm/journal ×
+light/dark screenshot matrix under `smoke/` and marked the program complete.
 
 | # | File | Title | Blocked by | Status |
 |---|------|-------|------------|--------|
@@ -20,7 +19,7 @@ close-out — keep work one-at-a-time unless a human explicitly parallelizes.
 | 10 | [issues/10-shell-motion-reduce-motion.md](./issues/10-shell-motion-reduce-motion.md) | Shell motion + reduce-motion | 01, 05 | done |
 | 11 | [issues/11-weak-surfaces-menu-widget-export.md](./issues/11-weak-surfaces-menu-widget-export.md) | Weak surfaces: menu / widget / export | 05, 10 | done |
 | 12 | [issues/12-presentation-format-if-needed.md](./issues/12-presentation-format-if-needed.md) | Presentation format convergence (conditional) | 06, 09 | done |
-| 13 | [issues/13-screenshot-matrix-closeout.md](./issues/13-screenshot-matrix-closeout.md) | Screenshot matrix + program close-out | 02, 07, 09, 11, 12 | ready-for-agent |
+| 13 | [issues/13-screenshot-matrix-closeout.md](./issues/13-screenshot-matrix-closeout.md) | Screenshot matrix + program close-out | 02, 07, 09, 11, 12 | done |
 
 Parent: [spec.md](./spec.md)
 
