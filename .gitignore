@@ -68,3 +68,15 @@ tools/lezi-sync/*.db-shm
 
 # Local artifact backups (old dist/)
 /backup/
+
+# Greenfield local data & builds
+greenfield/.data/
+greenfield/android/.gradle/
+greenfield/android/**/build/
+greenfield/sync-server/target/
+greenfield/android/local.properties
+
+# Dual-install motion/scene capture videos (review-local; keep harness + stills)
+greenfield/docs/specs/baselines/motion-prototype/**/*.mp4
+greenfield/docs/specs/baselines/scenes/**/*.mp4
+greenfield/docs/specs/baselines/scenes/**/*-strip.jpg
