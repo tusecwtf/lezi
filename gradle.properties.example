@@ -8,6 +8,3 @@ kotlin.code.style=official
 # Do not pin org.gradle.java.home here — absolute paths break CI and other machines.
 # Use JDK 21 (not 25+; AGP fails). Optionally set in ~/.gradle/gradle.properties:
 #   org.gradle.java.home=/path/to/jdk-21
-
-# Local overrides (daemon heap, user.language, idle): put in ~/.gradle/gradle.properties
-# Do not commit machine-specific jvmargs here.

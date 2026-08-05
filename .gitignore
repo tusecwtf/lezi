@@ -68,3 +68,4 @@ tools/lezi-sync/*.db-shm
 
 # Local artifact backups (old dist/)
 /backup/
+
