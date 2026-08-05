@@ -1,6 +1,6 @@
 # 08 — 更多 sheet 分组 IA
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,10 @@
 
 ## Acceptance criteria
 
-- [ ] Groups labeled in Chinese product language
-- [ ] All prior more catalog entries still reachable
-- [ ] Dual still more sheet GF vs legacy
-- [ ] Residual R-more-ia updated
+- [x] Groups labeled in Chinese product language
+- [x] All prior more catalog entries still reachable
+- [x] Dual still more sheet GF vs legacy
+- [x] Residual R-more-ia updated
 
 ## Blocked by
 

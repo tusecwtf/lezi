@@ -120,23 +120,29 @@ fun ComposerSheet(
                 )
                 Spacer(Modifier.height(12.dp))
 
-                TimeDial(
-                    timestampMs = draft.timestampMs,
-                    onTimestampChange = { ms ->
-                        // Absolute timestamp only — avoid double-apply with onAdjustTimeMinutes.
-                        onChange(
-                            draft.copy(
-                                timestampMs = ms,
-                                note = note,
-                                payloadJson = payload,
-                                dirty = true,
-                            ),
-                        )
-                    },
-                    accent = accent,
+                // Formula-family: milk amount first (legacy order); other types keep dial-first.
+                val milkPrimaryFirst = draft.type in setOf(
+                    RecordType.FORMULA,
+                    RecordType.PUMPED_FEED,
+                    RecordType.PUMP_EXPRESS,
                 )
-
-                Spacer(Modifier.height(12.dp))
+                if (!milkPrimaryFirst) {
+                    TimeDial(
+                        timestampMs = draft.timestampMs,
+                        onTimestampChange = { ms ->
+                            onChange(
+                                draft.copy(
+                                    timestampMs = ms,
+                                    note = note,
+                                    payloadJson = payload,
+                                    dirty = true,
+                                ),
+                            )
+                        },
+                        accent = accent,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
                 when (draft.type) {
                     RecordType.PEE -> {
                         val pee = ComposerFields.parsePee(payload)
@@ -329,8 +335,9 @@ fun ComposerSheet(
                             }
                         } else {
                             Text(
-                                "睡下后时长待醒来计算（开放会话 duration=0）",
+                                "睡下后时长将在醒来时计算",
                                 style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -343,7 +350,7 @@ fun ComposerSheet(
                             )
                         }
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("异常标记 !（不拦截写入）")
+                            Text("异常标记")
                             Switch(
                                 checked = sleep.anomaly,
                                 onCheckedChange = {
@@ -378,6 +385,59 @@ fun ComposerSheet(
                                     },
                                     label = { Text("${ml}ml") },
                                 )
+                            }
+                        }
+                        // Optional formula-only fields (data-model prepared_ml / duration_min)
+                        if (draft.type == RecordType.FORMULA) {
+                            Spacer(Modifier.height(4.dp))
+                            Text("可选", style = MaterialTheme.typography.labelMedium)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("冲调量", modifier = Modifier.weight(0.35f))
+                                TextButton(onClick = {
+                                    val cur = milk.preparedMl ?: milk.amountMl
+                                    push(
+                                        ComposerFields.buildMilk(
+                                            milk.copy(preparedMl = (cur - milk.stepMl).coerceAtLeast(0)),
+                                        ),
+                                    )
+                                }) { Text("−") }
+                                Text(
+                                    "${milk.preparedMl ?: "—"} ml",
+                                    modifier = Modifier.weight(0.4f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                TextButton(onClick = {
+                                    val cur = milk.preparedMl ?: milk.amountMl
+                                    push(
+                                        ComposerFields.buildMilk(
+                                            milk.copy(preparedMl = cur + milk.stepMl),
+                                        ),
+                                    )
+                                }) { Text("+") }
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("耗时", modifier = Modifier.weight(0.35f))
+                                TextButton(onClick = {
+                                    val cur = milk.durationMin ?: 0
+                                    push(
+                                        ComposerFields.buildMilk(
+                                            milk.copy(durationMin = (cur - 1).coerceAtLeast(0)),
+                                        ),
+                                    )
+                                }) { Text("−1分") }
+                                Text(
+                                    if (milk.durationMin != null) "${milk.durationMin} 分" else "—",
+                                    modifier = Modifier.weight(0.4f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                TextButton(onClick = {
+                                    val cur = milk.durationMin ?: 0
+                                    push(
+                                        ComposerFields.buildMilk(
+                                            milk.copy(durationMin = cur + 1),
+                                        ),
+                                    )
+                                }) { Text("+1分") }
                             }
                         }
                     }
@@ -465,6 +525,24 @@ fun ComposerSheet(
                         )
                     }
                     else -> Unit
+                }
+
+                if (milkPrimaryFirst) {
+                    Spacer(Modifier.height(12.dp))
+                    TimeDial(
+                        timestampMs = draft.timestampMs,
+                        onTimestampChange = { ms ->
+                            onChange(
+                                draft.copy(
+                                    timestampMs = ms,
+                                    note = note,
+                                    payloadJson = payload,
+                                    dirty = true,
+                                ),
+                            )
+                        },
+                        accent = accent,
+                    )
                 }
 
                 Spacer(Modifier.height(8.dp))

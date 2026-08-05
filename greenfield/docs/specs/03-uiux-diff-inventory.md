@@ -15,22 +15,20 @@ This file is the **engineering pointer**. Full problem/solution, scored matrix, 
 | S-freeze / 1.0.0 shell | PASS |
 | P0 dual-scene capture (03–17) | done + evening re-verify |
 | Formula default 120 + chips + 确认记录 | aligned |
-| Sleep/summary/plan debug copy | **aligned** (stills confirm) |
+| Sleep/summary/plan debug copy | **aligned** |
 | GF mid-frame swipe/timer/layout | **verified** |
 | Legacy dual honesty | **partial** (automation) |
-| §2.3 blind chrome | deferred fail |
+| gf-legacy-align campaign (01–10) | **code complete** |
+| §2.3 blind chrome | **not yet** (S-freeze PASS) |
+
+## Align campaign tracker
+
+[`.scratch/spec-02-gf-legacy-align/`](../../../.scratch/spec-02-gf-legacy-align/) — Composer order, next-feed dialog, dock default, daychips always-five, topbar accent, TypeMark icons, more groups.
 
 ## Acceptance re-verify tracker
 
-[`.scratch/spec-02-acceptance-verify/`](../../../.scratch/spec-02-acceptance-verify/) — close partial evidence + P0 polish.
-
-## Next polish (from inventory)
-
-1. Sleep Composer: no raw epoch — **in progress / landed in acceptance-verify**  
-2. Summary: no D0–D6 debug dump — **landed**  
-3. Plan/PENDING Chinese product copy — **landed**  
-4. Harness: mid-gesture stills; dismiss legacy next-feed before shot — **in progress** 
+[`.scratch/spec-02-acceptance-verify/`](../../../.scratch/spec-02-acceptance-verify/) — prior P0 polish.
 
 ## Out of scope here
 
-Pixel CI · NAS CD · Spec 01 migration · reopening S-freeze for top-bar/E3/E4 alone
+Pixel CI · NAS CD · Spec 01 migration · reopening S-freeze for residual chrome alone

@@ -1,6 +1,6 @@
 # 04 — 底坞默认序 + 计时入口收敛
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,10 @@ Default four-slot dock order is closer to 0.3.x everyday habits (e.g. 尿/睡眠
 
 ## Acceptance criteria
 
-- [ ] Fresh install / default layout dock order documented and dual-compared
-- [ ] Timer reachable in ≤2 taps from 记录 home without relying on obscure chrome
-- [ ] Secondary row either removed, simplified, or residual explicitly accepted
-- [ ] Dual still empty home dock; residual R-dock-order / R-dock-timer updated
+- [x] Fresh install / default layout dock order documented and dual-compared
+- [x] Timer reachable in ≤2 taps from 记录 home without relying on obscure chrome
+- [x] Secondary row either removed, simplified, or residual explicitly accepted
+- [x] Dual still empty home dock; residual R-dock-order / R-dock-timer updated
 
 ## Blocked by
 

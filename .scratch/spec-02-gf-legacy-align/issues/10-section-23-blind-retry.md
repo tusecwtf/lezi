@@ -1,6 +1,6 @@
 # 10 — §2.3 盲测重试建议
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,19 @@
 
 ## Acceptance criteria
 
-- [ ] Written §2.3 result: pass / fail / not yet
-- [ ] Evidence stills or video cited
-- [ ] S-freeze status restated PASS (1.0.0 shell) unless product explicitly changes gate
-- [ ] No UI code required in-ticket
+- [x] Written §2.3 result: **not yet**
+- [x] Evidence stills or video cited (prior dual stills + code-landed note)
+- [x] S-freeze status restated **PASS** (1.0.0 shell)
+- [x] No UI code required in-ticket
+
+## §2.3 result (2026-08-05)
+
+| Item | Result |
+|------|--------|
+| §2.3 blind | **not yet** |
+| Rationale | Top-bar color language and three-day axis still differ enough that a careful caregiver can tell packages apart without reading the package name. Align campaign closed the high-noise residuals (debug copy, dock order, next-feed dialog, icons, more groups). |
+| S-freeze | **PASS** — do not reopen for residual chrome alone |
+| Retry when | Optional dual recapture + human still review after device install of this build |
 
 ## Blocked by
 

@@ -1,6 +1,28 @@
 package com.lezi.gf.app.ui.theme
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsWalk
+import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.filled.BabyChangingStation
+import androidx.compose.material.icons.filled.Bathtub
+import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.ChildCare
+import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.Height
+import androidx.compose.material.icons.filled.LocalDrink
+import androidx.compose.material.icons.filled.LocalHospital
+import androidx.compose.material.icons.filled.LocalPharmacy
+import androidx.compose.material.icons.filled.MonitorWeight
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Restaurant
+import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.Sick
+import androidx.compose.material.icons.filled.Thermostat
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Vaccines
+import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.lezi.gf.care.RecordType
@@ -88,7 +110,10 @@ object LeziColors {
 }
 
 object LeziTypeGlyph {
-    /** Short Chinese glyph for dock / timeline identity (not Material icons alone). */
+    /**
+     * Short Chinese glyph fallback (a11y / no-vector paths).
+     * Prefer [vector] on dock, timeline, and more sheet for shared icon language.
+     */
     fun glyph(typeKey: String?): String = when (typeKey) {
         RecordType.NURSING.key -> "乳"
         RecordType.FORMULA.key -> "奶"
@@ -119,8 +144,48 @@ object LeziTypeGlyph {
         RecordType.VACCINE.key -> "苗"
         RecordType.CUSTOM.key -> "自"
         "__timer__" -> "计"
+        "__more__" -> "多"
         null -> "·"
         else -> if (typeKey.startsWith("custom:")) "自" else "记"
+    }
+
+    /**
+     * Shared vector icon language (closer to 0.3.x Material marks) for dock / row / more.
+     * Type color still comes from [accent]; glyph remains for TalkBack fallbacks.
+     */
+    fun vector(typeKey: String?): ImageVector = when (typeKey) {
+        RecordType.NURSING.key -> Icons.Default.ChildCare
+        RecordType.FORMULA.key -> Icons.Default.LocalDrink
+        RecordType.PUMPED_FEED.key -> Icons.Default.LocalDrink
+        RecordType.PUMP_EXPRESS.key -> Icons.Default.Science
+        RecordType.PEE.key -> Icons.Default.WaterDrop
+        RecordType.POOP.key -> Icons.Default.BabyChangingStation
+        RecordType.BOTH_DIAPER.key -> Icons.Default.BabyChangingStation
+        RecordType.SLEEP.key -> Icons.Default.Bedtime
+        RecordType.TEMPERATURE.key -> Icons.Default.Thermostat
+        RecordType.DIARY.key -> Icons.AutoMirrored.Filled.Notes
+        RecordType.BATH.key -> Icons.Default.Bathtub
+        RecordType.WALK.key -> Icons.AutoMirrored.Filled.DirectionsWalk
+        RecordType.COUGH.key -> Icons.Default.Sick
+        RecordType.RASH.key -> Icons.Default.Sick
+        RecordType.VOMIT.key -> Icons.Default.Sick
+        RecordType.INJURY.key -> Icons.Default.LocalHospital
+        RecordType.MEDICINE.key -> Icons.Default.LocalPharmacy
+        RecordType.HOSPITAL.key -> Icons.Default.LocalHospital
+        RecordType.HEIGHT.key -> Icons.Default.Height
+        RecordType.WEIGHT.key -> Icons.Default.MonitorWeight
+        RecordType.BABY_FOOD.key -> Icons.Default.Restaurant
+        RecordType.SNACK.key -> Icons.Default.Restaurant
+        RecordType.DRINK.key -> Icons.Default.LocalDrink
+        RecordType.HEAD_SIZE.key -> Icons.Default.ChildCare
+        RecordType.CHEST_SIZE.key -> Icons.Default.Height
+        RecordType.FOOT_SIZE.key -> Icons.Default.Height
+        RecordType.VACCINE.key -> Icons.Default.Vaccines
+        RecordType.CUSTOM.key -> Icons.Default.EditNote
+        "__timer__" -> Icons.Default.Timer
+        "__more__" -> Icons.Default.MoreHoriz
+        null -> Icons.Default.MoreHoriz
+        else -> if (typeKey.startsWith("custom:")) Icons.Default.EditNote else Icons.Default.EditNote
     }
 
     fun accent(typeKey: String?): Color = when (typeKey) {
@@ -133,6 +198,30 @@ object LeziTypeGlyph {
         RecordType.WEIGHT.key, RecordType.HEIGHT.key -> Color(0xFF6A4C93)
         else -> Color(0xFF6D6875)
     }
+}
+
+/**
+ * Day-summary chip policy (spec-02-gf-legacy-align ticket 05 / E4).
+ *
+ * **Policy (locked):** always-five structure for 奶 / 母乳 / 睡眠 / 尿 / 便
+ * (0.3.x everyday chrome). Values may be zero. Filter selection only when
+ * the chip has data (PRD A2: 0-count classes do not enter empty filter).
+ */
+object DaySummaryChipPolicy {
+    data class Chip(
+        val typeKey: String,
+        val label: String,
+        val value: Int,
+        val selectable: Boolean,
+    )
+
+    fun chips(summary: com.lezi.gf.care.DaySummary): List<Chip> = listOf(
+        Chip(RecordType.FORMULA.key, "奶 ${summary.milkMl}ml", summary.milkMl, summary.milkMl > 0),
+        Chip(RecordType.NURSING.key, "母乳 ${summary.nursingCount}", summary.nursingCount, summary.nursingCount > 0),
+        Chip(RecordType.SLEEP.key, "睡 ${summary.sleepMinutes}分", summary.sleepMinutes, summary.sleepMinutes > 0),
+        Chip(RecordType.PEE.key, "尿 ${summary.peeCount}", summary.peeCount, summary.peeCount > 0),
+        Chip(RecordType.POOP.key, "便 ${summary.poopCount}", summary.poopCount, summary.poopCount > 0),
+    )
 }
 
 /**

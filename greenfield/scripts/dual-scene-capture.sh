@@ -431,8 +431,8 @@ scene_gf_composer_diaper() {
 scene_gf_breast_timer_entry() {
   gf_goto_log
   dump
-  # Prefer dock 喂奶 Composer open for mid-frame (shot taken by run_scene after this path).
-  tap_n "喂奶" || true
+  # Prefer dock 母乳 Composer open for mid-frame (shot taken by run_scene after this path).
+  tap_n "母乳" || tap_n "喂奶" || true
   sleep 1.0
 }
 
@@ -716,13 +716,15 @@ run_scene_gf() {
       gf_ensure_foreground
       gf_goto_log
       with_record "$dir/gf.mp4" 5 scene_gf_breast_timer_entry
-      # Mid-frame: 喂奶 Composer (dock nursing entry)
+      # Mid-frame: 母乳 Composer (dock nursing entry — default slot 3)
       shot "$dir/gf.png"
       adb shell input keyevent 4
       sleep 0.3
-      # Second evidence path: secondary 计时
+      # Second evidence path: 更多 → 喂奶计时 (≤2 taps; secondary chrome row removed)
       gf_goto_log
-      tap_n "计时" || true
+      tap_n "更多" || true
+      sleep 0.5
+      tap_n "喂奶计时" || tap_n "计时" || true
       sleep 0.9
       shot "$dir/gf-timer.png" || true
       adb shell input keyevent 4

@@ -1,10 +1,11 @@
 # Spec 02 · GF ↔ 0.3.x 对齐战役（post-inventory）
 
-**Status:** ready-for-agent  
+**Status:** agent-complete (code 01–08 + acceptance 09–10)  
 **Parent inventory:** [../spec-02-dual-scene-review/uiux-diff-spec.md](../spec-02-dual-scene-review/uiux-diff-spec.md)  
 **Acceptance log:** [../spec-02-acceptance-verify/VERIFICATION.md](../spec-02-acceptance-verify/VERIFICATION.md)  
 **1.0.0 freeze (closed):** [../spec-02-apk-1.0-freeze/spec.md](../spec-02-apk-1.0-freeze/spec.md)  
-**Engineering:** `greenfield/docs/specs/02-apk-visual-parity.md` · `03-uiux-diff-inventory.md`
+**Engineering:** `greenfield/docs/specs/02-apk-visual-parity.md` · `03-uiux-diff-inventory.md`  
+**Residuals:** [../spec-02-dual-scene-review/residuals.md](../spec-02-dual-scene-review/residuals.md)
 
 ---
 
@@ -16,7 +17,22 @@
 
 执行 10 张 tracer-bullet 票：文案收尾 → Composer/计划/坞 → 记录首页 chrome（E4/E7）→ 图标与更多（E3）→ 双装重验 → §2.3 盲测建议。每票可独立验收；写路径仍 confirm-before-write。
 
-## Already done (do not re-ticket)
+## Landed (this campaign)
+
+| Ticket | Summary |
+|--------|---------|
+| 01 | Sleep Composer: no `duration=0` / engineer tokens |
+| 02 | Formula amount-first; optional `prepared_ml` / `duration_min` |
+| 03 | Post-write 「安排下次喂养？」 dialog (no silent plan) |
+| 04 | Default dock 尿·睡眠·母乳·配方奶; secondary timer row removed |
+| 05 | Day-summary **always-five** policy (zeros visible; A2 no empty filter) |
+| 06 | Top bar day-age + theme accent strip |
+| 07 | Shared `TypeMark` Material vectors + type accent |
+| 08 | More sheet groups (常用补充/喂养/排泄/…) |
+| 09 | Matrix/residuals honesty updated (code-landed) |
+| 10 | §2.3 = **not yet**; S-freeze restated **PASS** |
+
+## Already done before campaign (do not re-ticket)
 
 120ml default · quick chips · 确认记录 · 计时 label · sleep wall-clock · summary no D0 dump · PENDING→待履行 · dual harness mid-frames · S-freeze PASS
 
@@ -27,3 +43,4 @@ Spec 01 migration · NAS CD · pixel CI · reopening S-freeze for waived chrome 
 ## Comments
 
 - 2026-08-05: Breakdown approved (user “ok”) at 10-ticket full chrome+interaction scope; 06 after 05; 08 after 07.
+- 2026-08-05: Agent implemented 01–08 in greenfield Android; unit tests green; dual recapture optional on device.

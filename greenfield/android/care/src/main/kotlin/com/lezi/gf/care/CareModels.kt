@@ -65,9 +65,15 @@ data class CustomItemDef(
     val updatedAtMs: Long = 0,
 )
 
+/**
+ * Fresh-install four-slot dock (PRD ui.md §2.2): 尿尿 · 睡眠 · 母乳 · 配方奶.
+ * Absolute L→R; empty slots stay empty; layout editor may reorder.
+ */
+val DEFAULT_DOCK_SLOTS: List<String?> = listOf("pee", "sleep", "nursing", "formula")
+
 @Serializable
 data class LayoutSnapshot(
-    val dockSlots: List<String?> = listOf("formula", "pee", "sleep", "nursing"),
+    val dockSlots: List<String?> = DEFAULT_DOCK_SLOTS,
     val hiddenTypeKeys: Set<String> = emptySet(),
 )
 

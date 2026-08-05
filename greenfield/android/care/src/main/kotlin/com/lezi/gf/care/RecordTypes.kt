@@ -4,7 +4,7 @@ package com.lezi.gf.care
  * Built-in record types. English keys are wire/storage only — UI uses [chineseLabel].
  */
 enum class RecordType(val key: String, val chineseLabel: String) {
-    NURSING("nursing", "喂奶"),
+    NURSING("nursing", "母乳"),
     FORMULA("formula", "配方奶"),
     PUMPED_FEED("pumped_feed", "瓶喂母乳"),
     PUMP_EXPRESS("pump_express", "吸奶"),

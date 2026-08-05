@@ -3,7 +3,6 @@ package com.lezi.gf.app.ui.components
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
@@ -14,16 +13,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -41,7 +37,6 @@ import com.lezi.gf.app.ui.theme.LeziColors
 import com.lezi.gf.app.ui.theme.LeziDensity
 import com.lezi.gf.app.ui.theme.LeziMotion
 import com.lezi.gf.app.ui.theme.LeziRelativeTime
-import com.lezi.gf.app.ui.theme.LeziTypeGlyph
 import com.lezi.gf.app.ui.theme.SwipeGestureModel
 import com.lezi.gf.care.CareRecord
 import com.lezi.gf.care.RecordType
@@ -70,8 +65,6 @@ fun SwipeTimelineRow(
 ) {
     val type = RecordType.fromKey(record.typeKey)
     val label = type?.chineseLabel ?: record.typeKey
-    val glyph = LeziTypeGlyph.glyph(record.typeKey)
-    val accent = LeziTypeGlyph.accent(record.typeKey)
     val time = remember(record.timestampMs) {
         DateTimeFormatter.ofPattern("HH:mm")
             .withZone(ZoneId.of("Asia/Shanghai"))
@@ -214,16 +207,11 @@ fun SwipeTimelineRow(
                     .padding(density.cardPad),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(accent.copy(alpha = 0.2f))
-                        .border(1.dp, accent.copy(alpha = 0.45f), CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(glyph, fontWeight = FontWeight.Bold, color = accent)
-                }
+                TypeMark(
+                    typeKey = record.typeKey,
+                    size = 40.dp,
+                    iconSize = 20.dp,
+                )
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

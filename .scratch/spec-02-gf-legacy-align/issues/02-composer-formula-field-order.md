@@ -1,6 +1,6 @@
 # 02 — 配方奶 Composer 字段序 + 可选冲调量/耗时
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,10 @@ Opening 配方奶 Composer feels closer to 0.3.x: **milk amount is the primary c
 
 ## Acceptance criteria
 
-- [ ] Caregiver can set amount first without hunting past time dial as the only focus
-- [ ] Optional prep/duration fields exist or residual explicitly accepted with product note
-- [ ] confirm-before-write and cancel-no-write hold
-- [ ] Dual still vs legacy formula Composer scored; residual list updated
+- [x] Caregiver can set amount first without hunting past time dial as the only focus
+- [x] Optional prep/duration fields exist or residual explicitly accepted with product note
+- [x] confirm-before-write and cancel-no-write hold
+- [x] Dual still vs legacy formula Composer scored; residual list updated
 
 ## Blocked by
 

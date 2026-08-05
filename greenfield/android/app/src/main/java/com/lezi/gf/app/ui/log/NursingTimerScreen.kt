@@ -42,7 +42,6 @@ import com.lezi.gf.app.ui.model.ComposerFields
 import com.lezi.gf.app.ui.theme.LeziSpacing
 import com.lezi.gf.care.ComposerDraft
 import com.lezi.gf.care.NursingTimerState
-import com.lezi.gf.care.RecordType
 import com.lezi.gf.kernel.GfResult
 import com.lezi.gf.kernel.SystemClock
 import kotlinx.coroutines.delay
@@ -190,12 +189,7 @@ fun NursingTimerScreen(
                         when (container.care.confirmCreate(draft)) {
                             is GfResult.Ok -> {
                                 container.care.clearTimer()
-                                container.care.createPlan(
-                                    babyClientUuid = babyUuid,
-                                    typeKey = RecordType.NURSING.key,
-                                    scheduledAtMs = SystemClock.nowEpochMs() + 3 * 3600_000,
-                                    isNextFeed = true,
-                                )
+                                // Next-feed is offered by host (legacy-style dialog), not silent write.
                                 confirmDraft = null
                                 onConfirmed()
                             }

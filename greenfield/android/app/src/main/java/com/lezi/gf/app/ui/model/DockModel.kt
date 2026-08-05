@@ -1,15 +1,20 @@
 package com.lezi.gf.app.ui.model
 
 import com.lezi.gf.care.CustomItemDef
+import com.lezi.gf.care.DEFAULT_DOCK_SLOTS
 import com.lezi.gf.care.LayoutSnapshot
 import com.lezi.gf.care.RecordType
 
 /**
  * Fixed four-slot quick dock + 「更多」 catalog (PRD ui.md §2.2).
  * Absolute L→R order; empty slots stay empty (no auto-fill).
+ * Default slots: [DEFAULT_DOCK_SLOTS] — 尿尿 · 睡眠 · 母乳 · 配方奶.
  */
 object DockModel {
     const val SLOT_COUNT = 4
+
+    /** Product default for dual-install / fresh layout docs. */
+    val defaultDockSlots: List<String?> = DEFAULT_DOCK_SLOTS
 
     data class Slot(
         val index: Int,
@@ -25,6 +30,12 @@ object DockModel {
         val label: String,
         val typeKey: String?,
         val isCustom: Boolean,
+        val group: String = "其它",
+    )
+
+    data class CatalogGroup(
+        val title: String,
+        val items: List<CatalogItem>,
     )
 
     fun normalizeSlots(layout: LayoutSnapshot): List<String?> {
@@ -69,6 +80,7 @@ object DockModel {
                     label = t.chineseLabel,
                     typeKey = t.key,
                     isCustom = false,
+                    group = groupForType(t),
                 )
             }
         }
@@ -78,6 +90,7 @@ object DockModel {
                 label = def.title,
                 typeKey = RecordType.CUSTOM.key,
                 isCustom = true,
+                group = "自定义",
             )
         }
         if (includeTimer) {
@@ -86,9 +99,45 @@ object DockModel {
                 label = "喂奶计时",
                 typeKey = RecordType.NURSING.key,
                 isCustom = false,
+                group = "常用补充",
             )
         }
         return items
+    }
+
+    /**
+     * Caregiver-readable groups for 「更多」 sheet (legacy-style IA).
+     * Order: 常用补充 → 喂养 → 排泄 → 睡眠 → 健康 → 成长 → 日常 → 自定义 → 其它.
+     */
+    fun moreCatalogGrouped(
+        layout: LayoutSnapshot,
+        customs: List<CustomItemDef>,
+        includeTimer: Boolean = true,
+    ): List<CatalogGroup> {
+        val order = listOf(
+            "常用补充", "喂养", "排泄", "睡眠", "健康", "成长", "日常", "自定义", "其它",
+        )
+        val byGroup = moreCatalog(layout, customs, includeTimer).groupBy { it.group }
+        return order.mapNotNull { title ->
+            val items = byGroup[title].orEmpty()
+            if (items.isEmpty()) null else CatalogGroup(title, items)
+        }
+    }
+
+    fun groupForType(type: RecordType): String = when (type) {
+        RecordType.NURSING, RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS,
+        RecordType.BABY_FOOD, RecordType.SNACK, RecordType.DRINK,
+        -> "喂养"
+        RecordType.PEE, RecordType.POOP, RecordType.BOTH_DIAPER -> "排泄"
+        RecordType.SLEEP -> "睡眠"
+        RecordType.TEMPERATURE, RecordType.MEDICINE, RecordType.HOSPITAL, RecordType.COUGH,
+        RecordType.RASH, RecordType.VOMIT, RecordType.INJURY, RecordType.VACCINE,
+        -> "健康"
+        RecordType.HEIGHT, RecordType.WEIGHT, RecordType.HEAD_SIZE, RecordType.CHEST_SIZE,
+        RecordType.FOOT_SIZE,
+        -> "成长"
+        RecordType.BATH, RecordType.WALK, RecordType.DIARY -> "日常"
+        RecordType.CUSTOM -> "自定义"
     }
 
     /** Reorder: move item at [from] to [to] within 4-slot dock. */

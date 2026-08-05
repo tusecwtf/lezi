@@ -43,6 +43,10 @@ object ComposerFields {
     data class MilkFields(
         val amountMl: Int = DEFAULT_MILK_AMOUNT_ML,
         val stepMl: Int = DEFAULT_AMOUNT_STEP_ML,
+        /** Optional prep volume (冲调量), formula only — product optional field. */
+        val preparedMl: Int? = null,
+        /** Optional feed duration minutes (耗时), formula only. */
+        val durationMin: Int? = null,
     )
 
     /** Quick chips around the current/default milk amount (legacy-style shortcuts). */
@@ -195,6 +199,8 @@ object ComposerFields {
             amountMl = (o["amount_ml"]?.jsonPrimitive?.intOrNull ?: DEFAULT_MILK_AMOUNT_ML)
                 .coerceAtLeast(0),
             stepMl = if (step == 10) 10 else DEFAULT_AMOUNT_STEP_ML,
+            preparedMl = o["prepared_ml"]?.jsonPrimitive?.intOrNull?.coerceAtLeast(0),
+            durationMin = o["duration_min"]?.jsonPrimitive?.intOrNull?.coerceAtLeast(0),
         )
     }
 
@@ -202,6 +208,8 @@ object ComposerFields {
         buildJsonObject {
             put("amount_ml", fields.amountMl.coerceAtLeast(0))
             put("amount_step_ml", fields.stepMl)
+            fields.preparedMl?.let { put("prepared_ml", it.coerceAtLeast(0)) }
+            fields.durationMin?.let { put("duration_min", it.coerceAtLeast(0)) }
         }.toString()
 
     fun stepMilk(fields: MilkFields, deltaSteps: Int): MilkFields {
@@ -254,7 +262,9 @@ object ComposerFields {
         RecordType.POOP, RecordType.BOTH_DIAPER -> listOf("poop_amount", "poop_consistency", "poop_color")
         RecordType.SLEEP -> listOf("start_ms", "end_ms", "duration_minutes", "open", "anomaly", "is_nap")
         RecordType.NURSING -> listOf("left_ms", "right_ms", "order")
-        RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
+        RecordType.FORMULA ->
+            listOf("amount_ml", "amount_step_ml", "prepared_ml", "duration_min")
+        RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
             listOf("amount_ml", "amount_step_ml")
         RecordType.TEMPERATURE -> listOf("celsius")
         RecordType.WEIGHT -> listOf("grams")

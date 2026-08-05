@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,21 +39,56 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lezi.gf.app.ui.model.DayAxisModel
 import com.lezi.gf.app.ui.model.DockModel
+import com.lezi.gf.app.ui.theme.DaySummaryChipPolicy
 import com.lezi.gf.app.ui.theme.LeziDensity
 import com.lezi.gf.app.ui.theme.LeziSpacing
 import com.lezi.gf.app.ui.theme.LeziTypeGlyph
 import com.lezi.gf.care.CareRecord
 import com.lezi.gf.care.DaySummary
-import com.lezi.gf.care.RecordType
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 // TimelineRecordRow delegates to SwipeTimelineRow (same package).
+
+/**
+ * Shared type mark — vector + type accent (dock / timeline / more).
+ * Spec 02 E3 / gf-legacy-align ticket 07.
+ */
+@Composable
+fun TypeMark(
+    typeKey: String?,
+    modifier: Modifier = Modifier,
+    size: Dp = 44.dp,
+    iconSize: Dp = 22.dp,
+    empty: Boolean = false,
+) {
+    val accent = if (empty) Color(0xFFBDBDBD) else LeziTypeGlyph.accent(typeKey)
+    Box(
+        modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(accent.copy(alpha = if (empty) 0.15f else 0.2f))
+            .border(1.dp, accent.copy(alpha = 0.5f), CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (empty) {
+            Text("·", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = accent)
+        } else {
+            Icon(
+                imageVector = LeziTypeGlyph.vector(typeKey),
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier.size(iconSize),
+            )
+        }
+    }
+}
 
 @Composable
 fun DaySummaryChips(
@@ -62,50 +98,52 @@ fun DaySummaryChips(
     density: LeziDensity,
     modifier: Modifier = Modifier,
 ) {
-    val chips = buildList {
-        if (summary.milkMl > 0) add(RecordType.FORMULA.key to "奶 ${summary.milkMl}ml")
-        if (summary.nursingCount > 0) add(RecordType.NURSING.key to "喂奶 ${summary.nursingCount}")
-        if (summary.sleepMinutes > 0) add(RecordType.SLEEP.key to "睡 ${summary.sleepMinutes}分")
-        if (summary.peeCount > 0) add(RecordType.PEE.key to "尿 ${summary.peeCount}")
-        if (summary.poopCount > 0) add(RecordType.POOP.key to "便 ${summary.poopCount}")
-    }
+    // Policy: always-five (see DaySummaryChipPolicy). Zero chips are visible but not filterable.
+    val chips = DaySummaryChipPolicy.chips(summary)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = density.panelContent, vertical = LeziSpacing.Xs),
+            .padding(horizontal = density.panelContent, vertical = LeziSpacing.Xs)
+            .semantics { contentDescription = "日汇总五格" },
         horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
-        chips.forEach { (key, label) ->
-            val selected = selectedTypeKey == key
+        chips.forEach { chip ->
+            val selected = selectedTypeKey == chip.typeKey
+            val enabled = chip.selectable
             Surface(
                 shape = RoundedCornerShape(if (density.useCards) 8.dp else 4.dp),
-                color = if (selected) {
-                    LeziTypeGlyph.accent(key).copy(alpha = 0.25f)
-                } else {
-                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                color = when {
+                    selected -> LeziTypeGlyph.accent(chip.typeKey).copy(alpha = 0.25f)
+                    !enabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                    else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
                 },
                 modifier = Modifier
                     .height(LeziSpacing.Touch)
-                    .weight(1f, fill = false)
-                    .clickable {
-                        onSelect(if (selectedTypeKey == key) null else key)
-                    }
-                    .semantics { contentDescription = "日汇总筛选 $label" },
+                    .weight(1f)
+                    .then(
+                        if (enabled) {
+                            Modifier.clickable {
+                                onSelect(if (selectedTypeKey == chip.typeKey) null else chip.typeKey)
+                            }
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .semantics { contentDescription = "日汇总筛选 ${chip.label}" },
             ) {
                 Box(
-                    Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        label,
-                        style = MaterialTheme.typography.labelMedium,
+                        chip.label,
+                        style = MaterialTheme.typography.labelSmall,
                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                        textAlign = TextAlign.Center,
                     )
                 }
             }
-        }
-        if (chips.isEmpty()) {
-            Text("今日暂无汇总", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -241,7 +279,6 @@ fun QuickDock(
                     isEmpty = false,
                     isCustom = false,
                 ),
-                glyphOverride = "多",
                 onClick = onMore,
                 onLongClick = onLongPressLayout,
             )
@@ -255,11 +292,12 @@ private fun DockSlotButton(
     slot: DockModel.Slot,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    glyphOverride: String? = null,
 ) {
-    val accent = if (slot.isEmpty) Color(0xFFBDBDBD) else LeziTypeGlyph.accent(slot.typeKey ?: slot.bindingKey)
-    val glyph = glyphOverride
-        ?: if (slot.isEmpty) "·" else LeziTypeGlyph.glyph(slot.bindingKey ?: slot.typeKey)
+    val markKey = when {
+        slot.bindingKey == "__more__" -> "__more__"
+        slot.isEmpty -> null
+        else -> slot.bindingKey ?: slot.typeKey
+    }
     val interaction = remember { MutableInteractionSource() }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -277,16 +315,12 @@ private fun DockSlotButton(
             }
             .padding(4.dp),
     ) {
-        Box(
-            Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(accent.copy(alpha = if (slot.isEmpty) 0.15f else 0.2f))
-                .border(1.dp, accent.copy(alpha = 0.5f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(glyph, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = accent)
-        }
+        TypeMark(
+            typeKey = markKey,
+            empty = slot.isEmpty,
+            size = 44.dp,
+            iconSize = 22.dp,
+        )
         Text(
             slot.label.take(4),
             style = MaterialTheme.typography.labelSmall,

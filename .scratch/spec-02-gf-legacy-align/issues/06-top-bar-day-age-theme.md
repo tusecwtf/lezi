@@ -1,6 +1,6 @@
 # 06 — 顶栏日龄/主题强调 (E7)
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,10 @@
 
 ## Acceptance criteria
 
-- [ ] Caregiver sees age-like context on log home when birth date known
-- [ ] Theme accent visible on top emphasis / primary actions
-- [ ] Dual still top chrome; residual R-topbar narrowed or marked polish-done-partial
-- [ ] Does not break journal/warm template density tokens
+- [x] Caregiver sees age-like context on log home when birth date known
+- [x] Theme accent visible on top emphasis / primary actions
+- [x] Dual still top chrome; residual R-topbar narrowed or marked polish-done-partial
+- [x] Does not break journal/warm template density tokens
 
 ## Blocked by
 

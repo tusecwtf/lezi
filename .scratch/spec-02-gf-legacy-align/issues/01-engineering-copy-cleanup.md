@@ -1,6 +1,6 @@
 # 01 — 剩余工程文案清理
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,10 @@ Caregivers no longer see engineer-facing strings on primary care paths (e.g. sle
 
 ## Acceptance criteria
 
-- [ ] No raw engineer tokens on sleep Composer secondary labels caregivers see daily
-- [ ] Dual or GF still of sleep Composer shows only product copy
-- [ ] Unit/source anchor if pure helpers change
-- [ ] No regression of wall-clock / 待履行 polish already shipped
+- [x] No raw engineer tokens on sleep Composer secondary labels caregivers see daily
+- [x] Dual or GF still of sleep Composer shows only product copy
+- [x] Unit/source anchor if pure helpers change
+- [x] No regression of wall-clock / 待履行 polish already shipped
 
 ## Blocked by
 

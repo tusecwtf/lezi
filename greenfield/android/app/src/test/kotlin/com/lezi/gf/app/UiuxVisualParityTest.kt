@@ -137,4 +137,16 @@ class UiuxVisualParityTest {
         assertThat(cat.any { it.bindingKey == "__timer__" }).isTrue()
         assertThat(cat.size).isAtLeast(10)
     }
+
+    @Test
+    fun typeIconLanguageAndDefaultDockDocumented() {
+        val tokens = File("src/main/java/com/lezi/gf/app/ui/theme/LeziTokens.kt").readText()
+        assertThat(tokens).contains("fun vector(typeKey")
+        assertThat(tokens).contains("Icons.Default")
+        assertThat(DockModel.defaultDockSlots)
+            .containsExactly("pee", "sleep", "nursing", "formula")
+            .inOrder()
+        assertThat(DockModel.groupForType(com.lezi.gf.care.RecordType.FORMULA)).isEqualTo("喂养")
+        assertThat(DockModel.groupForType(com.lezi.gf.care.RecordType.PEE)).isEqualTo("排泄")
+    }
 }

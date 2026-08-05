@@ -1,6 +1,6 @@
 # 07 — 类型图标气质 (E3)
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -12,10 +12,10 @@ Type marks on timeline, dock, and more sheet use a **shared icon language** clos
 
 ## Acceptance criteria
 
-- [ ] Same type looks consistent on dock, row, more grid
-- [ ] Dual still of log home with seeded row + dock shows new language
-- [ ] Residual R-icons updated (aligned / partial)
-- [ ] No pixel CI gate
+- [x] Same type looks consistent on dock, row, more grid
+- [x] Dual still of log home with seeded row + dock shows new language
+- [x] Residual R-icons updated (aligned / partial)
+- [x] No pixel CI gate
 
 ## Blocked by
 

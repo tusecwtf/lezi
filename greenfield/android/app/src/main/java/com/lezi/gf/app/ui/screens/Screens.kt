@@ -160,6 +160,8 @@ fun LogScreen(
     var previewIndex by remember { mutableIntStateOf(0) }
     var refreshing by remember { mutableStateOf(false) }
     var expandedSwipeUuid by remember { mutableStateOf<String?>(null) }
+    /** Post-write next-feed offer (legacy-style); null = no dialog. */
+    var nextFeedOfferBabyUuid by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val babyAccent = LeziColors.babyAccent(
@@ -315,6 +317,7 @@ fun LogScreen(
             onDismiss = { showTimer = false },
             onConfirmed = {
                 showTimer = false
+                nextFeedOfferBabyUuid = baby.clientUuid
                 onChanged()
             },
         )
@@ -336,46 +339,63 @@ fun LogScreen(
             .semantics { contentDescription = "记录主路径" },
     ) {
         Column(Modifier.fillMaxSize()) {
-            // Top bar — nickname + day age + baby theme accent (Spec 02 E7)
-            Row(
+            // Top bar — nickname + day age + baby theme accent (Spec 02 E7 / align ticket 06)
+            Column(
                 Modifier
                     .fillMaxWidth()
-                    .background(
-                        if (settings.template == UiTemplate.JOURNAL) {
-                            babyAccent.copy(alpha = 0.12f)
-                        } else {
-                            Color.Transparent
-                        },
-                    )
-                    .padding(horizontal = density.topBarHorizontal, vertical = LeziSpacing.Sm),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                    .background(babyAccent.copy(alpha = if (settings.template == UiTemplate.JOURNAL) 0.14f else 0.10f)),
             ) {
-                Column {
-                    Text(
-                        baby.nickname,
-                        style = MaterialTheme.typography.titleLarge,
-                        color = babyAccent,
-                    )
-                    Text(
-                        buildString {
-                            if (dayAgeLine != null) {
-                                append(dayAgeLine)
-                                append(" · ")
-                            }
-                            append(if (settings.template == UiTemplate.JOURNAL) "紧凑记录簿" else "温暖卡片")
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = density.topBarHorizontal, vertical = LeziSpacing.Sm),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            baby.nickname,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = babyAccent,
+                        )
+                        if (dayAgeLine != null) {
+                            Text(
+                                dayAgeLine,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = babyAccent.copy(alpha = 0.9f),
+                            )
+                        }
+                        Text(
+                            if (settings.template == UiTemplate.JOURNAL) "紧凑记录簿" else "温暖卡片",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Row {
+                        TextButton(
+                            onClick = { showSearch = true },
+                            modifier = Modifier.semantics { contentDescription = "搜索" },
+                        ) {
+                            Text("搜索", color = babyAccent)
+                        }
+                        TextButton(
+                            onClick = {
+                                runForegroundSync(container)
+                                onChanged()
+                            },
+                            modifier = Modifier.semantics { contentDescription = "同步" },
+                        ) {
+                            Text("同步", color = babyAccent)
+                        }
+                    }
                 }
-                Row {
-                    TextButton(onClick = { showSearch = true }) { Text("搜索") }
-                    TextButton(onClick = {
-                        runForegroundSync(container)
-                        onChanged()
-                    }) { Text("同步") }
-                }
+                // Theme accent underline
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .background(babyAccent),
+                )
             }
 
             DateBar(
@@ -480,6 +500,8 @@ fun LogScreen(
                 }
             }
 
+            // Dock: default 尿尿·睡眠·母乳·配方奶 · 更多. Timer via 更多 ≤2 taps;
+            // layout via long-press dock; calendar via date bar (no noisy secondary row).
             QuickDock(
                 slots = dockSlots,
                 onSlotClick = { slot ->
@@ -501,23 +523,6 @@ fun LogScreen(
                 onLongPressLayout = { showLayout = true },
                 density = density,
             )
-            // Secondary row for timer / layout / calendar (not in 4-slot dock)
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = density.dockOuterHorizontal, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                TextButton(
-                    onClick = { showTimer = true },
-                    modifier = Modifier.semantics {
-                        // Exact a11y label for dual-capture harness (avoid "计 计时" glyph+text join).
-                        contentDescription = "计时"
-                    },
-                ) { Text("计时") }
-                TextButton(onClick = { showLayout = true }) { Text("布局") }
-                TextButton(onClick = { showCal = true }) { Text("月历") }
-            }
         }
     }
 
@@ -535,13 +540,13 @@ fun LogScreen(
     }
 
     if (showMore) {
-        val catalog = DockModel.moreCatalog(
-            container.care.store().layout,
-            container.care.liveCustomDefs(),
-            includeTimer = true,
-        )
+        val layout = container.care.store().layout
+        val customs = container.care.liveCustomDefs()
+        val catalog = DockModel.moreCatalog(layout, customs, includeTimer = true)
+        val groups = DockModel.moreCatalogGrouped(layout, customs, includeTimer = true)
         MoreSheet(
             catalog = catalog,
+            groups = groups,
             onDismiss = { showMore = false },
             onSelect = { item ->
                 when {
@@ -610,17 +615,18 @@ fun LogScreen(
                     when (val r = container.care.confirmCreate(updated)) {
                         is GfResult.Ok -> {
                             container.sync.markLocalPending(1)
-                            if (updated.type in setOf(RecordType.NURSING, RecordType.FORMULA, RecordType.PUMPED_FEED)) {
-                                container.care.createPlan(
-                                    babyClientUuid = baby.clientUuid,
-                                    typeKey = RecordType.NURSING.key,
-                                    scheduledAtMs = SystemClock.nowEpochMs() + 3 * 60 * 60 * 1000,
-                                    isNextFeed = true,
-                                )
-                            }
                             draft = null
                             editingRecordUuid = null
                             onChanged()
+                            // Legacy-style post-write offer — no silent plan without intent.
+                            if (updated.type in setOf(
+                                    RecordType.NURSING,
+                                    RecordType.FORMULA,
+                                    RecordType.PUMPED_FEED,
+                                )
+                            ) {
+                                nextFeedOfferBabyUuid = baby.clientUuid
+                            }
                         }
                         is GfResult.Err -> {
                             if (r.error.toString().contains("FUTURE_AS_PLAN")) {
@@ -648,6 +654,35 @@ fun LogScreen(
                     timestampMs = cur.timestampMs + delta * 60_000L,
                     dirty = true,
                 )
+            },
+        )
+    }
+
+    nextFeedOfferBabyUuid?.let { offerBaby ->
+        val suggestedMs = SystemClock.nowEpochMs() + 3 * 60 * 60 * 1000L
+        AlertDialog(
+            onDismissRequest = { nextFeedOfferBabyUuid = null },
+            title = { Text("安排下次喂养？") },
+            text = {
+                Text(
+                    "记录已保存。可安排约 3 小时后的下次喂养计划，或选择不安排。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    container.care.createPlan(
+                        babyClientUuid = offerBaby,
+                        typeKey = RecordType.NURSING.key,
+                        scheduledAtMs = suggestedMs,
+                        isNextFeed = true,
+                    )
+                    nextFeedOfferBabyUuid = null
+                    onChanged()
+                }) { Text("安排") }
+            },
+            dismissButton = {
+                TextButton(onClick = { nextFeedOfferBabyUuid = null }) { Text("不安排") }
             },
         )
     }

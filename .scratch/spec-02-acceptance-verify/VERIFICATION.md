@@ -47,4 +47,8 @@
 
 ## §2.3 recommendation
 
-**Not yet.** Chrome residuals (top bar, icons, day chips) still allow package discrimination. Retry only after deliberate chrome polish campaign.
+**Not yet** (restated after gf-legacy-align). High-noise residuals closed in [../spec-02-gf-legacy-align/](../spec-02-gf-legacy-align/); remaining top-bar color language + three-day axis still allow package discrimination. **S-freeze PASS** unchanged. Optional dual recapture on emulator after installing this build.
+
+## gf-legacy-align (2026-08-05)
+
+Code landed for tickets 01–08; matrix/residuals updated as **code-landed**. Unit tests `:app:testDebugUnitTest :care:test` green. See campaign ISSUES.md.

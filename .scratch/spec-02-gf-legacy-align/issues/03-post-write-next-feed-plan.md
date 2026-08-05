@@ -1,6 +1,6 @@
 # 03 — 写后下次喂养 / 计划体验对齐
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -14,10 +14,10 @@ After confirming a 配方奶 护理记录, the **next-feed / care-plan** moment 
 
 ## Acceptance criteria
 
-- [ ] After formula confirm, caregiver sees a clear next-step for plan/next feed (dialog and/or row)
-- [ ] Skip/dismiss does not leave confusing English or debug state
-- [ ] Fulfill/skip (if present) still confirm-safe
-- [ ] Dual still of post-write moment GF vs legacy; residual R-next-feed updated
+- [x] After formula confirm, caregiver sees a clear next-step for plan/next feed (dialog and/or row)
+- [x] Skip/dismiss does not leave confusing English or debug state
+- [x] Fulfill/skip (if present) still confirm-safe
+- [x] Dual still of post-write moment GF vs legacy; residual R-next-feed updated
 
 ## Blocked by
 

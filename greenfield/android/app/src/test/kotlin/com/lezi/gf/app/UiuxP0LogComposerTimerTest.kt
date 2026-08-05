@@ -120,6 +120,52 @@ class UiuxP0LogComposerTimerTest {
     }
 
     @Test
+    fun formulaOptionalPreparedAndDurationRoundTrip() {
+        val payload = ComposerFields.buildMilk(
+            ComposerFields.MilkFields(amountMl = 120, preparedMl = 140, durationMin = 12),
+        )
+        val parsed = ComposerFields.parseMilk(payload)
+        assertThat(parsed.amountMl).isEqualTo(120)
+        assertThat(parsed.preparedMl).isEqualTo(140)
+        assertThat(parsed.durationMin).isEqualTo(12)
+        assertThat(ComposerFields.secondaryFieldKeys(RecordType.FORMULA))
+            .containsAtLeast("amount_ml", "prepared_ml", "duration_min")
+    }
+
+    @Test
+    fun sleepOpenSessionCopyHasNoEngineerTokens() {
+        val composer = File("src/main/java/com/lezi/gf/app/ui/log/ComposerSheet.kt").readText()
+        assertThat(composer).doesNotContain("duration=0")
+        assertThat(composer).doesNotContain("开放会话")
+        assertThat(composer).doesNotContain("不拦截写入")
+        assertThat(composer).contains("睡下后时长将在醒来时计算")
+        assertThat(composer).contains("异常标记")
+    }
+
+    @Test
+    fun defaultDockOrderIsPeeSleepNursingFormula() {
+        val care = CareService()
+        assertThat(care.store().layout.dockSlots)
+            .containsExactly("pee", "sleep", "nursing", "formula")
+            .inOrder()
+        assertThat(DockModel.defaultDockSlots)
+            .containsExactly("pee", "sleep", "nursing", "formula")
+            .inOrder()
+    }
+
+    @Test
+    fun daySummaryAlwaysFivePolicyAndMoreGroups() {
+        val empty = CareService().daySummary("b", CareAggregation.dayStartMs(1_700_000_000_000L))
+        val chips = com.lezi.gf.app.ui.theme.DaySummaryChipPolicy.chips(empty)
+        assertThat(chips).hasSize(5)
+        assertThat(chips.all { !it.selectable }).isTrue()
+        val groups = DockModel.moreCatalogGrouped(LayoutSnapshot(), emptyList(), includeTimer = true)
+        assertThat(groups.map { it.title }).contains("常用补充")
+        assertThat(groups.map { it.title }).contains("喂养")
+        assertThat(groups.flatMap { it.items }.any { it.bindingKey == "__timer__" }).isTrue()
+    }
+
+    @Test
     fun typeSpecificFieldsAndEditRecordPreservesPayload() {
         val care = CareService()
         val pee = ComposerFields.buildPee(ComposerFields.PeeFields(3))
@@ -199,11 +245,21 @@ class UiuxP0LogComposerTimerTest {
         assertThat(screens).contains("editRecord")
         assertThat(screens).contains("PhotoStore.importFromUri")
         assertThat(screens).contains("planStatusChinese")
+        assertThat(screens).contains("安排下次喂养")
+        assertThat(screens).contains("不安排")
         assertThat(screens).doesNotContain("D\$i 奶")
         assertThat(screens).doesNotContain("bytes.take(64_000)")
+        // Secondary chrome row removed — timer via 更多
+        assertThat(screens).doesNotContain("contentDescription = \"计时\"")
         val photo = t("media/PhotoStore.kt")
         assertThat(photo).contains("importFromUri")
         assertThat(photo).contains("MAX_LONG_EDGE_PX")
         assertThat(photo).doesNotContain("64_000")
+        val tokens = t("ui/theme/LeziTokens.kt")
+        assertThat(tokens).contains("fun vector")
+        assertThat(tokens).contains("DaySummaryChipPolicy")
+        val more = t("ui/components/MoreSheet.kt")
+        assertThat(more).contains("分组")
+        assertThat(more).contains("TypeMark")
     }
 }
