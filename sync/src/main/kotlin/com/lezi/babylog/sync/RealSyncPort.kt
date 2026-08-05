@@ -92,6 +92,7 @@ import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
 import com.lezi.babylog.sync.session.CAPABILITY_AUTHORITATIVE_RECONCILE
 import com.lezi.babylog.sync.session.CAPABILITY_DISASTER_RESTORE
 import com.lezi.babylog.sync.session.CAPABILITY_RECORD_MEMBERSHIP_AUTHOR
+import com.lezi.babylog.sync.session.CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilySessionCommand
@@ -2196,6 +2197,7 @@ private val REQUIRED_HEALTH_CAPABILITIES = setOf(
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
     CAPABILITY_AUTHORITATIVE_RECONCILE,
+    CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
 )
 
 /** Reauth keeps the family replica/identity; only a true leave/unconfigure retires force UI. */

@@ -73,6 +73,7 @@ pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
 pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
 pub const CAPABILITY_AUTHORITATIVE_RECONCILE: &str = "authoritative_reconcile_v1";
+pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
@@ -515,6 +516,28 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     let restore_family_ids = disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
     media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
     media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
+    let validation_media_root = media_root.clone();
+    let validation = store.validate_authority_graph(
+        config.max_media_bytes,
+        move |family_id, media_id, expected_size| {
+            let path = validation_media_root.join(family_id).join(media_id);
+            let metadata = match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(StoreError::Io(error)),
+            };
+            Ok(metadata.file_type().is_file()
+                && metadata.len() > 0
+                && usize::try_from(metadata.len()) == Ok(expected_size))
+        },
+    )?;
+    tracing::info!(
+        family_count = validation.family_count,
+        entity_count = validation.entity_count,
+        deferred_fulfillment_count = validation.deferred_fulfillment_count,
+        capability = CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
+        "family authority graph validation completed"
+    );
     let app_update_metadata_path = config
         .app_update_metadata_path
         .unwrap_or_else(|| config.data_dir.join("app-update.json"));

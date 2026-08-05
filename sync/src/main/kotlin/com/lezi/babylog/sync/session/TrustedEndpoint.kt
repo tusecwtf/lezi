@@ -33,6 +33,8 @@ const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
 const val CAPABILITY_AUTHORITATIVE_RECONCILE = "authoritative_reconcile_v1"
 const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
 const val CAPABILITY_DISASTER_RESTORE = "device_disaster_restore_v1"
+const val CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT =
+    "validated_deferred_fulfillment_v1"
 
 enum class EndpointTrustMode {
     SystemPki,
@@ -451,4 +453,5 @@ private val REQUIRED_SETUP_CAPABILITIES = setOf(
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
     CAPABILITY_AUTHORITATIVE_RECONCILE,
+    CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
 )

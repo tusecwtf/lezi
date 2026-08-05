@@ -7,8 +7,9 @@
 > [ADR-0017](../adr/0017-authoritative-reconcile-settles-local-deltas.md)
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
-> 权威裁决扩展状态：0.3.8 已实现批量 head-by-UUID 裁决、Android 冻结/CAS 终结与
-> atomic pending 投影；发布验收证据由本地 tracker 固定到实际构建与联调结果。
+> 权威裁决扩展状态：0.3.9 在既有批量 head-by-UUID 裁决、Android 冻结/CAS 终结与
+> atomic pending 投影上增加启动 authority graph 校验及延迟履约能力门闩；发布验收证据
+> 由本地 tracker 固定到实际构建与联调结果。
 
 本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选按 ADR-0016 的先对账临时计划与 ADR-0017 的权威终态裁决生成。
 

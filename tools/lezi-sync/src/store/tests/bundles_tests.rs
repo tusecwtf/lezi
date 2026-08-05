@@ -8,6 +8,76 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[test]
+fn record_cannot_resolve_deferred_plan_for_a_different_baby() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("lezi.db")).unwrap();
+    let family_id = family(&store);
+    let principal = owner_principal(&family_id);
+    let plan_baby_id = Uuid::new_v4();
+    let record_baby_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+
+    for (baby_id, nickname) in [(plan_baby_id, "年年"), (record_baby_id, "安安")] {
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":nickname,"sex":null,"birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":null
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+    }
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "care_plan",
+            plan_id,
+            2,
+            json!({
+                "baby_client_uuid":plan_baby_id,"type":"bath",
+                "custom_item_client_uuid":null,"scheduled_at":90,
+                "scheduled_zone_id":"Asia/Shanghai","status":"completed",
+                "payload_json":{},"schema_version":2,"note":null,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":record_id,"fulfilled_at":100
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+
+    let result = publish_root(
+        &store,
+        &principal,
+        entity(
+            "record",
+            record_id,
+            3,
+            json!({
+                "baby_client_uuid":record_baby_id,"type":"bath","timestamp":100,
+                "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+            }),
+        ),
+        10,
+    );
+
+    assert!(matches!(
+        result,
+        Err(StoreError::UnresolvedReference(message))
+            if message == "fulfilled record baby does not match care_plan baby"
+    ));
+}
+
+#[test]
 fn atomic_root_rejects_a_ninth_cumulative_live_media_item() {
     let directory = TempDir::new().unwrap();
     let store = Store::open(directory.path().join("lezi.db")).unwrap();

@@ -552,7 +552,8 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
             "atomic_bundle",
             "record_membership_author",
             "device_disaster_restore_v1",
-            "authoritative_reconcile_v1"
+            "authoritative_reconcile_v1",
+            "validated_deferred_fulfillment_v1"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -879,6 +880,7 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "record_membership_author",
                 "device_disaster_restore_v1",
                 "authoritative_reconcile_v1",
+                "validated_deferred_fulfillment_v1",
             ],
             "family_state": "empty",
         })
@@ -911,6 +913,7 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "record_membership_author",
                 "device_disaster_restore_v1",
                 "authoritative_reconcile_v1",
+                "validated_deferred_fulfillment_v1",
             ],
             "family_state": "configured",
         })
@@ -8523,6 +8526,164 @@ async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
 // ---------------------------------------------------------------------------
 // Atomic bundle protocol
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn protocol_cutover_validates_defers_and_resolves_legacy_fulfillment_for_peer() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "cutover-owner",
+        "cutover-owner-request-000000000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let peer = approve_new_member(&rig.app, owner_token, "cutover-peer").await;
+    let peer_token = peer["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let clean_record_id = seed_record(&rig.app, owner_token, &baby_id).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let missing_record_id = Uuid::new_v4().to_string();
+    let plan_media_id = Uuid::new_v4().to_string();
+    let mut completed_plan = care_plan_payload(&baby_id, "formula");
+    completed_plan["status"] = json!("completed");
+    completed_plan["fulfilled_record_client_uuid"] = json!(missing_record_id);
+    completed_plan["fulfilled_at"] = json!(100);
+    let (plan_status, plan_body) = publish_bundle_with_media(
+        &rig.app,
+        owner_token,
+        entity_wire("care_plan", &plan_id, 3, completed_plan, None),
+        vec![(
+            entity_wire(
+                "media",
+                &plan_media_id,
+                3,
+                json!({
+                    "kind":"log","record_client_uuid":null,
+                    "care_plan_client_uuid":plan_id,"baby_client_uuid":null,
+                    "mime":"image/jpeg","width":1,"height":1,"byte_size":3
+                }),
+                None,
+            ),
+            b"img".to_vec(),
+        )],
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
+
+    let (_, before_restart) = get_json(&rig.app, "/v1/pull?cursor=0", Some(peer_token)).await;
+    let before_cursor = before_restart["cursor"].as_i64().unwrap();
+    assert!(before_restart["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == clean_record_id));
+    assert!(before_restart["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entity| entity["client_uuid"] != plan_id && entity["client_uuid"] != plan_media_id));
+
+    let upgraded = rig.restart("generation-0.3.9");
+    let (_, health) = get_json(&upgraded, "/health", None).await;
+    assert!(health["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("validated_deferred_fulfillment_v1")));
+    let (generation_status, generation_body) = get_json(
+        &upgraded,
+        &format!("/v1/pull?cursor={before_cursor}&generation=generation-a"),
+        Some(peer_token),
+    )
+    .await;
+    assert_eq!(generation_status, StatusCode::CONFLICT, "{generation_body}");
+    assert_eq!(generation_body["detail"]["action"], "full_resync");
+    for token in [owner_token, peer_token] {
+        test_client_sessions()
+            .lock()
+            .unwrap()
+            .get_mut(token)
+            .unwrap()
+            .generation = "generation-0.3.9".to_owned();
+    }
+
+    let (_, deferred) = get_json(&upgraded, "/v1/pull?cursor=0", Some(peer_token)).await;
+    let deferred_cursor = deferred["cursor"].as_i64().unwrap();
+    assert!(deferred["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entity| entity["client_uuid"] != plan_id && entity["client_uuid"] != plan_media_id));
+
+    seed_record_with_id(
+        &upgraded,
+        owner_token,
+        &missing_record_id,
+        4,
+        record_payload(&baby_id),
+    )
+    .await;
+    let (_, resolved) = get_json(
+        &upgraded,
+        &format!("/v1/pull?cursor={deferred_cursor}"),
+        Some(peer_token),
+    )
+    .await;
+    let resolved_ids = resolved["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entity| entity["client_uuid"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert!(resolved_ids.contains(missing_record_id.as_str()));
+    assert!(resolved_ids.contains(plan_id.as_str()));
+    assert!(resolved_ids.contains(plan_media_id.as_str()));
+}
+
+#[tokio::test]
+async fn protocol_cutover_refuses_ready_when_deferred_fulfillment_evidence_is_missing() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "cutover-invalid-owner",
+        "cutover-invalid-request-0000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let missing_record_id = Uuid::new_v4().to_string();
+    let mut completed_plan = care_plan_payload(&baby_id, "bath");
+    completed_plan["status"] = json!("completed");
+    completed_plan["fulfilled_record_client_uuid"] = json!(missing_record_id);
+    completed_plan["fulfilled_at"] = json!(100);
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("care_plan", &plan_id, 2, completed_plan, None),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM sync_bundles WHERE root_type = 'care_plan' AND root_client_uuid = ?1",
+            [&plan_id],
+        )
+        .unwrap();
+
+    let mut config = ServerConfig::new(rig.directory.path());
+    config.generation = Some("generation-invalid-cutover".to_owned());
+    config.max_media_bytes = 8;
+    let result = build_app(config);
+
+    assert!(
+        result.is_err(),
+        "invalid authority graph must never become ready"
+    );
+}
 
 fn entity_wire(
     entity_type: &str,

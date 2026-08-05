@@ -6,7 +6,7 @@
 > [ADR-0012](../adr/0012-preserve-android-local-data-across-in-place-upgrades.md)。
 > 主 PRD：[`README.md`](./README.md)
 >
-> **当前身份与网络合同（0.3.8）：** 历史的一设备一 membership、`left_at`、长期
+> **当前身份与网络合同（0.3.9）：** 历史的一设备一 membership、`left_at`、长期
 > credential、网络名称/明文传输的 0.3 实现说明已由
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 和
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
@@ -445,8 +445,9 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 
 两字段本身也是「同时为空或同时非空」；禁止残缺绑定。`status=completed` 的首次 atomic
 root 写入必须在同一事务携带完整 pair，不能先 completed 再补绑。若 bound Record 已在同
-家庭存在，须与计划同宝宝（否则引用冲突）；产品发布序仍允许 completed CarePlan → Record
-的前向引用。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
+家庭存在，须与计划同宝宝（否则引用冲突）；传输仍允许 completed CarePlan → Record 的
+前向提交，但 NAS 只把它保留为不可 pull 的延后履行，关联 Record 完整到达并在同一家庭事务
+复验后才公开完整关系。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
 清空、改绑其它 Record 或改变确认时间：残缺/清空在 model 边界 `422`，合法完整但改绑/改时
 的 rewrite 返回 `409`，creator 与 owner 遵循相同规则。精确 replay（同 pair）幂等；stage
 与 commit 间的并发 rebind 仍由 commit 时冻结检查拦截。其它计划字段仍可按原 ACL/LWW 更新。
@@ -756,7 +757,8 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前契约 v3（0.3.8 / versionCode 15）仍为 Room v26，通过
+相邻升级；当前 0.3.9 / versionCode 16 继续使用契约 v3（由 0.3.8 / versionCode 15 引入）
+与 Room v26，通过
 `OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含 LocalUser、Family、
 Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、CustomItemDef、CarePlan 与 FulfillmentCandidate，
 并使用真实 `SyncPort` 和 Record/计划媒体原子包。后续本地数据契约必须通过相邻迁移链保留

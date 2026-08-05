@@ -8,6 +8,142 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[test]
+fn legacy_incomplete_fulfillment_is_deferred_without_blocking_pull() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("lezi.db")).unwrap();
+    let family_id = family(&store);
+    let principal = owner_principal(&family_id);
+    let baby_id = Uuid::new_v4();
+    let unrelated_record_id = Uuid::new_v4();
+    let deferred_plan_id = Uuid::new_v4();
+    let missing_record_id = Uuid::new_v4();
+    let deferred_media_id = Uuid::new_v4();
+
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "baby",
+            baby_id,
+            1,
+            json!({
+                "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                "avatar_media_uuid":null,"birth_weight_grams":3200
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "record",
+            unrelated_record_id,
+            2,
+            json!({
+                "baby_client_uuid":baby_id,"type":"formula",
+                "custom_item_client_uuid":null,"timestamp":100,
+                "end_timestamp":null,"note":"保留的干净历史",
+                "payload_json":{"amount_ml":80},"schema_version":2
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+    publish_bundle(
+        &store,
+        &principal,
+        entity(
+            "care_plan",
+            deferred_plan_id,
+            3,
+            json!({
+                "baby_client_uuid":baby_id,"type":"formula",
+                "custom_item_client_uuid":null,"scheduled_at":90,
+                "scheduled_zone_id":"Asia/Shanghai","status":"completed",
+                "payload_json":{"amount_ml":80},"schema_version":2,"note":null,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":missing_record_id,"fulfilled_at":100
+            }),
+        ),
+        vec![entity(
+            "media",
+            deferred_media_id,
+            3,
+            json!({
+                "kind":"log","record_client_uuid":null,
+                "care_plan_client_uuid":deferred_plan_id,"baby_client_uuid":null,
+                "mime":"image/jpeg","width":1,"height":1,"byte_size":3
+            }),
+        )],
+        10,
+    )
+    .unwrap();
+
+    let validation = store
+        .validate_authority_graph(10 * 1024 * 1024, |_, _, _| Ok(true))
+        .unwrap();
+    assert_eq!(validation.family_count, 1);
+    assert_eq!(validation.entity_count, 4);
+    assert_eq!(validation.deferred_fulfillment_count, 1);
+
+    let pulled = store.pull(&family_id, 0).unwrap();
+
+    assert_eq!(pulled.cursor, 4);
+    assert!(pulled
+        .entities
+        .iter()
+        .any(|entity| entity.client_uuid == unrelated_record_id.to_string()));
+    assert!(pulled
+        .entities
+        .iter()
+        .all(|entity| entity.client_uuid != deferred_plan_id.to_string()));
+    assert!(pulled
+        .entities
+        .iter()
+        .all(|entity| entity.client_uuid != deferred_media_id.to_string()));
+    assert!(pulled
+        .entities
+        .iter()
+        .all(|entity| entity.client_uuid != missing_record_id.to_string()));
+
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "record",
+            missing_record_id,
+            4,
+            json!({
+                "baby_client_uuid":baby_id,"type":"formula",
+                "custom_item_client_uuid":null,"timestamp":100,
+                "end_timestamp":null,"note":"后来回补的履行事实",
+                "payload_json":{"amount_ml":80},"schema_version":2
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+
+    let resolved = store.pull(&family_id, pulled.cursor).unwrap();
+    let resolved_ids = resolved
+        .entities
+        .iter()
+        .map(|entity| entity.client_uuid.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        resolved_ids,
+        BTreeSet::from([
+            baby_id.to_string(),
+            missing_record_id.to_string(),
+            deferred_plan_id.to_string(),
+            deferred_media_id.to_string(),
+        ]),
+    );
+}
+
+#[test]
 fn full_pull_emits_custom_item_dependency_before_custom_record() {
     let directory = TempDir::new().unwrap();
     let store = Store::open(directory.path().join("lezi.db")).unwrap();

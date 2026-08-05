@@ -266,9 +266,9 @@ secret 的 request/status/cancel/claim 外，接口都要求
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
-| GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle","record_membership_author"]}`，不访问 DB/文件系统 |
+| GET | `/health` | 廉价进程存活检查，正常返回 `ok`、`version` 与完整协议能力（含 `authoritative_reconcile_v1`、`validated_deferred_fulfillment_v1`），不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（`trusted_https_endpoint_v1`、`device_sessions_v1`、`membership_devices_v1`、`atomic_bundle`、`record_membership_author`）与 `family_state:empty\|configured`，维护中返回无正文 503 |
+| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（包括灾备、权威对账与已验证延迟履约能力）与 `family_state:empty\|configured`，维护中返回无正文 503 |
 | POST | `/v1/family/create` | 仅空服务器可用；根密码幂等创建唯一家庭、Owner membership、首台 Device 与 DeviceSession |
 | POST | `/v1/owner/login` | configured 家庭用根密码幂等新增一个 Device 到唯一 Owner membership；旧 Owner Device 不受影响 |
 | POST | `/v1/owner/takeover` | 明确接管：原子撤销全部旧 Owner DeviceSession 后为当前 Device 签发 session；Member session 不受影响 |
@@ -427,8 +427,9 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 ### 原子同步包（`atomic_bundle`）
 
 `GET /health` 广告
-`capabilities: ["atomic_bundle", "record_membership_author"]`。当前客户端要求 health
-为 `ok` 且 capabilities 至少包含这两项；允许增加能力，`version` 仅展示、不参与门闩。
+`capabilities` 包含 `atomic_bundle`、`record_membership_author`、
+`authoritative_reconcile_v1` 与 `validated_deferred_fulfillment_v1`。当前客户端要求 health
+为 `ok` 且具备完整协议能力；最后一项只在启动语义校验完成后暴露，`version` 仅展示、不参与门闩。
 公网 `8765` 只提供 HTTPS；容器健康检查使用仅绑定 `127.0.0.1:8766` 的明文
 `/health`、`/ready` 路由，该内部 listener 不挂载任何 `/v1/*` 业务接口。
 所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
@@ -470,6 +471,9 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
   皆空；残缺 pair 或非 completed 携带 pair → model `422`。首次 completed 写入即冻结完整
   pair；后续清空/残缺 rewrite → `422`，完整但改绑/改时 → `409`。精确 replay 与同 bundle
   retry 幂等；stage→commit 竞态 rebind 由 commit 冻结检查拦截
+- completed CarePlan 可先于关联 Record 耐久提交，但在 Record 缺失期间连同计划媒体一起
+  排除在公开 pull 图之外；Record 到达时在同一家庭锁与 SQLite 事务复验关系，随后让完整
+  CarePlan/Record/媒体闭包对已越过旧 cursor 的客户端重新可达
 - `/v1/push` 与普通媒体 PUT 固定 `422`；GET 媒体下载保留
 - pull 发出 live Record/CarePlan 时，同页共组其全部 live `log` 媒体；客户端仍逐页完整 apply
 

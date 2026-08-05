@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 15,
-  "version_name": "0.3.8",
-  "min_supported_version_code": 6,
-  "sha256": "91c5415a41dca20bc56a0e97014ead8ad302561c9123e02f7668ff56dcd64344",
-  "release_notes": "0.3.8 完成服务端权威对账加固，原子收敛待同步记录与照片，并发布最新客户端"
+  "version_code": 16,
+  "version_name": "0.3.9",
+  "min_supported_version_code": 16,
+  "sha256": "7d2aa4cb4f48ec9e6078b5c76c1831a39d8168174485c658362dedaa32477b5c",
+  "release_notes": "0.3.9 完成家庭同步协议切换，无损重对账并隔离、自动修复旧版不完整履行"
 }

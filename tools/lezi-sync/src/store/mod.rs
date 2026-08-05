@@ -16,6 +16,7 @@
 //!
 //! `offline_migrate/` is **not** part of this package.
 
+mod authority_graph;
 mod bundles;
 mod identity;
 mod media;
@@ -326,6 +327,12 @@ pub enum StoreError {
     BundleRootNotNewer,
     #[error("authoritative reconcile batch is invalid")]
     InvalidReconcileBatch,
+    #[error("authority graph validation failed ({reason_code}) for {entity_type} {client_uuid}")]
+    AuthorityGraphInvalid {
+        reason_code: &'static str,
+        entity_type: String,
+        client_uuid: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -373,6 +380,13 @@ pub struct CommittedPendingBundleMedia {
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorityGraphValidationSummary {
+    pub family_count: usize,
+    pub entity_count: usize,
+    pub deferred_fulfillment_count: usize,
 }
 
 /// Entity primary key: `(entity_type, client_uuid)`.

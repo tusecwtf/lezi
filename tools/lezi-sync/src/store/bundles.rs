@@ -956,6 +956,65 @@ fn load_fulfillment_custom_references(
     Ok(references)
 }
 
+fn validate_deferred_fulfillment_resolutions(
+    connection: &Connection,
+    family_id: &str,
+    entities: &[Entity],
+) -> Result<Vec<(String, String)>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT plan.client_uuid, plan.payload_json
+        FROM entities AS plan
+        WHERE plan.family_id = ?1
+          AND plan.entity_type = 'care_plan'
+          AND plan.deleted_at IS NULL
+          AND json_extract(plan.payload_json, '$.status') = 'completed'
+          AND json_extract(plan.payload_json, '$.fulfilled_record_client_uuid') = ?2
+          AND NOT EXISTS (
+              SELECT 1
+              FROM entities AS record
+              WHERE record.family_id = ?1
+                AND record.entity_type = 'record'
+                AND record.client_uuid = ?2
+                AND record.deleted_at IS NULL
+          )
+        ",
+    )?;
+    let mut resolutions = Vec::new();
+    for record in entities
+        .iter()
+        .filter(|entity| entity.entity_type == "record" && entity.deleted_at.is_none())
+    {
+        let record_baby = record
+            .payload
+            .get("baby_client_uuid")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        let plans = statement
+            .query_map(params![family_id, record.client_uuid], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (plan_id, raw) in plans {
+            let plan = parse_payload(&raw)?;
+            let plan_baby = plan
+                .get("baby_client_uuid")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::InvalidStoredPayload)?;
+            if plan.get("fulfilled_at").and_then(Value::as_i64).is_none() {
+                return Err(StoreError::InvalidStoredPayload);
+            }
+            if plan_baby != record_baby {
+                return Err(StoreError::UnresolvedReference(
+                    "fulfilled record baby does not match care_plan baby".to_owned(),
+                ));
+            }
+            resolutions.push((plan_id, record.client_uuid.clone()));
+        }
+    }
+    Ok(resolutions)
+}
+
 fn validate_push(
     role: &str,
     membership_id: &str,
@@ -1600,6 +1659,7 @@ impl Store {
         let persisted = existing.clone();
         let fulfillment_custom_references =
             load_fulfillment_custom_references(&transaction, family_id, &package)?;
+        let _ = validate_deferred_fulfillment_resolutions(&transaction, family_id, &package)?;
         for entity in &package {
             existing.insert(
                 entity_key(entity),
@@ -2011,6 +2071,8 @@ impl Store {
         let persisted = existing.clone();
         let fulfillment_custom_references =
             load_fulfillment_custom_references(&transaction, family_id, &effective)?;
+        let deferred_fulfillment_resolutions =
+            validate_deferred_fulfillment_resolutions(&transaction, family_id, &effective)?;
         // Intra-package references: treat full package (not only LWW winners) as present.
         for entity in &package {
             existing
@@ -2154,6 +2216,18 @@ impl Store {
         }
         transaction.commit()?;
         self.secure_database_files()?;
+        for (care_plan_client_uuid, record_client_uuid) in
+            deferred_fulfillment_resolutions.into_iter().take(32)
+        {
+            tracing::info!(
+                family_id,
+                entity_type = "care_plan",
+                client_uuid = %care_plan_client_uuid,
+                record_client_uuid = %record_client_uuid,
+                reason_code = "deferred_fulfillment_resolved",
+                "deferred legacy fulfillment joined the public authority graph"
+            );
+        }
         let _ = original_count;
         Ok((
             BundleCommitResult {

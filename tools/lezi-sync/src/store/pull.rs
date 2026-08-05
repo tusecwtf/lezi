@@ -122,6 +122,14 @@ fn collect_pull_entity_with_dependencies(
                     group_keys,
                     group,
                 )?;
+                append_completed_plans_for_record(
+                    connection,
+                    family_id,
+                    &entity.client_uuid,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
             }
             "care_plan" => {
                 append_pull_dependency(
@@ -262,6 +270,50 @@ fn collect_pull_entity_with_dependencies(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn append_completed_plans_for_record(
+    connection: &Connection,
+    family_id: &str,
+    record_client_uuid: &str,
+    included_keys: &BTreeSet<EntityKey>,
+    group_keys: &mut BTreeSet<EntityKey>,
+    group: &mut Vec<PulledEntity>,
+) -> Result<(), StoreError> {
+    let plan_ids = {
+        let mut statement = connection.prepare(
+            "
+            SELECT client_uuid
+            FROM entities
+            WHERE family_id = ?1
+              AND entity_type = 'care_plan'
+              AND deleted_at IS NULL
+              AND json_extract(payload_json, '$.status') = 'completed'
+              AND json_extract(payload_json, '$.fulfilled_record_client_uuid') = ?2
+            ORDER BY rev ASC, client_uuid ASC
+            ",
+        )?;
+        let ids = statement
+            .query_map(params![family_id, record_client_uuid], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    for plan_id in plan_ids {
+        append_pull_dependency(
+            connection,
+            family_id,
+            -1,
+            "care_plan",
+            &plan_id,
+            included_keys,
+            group_keys,
+            group,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn append_log_media_for_parent(
     connection: &Connection,
     family_id: &str,
@@ -363,6 +415,59 @@ fn required_payload_reference<'a>(
         .ok_or(StoreError::InvalidStoredPayload)
 }
 
+fn is_deferred_fulfillment(
+    connection: &Connection,
+    family_id: &str,
+    entity: &PulledEntity,
+) -> Result<bool, StoreError> {
+    match entity.entity_type.as_str() {
+        "care_plan" => is_deferred_care_plan(connection, family_id, entity),
+        "media" => {
+            let Some(plan_id) = entity
+                .payload
+                .get("care_plan_client_uuid")
+                .and_then(Value::as_str)
+            else {
+                return Ok(false);
+            };
+            let Some(plan) = load_pulled_entity(connection, family_id, "care_plan", plan_id)?
+            else {
+                return Ok(false);
+            };
+            is_deferred_care_plan(connection, family_id, &plan)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn is_deferred_care_plan(
+    connection: &Connection,
+    family_id: &str,
+    plan: &PulledEntity,
+) -> Result<bool, StoreError> {
+    if plan.deleted_at.is_some()
+        || plan.payload.get("status").and_then(Value::as_str) != Some("completed")
+    {
+        return Ok(false);
+    }
+    let record_id = required_payload_reference(&plan.payload, "fulfilled_record_client_uuid")?;
+    let record_exists = connection.query_row(
+        "
+        SELECT EXISTS(
+            SELECT 1
+            FROM entities
+            WHERE family_id = ?1
+              AND entity_type = 'record'
+              AND client_uuid = ?2
+              AND deleted_at IS NULL
+        )
+        ",
+        params![family_id, record_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(!record_exists)
+}
+
 impl Store {
     pub fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError> {
         let connection = self.connect()?;
@@ -396,6 +501,10 @@ impl Store {
         while let Some(row) = rows.next()? {
             let entity = pulled_entity_from_row(row)?;
             let base_rev = entity.rev;
+            if is_deferred_fulfillment(&connection, family_id, &entity)? {
+                page_cursor = base_rev;
+                continue;
+            }
             let mut group = Vec::new();
             let mut group_keys = BTreeSet::new();
             collect_pull_entity_with_dependencies(

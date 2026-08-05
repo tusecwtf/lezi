@@ -206,6 +206,28 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun reconnectCandidateRejectsServerWithoutValidatedDeferredFulfillment() = runTest {
+        val candidate = TrustedEndpointProfile.systemPki("https://nas-old.example.test")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            setupProbe = SetupProbe { _, _ ->
+                SetupProbeResult.Ready(candidate, SetupFamilyState.Configured)
+            },
+        )
+        rig.backend.anonymousHealthResult = rig.backend.anonymousHealthResult.copy(
+            capabilities = setOf(
+                "atomic_bundle",
+                "record_membership_author",
+                "device_disaster_restore_v1",
+                "authoritative_reconcile_v1",
+            ),
+        )
+
+        assertThat(rig.port.probeReconnectEndpoint(candidate.origin))
+            .isEqualTo(SetupProbeResult.Failed.Incompatible)
+    }
+
+    @Test
     fun reconnectCandidateWaitsForCertificateApprovalBeforeAnonymousProtocolProbes() = runTest {
         val candidate = CertificateTrustCandidate.fromSpki(
             TrustedEndpointProfile.systemPki("https://nas-new.example.test"),
@@ -8989,6 +9011,7 @@ internal class RecordingSyncBackend : SyncBackend {
             "record_membership_author",
             "device_disaster_restore_v1",
             "authoritative_reconcile_v1",
+            "validated_deferred_fulfillment_v1",
         ),
     )
     var anonymousReadyResult = AnonymousReadiness(version = "0.3.3")
