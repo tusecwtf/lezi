@@ -1,6 +1,6 @@
 # 10 — Composer · 母乳 / 与计时入口关系
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

@@ -1,6 +1,6 @@
 # 09 — Composer · 尿/便
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

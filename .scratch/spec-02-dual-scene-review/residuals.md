@@ -1,30 +1,60 @@
 # Dual-scene residuals (living)
 
-Updated as scenes are reviewed. **Do not** treat chrome items below as 1.0.0 blockers.
+**Canonical inventory:** [uiux-diff-spec.md](./uiux-diff-spec.md)  
+**Do not** treat chrome waived items as 1.0.0 blockers.
 
-## From S-freeze / dual stills (2026-08-05) — accepted residual
+## Aligned (code)
 
-| ID | Diff | Align attempt? | Status |
-|----|------|----------------|--------|
-| R-topbar | Legacy blue top bar + day-age + icon summary vs GF cream nickname + three-day axis | No (explicit non-compare) | residual / waived |
-| R-icons | Material/line icons vs 汉字 glyph circles (E3) | No this batch | residual / waived |
-| R-daychips | Legacy empty five chips vs GF “今日暂无汇总” (E4) | No this batch | residual / waived |
-| R-composer-density | Legacy dense ml chips + 冲调量/耗时 vs GF stepper-only | **Yes** — default 120ml + quick chips + CTA 确认记录 | **partial align landed** |
-| R-composer-default-0 | GF open formula at 0 ml vs legacy ~120 | **Yes** — `DEFAULT_MILK_AMOUNT_ML=120` | **aligned** |
-| R-confirm-label | GF create CTA “确认” vs legacy “确认记录” | **Yes** — create path “确认记录” | **aligned** |
-| R-timer-label | GF secondary “计 计时” glyph+text vs “计时” | **Yes** — label/contentDescription “计时” | **aligned** |
-| R-dock-order | GF default 配方奶/尿/睡眠/喂奶 vs legacy 尿尿/睡眠/母乳/配方奶 | No this batch (layout customizable) | residual |
-| R-§2.3 | Agent can tell packages apart on stills | Deferred post-1.0.0 | fail deferred |
+| ID | Status |
+|----|--------|
+| R-milk-default (120ml) | **aligned** |
+| R-milk-chips | **aligned** |
+| R-confirm-label (确认记录) | **aligned** |
+| R-timer-label (计时) | **aligned** |
 
-## Scene tickets (fill when capturing)
+## Waived non-compare
 
-| Scene | Residual note | Severity |
-|-------|---------------|----------|
-| log-home-empty-ia (03) | IA pass; chrome (top bar / five chips / icons) still distinguishes packages | residual (waived non-compare) |
-| composer-formula (07) | Default 120 + 快捷 chips + 确认记录 **aligned**; GF keeps TimeDial first + full-width CTA; legacy has 冲调量/耗时/任意 ml + dual bottom buttons | residual (optional fields / chrome) |
-| _(08–20 pending)_ | | |
+R-topbar · R-icons (E3) · R-daychips (E4) · R-pixel · R-ms · §2.3 deferred fail
 
-## Alignable vs deferred policy
+## Open residuals (by severity)
 
-- **Align in this implement batch:** create-path CTA wording, milk default amount, quick amount chips, timer a11y/label for harness, capture harness hardening.  
-- **Do not align here:** top-bar language, E3 icons, E4 empty chips, full §2.3 blind chrome — polish tickets only.
+### High polish (user-visible “debug”)
+
+| ID | Note |
+|----|------|
+| R-sleep-debug | 睡眠 Composer 显示 epoch `start 17…` — 必须改时钟文案 |
+| R-summary-debug | 汇总空态 D0–D6 dump — 必须去掉 |
+
+### Medium
+
+| ID | Note |
+|----|------|
+| R-plan-ui | PENDING 英文 + 行内履行 vs legacy 下次喂养弹层 |
+| R-composer-order | 圆盘优先 vs 奶量优先 |
+| R-dock-timer | 计时在次行 |
+| R-swipe-static | 本批滑动静帧未锁中途 |
+| R-legacy-seed | legacy seed/弹层干扰 capture |
+| R-layout-entry | 布局静帧未停在编辑器 |
+
+### Low
+
+R-dock-order · R-composer-extra · R-more-ia · R-row-chrome · R-timer-chrome · R-home-layers
+
+## Scene ticket lines
+
+| Scene | Residual |
+|-------|----------|
+| 03 empty home | chrome waived only |
+| 04 seeded | next-feed vs PENDING plan |
+| 05 tab | GF summary debug dump |
+| 06 day axis | axis card vs top date chrome |
+| 07 formula | 冲调量/耗时 optional; order residual |
+| 08 sleep | epoch debug |
+| 09 diaper | minor chrome |
+| 10 breast/timer | entry split residual |
+| 11–13 swipe | static frame weak; video/history |
+| 14 more | grouping residual |
+| 15 timer idle | still pollution residual |
+| 16 timer run | pass structure |
+| 17 layout | still incomplete |
+| 18–20 | P1 not run |

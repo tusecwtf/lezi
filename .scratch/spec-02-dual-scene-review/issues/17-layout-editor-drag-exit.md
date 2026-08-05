@@ -1,6 +1,6 @@
 # 17 — 布局编辑 · 进入/拖拽/退出
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

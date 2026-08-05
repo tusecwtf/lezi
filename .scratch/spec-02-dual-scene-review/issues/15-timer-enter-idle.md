@@ -1,6 +1,6 @@
 # 15 — 计时 · 进入与 idle
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

@@ -6,6 +6,7 @@
 |------|------|----------|------------|-------|
 | [01 — 后端/数据库迁移](./01-backend-data-migration.md) | 数据与会话重建 | 0.3.x 护理/宝宝/计划/媒体 → GF 可导入；维护窗剧本 | APK 长相；生产 NAS CD 密钥 | 并行，不挡壳层冻 |
 | [02 — APK 设计一致](./02-apk-visual-parity.md) | 质感 · 元素 · 动画 | 与 0.3.x 视觉与交互语言一致；**1.0.0 以单场景 S-freeze 冻结** | Room 迁移；服务器 schema；完整 §2.3 盲测 chrome | **S-freeze PASS · residual 延期** |
+| [03 — UI/UX 差异 inventory](./03-uiux-diff-inventory.md) | 双装场景差异清单 | P0 场景矩阵 + R-* residual + polish 顺序 | 像素 CI；自动改 UI | **inventory complete · polish open** |
 
 ## 关系
 

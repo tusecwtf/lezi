@@ -1,6 +1,6 @@
 # 12 — 滑动 · 满行程提交编辑
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

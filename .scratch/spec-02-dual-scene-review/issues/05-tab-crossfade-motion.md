@@ -1,6 +1,6 @@
 # 05 — Tab 切换动效 (A2)
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

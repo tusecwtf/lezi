@@ -62,6 +62,8 @@ Per-scene capture for tickets 03–20:
 
 Outputs under [`scenes/<scene-id>/`](./scenes/) (`gf`/`legacy`/`compare` mp4+png). Matrix/rubric: [`.scratch/spec-02-dual-scene-review/matrix.md`](../../../../.scratch/spec-02-dual-scene-review/matrix.md). mp4 gitignored.
 
+**UI/UX 差异 inventory（P0 已评）：** [`.scratch/spec-02-dual-scene-review/uiux-diff-spec.md`](../../../../.scratch/spec-02-dual-scene-review/uiux-diff-spec.md) · engineering [03-uiux-diff-inventory.md](../03-uiux-diff-inventory.md).
+
 ## Review
 
 See [review-notes.md](./review-notes.md).

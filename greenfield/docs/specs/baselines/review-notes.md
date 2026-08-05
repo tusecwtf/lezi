@@ -42,7 +42,8 @@
 3. **Composer 密度：** legacy 快捷 ml chips / 冲调量/耗时；GF 圆盘 + 步进 + **快捷奶量 chips（已对齐默认 120ml + chips）**；冲调量/耗时仍 residual。  
 4. **日汇总 chips：** legacy 空数据五格；GF 无数据类不进空筛选（E4 / PRD）。  
 5. **全场景盲测 + 非实现者签字：** post-1.0.0 polish。  
-6. **多场景矩阵：** `.scratch/spec-02-dual-scene-review/` · harness `scripts/dual-scene-capture.sh`。
+6. **多场景矩阵：** `.scratch/spec-02-dual-scene-review/` · harness `scripts/dual-scene-capture.sh`。  
+7. **P0 差异 inventory：** [uiux-diff-spec.md](../../../../.scratch/spec-02-dual-scene-review/uiux-diff-spec.md) — 无结构/交互 fail；P0 polish = sleep epoch + summary D0 dump + plan 文案；§2.3 仍 deferred。
 
 ## Gate table
 

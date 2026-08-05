@@ -36,6 +36,14 @@ See [`ISSUES.md`](./ISSUES.md). **21** vertical slices: matrix+rubric → harnes
 - Does **not** claim 无感替换 complete.  
 - May later recommend §2.3 retry after residuals shrink.
 
+## Deliverables (agent)
+
+- [uiux-diff-spec.md](./uiux-diff-spec.md) — **canonical UI/UX 差异 inventory**  
+- [matrix.md](./matrix.md) · [residuals.md](./residuals.md) · [rubric.md](./rubric.md)  
+- Engineering pointer: `greenfield/docs/specs/03-uiux-diff-inventory.md`  
+- Evidence: `greenfield/docs/specs/baselines/scenes/` (P0 03–17 dual capture)
+
 ## Comments
 
-- 2026-08-05: Breakdown approved at 21-ticket granularity; remaining quiz defaults applied (P1 kept, swipe split, 母乳 separate, rollup acceptance-only).
+- 2026-08-05: Breakdown approved at 21-ticket granularity; remaining quiz defaults applied (P1 kept, swipe split, 母乳 separate, rollup acceptance-only).  
+- 2026-08-05: P0 dual capture + uiux-diff-spec published; ticket 21 rollup done; §2.3 still deferred.

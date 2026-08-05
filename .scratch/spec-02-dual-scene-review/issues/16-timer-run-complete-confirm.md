@@ -1,6 +1,6 @@
 # 16 — 计时 · 运行→完成→确认单
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

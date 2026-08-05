@@ -7,7 +7,8 @@
 
 > **1.0.0 固化口径（本文件 §2.4 / §10）：** 不以「未看包名完全分不出 0.3.x」为发版门闩；以**单场景主路径结构 + 写前确认**为冻结门闩。全量盲测 chrome 对齐为 1.0.0 之后的 polish。  
 > **Issue tracker 发布件（skills / `to-spec`）：** [`.scratch/spec-02-apk-1.0-freeze/spec.md`](../../../.scratch/spec-02-apk-1.0-freeze/spec.md) — 本文件是工程对照权威，不是 local tracker 本体。  
-> **多场景双装验收（post-1.0.0）：** [`.scratch/spec-02-dual-scene-review/`](../../../.scratch/spec-02-dual-scene-review/) · 21 竖切票。
+> **多场景双装验收（post-1.0.0）：** [`.scratch/spec-02-dual-scene-review/`](../../../.scratch/spec-02-dual-scene-review/) · 21 竖切票。  
+> **UI/UX 差异 inventory：** [`.scratch/spec-02-dual-scene-review/uiux-diff-spec.md`](../../../.scratch/spec-02-dual-scene-review/uiux-diff-spec.md) · 工程指针 [03-uiux-diff-inventory.md](./03-uiux-diff-inventory.md)。
 
 ---
 

@@ -1,6 +1,6 @@
 # 04 — 记录首页 · 有数据行结构
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

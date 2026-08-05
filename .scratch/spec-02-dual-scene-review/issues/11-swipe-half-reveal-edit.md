@@ -1,6 +1,6 @@
 # 11 — 滑动 · 半程 reveal 编辑
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

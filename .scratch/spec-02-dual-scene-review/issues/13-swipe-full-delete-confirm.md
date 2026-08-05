@@ -1,6 +1,6 @@
 # 13 — 滑动 · 满行程删除确认
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

@@ -1,6 +1,6 @@
 # 21 — 总评卷 · 矩阵 + residual + §2.3
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
@@ -19,11 +19,11 @@
 
 ## Acceptance criteria
 
-- [ ] Matrix complete for all finished scene tickets
-- [ ] Residual list consolidated with scene IDs
-- [ ] §2.3 retry recommendation recorded
-- [ ] No UI code changes in this ticket’s deliverable
-- [ ] Links to evidence roots updated in engineering baselines README or review-notes (docs only)
+- [x] Matrix complete for all finished scene tickets → [matrix.md](../matrix.md) (P0 03–17; 18–20 N/A)
+- [x] Residual list consolidated with scene IDs → [residuals.md](../residuals.md) · [uiux-diff-spec.md](../uiux-diff-spec.md)
+- [x] §2.3 retry recommendation: **not yet** — chrome residuals still allow package discrimination; retry after P0 polish (sleep/summary debug) + optional top-bar work
+- [x] No UI code changes in this ticket’s deliverable (acceptance-only rollup + inventory)
+- [x] Links to evidence roots updated in engineering baselines README / Spec 03 pointer
 
 
 ## Blocked by

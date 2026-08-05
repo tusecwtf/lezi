@@ -1,6 +1,6 @@
 # 06 — 三日轴 / 日期切换
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
