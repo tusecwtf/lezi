@@ -21,6 +21,7 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0015](./0015-isolate-lan-invite-install-distribution.md) | 隔离家庭 LAN 邀请首装分发与可信同步 | accepted |
 | [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | partially superseded by ADR-0017（保留先对账/临时 plan，取代无 head 协议限制） |
 | [0017](./0017-authoritative-reconcile-settles-local-deltas.md) | 家庭服务器权威裁决必须终结本机待对账修改 | accepted |
+| [0018](./0018-neighbor-duplicate-records-and-tombstone-wins.md) | 跨成员近邻重复由服务器隐式落选，护理记录墓碑永胜 | accepted |
 
 ## Numbering
 
