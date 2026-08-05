@@ -1,68 +1,43 @@
 # Issues — test redundancy cleanup
 
+## Index
+
 | ID | Title | Status |
 |----|-------|--------|
-| 00 | Policy grill lock + inventory | **done** (spec + inventory) |
+| 00 | Policy grill lock + inventory | **done** |
 | 01 | Wave 1 PROCESS-FIX dirty family/composer | **done** |
 | 02 | Wave 1 DELETE Structure/scan suites | **done** |
-| 03 | Wave 1 optional REWRITE (bottom-nav / cleartext / BareMaterial) | **done** — cleartext `NetworkSecurityConfigTest`; BareMaterial suite restored; bottom-nav behavior via `bottomNavLongPressOnly` + `BottomNavShortPressDeviceTest` |
+| 03 | Gate REWRITE (cleartext / BareMaterial / bottom-nav) | **done** |
 | 04 | Wave 2 layout/calendar device compress | **done** |
-| 04b | Wave 3 guidance thin + owner-takeover JVM + network security | **done** |
-| 05 | Kitchen-sink method inventory (out of round unless reopened) | deferred |
-| 06 | Rust lezi-sync test inventory | out of scope |
+| 04b | Wave 3 guidance / owner-takeover / network security | **done** |
+| [05](./issues/05-kitchen-sink-realsync-port.md) | **A** Split `RealSyncPortTest` | ready-for-agent |
+| [06](./issues/06-kitchen-sink-carelog.md) | **B** Split `CareLogTest` | ready-for-agent |
+| [07](./issues/07-kitchen-sink-medium-suites.md) | **C** Split medium JVM suites | ready-for-agent |
+| [08](./issues/08-kitchen-sink-boundary-large.md) | **D** Boundary large files | ready-for-agent (prefer after 05–06) |
+| [09](./issues/09-rust-lezi-sync-test-inventory.md) | **E** Rust lezi-sync inventory/split | ready-for-agent (parallel) |
 
-## Wave 1 landed (2026-08-05)
+Policy: [spec.md](./spec.md) · Inventory: [inventory.md](./inventory.md)
 
-**PROCESS-FIX**
-- Dropped product-only `testTag("members_devices_list")`; empty-state uses `performScrollTo()` on public copy「暂无设备」.
-- Kept `RecordComposerDiscardDeviceTest` `material3.Button` import (harness compile).
+## Open kitchen-sink / residual (A–E)
 
-**DELETE**
-- `ContractSupersededSurfacesTest`
-- `BareMaterialWhitelistContractTest` + `DesignsystemSourceFixtures`
-- `UiAuditPathContractTest`
-- `ClockDialNursingChromeContractTest`, `NursingConfirmSurfaceContractTest`
-- `NextFeedPhotoQrChromeContractTest`, `PhotoPreviewDialogTest`
-- `SummaryDensityEmptyContractTest`
+| Block | Ticket | Primary target |
+|-------|--------|----------------|
+| **A** | [05](./issues/05-kitchen-sink-realsync-port.md) | `RealSyncPortTest` ~11k LOC |
+| **B** | [06](./issues/06-kitchen-sink-carelog.md) | `CareLogTest` ~8.4k LOC |
+| **C** | [07](./issues/07-kitchen-sink-medium-suites.md) | Engine/HTTP/session/wizard/prefs/draft |
+| **D** | [08](./issues/08-kitchen-sink-boundary-large.md) | Next-tier ~550–870 LOC files |
+| **E** | [09](./issues/09-rust-lezi-sync-test-inventory.md) | `tools/lezi-sync` tests |
 
-**KEEP-PARTIAL**
-- `WeakSurfacesContractTest`, `JournalThemeAndDockPolicyContractTest`, `RecordDensityEmptyContractTest`, `LeziTextFieldLineModeTest` — token/runtime only
+**Suggested order:** 05 → 06 → 07 → 08; **09 parallel**.  
+**Split rule:** contract map → move by cluster → optional exact-duplicate merge; do not gut assertions.
 
-**Gates run:** `:designsystem:testDebugUnitTest`, `:feature:widget:testDebugUnitTest`, `:feature:summary:testDebugUnitTest`, `:app:testDebugUnitTest`, `:feature:family:compileDebugKotlin`, `:feature:log:compileDebugAndroidTestKotlin` — green.
+## Landed waves (summary)
 
-**Known accepted gaps:** no automated bare-Material chrome scan; no source-string dead-surface / bottom-nav wiring tests.
+See git history / commit messages:
 
-## Wave 2 landed (2026-08-05)
+- `f355ad32` Wave 1 Structure cleanup  
+- `dd3a661d` Wave 2 device compress  
+- `471b292c` Wave 3 guidance/takeover/network  
+- `160f94db` BareMaterial + bottom-nav gate restore  
 
-**COMPRESS (device → JVM receipts)**
-
-| Deleted device suite | Retained coverage |
-|----------------------|-------------------|
-| `LayoutCategoryDragDeviceTest` | `LayoutDragSessionTest` category heading drop/no-op/domain + `LocalLayoutEditPolicyTest` `MoveCategoryToIndex` |
-| `LayoutEditDropMatrixDeviceTest` | `LayoutDragSessionTest` locked-more/dock-gap/clear/restore/assign matrix |
-| `LayoutEdgeAutoScrollDeviceTest` | `LayoutEdgeAutoScrollPolicyTest` edge bands / authorize / cancel-at-boundary |
-| `CalendarEmptyDayStateTest` | New JVM `CalendarEmptyDayChromeTest` + pure helpers; date schedule policy in `CalendarMonthStateTest` |
-
-**Product:** `calendarEmptyDayMessage` / `calendarEmptyDayActionLabel` extracted for L1 seam (no user-visible change).
-
-**Kept device (not compressed):** layout a11y, config recreation, haptics, local-deleted fontScale/viewport, undo snackbar, drag guidance, target registration.
-
-**Gates:** layout + calendar JVM unit tests green; androidTest compile for log still green.
-
-## Wave 3 landed (2026-08-05)
-
-| Change | Receipt / note |
-|--------|----------------|
-| Thin `LayoutDragGuidanceDeviceTest` → recreation-only | Policy/completion in `LayoutDragGuidanceTest`; drop touch-channel device smoke (same class as Wave 2 gap) |
-| Delete `OwnerTakeoverConfirmationDeviceTest` | `OwnerTakeoverChrome` + `OwnerTakeoverChromeTest` |
-| Add `NetworkSecurityConfigTest` | Release cleartext off + debug loopback-only domains (XML/manifest data, not Kotlin Structure scan) |
-
-## Gate restore landed (2026-08-05)
-
-| Gate | Rewrite |
-|------|---------|
-| BareMaterial Phase A | Restored `DesignsystemSourceFixtures` + `BareMaterialWhitelistContractTest` (intentional chrome whitelist) |
-| Bottom-nav short-press | `Modifier.bottomNavLongPressOnly` used by `MainActivity`; `BottomNavShortPressDeviceTest` proves short-press fires `onClick`, long-press does not steal it |
-| Cleartext | already `NetworkSecurityConfigTest` |
-
-**Still deferred:** kitchen sinks (Q2=A), Rust (Q6=A), detekt alternative for BareMaterial (suite is the gate).
+Detailed wave notes remain in git; tickets 01–04 are closed above.

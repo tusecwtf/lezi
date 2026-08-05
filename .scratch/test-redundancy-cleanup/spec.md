@@ -44,10 +44,10 @@ Audit and simplify redundant tests **without weakening PRD/spec behavior contrac
 
 ## Execution waves (after approval)
 
-1. **Wave 1 — process + Structure high-confidence DELETE/PROCESS-FIX** (this inventory §3–4).  
-2. **Wave 2 — cross-layer COMPRESS** (device without a11y/system/regression story).  
-3. **Wave 3 — remaining Structure REWRITE candidates** (only if coverage gap proven).  
-4. **Out of round — DEFER** kitchen sinks + Rust.
+1. **Wave 1 — process + Structure high-confidence DELETE/PROCESS-FIX** — done.  
+2. **Wave 2 — cross-layer COMPRESS** — done.  
+3. **Wave 3 + gate REWRITE** (cleartext / BareMaterial / bottom-nav) — done.  
+4. **Kitchen-sink / residual tickets A–E** — open under `issues/05`–`09` (split by contract; Q2=A).
 
 ## Non-goals this round
 
