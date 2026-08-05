@@ -233,6 +233,15 @@ Healthy L1/L2 style; not flagged Structure unless noted.
 
 **Accepted gap:** no Compose long-press→intent wiring device smoke for layout drop matrix (session unit owns rules).
 
+## 8b. Wave 3 — landed
+
+| Change | Disposition |
+|--------|-------------|
+| `LayoutDragGuidanceDeviceTest` | **KEEP-PARTIAL** — recreation/geometry only |
+| `OwnerTakeoverConfirmationDeviceTest` | **COMPRESS** → `OwnerTakeoverChrome` + JVM |
+| `NetworkSecurityConfigTest` (new) | **REWRITE** of deleted Structure cleartext half |
+| BareMaterial / bottom-nav | still deferred |
+
 ---
 
 ## 9. Metrics (rough)

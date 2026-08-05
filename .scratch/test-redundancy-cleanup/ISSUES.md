@@ -5,8 +5,9 @@
 | 00 | Policy grill lock + inventory | **done** (spec + inventory) |
 | 01 | Wave 1 PROCESS-FIX dirty family/composer | **done** |
 | 02 | Wave 1 DELETE Structure/scan suites | **done** |
-| 03 | Wave 1 optional REWRITE (bottom-nav / cleartext / BareMaterial lint) | skipped (accepted gap under Q3/Q7) |
+| 03 | Wave 1 optional REWRITE (bottom-nav / cleartext / BareMaterial lint) | **partial** — cleartext via `NetworkSecurityConfigTest`; bottom-nav + BareMaterial lint still deferred |
 | 04 | Wave 2 layout/calendar device compress | **done** |
+| 04b | Wave 3 guidance thin + owner-takeover JVM + network security | **done** |
 | 05 | Kitchen-sink method inventory (out of round unless reopened) | deferred |
 | 06 | Rust lezi-sync test inventory | out of scope |
 
@@ -47,3 +48,13 @@
 **Kept device (not compressed):** layout a11y, config recreation, haptics, local-deleted fontScale/viewport, undo snackbar, drag guidance, target registration.
 
 **Gates:** layout + calendar JVM unit tests green; androidTest compile for log still green.
+
+## Wave 3 landed (2026-08-05)
+
+| Change | Receipt / note |
+|--------|----------------|
+| Thin `LayoutDragGuidanceDeviceTest` → recreation-only | Policy/completion in `LayoutDragGuidanceTest`; drop touch-channel device smoke (same class as Wave 2 gap) |
+| Delete `OwnerTakeoverConfirmationDeviceTest` | `OwnerTakeoverChrome` + `OwnerTakeoverChromeTest` |
+| Add `NetworkSecurityConfigTest` | Release cleartext off + debug loopback-only domains (XML/manifest data, not Kotlin Structure scan) |
+
+**Still deferred:** BareMaterial lint, bottom-nav short-press device, kitchen sinks, Rust.

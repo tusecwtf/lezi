@@ -333,6 +333,19 @@ internal fun OwnerLoginDialog(
 }
 
 
+/** Dangerous owner-takeover copy — pure seam for JVM chrome tests. */
+internal object OwnerTakeoverChrome {
+    const val TITLE = "接管管理员身份？"
+    const val BODY =
+        "所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。"
+    const val CONFIRM = "确认接管"
+    const val CONFIRM_BUSY = "正在接管…"
+    const val CANCEL = "取消"
+
+    fun confirmLabel(submitting: Boolean): String =
+        if (submitting) CONFIRM_BUSY else CONFIRM
+}
+
 @Composable
 internal fun OwnerTakeoverConfirmationDialog(
     submitting: Boolean,
@@ -341,15 +354,23 @@ internal fun OwnerTakeoverConfirmationDialog(
 ) {
     LeziAlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
-        title = { Text("接管管理员身份？") },
+        title = { Text(OwnerTakeoverChrome.TITLE) },
         text = {
-            Text("所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。")
+            Text(OwnerTakeoverChrome.BODY)
         },
         confirmButton = {
-            LeziTextButton(label = if (submitting) "正在接管…" else "确认接管", onClick = onConfirm, enabled = !submitting)
+            LeziTextButton(
+                label = OwnerTakeoverChrome.confirmLabel(submitting),
+                onClick = onConfirm,
+                enabled = !submitting,
+            )
         },
         dismissButton = {
-            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !submitting)
+            LeziTextButton(
+                label = OwnerTakeoverChrome.CANCEL,
+                onClick = onDismiss,
+                enabled = !submitting,
+            )
         },
     )
 }
