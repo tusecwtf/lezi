@@ -304,7 +304,7 @@ fun ComposerSheet(
                                 push(ComposerFields.buildSleep(ComposerFields.adjustSleepStartMinutes(sleep, -5)))
                             }) { Text("−5分") }
                             Text(
-                                "start ${sleep.startMs}",
+                                "睡下 ${ComposerFields.formatWallClockMs(sleep.startMs)}",
                                 modifier = Modifier.weight(1f),
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -319,7 +319,7 @@ fun ComposerSheet(
                                     push(ComposerFields.buildSleep(ComposerFields.adjustSleepEndMinutes(sleep, -5)))
                                 }) { Text("−5分") }
                                 Text(
-                                    "end ${sleep.endMs ?: 0} · ${sleep.durationMinutes} 分",
+                                    "醒来 ${ComposerFields.formatWallClockMs(sleep.endMs ?: 0)} · ${sleep.durationMinutes} 分",
                                     modifier = Modifier.weight(1f),
                                     style = MaterialTheme.typography.bodySmall,
                                 )

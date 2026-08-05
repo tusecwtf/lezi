@@ -5,9 +5,11 @@ import com.lezi.gf.app.media.PhotoStore
 import com.lezi.gf.app.ui.model.ComposerFields
 import com.lezi.gf.app.ui.model.DayAxisModel
 import com.lezi.gf.app.ui.model.DockModel
+import com.lezi.gf.app.ui.screens.planStatusChinese
 import com.lezi.gf.care.CareAggregation
 import com.lezi.gf.care.CareService
 import com.lezi.gf.care.LayoutSnapshot
+import com.lezi.gf.care.PlanStatus
 import com.lezi.gf.care.RecordType
 import com.lezi.gf.kernel.FixedClock
 import com.lezi.gf.kernel.GfResult
@@ -99,6 +101,16 @@ class UiuxP0LogComposerTimerTest {
     }
 
     @Test
+    fun sleepWallClockNeverShowsRawEpochAndPlanStatusIsChinese() {
+        val ms = 1_700_200_000_000L
+        val label = ComposerFields.formatWallClockMs(ms)
+        assertThat(label).doesNotContain(ms.toString())
+        assertThat(label).matches("""\d{2}:\d{2}""")
+        assertThat(planStatusChinese(PlanStatus.PENDING)).isEqualTo("待履行")
+        assertThat(planStatusChinese(PlanStatus.MISSED)).isEqualTo("已过期")
+    }
+
+    @Test
     fun formulaOpenDefaultsToLegacyStyle120MlAndQuickChips() {
         val care = CareService()
         val draft = care.openComposer(RecordType.FORMULA, "b")
@@ -180,10 +192,14 @@ class UiuxP0LogComposerTimerTest {
         assertThat(composer).contains("确认醒来")
         assertThat(composer).contains("补记起止")
         assertThat(composer).contains("editingRecordUuid")
+        assertThat(composer).contains("formatWallClockMs")
+        assertThat(composer).doesNotContain("start \${sleep.startMs}")
         val screens = t("ui/screens/Screens.kt")
         assertThat(screens).contains("openEditComposer")
         assertThat(screens).contains("editRecord")
         assertThat(screens).contains("PhotoStore.importFromUri")
+        assertThat(screens).contains("planStatusChinese")
+        assertThat(screens).doesNotContain("D\$i 奶")
         assertThat(screens).doesNotContain("bytes.take(64_000)")
         val photo = t("media/PhotoStore.kt")
         assertThat(photo).contains("importFromUri")

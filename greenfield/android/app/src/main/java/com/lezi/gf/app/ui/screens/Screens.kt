@@ -85,6 +85,7 @@ import com.lezi.gf.care.CareAggregation
 import com.lezi.gf.care.ComposerDraft
 import com.lezi.gf.care.GrowthCurves
 import com.lezi.gf.care.PhotoRef
+import com.lezi.gf.care.PlanStatus
 import com.lezi.gf.care.RecordType
 import com.lezi.gf.family.JoinState
 import com.lezi.gf.kernel.GfResult
@@ -421,8 +422,9 @@ fun LogScreen(
                     Text("待履行", style = MaterialTheme.typography.titleSmall)
                     pending.forEach { p ->
                         val label = RecordType.fromKey(p.typeKey)?.chineseLabel ?: p.typeKey
+                        val statusLabel = planStatusChinese(p.status)
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("$label · ${p.status}")
+                            Text("$label · $statusLabel")
                             Row {
                                 TextButton(onClick = {
                                     container.care.fulfillPlan(p.clientUuid)
@@ -795,13 +797,7 @@ fun SummaryScreen(container: AppContainer, settings: LocalSettings, modifier: Mo
         WeekBarChart(peeBars, "尿 次数", Color(0xFFE9C46A), density)
         Spacer(Modifier.height(density.sectionGap))
         WeekBarChart(poopBars, "便 次数", Color(0xFFB08968), density)
-        Spacer(Modifier.height(8.dp))
-        days.forEachIndexed { i, d ->
-            Text(
-                "D$i 奶${d.milkMl} 睡${d.sleepMinutes} 尿${d.peeCount} 便${d.poopCount}",
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
+        // No raw D0–D6 debug dump — empty series already show「本周暂无数据」on charts.
     }
 }
 
@@ -1138,4 +1134,12 @@ object UpdateShells {
 /** Public for unit tests — uses [ForegroundSyncCoordinator] apply path. */
 fun runForegroundSync(container: AppContainer): GfResult<*> {
     return ForegroundSyncCoordinator(container.care, container.family, container.sync).run()
+}
+
+/** Caregiver-facing plan status — never show enum name like PENDING. */
+fun planStatusChinese(status: PlanStatus): String = when (status) {
+    PlanStatus.PENDING -> "待履行"
+    PlanStatus.MISSED -> "已过期"
+    PlanStatus.COMPLETED -> "已完成"
+    PlanStatus.SKIPPED -> "已跳过"
 }

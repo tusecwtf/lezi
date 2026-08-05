@@ -18,12 +18,16 @@ This file is the **engineering pointer**. Full problem/solution, scored matrix, 
 | §2.3 blind chrome | deferred fail |
 | User-visible debug (sleep epoch, summary D0 dump) | **open P0 polish** |
 
+## Acceptance re-verify tracker
+
+[`.scratch/spec-02-acceptance-verify/`](../../../.scratch/spec-02-acceptance-verify/) — close partial evidence + P0 polish.
+
 ## Next polish (from inventory)
 
-1. Sleep Composer: no raw epoch  
-2. Summary: no D0–D6 debug dump  
-3. Plan/PENDING Chinese product copy  
-4. Harness: mid-gesture stills; dismiss legacy next-feed before shot  
+1. Sleep Composer: no raw epoch — **in progress / landed in acceptance-verify**  
+2. Summary: no D0–D6 debug dump — **landed**  
+3. Plan/PENDING Chinese product copy — **landed**  
+4. Harness: mid-gesture stills; dismiss legacy next-feed before shot — **in progress** 
 
 ## Out of scope here
 

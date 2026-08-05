@@ -76,8 +76,29 @@ log() { printf '%s\n' "$*"; }
 mkdir -p "$OUT_ROOT"
 
 dump() {
-  adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 || true
-  adb pull /sdcard/ui.xml "$XML" >/dev/null 2>&1 || true
+  rm -f "$XML"
+  if ! adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; then
+    log "  ! uiautomator dump failed"
+    : >"$XML"
+    return 1
+  fi
+  if ! adb pull /sdcard/ui.xml "$XML" >/dev/null 2>&1; then
+    log "  ! pull ui.xml failed"
+    : >"$XML"
+    return 1
+  fi
+  return 0
+}
+
+# Dismiss legacy post-formula 「安排下次喂养」 dialog if present.
+dismiss_next_feed_dialog() {
+  dump || true
+  if grep -qE '安排下次喂养|不安排|确认安排' "$XML" 2>/dev/null; then
+    log "  dismiss next-feed dialog"
+    tap_n "不安排" || tap_n "取消" || adb shell input keyevent 4
+    sleep 0.5
+    dump || true
+  fi
 }
 
 find_xy() {
@@ -333,10 +354,18 @@ legacy_seed_formula_n() {
   local i
   for ((i=0; i<n; i++)); do
     legacy_goto_log
-    tap_formula_dock || tap_n "配方奶" || return 1
+    dismiss_next_feed_dialog
+    tap_formula_dock || tap_n "配方奶" || {
+      log "  ! legacy seed formula open failed"
+      return 1
+    }
     sleep 0.8
-    tap_confirm || true
+    tap_confirm || {
+      log "  ! legacy seed confirm failed"
+      return 1
+    }
     sleep 0.6
+    dismiss_next_feed_dialog
   done
 }
 
@@ -413,67 +442,41 @@ scene_gf_breast_timer_entry() {
   sleep 0.3
 }
 
-scene_gf_swipe_half() {
-  dump
-  local rowy
-  rowy=$(python3 - "$XML" <<'PY'
+timeline_row_y() {
+  dump || true
+  python3 - "$XML" <<'PY'
 import re, sys
 from pathlib import Path
 xml=Path(sys.argv[1]).read_text(errors="ignore")
-for label in ["刚刚","分钟前","小时前","配方","ml"]:
+for label in ["刚刚","分钟前","小时前","配方","ml","120"]:
     for m in re.finditer(rf'text="([^"]*{label}[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml):
         print((int(m.group(3))+int(m.group(5)))//2); raise SystemExit
 print("")
 PY
-)
-  if [[ -z "$rowy" ]]; then log "  ! no row"; return 0; fi
+}
+
+scene_gf_swipe_half() {
+  local rowy
+  rowy=$(timeline_row_y)
+  if [[ -z "$rowy" ]]; then log "  ! no row"; return 1; fi
   adb shell input swipe 920 "$rowy" 520 "$rowy" 380
   sleep 0.7
-  adb shell input tap 540 "$rowy"
-  sleep 0.3
 }
 
 scene_gf_swipe_edit() {
-  dump
   local rowy
-  rowy=$(python3 - "$XML" <<'PY'
-import re, sys
-from pathlib import Path
-xml=Path(sys.argv[1]).read_text(errors="ignore")
-for label in ["刚刚","分钟前","小时前","配方","ml"]:
-    for m in re.finditer(rf'text="([^"]*{label}[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml):
-        print((int(m.group(3))+int(m.group(5)))//2); raise SystemExit
-print("")
-PY
-)
-  if [[ -z "$rowy" ]]; then log "  ! no row"; return 0; fi
+  rowy=$(timeline_row_y)
+  if [[ -z "$rowy" ]]; then log "  ! no row"; return 1; fi
   adb shell input swipe 900 "$rowy" 120 "$rowy" 320
   sleep 1.0
-  adb shell input keyevent 4
-  sleep 0.3
 }
 
 scene_gf_swipe_delete() {
-  dump
   local rowy
-  rowy=$(python3 - "$XML" <<'PY'
-import re, sys
-from pathlib import Path
-xml=Path(sys.argv[1]).read_text(errors="ignore")
-for label in ["刚刚","分钟前","小时前","配方","ml"]:
-    for m in re.finditer(rf'text="([^"]*{label}[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml):
-        print((int(m.group(3))+int(m.group(5)))//2); raise SystemExit
-print("")
-PY
-)
-  if [[ -z "$rowy" ]]; then log "  ! no row"; return 0; fi
+  rowy=$(timeline_row_y)
+  if [[ -z "$rowy" ]]; then log "  ! no row"; return 1; fi
   adb shell input swipe 160 "$rowy" 980 "$rowy" 320
   sleep 0.8
-  dump
-  if grep -qE '确认删除|删除' "$XML" 2>/dev/null; then
-    tap_n "取消" || adb shell input keyevent 4
-  fi
-  sleep 0.3
 }
 
 scene_gf_more() {
@@ -649,9 +652,24 @@ prepare_seed_legacy() {
   local profile=$1
   case "$profile" in
     empty) ;;
-    seeded-formula) legacy_seed_formula_n 1 || true ;;
-    multi-row) legacy_seed_formula_n 2 || true ;;
-    data-ish) legacy_seed_formula_n 3 || true ;;
+    seeded-formula)
+      legacy_seed_formula_n 1 || {
+        log "FAIL: legacy seeded-formula seed"
+        return 1
+      }
+      ;;
+    multi-row)
+      legacy_seed_formula_n 2 || {
+        log "FAIL: legacy multi-row seed"
+        return 1
+      }
+      ;;
+    data-ish)
+      legacy_seed_formula_n 3 || {
+        log "FAIL: legacy data-ish seed"
+        return 1
+      }
+      ;;
   esac
 }
 
@@ -687,29 +705,41 @@ run_scene_gf() {
       ;;
     composer-sleep)
       with_record "$dir/gf.mp4" 5 scene_gf_composer_sleep
-      gf_goto_log; tap_n "睡眠" || true; sleep 0.8; shot "$dir/gf.png"
+      gf_goto_log; tap_n "睡眠" || true; sleep 0.9; shot "$dir/gf.png"
       adb shell input keyevent 4
       ;;
     composer-diaper)
       with_record "$dir/gf.mp4" 5 scene_gf_composer_diaper
-      gf_goto_log; tap_n "尿" || true; sleep 0.8; shot "$dir/gf.png"
+      gf_goto_log; tap_n "尿" || true; sleep 0.9; shot "$dir/gf.png"
       adb shell input keyevent 4
       ;;
     composer-breast-vs-timer)
+      gf_goto_log
       with_record "$dir/gf.mp4" 7 scene_gf_breast_timer_entry
-      shot "$dir/gf.png"
+      # Mid-frame: timer surface (last step of entry path)
+      gf_goto_log; tap_n "计时" || true; sleep 0.9; shot "$dir/gf.png"
+      adb shell input keyevent 4
       ;;
     swipe-half-reveal)
       with_record "$dir/gf.mp4" 5 scene_gf_swipe_half
       shot "$dir/gf.png"
+      adb shell input tap 540 1200 || true
       ;;
     swipe-full-edit)
       with_record "$dir/gf.mp4" 6 scene_gf_swipe_edit
       shot "$dir/gf.png"
+      adb shell input keyevent 4
+      sleep 0.3
       ;;
     swipe-full-delete)
       with_record "$dir/gf.mp4" 6 scene_gf_swipe_delete
       shot "$dir/gf.png"
+      dump
+      if grep -qE '确认删除|删除' "$XML" 2>/dev/null; then
+        tap_n "取消" || adb shell input keyevent 4
+      else
+        adb shell input keyevent 4
+      fi
       ;;
     more-sheet-four-col)
       with_record "$dir/gf.mp4" 4 scene_gf_more
@@ -718,16 +748,27 @@ run_scene_gf() {
       ;;
     timer-enter-idle)
       with_record "$dir/gf.mp4" 5 scene_gf_timer_idle
-      gf_goto_log; tap_n "计时" || true; sleep 0.8; shot "$dir/gf.png"
+      gf_goto_log; tap_n "计时" || true; sleep 1.0; shot "$dir/gf.png"
       adb shell input keyevent 4
       ;;
     timer-run-complete)
       with_record "$dir/gf.mp4" 8 scene_gf_timer_run
+      # Prefer confirm sheet if present; else running timer
+      gf_goto_log; tap_n "计时" || true; sleep 0.6
+      dump; tap_n "左" || tap_xy 277 995
+      sleep 1.0
+      dump; tap_n "完成" || true
+      sleep 0.7
       shot "$dir/gf.png"
+      adb shell input keyevent 4; sleep 0.2; adb shell input keyevent 4
       ;;
     layout-editor-drag)
       with_record "$dir/gf.mp4" 6 scene_gf_layout
+      gf_goto_log; tap_n "布局" || true; sleep 0.8
+      adb shell input swipe 980 900 980 1200 450
+      sleep 0.4
       shot "$dir/gf.png"
+      dump; tap_n "完成" || adb shell input keyevent 4
       ;;
     *) log "  unknown scene $sid"; return 1 ;;
   esac
@@ -746,8 +787,9 @@ run_scene_legacy() {
   prepare_seed_legacy "$seed"
   case "$sid" in
     log-home-empty-ia|log-home-seeded-row)
+      dismiss_next_feed_dialog
       with_record "$dir/legacy.mp4" 4 scene_legacy_log_home
-      scene_legacy_log_home; shot "$dir/legacy.png"
+      scene_legacy_log_home; dismiss_next_feed_dialog; shot "$dir/legacy.png"
       ;;
     tab-crossfade)
       with_record "$dir/legacy.mp4" 6 scene_legacy_tab
@@ -764,19 +806,40 @@ run_scene_legacy() {
       ;;
     composer-sleep)
       with_record "$dir/legacy.mp4" 5 scene_legacy_composer_sleep
-      shot "$dir/legacy.png"
+      legacy_goto_log; dismiss_next_feed_dialog
+      tap_n "睡眠" || true; sleep 1.0; shot "$dir/legacy.png"
+      adb shell input keyevent 4
       ;;
     composer-diaper)
       with_record "$dir/legacy.mp4" 5 scene_legacy_composer_diaper
-      shot "$dir/legacy.png"
+      legacy_goto_log; dismiss_next_feed_dialog
+      tap_n "尿尿" || tap_n "尿" || true; sleep 1.0; shot "$dir/legacy.png"
+      adb shell input keyevent 4
       ;;
     composer-breast-vs-timer)
       with_record "$dir/legacy.mp4" 7 scene_legacy_breast_timer
-      shot "$dir/legacy.png"
+      legacy_goto_log; dismiss_next_feed_dialog
+      if ! tap_n "计时"; then tap_n "母乳" || true; fi
+      sleep 1.0; shot "$dir/legacy.png"
+      adb shell input keyevent 4
       ;;
     swipe-half-reveal|swipe-full-edit|swipe-full-delete)
+      dismiss_next_feed_dialog
       with_record "$dir/legacy.mp4" 6 scene_legacy_swipe
+      # Mid-frame after swipe action inside scene_legacy_swipe — re-swipe for still
+      dump || true
+      local rowy
+      rowy=$(timeline_row_y)
+      if [[ -n "$rowy" ]]; then
+        case "$sid" in
+          swipe-half-reveal) adb shell input swipe 900 "$rowy" 500 "$rowy" 380 ;;
+          swipe-full-edit) adb shell input swipe 900 "$rowy" 120 "$rowy" 320 ;;
+          swipe-full-delete) adb shell input swipe 160 "$rowy" 980 "$rowy" 320 ;;
+        esac
+        sleep 0.7
+      fi
       shot "$dir/legacy.png"
+      adb shell input keyevent 4 || true
       ;;
     more-sheet-four-col)
       with_record "$dir/legacy.mp4" 4 scene_legacy_more
@@ -785,11 +848,17 @@ run_scene_legacy() {
       ;;
     timer-enter-idle|timer-run-complete)
       with_record "$dir/legacy.mp4" 6 scene_legacy_timer
-      shot "$dir/legacy.png"
+      legacy_goto_log; dismiss_next_feed_dialog
+      if ! tap_n "计时"; then tap_n "母乳" || true; fi
+      sleep 1.0; shot "$dir/legacy.png"
+      adb shell input keyevent 4
       ;;
     layout-editor-drag)
       with_record "$dir/legacy.mp4" 5 scene_legacy_layout
+      dump; tap_n "菜单" || true; sleep 0.5
+      dump; tap_n "布局" || true; sleep 0.8
       shot "$dir/legacy.png"
+      adb shell input keyevent 4
       ;;
     *) log "  unknown scene $sid"; return 1 ;;
   esac

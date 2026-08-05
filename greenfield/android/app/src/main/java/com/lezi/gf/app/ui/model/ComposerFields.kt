@@ -177,6 +177,17 @@ object ComposerFields {
         return "%02d:%02d".format(h, m)
     }
 
+    /** Caregiver-facing local wall clock — never show raw epoch ms. */
+    fun formatWallClockMs(ms: Long): String {
+        if (ms <= 0L) return "--:--"
+        return try {
+            java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+                .format(java.util.Date(ms))
+        } catch (_: Exception) {
+            formatClockMs(ms)
+        }
+    }
+
     fun parseMilk(payload: String): MilkFields {
         val o = obj(payload)
         val step = o["amount_step_ml"]?.jsonPrimitive?.intOrNull ?: DEFAULT_AMOUNT_STEP_ML

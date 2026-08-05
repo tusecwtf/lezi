@@ -41,7 +41,8 @@ See [`ISSUES.md`](./ISSUES.md). **21** vertical slices: matrix+rubric → harnes
 - [uiux-diff-spec.md](./uiux-diff-spec.md) — **canonical UI/UX 差异 inventory**  
 - [matrix.md](./matrix.md) · [residuals.md](./residuals.md) · [rubric.md](./rubric.md)  
 - Engineering pointer: `greenfield/docs/specs/03-uiux-diff-inventory.md`  
-- Evidence: `greenfield/docs/specs/baselines/scenes/` (P0 03–17 dual capture)
+- Evidence: `greenfield/docs/specs/baselines/scenes/` (P0 03–17 dual capture)  
+- **Acceptance re-verify (gaps):** [../spec-02-acceptance-verify/](../spec-02-acceptance-verify/)
 
 ## Comments
 
