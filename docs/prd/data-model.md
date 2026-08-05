@@ -165,9 +165,11 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 | `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire。独立 log 媒体包会抬高 NAS 根 `updated_at`，成功后须把本机回执与（内容 epoch 未变时的）本地 `updated_at` 对齐到同一 `rootUpdatedAt`，不能只 ack 媒体 |
 | `payload_json` | 类型扩展 |
 | `schema_version` | 当前固定为 v2 |
-| `updated_at` / `deleted_at` | 软删 / LWW |
+| `updated_at` / `deleted_at` | 软删；**0.3.10 起** 家庭权威图上的 record tombstone **永胜**（更高 `updated_at` 的 live 不得清零 `deleted_at`）；误删/落选后需事实时 **新记一条**（新 UUID），无 LWW restore |
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
+
+**近邻落选（0.3.10）：** 白名单类型跨 membership、主时间 ≤30 分钟的 live 近邻由家庭服务器在 atomic commit 同事务内裁决，落选写 tombstone；同 membership 豁免。详见 ADR-0018 / CONTEXT。
 
 每个宝宝最多只有一条 `end_timestamp = null` 的开放睡眠。若本地维护或家庭 pull 发现多条，
 两条路径必须调用同一个纯决策：按 `timestamp` 升序排列，时间相同时按跨设备稳定的
@@ -181,9 +183,9 @@ pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语�
 偏斜导致开始晚于 wake 的开放行保留为唯一 residual，禁止生成负区间。
 
 已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 atomic commit
-与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次
-作者。Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止
-同步，不发送降级 payload。
+与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑或删除不得改写首次作者；
+tombstone 后不得再以 live 恢复同一 `client_uuid`。Android 与 NAS 都要求 current
+`record_membership_author` capability，缺失时停止同步，不发送降级 payload。
 
 当前 Room schema 的 `pending_reminder_cleanup` 持久化 `carePlanIds`、
 `systemCalendarProjectionsJson`、可空的 `currentBabyId`、哺乳计时 epoch，以及
@@ -759,7 +761,7 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前 0.3.9 / versionCode 16 继续使用契约 v3（由 0.3.8 / versionCode 15 引入）
+相邻升级；当前 0.3.10 / versionCode 17 继续使用契约 v3（由 0.3.8 / versionCode 15 引入）
 与 Room v26，通过
 `OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含 LocalUser、Family、
 Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、CustomItemDef、CarePlan 与 FulfillmentCandidate，

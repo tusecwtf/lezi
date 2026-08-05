@@ -20,6 +20,7 @@ mod authority_graph;
 mod bundles;
 mod identity;
 mod media;
+mod neighbor;
 mod pull;
 mod reconciliation;
 mod restore;
@@ -289,6 +290,8 @@ pub enum StoreError {
     CustomItemTombstoneResurrection,
     #[error("deleted care plan cannot be resurrected")]
     CarePlanTombstoneResurrection,
+    #[error("deleted care record cannot be resurrected")]
+    RecordTombstoneResurrection,
     #[error("completed care plan fulfillment binding is immutable")]
     ImmutableCarePlanFulfillmentBinding,
     #[error("fulfillment candidate evidence is immutable")]
@@ -351,6 +354,10 @@ pub struct BundleCommitResult {
     pub applied: usize,
     pub cursor: i64,
     pub record_authors: Vec<RecordAuthor>,
+    /// Record `client_uuid` values soft-deleted by neighbor adjudication in this commit.
+    /// Empty when no whitelist near-duplicate losers were written. Explicit signal only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub neighbor_losers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

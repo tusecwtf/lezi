@@ -165,6 +165,9 @@ class RealSyncPort @Inject constructor(
     /** Process-session "稍后" suppressions keyed by server package versionCode. */
     private val dismissedOptionalUpdateVersionCodes =
         java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+    private val neighborAlignmentHintEvents = MutableSharedFlow<String>(
+        extraBufferCapacity = 1,
+    )
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -470,6 +473,8 @@ class RealSyncPort @Inject constructor(
     override fun verifiedEndpoint(): Flow<TrustedEndpointProfile?> = preferences.verifiedEndpoint
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = preferences.pendingMemberLogin
     override fun memberLoginChecks(): Flow<MemberLoginCheckResult> = memberLoginCheckEvents
+
+    override fun neighborAlignmentHints(): Flow<String> = neighborAlignmentHintEvents
     override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         optionalAppUpdateState
 
@@ -1835,8 +1840,33 @@ class RealSyncPort @Inject constructor(
         preferences.markSuccess(clock.nowMillis())
         cachedSession = preferences.session.first()
         currentStatus.value = when (outcome) {
-            ReplicaSyncOutcome.Synchronized -> SyncStatus.Idle
+            is ReplicaSyncOutcome.Synchronized -> {
+                maybeEmitNeighborAlignmentHint(
+                    session = session,
+                    neighborLoserClientUuids = outcome.neighborLoserClientUuids,
+                )
+                SyncStatus.Idle
+            }
         }
+    }
+
+    /**
+     * At most one light hint per sync cycle when the server explicitly listed a
+     * neighbor-loser uuid authored by the current membership. Ordinary remote
+     * deletes without that signal never use this copy.
+     */
+    private suspend fun maybeEmitNeighborAlignmentHint(
+        session: SyncSession,
+        neighborLoserClientUuids: Set<String>,
+    ) {
+        if (neighborLoserClientUuids.isEmpty()) return
+        val membershipId = session.membershipId
+        if (membershipId.isBlank()) return
+        val selfAuthored = neighborLoserClientUuids.any { uuid ->
+            recordDao.getByClientUuid(uuid)?.createdByMembershipId == membershipId
+        }
+        if (!selfAuthored) return
+        neighborAlignmentHintEvents.tryEmit("已与家人同一时间的记录对齐")
     }
 
     private suspend fun requireRetainedOwnerSession(): SyncSession =

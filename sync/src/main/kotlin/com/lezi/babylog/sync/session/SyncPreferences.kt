@@ -25,6 +25,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
@@ -1062,6 +1063,7 @@ class DataStoreSyncPreferences @Inject constructor(
                             put("display_name", member.displayName)
                             put("role", member.role.name)
                             put("is_self", member.isSelf)
+                            member.lastSyncAtEpochSeconds?.let { put("last_sync_at", it) }
                         },
                     )
                 }
@@ -1077,6 +1079,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 ?: return@mapNotNull null
             val isSelf = value["is_self"]?.jsonPrimitive?.booleanOrNull
                 ?: return@mapNotNull null
+            val lastSyncAt = value["last_sync_at"]?.jsonPrimitive?.longOrNull
             normalizeDirectoryMember(
                 FamilyMember(
                     displayName = displayName,
@@ -1084,6 +1087,7 @@ class DataStoreSyncPreferences @Inject constructor(
                     isSelf = isSelf,
                     membershipId = membershipId,
                     devices = null,
+                    lastSyncAtEpochSeconds = lastSyncAt,
                 ),
             )
         }.distinctBy(FamilyMember::membershipId)
@@ -1099,6 +1103,7 @@ class DataStoreSyncPreferences @Inject constructor(
             isSelf = member.isSelf,
             membershipId = membershipId,
             devices = null,
+            lastSyncAtEpochSeconds = member.lastSyncAtEpochSeconds,
         )
     }
 

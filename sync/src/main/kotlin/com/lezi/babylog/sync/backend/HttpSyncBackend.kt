@@ -963,6 +963,10 @@ class HttpSyncBackend internal constructor(
                     "members[$index]",
                 ),
                 devices = devices,
+                lastSyncAtEpochSeconds = member.optionalNullableLong(
+                    "last_sync_at",
+                    "members[$index]",
+                ),
             )
         }
     }
@@ -1109,6 +1113,7 @@ class HttpSyncBackend internal constructor(
             applied = json.requiredLong("applied", "bundle commit").toInt(),
             cursor = json.requiredLong("cursor", "bundle commit"),
             recordAuthors = json.recordAuthors(),
+            neighborLosers = json.neighborLosers(),
         )
     }
 
@@ -1584,6 +1589,20 @@ private fun JsonObject.recordAuthors(): List<CanonicalRecordAuthor> =
         CanonicalRecordAuthor(clientUuid, membershipId)
     }
 
+/** Additive 0.3.10 field; missing/null → empty (older servers). */
+private fun JsonObject.neighborLosers(): List<String> {
+    val element = this["neighbor_losers"] ?: return emptyList()
+    if (element is JsonNull) return emptyList()
+    val array = element as? JsonArray
+        ?: throw IllegalArgumentException("neighbor_losers 不是数组")
+    return array.mapIndexed { index, item ->
+        val primitive = item as? JsonPrimitive
+            ?: throw IllegalArgumentException("neighbor_losers[$index] 不是字符串")
+        primitive.contentOrNull?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("neighbor_losers[$index] 不能为空")
+    }
+}
+
 private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageStatus(
     bundleId = requiredNonBlankString("bundle_id", "bundle stage"),
     status = requiredNonBlankString("status", "bundle stage"),
@@ -1809,6 +1828,17 @@ private fun JsonObject.requiredNullableLong(key: String, context: String): Long?
     require(key in this) { "$context 响应缺少 $key" }
     return when (val value = get(key)) {
         JsonNull -> null
+        is JsonPrimitive -> value.longOrNull
+            ?: throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
+        else -> throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
+    }
+}
+
+/** Additive field: missing or null → null. */
+private fun JsonObject.optionalNullableLong(key: String, context: String): Long? {
+    if (key !in this) return null
+    return when (val value = get(key)) {
+        null, JsonNull -> null
         is JsonPrimitive -> value.longOrNull
             ?: throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
         else -> throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")

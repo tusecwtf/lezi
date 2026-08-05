@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 16,
-  "version_name": "0.3.9",
+  "version_code": 17,
+  "version_name": "0.3.10",
   "min_supported_version_code": 16,
   "sha256": "7d2aa4cb4f48ec9e6078b5c76c1831a39d8168174485c658362dedaa32477b5c",
-  "release_notes": "0.3.9 完成家庭同步协议切换，无损重对账并隔离、自动修复旧版不完整履行"
+  "release_notes": "0.3.10 近邻落选与记录墓碑永胜；记录/汇总/成长短暂浅同步 chrome；家庭成员页展示各成员上次同步时间（全角色）"
 }

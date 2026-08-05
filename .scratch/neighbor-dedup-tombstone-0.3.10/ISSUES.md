@@ -1,7 +1,7 @@
 # 0.3.10 近邻落选 + 墓碑永胜 + 同步 chrome — issues
 
 Spec: [`spec.md`](./spec.md)  
-Tracker status: **ready-for-agent** (tickets published)
+Tracker status: **implementation-complete** (awaiting user-confirmed NAS CD / signed release packaging)
 
 ## Graph
 
@@ -14,19 +14,19 @@ Tracker status: **ready-for-agent** (tickets published)
 
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
-| 01 | [`issues/01-record-tombstone-wins.md`](./issues/01-record-tombstone-wins.md) | ready-for-agent | — |
-| 02 | [`issues/02-neighbor-adjudication-on-commit.md`](./issues/02-neighbor-adjudication-on-commit.md) | ready-for-agent | 01 |
-| 03 | [`issues/03-client-settle-and-neighbor-toast.md`](./issues/03-client-settle-and-neighbor-toast.md) | ready-for-agent | 01, 02 |
-| 05 | [`issues/05-data-pages-unified-transient-sync-chrome.md`](./issues/05-data-pages-unified-transient-sync-chrome.md) | ready-for-agent | — |
-| 06 | [`issues/06-member-last-sync-visible-to-all-roles.md`](./issues/06-member-last-sync-visible-to-all-roles.md) | ready-for-agent | — |
-| 04 | [`issues/04-release-0.3.10.md`](./issues/04-release-0.3.10.md) | ready-for-agent | 01, 02, 03, 05, 06 |
+| 01 | [`issues/01-record-tombstone-wins.md`](./issues/01-record-tombstone-wins.md) | done | — |
+| 02 | [`issues/02-neighbor-adjudication-on-commit.md`](./issues/02-neighbor-adjudication-on-commit.md) | done | 01 |
+| 03 | [`issues/03-client-settle-and-neighbor-toast.md`](./issues/03-client-settle-and-neighbor-toast.md) | done | 01, 02 |
+| 05 | [`issues/05-data-pages-unified-transient-sync-chrome.md`](./issues/05-data-pages-unified-transient-sync-chrome.md) | done | — |
+| 06 | [`issues/06-member-last-sync-visible-to-all-roles.md`](./issues/06-member-last-sync-visible-to-all-roles.md) | done | — |
+| 04 | [`issues/04-release-0.3.10.md`](./issues/04-release-0.3.10.md) | in-progress | 01, 02, 03, 05, 06 |
+
+## Verification evidence
+
+- Rust: `cargo fmt --check`, `cargo test --locked` (all green incl. neighbor/tombstone store + API), `cargo clippy -D warnings`
+- Android: `:sync:testDebugUnitTest` + compile of designsystem / family / log / summary / growth / app
+- Versions: Android `0.3.10` / versionCode `17`; lezi-sync `0.3.10`; `app-update.json` version fields aligned (sha256 still from prior signed APK — re-sign + repackage before CD)
 
 ## Frontier
 
-权威链从 **01** 起：01 → 02 → 03。  
-Chrome 链 **05**、成员上次同步 **06** 可与权威链 **并行**。  
-全部完成后做 **04** 发版收口。
-
-Optional one-time historical neighbor backfill remains out of this ticket set (spec optional); add a later ticket if product requires upgrade-day full collapse.
-
-Former standalone tracker `sync-chrome-and-member-last-sync` is **merged** into this directory (05/06 + spec §3–4).
+Release packaging + user-confirmed NAS CD remain for ticket **04**. Do not run `push-and-deploy.sh` without confirmation.

@@ -84,7 +84,10 @@ internal object AtomicBundleId {
 }
 
 internal sealed interface ReplicaSyncOutcome {
-    data object Synchronized : ReplicaSyncOutcome
+    data class Synchronized(
+        /** Explicit server neighbor-loser uuids from this cycle's commits. */
+        val neighborLoserClientUuids: Set<String> = emptySet(),
+    ) : ReplicaSyncOutcome
 }
 
 private data class CapturedLocalChanges(
@@ -164,6 +167,7 @@ internal class ReplicaSyncEngine(
             backend.members(current),
         )
         var recovered = false
+        val neighborLosers = linkedSetOf<String>()
         try {
             current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
         } catch (error: SyncHttpException) {
@@ -180,7 +184,7 @@ internal class ReplicaSyncEngine(
                 current = preferences.session.first()
             }
             try {
-                settleAndPublish(current, captured.candidates)
+                neighborLosers += settleAndPublish(current, captured.candidates)
             } catch (error: AuthorityProofException) {
                 current = recoverFullResync(
                     current,
@@ -210,7 +214,7 @@ internal class ReplicaSyncEngine(
         // Tombstone metadata remains as family deletion evidence; only unowned
         // bytes and their retry marker are reclaimed here.
         mediaFileCleanup.cleanupPendingTombstones()
-        return ReplicaSyncOutcome.Synchronized
+        return ReplicaSyncOutcome.Synchronized(neighborLoserClientUuids = neighborLosers)
     }
 
     override suspend fun applyInitialEntities(
@@ -233,9 +237,7 @@ internal class ReplicaSyncEngine(
     private suspend fun pushPending(
         session: SyncSession,
         candidates: List<PublishCandidate>,
-    ) {
-        publisher.pushPending(session, candidates)
-    }
+    ): Set<String> = publisher.pushPending(session, candidates)
 
     /**
      * Resolve dependency-ordered authority in one bounded foreground cycle.
@@ -246,12 +248,13 @@ internal class ReplicaSyncEngine(
     private suspend fun settleAndPublish(
         session: SyncSession,
         initialCandidates: List<PublishCandidate>,
-    ) {
+    ): Set<String> {
         var candidates = initialCandidates
+        val neighborLosers = linkedSetOf<String>()
         repeat(MAX_AUTHORITY_SETTLEMENT_PASSES) {
             val settlement = reconcileFrozenChanges(session, candidates)
-            pushPending(session, settlement.publishable)
-            if (settlement.retryCount == 0) return
+            neighborLosers += pushPending(session, settlement.publishable)
+            if (settlement.retryCount == 0) return neighborLosers
             require(settlement.publishable.isNotEmpty()) {
                 "家庭服务器暂时无法完成权威裁决，请稍后重试"
             }

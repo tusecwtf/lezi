@@ -49,10 +49,18 @@ data class FamilyMember(
     val membershipId: String,
     /** Null means this viewer is not authorized to receive this member's device details. */
     val devices: List<FamilyDevice>? = null,
+    /**
+     * Max active-device last_used_at for this membership (epoch seconds).
+     * Present for every role; null means no active device / never synced.
+     */
+    val lastSyncAtEpochSeconds: Long? = null,
 ) {
     init {
         require(displayName.isNotBlank()) { "家庭成员称呼不能为空" }
         require(membershipId.isNotBlank()) { "家庭成员 membership_id 不能为空" }
+        require(lastSyncAtEpochSeconds == null || lastSyncAtEpochSeconds >= 0) {
+            "家庭成员上次同步时间无效"
+        }
     }
 }
 
@@ -314,6 +322,12 @@ interface SyncPort {
         pendingMemberLogin = pendingMemberLogin(),
         pendingPublishCount = pendingPublishCount(),
     )
+    /**
+     * One-shot light hints after a sync cycle where this membership's authored
+     * records were explicitly marked neighbor losers by the family server.
+     * At most one emission per cycle; never uses neighbor copy for ordinary deletes.
+     */
+    fun neighborAlignmentHints(): Flow<String> = kotlinx.coroutines.flow.emptyFlow()
     /** Dirty Room entity count for the current retained family. */
     fun pendingPublishCount(): Flow<Int> = kotlinx.coroutines.flow.flowOf(0)
     /** Device-local minimal roster; never waits for the family server. */

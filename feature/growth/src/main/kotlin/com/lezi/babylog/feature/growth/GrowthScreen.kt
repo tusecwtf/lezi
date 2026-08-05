@@ -76,6 +76,7 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.TransientShallowSyncStatus
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziHairlineColor
 import com.lezi.babylog.designsystem.LeziTextButton
@@ -333,20 +334,14 @@ fun GrowthRoute(
                 }
 
                 item(key = "growth_sync", contentType = "growth_sync") {
-                    Text(
-                        shallowSyncStatus.text,
-                        style = LeziTypography.Meta,
-                        color = if (
-                            shallowSyncStatus.state in setOf(
-                                ShallowSyncState.Error,
-                                ShallowSyncState.ReauthRequired,
-                            )
-                        ) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier.testTag("growth_shallow_sync_status"),
+                    TransientShallowSyncStatus(
+                        text = shallowSyncStatus.text,
+                        isError = shallowSyncStatus.state in setOf(
+                            ShallowSyncState.Error,
+                            ShallowSyncState.ReauthRequired,
+                        ),
+                        isUserRefreshing = isRefreshing,
+                        contentTestTag = "growth_shallow_sync_status",
                     )
                 }
 

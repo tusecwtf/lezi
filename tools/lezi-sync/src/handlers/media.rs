@@ -936,6 +936,9 @@ fn map_bundle_policy_store_error(error: StoreError) -> Result<StoreError, ApiErr
         StoreError::CustomItemTombstoneResurrection => Err(ApiError::conflict(
             "Deleted custom item cannot be resurrected",
         )),
+        StoreError::RecordTombstoneResurrection => Err(ApiError::conflict(
+            "Deleted care record cannot be resurrected",
+        )),
         StoreError::ImmutableMediaAssociation => Err(ApiError::conflict(
             "Media kind and association are immutable",
         )),

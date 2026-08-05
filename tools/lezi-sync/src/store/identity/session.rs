@@ -918,4 +918,33 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// Per-membership max active-device `last_used_at` for the family roster.
+    ///
+    /// Safe for every authenticated role: returns only an aggregate timestamp,
+    /// never device names or device ids. Memberships without active devices are
+    /// omitted (callers treat missing keys as null / not-yet-synced).
+    pub fn membership_last_sync_at(
+        &self,
+        family_id: &str,
+    ) -> Result<std::collections::HashMap<String, i64>, StoreError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "
+        SELECT devices.membership_id, MAX(devices.last_used_at)
+        FROM devices
+        JOIN memberships ON memberships.membership_id = devices.membership_id
+        WHERE memberships.family_id = ?1
+          AND memberships.left_at IS NULL
+          AND devices.status = 'active'
+        GROUP BY devices.membership_id
+        ",
+        )?;
+        let rows = statement
+            .query_map(params![family_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().collect())
+    }
 }

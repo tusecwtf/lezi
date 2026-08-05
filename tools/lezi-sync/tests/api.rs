@@ -4864,6 +4864,7 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     let (owner_status, owner_view) =
         get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     assert_eq!(owner_status, StatusCode::OK);
+    let now = rig.now.load(Ordering::SeqCst);
     assert_eq!(
         owner_view,
         json!({"members":[
@@ -4872,10 +4873,11 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"owner",
                 "is_self":true,
                 "membership_id": owner_membership_id,
+                "last_sync_at": now,
                 "devices":[{
                     "device_id":owner["device_id"],
                     "device_name":"owner-sensitive-device-id",
-                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "last_used_at": now,
                     "is_current":true,
                 }],
             },
@@ -4884,10 +4886,11 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"member",
                 "is_self":false,
                 "membership_id": member_membership_id,
+                "last_sync_at": now,
                 "devices":[{
                     "device_id":member["device_id"],
                     "device_name":"member-sensitive-device-id",
-                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "last_used_at": now,
                     "is_current":false,
                 }],
             },
@@ -4904,16 +4907,18 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"owner",
                 "is_self":false,
                 "membership_id": owner_membership_id,
+                "last_sync_at": now,
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":true,
                 "membership_id": member_membership_id,
+                "last_sync_at": now,
                 "devices":[{
                     "device_id":member["device_id"],
                     "device_name":"member-sensitive-device-id",
-                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "last_used_at": now,
                     "is_current":true,
                 }],
             },
@@ -4951,9 +4956,11 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     }
     for row in owner_view["members"].as_array().unwrap() {
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 5);
+        // display_name, role, is_self, membership_id, last_sync_at, devices
+        assert_eq!(fields.len(), 6);
         assert!(fields.contains_key("membership_id"));
         assert!(fields.contains_key("devices"));
+        assert!(fields.contains_key("last_sync_at"));
         assert!(!fields.contains_key("token_hash"));
         assert!(!fields.contains_key("token"));
         assert!(!fields.contains_key("family_id"));
@@ -6549,7 +6556,13 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
     assert!(member_rows[0]["membership_id"].as_str().unwrap().len() >= 32);
     for row in rows {
         assert!(row["membership_id"].as_str().unwrap().len() >= 32);
-        assert_eq!(row.as_object().unwrap().len(), 5);
+        // display_name, role, is_self, membership_id, devices, optional last_sync_at
+        let field_count = row.as_object().unwrap().len();
+        assert!(
+            field_count == 5 || field_count == 6,
+            "unexpected member fields: {}",
+            row
+        );
         assert!(!row.as_object().unwrap().contains_key("device_id"));
         assert!(row["devices"].is_array());
     }
@@ -10272,7 +10285,6 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
         (2, None, "创建"),
         (3, None, "管理员编辑"),
         (4, Some(4), "管理员删除"),
-        (5, None, "管理员恢复"),
     ] {
         let bundle_id = Uuid::new_v4().to_string();
         let mut forged_payload = record_payload(&baby_id);
@@ -10352,6 +10364,45 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             .as_object()
             .unwrap()
             .contains_key("created_by_device_id"));
+    }
+
+    // 0.3.10 record tombstone wins: higher live cannot clear deleted_at.
+    let restore_bundle = Uuid::new_v4().to_string();
+    let mut restore_payload = record_payload(&baby_id);
+    restore_payload["note"] = json!("管理员恢复");
+    restore_payload["created_by_membership_id"] = owner["membership_id"].clone();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": restore_bundle,
+            "root": entity_wire("record", &record_id, 99, restore_payload, None),
+            "media": [],
+        }),
+    )
+    .await;
+    // Stage may succeed (validation deferred) or fail; commit must refuse.
+    if stage_status == StatusCode::OK {
+        let (commit_status, commit_body) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{restore_bundle}/commit"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await;
+        assert_eq!(commit_status, StatusCode::CONFLICT, "{commit_body}");
+        assert!(
+            commit_body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("cannot be resurrected"),
+            "{commit_body}"
+        );
+    } else {
+        assert_eq!(stage_status, StatusCode::CONFLICT, "{stage_body}");
     }
 }
 

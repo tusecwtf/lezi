@@ -221,6 +221,11 @@ data class BundleCommitResult(
     val applied: Int,
     val cursor: Long,
     val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
+    /**
+     * Record client_uuids soft-deleted by server neighbor adjudication in this commit.
+     * Empty when the server wrote no neighbor losers (or older servers omit the field).
+     */
+    val neighborLosers: List<String> = emptyList(),
 )
 
 data class AnonymousHealth(

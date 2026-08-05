@@ -71,6 +71,7 @@ import com.lezi.babylog.designsystem.PageHero
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.TransientShallowSyncStatus
 import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.carelog.WeekSummary
@@ -368,20 +369,14 @@ private fun SummaryContent(
                     title = "汇总",
                 )
 
-                Text(
-                    shallowSyncStatus.text,
-                    style = LeziTypography.Meta,
-                    color = if (
-                        shallowSyncStatus.state in setOf(
-                            ShallowSyncState.Error,
-                            ShallowSyncState.ReauthRequired,
-                        )
-                    ) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.testTag("summary_shallow_sync_status"),
+                TransientShallowSyncStatus(
+                    text = shallowSyncStatus.text,
+                    isError = shallowSyncStatus.state in setOf(
+                        ShallowSyncState.Error,
+                        ShallowSyncState.ReauthRequired,
+                    ),
+                    isUserRefreshing = isRefreshing,
+                    contentTestTag = "summary_shallow_sync_status",
                 )
 
                 LeziRangeTabs(

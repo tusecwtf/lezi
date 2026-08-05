@@ -460,7 +460,8 @@ fn stamp_and_authorize_custom_items(
 
 /// Record authorship belongs to the authenticated principal, never to client claims.
 /// Once published, only that membership (across all of its devices) or the
-/// family owner may edit, tombstone, or restore the record.
+/// family owner may edit or tombstone the record. Soft-deleted records cannot
+/// be resurrected (record tombstone wins — ADR-0018 / 0.3.10).
 fn canonicalize_record_authors(
     role: &str,
     membership_id: &str,
@@ -473,6 +474,9 @@ fn canonicalize_record_authors(
         }
         let key = ("record".to_owned(), entity.client_uuid.clone());
         if let Some(current) = existing.get(&key) {
+            if current.deleted_at.is_some() && entity.deleted_at.is_none() {
+                return Err(StoreError::RecordTombstoneResurrection);
+            }
             let value = current
                 .payload
                 .get("created_by_membership_id")
@@ -2057,6 +2061,7 @@ impl Store {
                     applied,
                     cursor,
                     record_authors,
+                    neighbor_losers: Vec::new(),
                 },
                 package,
             ));
@@ -2224,8 +2229,17 @@ impl Store {
             "fulfillment_candidate" => 2,
             _ => 3,
         });
-        let entity_count = effective.len();
-        for entity in &effective {
+        // Neighbor adjudication (ADR-0018): same transaction as this commit's
+        // LWW write. Uses pre-write `persisted` + this package's effective winners.
+        let neighbor_losers = crate::store::neighbor::adjudicate_neighbor_losers(
+            &transaction,
+            family_id,
+            &effective,
+            &persisted,
+            now,
+        )?;
+        let mut entity_count = effective.len();
+        for entity in effective.iter().chain(neighbor_losers.iter()) {
             cursor += 1;
             transaction.execute(
                 "
@@ -2250,6 +2264,11 @@ impl Store {
                 ],
             )?;
         }
+        entity_count += neighbor_losers.len();
+        let neighbor_loser_ids = neighbor_losers
+            .iter()
+            .map(|entity| entity.client_uuid.clone())
+            .collect::<Vec<_>>();
         transaction.execute(
             "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
             params![cursor, family_id],
@@ -2357,6 +2376,7 @@ impl Store {
                 applied: entity_count,
                 cursor,
                 record_authors,
+                neighbor_losers: neighbor_loser_ids,
             },
             package,
         ))

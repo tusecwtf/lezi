@@ -372,6 +372,18 @@ class RootViewModel @Inject constructor(
         }
     }
 
+    val shallowSyncLine = syncPort.shallowStatus()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            com.lezi.babylog.sync.session.ShallowSyncLine(
+                state = com.lezi.babylog.sync.session.ShallowSyncState.Unjoined,
+                text = "",
+            ),
+        )
+
+    val neighborAlignmentHints = syncPort.neighborAlignmentHints()
+
     val ui = combine(
         baseUi,
         sleepingBaby,
@@ -884,6 +896,12 @@ private fun LeziMainScaffold(
     val today = ui.today
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val shallowSyncLine by vm.shallowSyncLine.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) {
+        vm.neighborAlignmentHints.collect { message ->
+            snackbar.showSnackbar(message)
+        }
+    }
     val composerRequest = ui.composerRequest
     val systemCalendarId by vm.systemCalendarId.collectAsStateWithLifecycle()
     val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()
@@ -1026,6 +1044,21 @@ private fun LeziMainScaffold(
                                     showHeaderCalendar = true
                                 },
                                 onSearch = { nav.navigate("search") },
+                                collapsedSyncText = if (
+                                    current in setOf(
+                                        TopDest.Log.route,
+                                        TopDest.Summary.route,
+                                        TopDest.Growth.route,
+                                    ) && shallowSyncLine.text.isNotBlank()
+                                ) {
+                                    shallowSyncLine.text
+                                } else {
+                                    null
+                                },
+                                collapsedSyncIsError = shallowSyncLine.state in setOf(
+                                    com.lezi.babylog.sync.session.ShallowSyncState.Error,
+                                    com.lezi.babylog.sync.session.ShallowSyncState.ReauthRequired,
+                                ),
                             )
                         }
                     }

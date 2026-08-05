@@ -48,6 +48,7 @@ import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.designsystem.TransientShallowSyncStatus
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
@@ -184,22 +185,14 @@ internal fun LogTimelineList(
                 Column(
                     Modifier.padding(horizontal = pageHorizontal),
                 ) {
-                    Text(
+                    TransientShallowSyncStatus(
                         text = state.shallowSyncLine.text,
-                        style = LeziTypography.Meta,
-                        color = if (
-                            state.shallowSyncLine.state in setOf(
-                                ShallowSyncState.Error,
-                                ShallowSyncState.ReauthRequired,
-                            )
-                        ) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier
-                            .testTag("log_shallow_sync_status")
-                            .padding(bottom = LeziSpacing.Sm),
+                        isError = state.shallowSyncLine.state in setOf(
+                            ShallowSyncState.Error,
+                            ShallowSyncState.ReauthRequired,
+                        ),
+                        isUserRefreshing = state.refreshing,
+                        contentTestTag = "log_shallow_sync_status",
                     )
                     if (journal) {
                         RecordSummaryStrip(

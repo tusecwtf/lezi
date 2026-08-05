@@ -661,6 +661,12 @@ internal fun FamilyMemberRow(
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(
+                formatMemberLastSync(member.lastSyncAtEpochSeconds),
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag("member_last_sync_${member.membershipId}"),
+            )
         }
         FamilyRowOverflowMenu(
             actions = buildList {
@@ -842,6 +848,16 @@ internal fun formatFamilyDeviceLastUsed(
         delta < 7 * 86_400 -> "${delta / 86_400} 天前"
         else -> SimpleDateFormat("MM-dd", Locale.getDefault()).format(Date(then * 1_000L))
     }
+}
+
+/** Member-level last sync summary; empty when no active device has connected. */
+internal fun formatMemberLastSync(
+    epochSeconds: Long?,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1_000L,
+): String = if (epochSeconds == null) {
+    "尚未同步"
+} else {
+    "上次同步 · ${formatFamilyDeviceLastUsed(epochSeconds, nowEpochSeconds)}"
 }
 
 @Composable

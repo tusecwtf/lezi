@@ -192,9 +192,8 @@ fn permanent_rejection(error: &StoreError) -> Option<&'static str> {
         StoreError::ForbiddenAnonymousFact => Some("forbidden_anonymous_fact"),
         StoreError::CustomItemTombstoneResurrection
         | StoreError::CarePlanTombstoneResurrection
-        | StoreError::FulfillmentCandidateTombstoneResurrection => {
-            Some("tombstone_resurrection_forbidden")
-        }
+        | StoreError::FulfillmentCandidateTombstoneResurrection
+        | StoreError::RecordTombstoneResurrection => Some("tombstone_resurrection_forbidden"),
         StoreError::ImmutableCarePlanFulfillmentBinding
         | StoreError::ImmutableFulfillmentCandidateEvidence
         | StoreError::ImmutableMediaAssociation => Some("immutable_evidence_conflict"),
