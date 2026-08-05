@@ -431,15 +431,14 @@ scene_gf_composer_diaper() {
 scene_gf_breast_timer_entry() {
   gf_goto_log
   dump
+  # Prefer dock 喂奶 Composer open for mid-frame (shot taken by run_scene after this path).
   tap_n "喂奶" || true
   sleep 1.0
-  adb shell input keyevent 4
-  sleep 0.4
-  dump
-  tap_n "计时" || true
-  sleep 1.0
-  adb shell input keyevent 4
-  sleep 0.3
+}
+
+gf_ensure_foreground() {
+  adb shell am start -n "$GF/com.lezi.gf.app.MainActivity" >/dev/null 2>&1 || true
+  sleep 0.5
 }
 
 timeline_row_y() {
@@ -714,10 +713,18 @@ run_scene_gf() {
       adb shell input keyevent 4
       ;;
     composer-breast-vs-timer)
+      gf_ensure_foreground
       gf_goto_log
-      with_record "$dir/gf.mp4" 7 scene_gf_breast_timer_entry
-      # Mid-frame: timer surface (last step of entry path)
-      gf_goto_log; tap_n "计时" || true; sleep 0.9; shot "$dir/gf.png"
+      with_record "$dir/gf.mp4" 5 scene_gf_breast_timer_entry
+      # Mid-frame: 喂奶 Composer (dock nursing entry)
+      shot "$dir/gf.png"
+      adb shell input keyevent 4
+      sleep 0.3
+      # Second evidence path: secondary 计时
+      gf_goto_log
+      tap_n "计时" || true
+      sleep 0.9
+      shot "$dir/gf-timer.png" || true
       adb shell input keyevent 4
       ;;
     swipe-half-reveal)
@@ -747,8 +754,16 @@ run_scene_gf() {
       adb shell input keyevent 4
       ;;
     timer-enter-idle)
-      with_record "$dir/gf.mp4" 5 scene_gf_timer_idle
-      gf_goto_log; tap_n "计时" || true; sleep 1.0; shot "$dir/gf.png"
+      gf_ensure_foreground
+      gf_goto_log
+      with_record "$dir/gf.mp4" 4 bash -c 'dump; tap_n "计时" || true; sleep 1.0'
+      # Do not keyevent before still — prior path left launcher
+      gf_ensure_foreground
+      gf_goto_log
+      dump
+      tap_n "计时" || true
+      sleep 1.1
+      shot "$dir/gf.png"
       adb shell input keyevent 4
       ;;
     timer-run-complete)

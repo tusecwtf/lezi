@@ -1,6 +1,6 @@
 # 06 — 矩阵 verified/partial 总评 + §2.3 建议
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

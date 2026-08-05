@@ -1,6 +1,6 @@
 # Spec 02 follow-on · Dual-scene acceptance verification (close evidence gaps)
 
-**Status:** ready-for-agent  
+**Status:** done · P0 closed (P1 optional open)  
 **Parent inventory:** [../spec-02-dual-scene-review/uiux-diff-spec.md](../spec-02-dual-scene-review/uiux-diff-spec.md)  
 **Parent campaign:** [../spec-02-dual-scene-review/spec.md](../spec-02-dual-scene-review/spec.md)  
 **1.0.0 freeze (closed):** [../spec-02-apk-1.0-freeze/spec.md](../spec-02-apk-1.0-freeze/spec.md)  

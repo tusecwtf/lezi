@@ -1,6 +1,6 @@
 # 03 — 重验 11–13 滑动中途静帧
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

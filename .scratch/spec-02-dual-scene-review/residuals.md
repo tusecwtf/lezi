@@ -1,6 +1,7 @@
 # Dual-scene residuals (living)
 
 **Canonical inventory:** [uiux-diff-spec.md](./uiux-diff-spec.md)  
+**Acceptance re-verify:** [../spec-02-acceptance-verify/VERIFICATION.md](../spec-02-acceptance-verify/VERIFICATION.md)  
 **Do not** treat chrome waived items as 1.0.0 blockers.
 
 ## Aligned (code)
@@ -11,6 +12,9 @@
 | R-milk-chips | **aligned** |
 | R-confirm-label (确认记录) | **aligned** |
 | R-timer-label (计时) | **aligned** |
+| R-sleep-debug (epoch → HH:mm) | **aligned** (re-verify stills) |
+| R-summary-debug (D0 dump) | **aligned** (re-verify stills) |
+| R-plan-ui PENDING → 待履行 | **aligned** GF (legacy next-feed still residual) |
 
 ## Waived non-compare
 
@@ -18,43 +22,33 @@ R-topbar · R-icons (E3) · R-daychips (E4) · R-pixel · R-ms · §2.3 deferred
 
 ## Open residuals (by severity)
 
-### High polish (user-visible “debug”)
-
-| ID | Note |
-|----|------|
-| R-sleep-debug | 睡眠 Composer 显示 epoch `start 17…` — 必须改时钟文案 |
-| R-summary-debug | 汇总空态 D0–D6 dump — 必须去掉 |
-
 ### Medium
 
 | ID | Note |
 |----|------|
-| R-plan-ui | PENDING 英文 + 行内履行 vs legacy 下次喂养弹层 |
 | R-composer-order | 圆盘优先 vs 奶量优先 |
-| R-dock-timer | 计时在次行 |
-| R-swipe-static | 本批滑动静帧未锁中途 |
-| R-legacy-seed | legacy seed/弹层干扰 capture |
-| R-layout-entry | 布局静帧未停在编辑器 |
+| R-dock-timer | 计时在次行 vs 更多/母乳路径 |
+| R-next-feed | legacy 写后「安排下次喂养」弹层 vs GF 行内待履行 |
+| R-legacy-automation | 多场景 legacy 静帧仍 partial（seed/launcher） |
 
 ### Low
 
-R-dock-order · R-composer-extra · R-more-ia · R-row-chrome · R-timer-chrome · R-home-layers
+R-dock-order · R-composer-extra · R-more-ia · R-row-chrome · R-home-layers · R-sleep-duration-debug-text（「duration=0」文案仍偏工程化）
 
-## Scene ticket lines
+## Scene honesty (post re-verify)
 
 | Scene | Residual |
 |-------|----------|
 | 03 empty home | chrome waived only |
-| 04 seeded | next-feed vs PENDING plan |
-| 05 tab | GF summary debug dump |
-| 06 day axis | axis card vs top date chrome |
-| 07 formula | 冲调量/耗时 optional; order residual |
-| 08 sleep | epoch debug |
+| 04 seeded | GF 待履行 OK；legacy next-feed |
+| 05 tab | GF 无 dump **verified** |
+| 06 day axis | axis vs top date chrome |
+| 07 formula | 冲调量/耗时 optional |
+| 08 sleep | **dual verified**；可选简化 duration 文案 |
 | 09 diaper | minor chrome |
-| 10 breast/timer | entry split residual |
-| 11–13 swipe | static frame weak; video/history |
+| 10 breast/timer | GF 双路径 verified；入口分离 residual |
+| 11–13 swipe | **GF mid-frame verified**；legacy partial |
 | 14 more | grouping residual |
-| 15 timer idle | still pollution residual |
-| 16 timer run | pass structure |
-| 17 layout | still incomplete |
+| 15–16 timer | **GF verified**；legacy partial |
+| 17 layout | **GF verified**；legacy partial |
 | 18–20 | P1 not run |

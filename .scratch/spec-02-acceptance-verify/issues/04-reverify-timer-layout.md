@@ -1,6 +1,6 @@
 # 04 — 重验 15 计时 idle / 16 运行 / 17 布局
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 

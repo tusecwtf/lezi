@@ -13,10 +13,12 @@ This file is the **engineering pointer**. Full problem/solution, scored matrix, 
 | Gate | Status |
 |------|--------|
 | S-freeze / 1.0.0 shell | PASS |
-| P0 dual-scene capture (03–17) | done |
+| P0 dual-scene capture (03–17) | done + evening re-verify |
 | Formula default 120 + chips + 确认记录 | aligned |
+| Sleep/summary/plan debug copy | **aligned** (stills confirm) |
+| GF mid-frame swipe/timer/layout | **verified** |
+| Legacy dual honesty | **partial** (automation) |
 | §2.3 blind chrome | deferred fail |
-| User-visible debug (sleep epoch, summary D0 dump) | **open P0 polish** |
 
 ## Acceptance re-verify tracker
 

@@ -1,7 +1,7 @@
 # Spec · GF 1.0.0 vs Legacy 0.3.x UI/UX 差异清单
 
-**Status:** agent-complete (P0 dual-install review)  
-**Date:** 2026-08-05  
+**Status:** agent-complete (P0 dual-install + acceptance re-verify)  
+**Date:** 2026-08-05 · re-verify evening  
 **Packages:** GF `com.lezi.babylog.gf` **1.0.0** (`versionCode` 100) · legacy `com.lezi.babylog.debug` (0.3.x)  
 **Device:** emulator-5554 · lezi_api35 · 1080×2400 · API 35  
 **Evidence:** `greenfield/docs/specs/baselines/scenes/<scene-id>/{gf,legacy,compare}.*`  
@@ -116,24 +116,24 @@ Full rubric: [rubric.md](./rubric.md).
 |----|--------------|-------------|-------|
 | A2 Tab | Base crossfade | 内容切换存在；ease 难从 strip 判 | residual |
 | A4 Sheet | Base | Composer/更多 sheet 有进入；时长不 CI | residual |
-| A5 Swipe | Fast + commit | GF 历史证据强；本批仍帧弱 | residual |
-| A3 Layout | Emphasized | 本批静帧未进编辑器 | residual / incomplete still |
+| A5 Swipe | Fast + commit | GF mid-frames: half reveal / full edit / delete confirm | residual (class only) |
+| A3 Layout | Emphasized | GF layout editor + handle still verified | residual |
 
 ## 6. User-visible polish backlog (recommended order)
 
 ### P0 polish（用户会直接看到「半成品」）
 
-1. **R-sleep-debug** — 睡眠 Composer 隐藏 epoch，显示本地时钟。  
-2. **R-summary-debug** — 汇总页去掉 `D0 奶0…` dump；空态只保留产品文案。  
-3. **R-plan-ui** — 「PENDING」改为中文产品文案（如「待履行」/类型名）。
+1. **R-sleep-debug** — **done**（`formatWallClockMs`；静帧「睡下 HH:mm」）  
+2. **R-summary-debug** — **done**（汇总无 D0 dump）  
+3. **R-plan-ui PENDING** — **done** on GF（「喂奶 · 待履行」）；legacy 下次喂养弹层仍 residual  
 
 ### P1 polish（对齐感）
 
 4. R-composer-order — 配方奶主字段顺序更接近 legacy（奶量优先，时间次之或并排）。  
 5. R-next-feed / 计划 — 写后体验统一（弹层 vs 行内）。  
 6. R-dock-timer — 计时入口收敛，减少次行噪音。  
-7. Swipe harness — 半程/满行程中途截帧。  
-8. Legacy seed — 关闭「下次喂养」再 capture。
+7. ~~Swipe harness 中途截帧~~ — **done**（11–13 GF mid-frames）  
+8. ~~Legacy seed 关下次喂养~~ — **done in harness**；legacy 仍 partial 自动化  
 
 ### P2 / deferred（明确不挡发版）
 
@@ -146,18 +146,21 @@ Full rubric: [rubric.md](./rubric.md).
 - confirm-before-write / 取消不写  
 - 配方奶：120 默认、快捷 chips、确认记录、TimeDial、全宽 CTA  
 - 尿：小中大 + 确认记录  
-- 睡眠：确认睡下 / 醒来 / 补记（字段齐，仅 debug 文案要修）  
+- 睡眠：确认睡下 / 醒来 / 补记 + 本地时钟文案  
 - 更多：四列底 sheet  
 - 计时：双大圆 + 完成需确认  
 - 相对时间「刚刚 / N 分钟前」在 seeded 行可见  
+- 滑动中途：半程编辑条 / 满行程编辑 Composer / 删除确认（GF）  
+- 布局编辑全屏 + 拖动手柄（GF）  
 
 ## 8. Automation / evidence gaps
 
 | Gap | Impact | Fix |
 |-----|--------|-----|
-| End-of-scene `shot` after dismiss | 布局/计时 idle/滑动中途证据弱 | shot before keyevent back; mid-gesture pause |
-| Legacy seed + next-feed dialog | legacy 有数据场景常被挡或空 | dismiss dialog; fail seed loudly |
-| timer-enter-idle gf.png looks like legacy home | 包切换/截帧时序 | re-run scene 15 after fix |
+| ~~End-of-scene shot after dismiss~~ | was weak | **fixed** mid-frame stills |
+| ~~Legacy next-feed block~~ | was blocking | **dismiss_next_feed_dialog** |
+| ~~timer-enter-idle launcher~~ | was pollution | **fixed** idle still verified |
+| Legacy swipe/layout still partial | dual not always honest | improve legacy dock labels / seed |
 | P1 scenes not run | 汇总/成长/模板未评分 | optional tickets 18–20 |
 
 ## 9. Relationship to 1.0.0
@@ -165,10 +168,10 @@ Full rubric: [rubric.md](./rubric.md).
 | Gate | Status |
 |------|--------|
 | S-freeze | **PASS**（不变） |
-| 本差异 spec | **Inventory complete for P0** |
-| §2.3 盲测 | **FAIL deferred** |
+| 本差异 spec | **Inventory + P0 re-verify complete (GF strong; legacy partial)** |
+| §2.3 盲测 | **FAIL deferred** — not yet |
 | 是否需因 residual 撤回 1.0.0 | **否** |
-| 是否需 polish 才能宣称「无感换壳」 | **是**（P0 polish + chrome deferred） |
+| 是否需 chrome polish 才能宣称「无感换壳」 | **是**（E3/E4/top-bar deferred） |
 
 ## 10. Reproduce
 
@@ -193,4 +196,5 @@ Full rubric: [rubric.md](./rubric.md).
 
 ## 12. Comments
 
-- 2026-08-05: P0 15 scenes dual-captured; formula align landed earlier same day; this doc freezes the **diff inventory** for polish tickets.
+- 2026-08-05: P0 15 scenes dual-captured; formula align landed earlier same day; this doc freezes the **diff inventory** for polish tickets.  
+- 2026-08-05 evening: acceptance-verify tracker; P0 debug polish landed; GF mid-frames re-verified; see [../spec-02-acceptance-verify/VERIFICATION.md](../spec-02-acceptance-verify/VERIFICATION.md).

@@ -1,8 +1,8 @@
 # Dual-scene capture index
 
-**When:** 2026-08-05T17:38:35+08:00  
+**When:** 2026-08-05T18:42:44+08:00  
 **Device:** `emulator-5554` · 1080x2400  
-**Mode:** `both` · scene arg: `layout-editor-drag`
+**Mode:** `both` · scene arg: `composer-breast-vs-timer`
 
 ## Command
 

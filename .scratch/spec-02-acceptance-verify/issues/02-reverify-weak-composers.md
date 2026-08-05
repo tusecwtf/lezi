@@ -1,6 +1,6 @@
 # 02 — 重验 08 睡眠 / 09 尿 / 10 喂奶·计时
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Parent
 
