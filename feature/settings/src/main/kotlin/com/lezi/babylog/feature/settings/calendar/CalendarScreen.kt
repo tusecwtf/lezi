@@ -766,6 +766,18 @@ fun CalendarRoute(
     }
 }
 
+/** Empty-day message for the selected calendar date (scheduleable vs browse-only). */
+internal fun calendarEmptyDayMessage(canScheduleSelectedDate: Boolean): String =
+    if (canScheduleSelectedDate) {
+        "可选择具体记录项目安排护理"
+    } else {
+        "该日期仅供查看；护理计划只能安排在未来时刻。"
+    }
+
+/** Schedule CTA label when the selected date accepts a care plan; null when browse-only. */
+internal fun calendarEmptyDayActionLabel(canScheduleSelectedDate: Boolean): String? =
+    "安排护理".takeIf { canScheduleSelectedDate }
+
 @Composable
 internal fun CalendarEmptyDayState(
     canScheduleSelectedDate: Boolean,
@@ -774,12 +786,8 @@ internal fun CalendarEmptyDayState(
     StateContainer(
         kind = StateKind.Empty,
         title = "这一天还没有安排",
-        message = if (canScheduleSelectedDate) {
-            "可选择具体记录项目安排护理"
-        } else {
-            "该日期仅供查看；护理计划只能安排在未来时刻。"
-        },
-        actionLabel = "安排护理".takeIf { canScheduleSelectedDate },
+        message = calendarEmptyDayMessage(canScheduleSelectedDate),
+        actionLabel = calendarEmptyDayActionLabel(canScheduleSelectedDate),
         onAction = onSchedule.takeIf { canScheduleSelectedDate },
     )
 }

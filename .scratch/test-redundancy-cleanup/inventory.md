@@ -222,11 +222,16 @@ Healthy L1/L2 style; not flagged Structure unless noted.
 
 ---
 
-## 8. Wave 2 sketch (after Wave 1 lands)
+## 8. Wave 2 — landed (`f355ad32` parent / this tree)
 
-1. Method-level review: `LayoutCategoryDragDeviceTest`, `LayoutEditDropMatrixDeviceTest`, `LayoutEdgeAutoScrollDeviceTest` vs `LayoutDragSessionTest` / policy — delete device only with intent-matrix receipt.  
-2. `CalendarEmptyDayStateTest` vs `CalendarMonthStateTest`.  
-3. Any remaining designsystem source contains after KEEP-PARTIAL splits.
+| Deleted device | Receipt |
+|----------------|---------|
+| `LayoutCategoryDragDeviceTest` | `LayoutDragSessionTest` category* + `LocalLayoutEditPolicyTest` MoveCategoryToIndex |
+| `LayoutEditDropMatrixDeviceTest` | `LayoutDragSessionTest` locked-more / gap / clear / restore / assign |
+| `LayoutEdgeAutoScrollDeviceTest` | `LayoutEdgeAutoScrollPolicyTest` |
+| `CalendarEmptyDayStateTest` | JVM `CalendarEmptyDayChromeTest` + `calendarEmptyDayMessage/ActionLabel` helpers; schedule dates in `CalendarMonthStateTest` |
+
+**Accepted gap:** no Compose long-press→intent wiring device smoke for layout drop matrix (session unit owns rules).
 
 ---
 
