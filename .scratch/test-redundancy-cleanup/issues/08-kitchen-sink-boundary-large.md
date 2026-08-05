@@ -1,7 +1,7 @@
 # 08 — Kitchen sink D: boundary large test files
 
 **Block:** D  
-**Status:** ready-for-agent  
+**Status:** done  
 **Blocked by:** **05 and 06 preferred first** (higher ROI); 07 may interleave  
 **Modules:** `:domain`, `:feature:log`, `:sync`, `:designsystem`, `:feature:timer`, `:feature:settings`
 
@@ -39,10 +39,10 @@ Re-run `wc -l` + `@Test` counts before claiming a row.
 
 ## Acceptance
 
-- [ ] Inventory table above updated with current LOC/@Test and disposition:
+- [x] Inventory table above updated with current LOC/@Test and disposition:
   `split` / `extract-support-only` / `leave`
-- [ ] Every `split` row: ≥1 PR with map + focused classes + green module tests
-- [ ] `leave` rows: one-sentence justification (single contract cluster)
+- [x] Every `split` row: ≥1 PR with map + focused classes + green module tests
+- [x] `leave` rows: one-sentence justification (single contract cluster)
 
 ## Out of scope
 
@@ -53,3 +53,11 @@ Re-run `wc -l` + `@Test` counts before claiming a row.
 ## Comments
 
 Opened from test-redundancy-cleanup residual plan (blocks A–E).
+
+### Receipt (implement 08)
+
+- Disposition table: `.scratch/test-redundancy-cleanup/maps/boundary-large.md`
+- **split:** LocalDataClearCoordinator, RecordComposerSavedState, LocalReplicaClearCoordinator, TimerCompletionUi
+- **leave:** AtomicMediaBundlePublisher, LocalPhotoLoader, LayoutDragSession, TimelineWindowRepository, AndroidSystemCalendarPortSmoke (device), ReferenceAwareMediaFileCleanup, TimerTransitionFailure
+- Module filters for split suites green
+

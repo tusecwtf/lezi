@@ -28,7 +28,8 @@ import com.lezi.babylog.sync.MemorySyncPreferences
 import com.lezi.babylog.sync.TestMediaFileStore
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class LocalReplicaClearCoordinatorTest {
+// Contract-cluster split (ticket 08).
+class LocalReplicaClearRecoveryTest {
     @Test
     fun domainRecoveryAndFinalizerStayInsideOrderedExclusionOnReplicaFailure() = runTest {
         val rig = ClearRig()
@@ -72,7 +73,6 @@ class LocalReplicaClearCoordinatorTest {
             .containsExactly("recover-domain", "exclude", "room", "domain-finish")
             .inOrder()
     }
-
     @Test
     fun domainRecoveryFailurePreventsReplicaMarkerAndRoomClear() = runTest {
         val rig = ClearRig()
@@ -89,7 +89,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.pending.pending).isNull()
         assertThat(rig.transactions.runCount).isEqualTo(0)
     }
-
     @Test
     fun successfulCommittedRecoveryStillExecutesTheNewExplicitClear() = runTest {
         val rig = ClearRig()
@@ -106,23 +105,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.pending.pending).isNull()
         assertThat(rig.transactions.runCount).isEqualTo(2)
     }
-
-    @Test
-    fun recordsOnlyRecoveryDoesNotShortCircuitARequestedAllLocalClear() = runTest {
-        val rig = ClearRig()
-        var roomCalls = 0
-
-        val result = rig.coordinator.clear(
-            scope = LocalDataClearScope.AllLocalData,
-            workflow = testLocalClearWorkflow { roomCalls += 1 },
-            recoverDomain = { LocalDataClearScope.RecordsOnly },
-        )
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(roomCalls).isEqualTo(1)
-        assertThat(rig.transactions.runCount).isEqualTo(2)
-    }
-
     @Test
     fun domainCancellationWinsWhenReplicaFinalizationAlsoFails() = runTest {
         val rig = ClearRig()
@@ -144,7 +126,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(failure.suppressed.single()).isInstanceOf(LocalClearCommittedException::class.java)
         assertThat(failure.suppressed.single().cause).isSameInstanceAs(replicaFailure)
     }
-
     @Test
     fun markerAndDomainClearShareOneTransactionBeforeFinalizationTransaction() = runTest {
         val rig = ClearRig()
@@ -161,7 +142,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.transactions.runCount).isEqualTo(2)
         assertThat(rig.pending.pending).isNull()
     }
-
     @Test
     fun ownershipRecheckAndPhysicalDeleteShareTheFinalRoomWriteLease() = runTest {
         lateinit var rig: ClearRig
@@ -174,7 +154,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(result.isSuccess).isTrue()
         assertThat(observingFiles.deleteDepths).containsExactly(1)
     }
-
     @Test
     fun markerStageFailurePreventsDomainClearAndReplicaCleanup() = runTest {
         val rig = ClearRig(
@@ -194,7 +173,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(callbackCalls).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(9)
     }
-
     @Test
     fun committedFileFailureRetainsDurableMarkerAndRoomReplicaRows() = runTest {
         val rig = ClearRig()
@@ -213,7 +191,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.media.getByClientUuid("log-media")).isNotNull()
         assertThat(rig.mediaFiles.deleted).containsExactly("photos/log.jpg")
     }
-
     @Test
     fun cursorFailureRetainsMarkerAndFinalRoomRowsForRecreationRecovery() = runTest {
         val rig = ClearRig(
@@ -240,7 +217,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.media.getByClientUuid("log-media")).isNull()
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("known-generation")
     }
-
     @Test
     fun finalRoomTransactionFailureRetainsMarkerForRetry() = runTest {
         val rig = ClearRig()
@@ -258,7 +234,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.newCoordinator().recoverPending().isSuccess).isTrue()
         assertThat(rig.pending.pending).isNull()
     }
-
     @Test
     fun recoveryDeletesOnlyCapturedMediaCreatedBeforeTheClear() = runTest {
         val rig = ClearRig()
@@ -277,7 +252,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.mediaFiles.deleted)
             .containsExactly("photos/old.jpg", "photos/old.jpg")
     }
-
     @Test
     fun recoveryDoesNotDeleteACapturedPathReownedByNewMedia() = runTest {
         val rig = ClearRig()
@@ -296,122 +270,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.media.getByClientUuid("new-log-media")).isNotNull()
         assertThat(rig.mediaFiles.deleted).containsExactly(reusedPath)
     }
-
-    @Test
-    fun recordsOnlyClearsRecordAndPlanReplicaButPreservesAvatarAndGeneration() = runTest {
-        val originalSession = joinedClearSession().copy(
-            pullCursor = 9,
-            pullGeneration = "known-generation",
-            membershipId = "membership-a",
-        )
-        val rig = ClearRig(session = originalSession)
-        rig.records.seed(record(payloadJson = """{"photos":["photos/record-inline.jpg"]}"""))
-        rig.carePlans.seed(carePlan("""{"photos":["photos/plan-inline.jpg"]}"""))
-        rig.media.seed(media("record-media", "log", "photos/record.jpg"))
-        rig.media.seed(media("plan-media", "log", "photos/plan.jpg", carePlanId = 1))
-        rig.media.seed(media("avatar-media", "avatar", "avatars/baby.jpg"))
-        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
-            rig.records.deleteAll()
-            rig.carePlans.deleteAll()
-        }
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.preferences.current()).isEqualTo(originalSession.copy(pullCursor = 0))
-        assertThat(rig.media.getByClientUuid("record-media")).isNull()
-        assertThat(rig.media.getByClientUuid("plan-media")).isNull()
-        assertThat(rig.media.getByClientUuid("avatar-media")).isNotNull()
-        assertThat(rig.mediaFiles.deleted).containsExactly(
-            "photos/record.jpg",
-            "photos/plan.jpg",
-        )
-    }
-
-    @Test
-    fun recordsOnlyNeverDeletesAPathStillOwnedByAnAvatar() = runTest {
-        val rig = ClearRig()
-        val sharedPath = "avatars/shared.jpg"
-        rig.records.seed(record(payloadJson = """{"photos":["$sharedPath"]}"""))
-        rig.media.seed(media("record-shared", "log", sharedPath))
-        rig.media.seed(media("avatar-shared", "avatar", sharedPath))
-
-        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
-            rig.records.deleteAll()
-        }
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.media.getByClientUuid("record-shared")).isNull()
-        assertThat(rig.media.getByClientUuid("avatar-shared")).isNotNull()
-        assertThat(rig.mediaFiles.deleted).doesNotContain(sharedPath)
-    }
-
-    @Test
-    fun recordsOnlySweepsOrphanDraftImportsButPreservesAvatarRoot() = runTest {
-        val rig = ClearRig()
-        val orphanDraft = "record-media/orphan-draft.jpg"
-        val avatarOwnedRecordPath = "record-media/avatar-owned.jpg"
-        val orphanAvatar = "baby_avatars/orphan-avatar.jpg"
-        rig.mediaFiles.existing += orphanDraft
-        rig.mediaFiles.existing += avatarOwnedRecordPath
-        rig.mediaFiles.existing += orphanAvatar
-        rig.media.seed(media("avatar-in-record-root", "avatar", avatarOwnedRecordPath))
-
-        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.mediaFiles.existing).doesNotContain(orphanDraft)
-        assertThat(rig.mediaFiles.existing).contains(avatarOwnedRecordPath)
-        assertThat(rig.mediaFiles.existing).contains(orphanAvatar)
-    }
-
-    @Test
-    fun allLocalClearsEveryCapturedReplicaAndDropsGeneration() = runTest {
-        val rig = ClearRig(
-            session = joinedClearSession().copy(
-                pullCursor = 11,
-                pullGeneration = "known-generation",
-            ),
-        )
-        val babyId = rig.babies.seed(baby(avatarPath = "avatars/baby.jpg"))
-        rig.records.seed(
-            record(
-                babyId = babyId,
-                payloadJson = """{"photos":["photos/inline.jpg"]}""",
-            ),
-        )
-        rig.media.seed(media("log-media", "log", "photos/log.jpg"))
-        rig.media.seed(media("avatar-media", "avatar", "avatars/baby.jpg"))
-
-        val result = rig.coordinator.clear(LocalDataClearScope.AllLocalData) {
-            rig.records.deleteAll()
-            rig.babies.deleteAll()
-        }
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-        assertThat(rig.preferences.current().pullGeneration).isEmpty()
-        assertThat(rig.media.listAllIncludingDeleted()).isEmpty()
-        assertThat(rig.mediaFiles.deleted).containsExactly(
-            "photos/log.jpg",
-            "avatars/baby.jpg",
-        )
-        assertThat(rig.mediaFiles.deleted).doesNotContain("photos/inline.jpg")
-        assertThat(rig.pending.pending).isNull()
-    }
-
-    @Test
-    fun recordsOnlyChunksLargeCapturedMediaDeletes() = runTest {
-        val rig = ClearRig()
-        repeat(1_005) { index ->
-            val uuid = "log-media-$index"
-            rig.media.seed(media(uuid, "log", "photos/$index.jpg"))
-        }
-
-        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.media.listAllIncludingDeleted()).isEmpty()
-    }
-
     @Test
     fun committedCleanupRunsNonCancellableBeforePropagatingCancellation() = runTest {
         val gatedFiles = GatedDeleteMediaFileStore()
@@ -430,7 +288,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.media.getByClientUuid("log-media")).isNull()
         assertThat(clearing.isCancelled).isTrue()
     }
-
     @Test
     fun callerCancellationWinsWhenNonCancellableReplicaFinalizationFails() = runTest {
         val gatedFiles = GatedDeleteMediaFileStore()
@@ -456,7 +313,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(failure.suppressed.single().cause).isSameInstanceAs(replicaFailure)
         assertThat(rig.pending.pending).isNotNull()
     }
-
     @Test
     fun clearWaitsForItsSharedBarrier() = runTest {
         val rig = ClearRig()
@@ -473,168 +329,3 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(clearing.await().isSuccess).isTrue()
     }
 }
-
-private suspend fun LocalReplicaClearCoordinator.clear(
-    scope: LocalDataClearScope,
-    clearRoom: suspend () -> Unit,
-): Result<Unit> = clear(
-    scope = scope,
-    workflow = testLocalClearWorkflow(clearRoom = clearRoom),
-    recoverDomain = { null },
-)
-
-private fun testLocalClearWorkflow(
-    clearRoom: suspend () -> Unit = {},
-    finishCommitted: suspend () -> Unit = {},
-): LocalClearWorkflow = object : LocalClearWorkflow {
-    override suspend fun <T> withLocalExclusion(block: suspend () -> T): T = block()
-    override suspend fun clearRoom() = clearRoom.invoke()
-    override suspend fun finishCommitted() = finishCommitted.invoke()
-}
-
-private class ClearRig(
-    session: SyncSession = joinedClearSession(),
-    val mediaFiles: TestMediaFileStore = TestMediaFileStore(),
-) {
-    val barrier = Mutex()
-    val preferences = MemorySyncPreferences(session)
-    val records = MemoryRecordDao()
-    val carePlans = MemoryCarePlanDao()
-    val babies = MemoryBabyDao()
-    val media = MemoryMediaDao()
-    val transactions = ClearTransactionRunner()
-    val pending = MemoryPendingReplicaCleanupStore { transactions.depth }
-    val coordinator = newCoordinator()
-
-    fun newCoordinator() = LocalReplicaClearCoordinator(
-        barrier = barrier,
-        preferences = preferences,
-        babyDao = babies,
-        mediaDao = media,
-        mediaFiles = mediaFiles,
-        transactionRunner = transactions,
-        pendingStore = pending,
-    )
-}
-
-private class ClearTransactionRunner : DatabaseTransactionRunner {
-    var runCount = 0
-    var depth = 0
-    val failRunNumbers = mutableSetOf<Int>()
-
-    override suspend fun <T> run(block: suspend () -> T): T {
-        runCount += 1
-        val currentRun = runCount
-        if (failRunNumbers.remove(currentRun)) {
-            error("transaction $currentRun failed")
-        }
-        depth += 1
-        return try {
-            block()
-        } finally {
-            depth -= 1
-        }
-    }
-}
-
-private class MemoryPendingReplicaCleanupStore(
-    private val transactionDepth: () -> Int,
-) : PendingReplicaCleanupStore {
-    var pending: PendingReplicaCleanup? = null
-    var stageFailure: Throwable? = null
-    val stageDepths = mutableListOf<Int>()
-    val deleteDepths = mutableListOf<Int>()
-
-    override suspend fun load(): PendingReplicaCleanup? = pending
-
-    override suspend fun stage(pending: PendingReplicaCleanup) {
-        stageDepths += transactionDepth()
-        stageFailure?.let { throw it }
-        check(this.pending == null)
-        this.pending = pending
-    }
-
-    override suspend fun delete() {
-        deleteDepths += transactionDepth()
-        pending = null
-    }
-}
-
-private class GatedDeleteMediaFileStore : TestMediaFileStore() {
-    val deleteStarted = CompletableDeferred<Unit>()
-    val allowDelete = CompletableDeferred<Unit>()
-
-    override suspend fun delete(localUri: String) {
-        deleteStarted.complete(Unit)
-        allowDelete.await()
-        super.delete(localUri)
-    }
-}
-
-private class TransactionObservingMediaFileStore(
-    private val transactionDepth: () -> Int,
-) : TestMediaFileStore() {
-    val deleteDepths = mutableListOf<Int>()
-
-    override suspend fun delete(localUri: String) {
-        deleteDepths += transactionDepth()
-        super.delete(localUri)
-    }
-}
-
-private fun media(
-    clientUuid: String,
-    kind: String,
-    localUri: String,
-    carePlanId: Long? = null,
-) = MediaAssetEntity(
-    clientUuid = clientUuid,
-    kind = kind,
-    recordId = if (carePlanId == null && kind == "log") 1 else null,
-    carePlanId = carePlanId,
-    babyId = 1L.takeIf { kind == "avatar" },
-    localUri = localUri,
-    createdAt = 1,
-)
-
-private fun record(
-    babyId: Long = 1,
-    payloadJson: String = "{}",
-) = RecordEntity(
-    clientUuid = "record-local",
-    babyId = babyId,
-    type = "formula",
-    timestamp = 120,
-    payloadJson = payloadJson,
-    updatedAt = 120,
-)
-
-private fun carePlan(payloadJson: String) = CarePlanEntity(
-    id = 1,
-    clientUuid = "plan-local",
-    babyId = 1,
-    type = "formula",
-    scheduledAt = 120,
-    scheduledZoneId = "Asia/Shanghai",
-    payloadJson = payloadJson,
-    updatedAt = 120,
-)
-
-private fun baby(avatarPath: String?) = BabyEntity(
-    familyId = 1,
-    nickname = "本地宝宝",
-    birthdayEpochDay = 20_000,
-    themeColorArgb = 0,
-    clientUuid = "baby-local",
-    updatedAt = 100,
-    avatarPath = avatarPath,
-)
-
-private fun joinedClearSession() = SyncSession(
-    familyId = "family-a",
-    accessToken = "token",
-    deviceId = "device-a",
-    role = FamilyRole.Owner,
-    serverHost = "192.168.1.20",
-    serverPort = 8787,
-)

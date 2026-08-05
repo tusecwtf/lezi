@@ -12,217 +12,8 @@ import com.lezi.babylog.feature.log.dock.*
 import com.lezi.babylog.feature.log.layout.*
 import com.lezi.babylog.feature.log.photo.*
 
-class RecordComposerSavedStateTest {
-    @Test
-    fun confirmFreezesFuturePlanDecisionAndEditableCommandAcrossClockFlip() {
-        val request = RecordComposerRequest.New(
-            babyId = 7L,
-            type = RecordType.BATH,
-            timestamp = 2_000L,
-            historical = false,
-        )
-        val confirmedDraft = QuickRecordDraft.create(RecordType.BATH, 2_000L).copy(
-            note = "确认时备注",
-        )
-
-        val frozen = freezeComposerWrite(
-            request = request,
-            babyId = 7L,
-            draft = confirmedDraft,
-            confirmedAtMillis = 1_000L,
-            clientUuid = "composer-plan-identity",
-        )
-
-        assertEquals(ComposerWriteDecision.CreateCarePlan, frozen.writeDecision)
-        assertEquals(2_000L, frozen.command.timestamp)
-        assertEquals("确认时备注", frozen.command.note)
-        assertEquals("composer-plan-identity", frozen.clientUuid)
-        // The same draft would be a fact after the long import crosses its timestamp.
-        assertEquals(
-            ComposerWriteDecision.AddRecord,
-            confirmedDraft.copy(note = "导入期间误改").writeDecision(nowMillis = 3_000L),
-        )
-        assertEquals("确认时备注", frozen.command.note)
-    }
-
-    @Test
-    fun confirmFreezesRecordConversionAcrossClockFlip() {
-        val request = RecordComposerRequest.Edit(recordId = 9L)
-        val confirmedDraft = QuickRecordDraft.create(RecordType.BATH, 2_000L).copy(
-            existingRecordId = 9L,
-            note = "转计划",
-        )
-
-        val frozen = freezeComposerWrite(
-            request = request,
-            babyId = 7L,
-            draft = confirmedDraft,
-            confirmedAtMillis = 1_000L,
-            clientUuid = "composer-convert-identity",
-        )
-
-        assertEquals(ComposerWriteDecision.ConvertRecordToCarePlan, frozen.writeDecision)
-        assertEquals(
-            ComposerWriteDecision.UpdateRecord,
-            confirmedDraft.writeDecision(nowMillis = 3_000L),
-        )
-        assertEquals(ComposerWriteDecision.ConvertRecordToCarePlan, frozen.writeDecision)
-    }
-
-    @Test
-    fun processRecreationRestoresOnePendingWriteIdentityInsteadOfAnEditableDraft() {
-        val handle = SavedStateHandle()
-        val request = RecordComposerRequest.New(
-            babyId = 7L,
-            type = RecordType.DIARY,
-            timestamp = 1_000L,
-            historical = false,
-        )
-        val originalDraft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
-            body = "只应写入一次",
-        )
-        val saved = RecordComposerSavedState(handle)
-        saved.initialize(request, originalDraft)
-        val pending = freezeComposerWrite(
-            request = request,
-            babyId = 7L,
-            draft = originalDraft,
-            confirmedAtMillis = 2_000L,
-            clientUuid = "composer-fact-identity",
-        )
-
-        saved.savePendingWrite(pending)
-        // A late editable-field callback cannot mutate an already-confirmed write.
-        saved.update(request, originalDraft.copy(body = "不应覆盖"))
-
-        val recreated = RecordComposerSavedState(handle)
-        assertEquals(pending, recreated.pendingWrite())
-        assertEquals(originalDraft, recreated.pendingWrite()?.draft)
-        assertNull(recreated.restore(request))
-    }
-
-    @Test
-    fun recreatedPendingWriteMapsToLockedAutomaticResumeState() {
-        val request = RecordComposerRequest.New(
-            babyId = 7L,
-            type = RecordType.DIARY,
-            timestamp = 1_000L,
-            historical = false,
-        )
-        val draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
-            body = "只写一次",
-        )
-        val pending = freezeComposerWrite(
-            request = request,
-            babyId = 7L,
-            draft = draft,
-            confirmedAtMillis = 2_000L,
-            clientUuid = "composer-resume-identity",
-        )
-
-        val restored = recordComposerPendingWriteUiState(pending)
-
-        assertEquals(request, restored.activeRequest)
-        assertEquals(draft, restored.draft)
-        assertTrue(restored.saving)
-        assertFalse(restored.hasUserChanges)
-        assertNull(restored.error)
-    }
-
-    @Test
-    fun recreatedStoreRestoresDraftOnlyForTheSameRequest() {
-        val handle = SavedStateHandle()
-        val request = RecordComposerRequest.New(
-            babyId = 7L,
-            type = RecordType.DIARY,
-            timestamp = 1_000L,
-            historical = false,
-            customItemId = null,
-        )
-        val draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
-            body = "已输入的正文",
-            photos = listOf("/data/user/0/com.lezi/files/record-media/draft.jpg"),
-        )
-        RecordComposerSavedState(handle).initialize(request, draft)
-
-        val recreated = RecordComposerSavedState(handle)
-
-        assertEquals(draft, recreated.restore(request))
-        assertNull(recreated.restore(RecordComposerRequest.Edit(recordId = 99L)))
-    }
-
-    @Test
-    fun explicitScheduleIntentSurvivesRecreationAndDoesNotRestoreAsTimestampDerived() {
-        val handle = SavedStateHandle()
-        val request = RecordComposerRequest.New(
-            babyId = 7L,
-            type = RecordType.BATH,
-            timestamp = 2_000L,
-            historical = false,
-            createIntent = ComposerCreateIntent.ScheduleCare,
-        )
-        val draft = QuickRecordDraft.create(
-            type = RecordType.BATH,
-            timestamp = 2_000L,
-            createIntent = ComposerCreateIntent.ScheduleCare,
-        )
-        RecordComposerSavedState(handle).initialize(request, draft)
-
-        val recreated = RecordComposerSavedState(handle)
-
-        assertEquals(ComposerCreateIntent.ScheduleCare, recreated.restore(request)?.createIntent)
-        assertNull(
-            recreated.restore(
-                request.copy(createIntent = ComposerCreateIntent.DeriveFromTimestamp),
-            ),
-        )
-    }
-
-    @Test
-    fun explicitClearRemovesRestorableDraft() {
-        val handle = SavedStateHandle()
-        val request = RecordComposerRequest.Edit(recordId = 9L)
-        val saved = RecordComposerSavedState(handle)
-        saved.initialize(request, QuickRecordDraft.create(RecordType.DIARY, 1_000L))
-
-        saved.clear()
-
-        assertNull(RecordComposerSavedState(handle).restore(request))
-    }
-
-    @Test
-    fun recreatedStoreKeepsInitialAndEditedDraftForDirtyRecovery() {
-        val handle = SavedStateHandle()
-        val request = RecordComposerRequest.New(
-            babyId = 7L,
-            type = RecordType.DIARY,
-            timestamp = 1_000L,
-            historical = false,
-        )
-        val initial = QuickRecordDraft.create(RecordType.DIARY, 1_000L)
-        val edited = initial.copy(
-            body = "进程重建后仍未保存",
-            photos = listOf("/data/user/0/com.lezi/files/record-media/draft.jpg"),
-            ownedDraftPhotos = listOf(
-                "/data/user/0/com.lezi/files/record-media/draft.jpg",
-            ),
-        )
-        val saved = RecordComposerSavedState(handle)
-        saved.initialize(request, initial)
-        saved.update(request, edited)
-
-        val recreated = RecordComposerSavedState(handle)
-
-        assertEquals(initial, recreated.restoreInitial(request))
-        assertEquals(edited, recreated.restore(request))
-        assertTrue(
-            hasRecordComposerUserChanges(
-                requireNotNull(recreated.restoreInitial(request)),
-                requireNotNull(recreated.restore(request)),
-            ),
-        )
-    }
-
+// Contract-cluster split (ticket 08).
+class RecordComposerPostSaveTest {
     @Test
     fun persistedFactKeepsNextFeedIdentityAfterComposerDraftIsConsumed() {
         val handle = SavedStateHandle()
@@ -258,7 +49,6 @@ class RecordComposerSavedStateTest {
         saved.clearPendingNextFeed()
         assertNull(saved.pendingNextFeed())
     }
-
     @Test
     fun recreatedHandleRestoresUnifiedNextFeedOfferIncludingFactMessage() {
         val handle = SavedStateHandle()
@@ -283,7 +73,6 @@ class RecordComposerSavedStateTest {
             restored,
         )
     }
-
     @Test
     fun partialLegacyMultiKeyOfferIsNotRestoredWithoutMessage() {
         val handle = SavedStateHandle()
@@ -294,7 +83,6 @@ class RecordComposerSavedStateTest {
 
         assertNull(RecordComposerSavedState(handle).pendingNextFeed())
     }
-
     @Test
     fun completeLegacyMultiKeyOfferMigratesToSingleBlob() {
         val handle = SavedStateHandle()
@@ -318,7 +106,6 @@ class RecordComposerSavedStateTest {
         // Blob survives a second read.
         assertEquals(restored, RecordComposerSavedState(handle).pendingNextFeed())
     }
-
     @Test
     fun pendingFinishMessageSurvivesRecreationUntilAcknowledged() {
         val handle = SavedStateHandle()
@@ -329,7 +116,6 @@ class RecordComposerSavedStateTest {
         saved.clearPendingFinishMessage()
         assertNull(RecordComposerSavedState(handle).pendingFinishMessage())
     }
-
     @Test
     fun postSaveOutcomeUnifiesOfferWithoutComposeLocalDualMaster() {
         val offer = composerPostSaveOutcome(
@@ -359,7 +145,6 @@ class RecordComposerSavedStateTest {
             ),
         )
     }
-
     @Test
     fun closedUiStatePreservesPendingOfferAndFinishMessageForNewComposition() {
         val offer = PendingNextFeed(
@@ -383,7 +168,6 @@ class RecordComposerSavedStateTest {
         assertEquals("已记录笔记", finished.pendingFinishMessage)
         assertNull(finished.pendingNextFeedOffer)
     }
-
     @Test
     fun applyPostSaveOutcomePublishesObservableOfferAndConsumesRestorableIdentity() {
         val handle = SavedStateHandle()
@@ -451,7 +235,6 @@ class RecordComposerSavedStateTest {
         assertTrue(!applied.saving)
         assertEquals(listOf("/cache/kept.jpg"), applied.draft?.sourcePhotos)
     }
-
     @Test
     fun applyPostSaveOutcomePublishesDurableFinishMessageWithoutNextFeedOffer() {
         val handle = SavedStateHandle()
@@ -480,7 +263,6 @@ class RecordComposerSavedStateTest {
         assertNull(applied.activeRequest)
         assertTrue(!applied.saving)
     }
-
     @Test
     fun persistAndMapPostSaveAreSeparableCommandAndQuery() {
         val handle = SavedStateHandle()
@@ -517,7 +299,6 @@ class RecordComposerSavedStateTest {
         assertNull(saved.restore(request))
         assertEquals(outcome.pending, saved.pendingNextFeed())
     }
-
     @Test
     fun writeSessionOpenIsRefusedWhilePostSaveStageIsLive() {
         val request = RecordComposerRequest.New(
@@ -561,7 +342,6 @@ class RecordComposerSavedStateTest {
             ),
         )
     }
-
     @Test
     fun processRecreateWithRootStillSetCannotRearmDraftUnderPendingOffer() {
         // Simulate: apply cleared VM request/draft SavedState; Activity root still New;
@@ -608,7 +388,6 @@ class RecordComposerSavedStateTest {
         // Re-open path must not re-initialize restorable identity under live offer.
         assertNull(recreated.restore(request))
     }
-
     @Test
     fun deliverMissStillPublishesDurableOfferFromSavedState() {
         val handle = SavedStateHandle()
@@ -643,7 +422,6 @@ class RecordComposerSavedStateTest {
         assertEquals(applied.pendingNextFeedOffer, durable.pendingNextFeedOffer)
         assertTrue(durable.isActive)
     }
-
     @Test
     fun hostConsumesObservablePostSaveWithIdempotentRootCallback() {
         val events = mutableListOf<String>()
@@ -706,7 +484,6 @@ class RecordComposerSavedStateTest {
             events,
         )
     }
-
     @Test
     fun nonFeedFinishIsDurableUntilAcknowledged() {
         val handle = SavedStateHandle()
@@ -736,7 +513,6 @@ class RecordComposerSavedStateTest {
             ),
         )
     }
-
     @Test
     fun carePlanSaveMessageSurfacesPermissionDegradationWithoutBlockingCopy() {
         assertTrue(isCarePlanSaveMessage("已安排配方奶"))
@@ -778,7 +554,6 @@ class RecordComposerSavedStateTest {
             ),
         )
     }
-
     @Test
     fun composerSaveSuccessMessageCoversFeedAndNonFeed() {
         val formula = QuickRecordDraft.create(RecordType.FORMULA, 1_000L)

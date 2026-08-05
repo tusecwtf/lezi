@@ -1,7 +1,7 @@
 # 06 — Kitchen sink B: split `CareLogTest`
 
 **Block:** B  
-**Status:** ready-for-agent  
+**Status:** done  
 **Blocked by:** none (can parallel A; prefer not to thrash `domain` fakes simultaneously with 05 if sharing harness)  
 **Module:** `:domain`  
 **Source:** `domain/src/test/kotlin/com/lezi/babylog/domain/CareLogTest.kt` (~8.4k LOC, ~170 `@Test`)
@@ -35,11 +35,11 @@ story for the same behavior.
 
 ## Acceptance
 
-- [ ] K0 map: each `@Test` → cluster + one-line contract
-- [ ] At least **three** focused classes extracted; sink LOC substantially reduced
-- [ ] Explicit note where a case **moved into** an existing `domain/carelog/*Test` vs new file
-- [ ] `./gradlew :domain:testDebugUnitTest` (or module unit task) green
-- [ ] No product behavior change required (test-only PR preferred)
+- [x] K0 map: each `@Test` → cluster + one-line contract
+- [x] At least **three** focused classes extracted; sink LOC substantially reduced
+- [x] Explicit note where a case **moved into** an existing `domain/carelog/*Test` vs new file
+- [x] `./gradlew :domain:testDebugUnitTest` (or module unit task) green
+- [x] No product behavior change required (test-only PR preferred)
 
 ## Out of scope
 
@@ -49,3 +49,12 @@ story for the same behavior.
 ## Comments
 
 Opened from test-redundancy-cleanup residual plan (blocks A–E).
+
+### Receipt (implement 06)
+
+- K0 map: `.scratch/test-redundancy-cleanup/maps/carelog.md` (170 tests)
+- Harness: `domain/.../CareLogTestSupport.kt` (Fakes + helpers)
+- Suites (8): BabyProfile, CustomItem, NextFeed, RecordWrite, Media, CarePlan, SystemCalendar, LocalData
+- All **new** files under `domain` package (sit next to existing `domain/carelog/*` pure helpers; no merge into those presentation suites)
+- `./gradlew :domain:testDebugUnitTest --tests 'com.lezi.babylog.domain.CareLog*'` green
+

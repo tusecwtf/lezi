@@ -7,12 +7,11 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
-import com.lezi.babylog.sync.RealSyncPortTest
 
 /**
  * Thin fidelity suite for [FakeSyncBackend] as a dual-client double.
  *
- * Product wire/failure paths stay in HttpSyncBackendTest / RealSyncPortTest /
+ * Product wire/failure paths stay in HttpSyncBackendTest / RealSyncPort* contract suites /
  * lezi-sync api.rs. These cases only pin rules higher tests trust via Fake:
  * equal-updatedAt LWW, member avatar ACL + ref integrity, fulfillment freeze
  * vs forged stamps, dual-client package isolation until commit, and canonical
