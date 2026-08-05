@@ -429,7 +429,8 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 `GET /health` 广告
 `capabilities` 包含 `atomic_bundle`、`record_membership_author`、
 `authoritative_reconcile_v1` 与 `validated_deferred_fulfillment_v1`。当前客户端要求 health
-为 `ok` 且具备完整协议能力；最后一项只在启动语义校验完成后暴露，`version` 仅展示、不参与门闩。
+为 `ok` 且具备完整协议能力；生产进程只在启动语义校验完成且 versionCode 16 强制升级包与
+最低版本门均验证后暴露最后一项，否则拒绝启动。`version` 仅展示、不参与门闩。
 公网 `8765` 只提供 HTTPS；容器健康检查使用仅绑定 `127.0.0.1:8766` 的明文
 `/health`、`/ready` 路由，该内部 listener 不挂载任何 `/v1/*` 业务接口。
 所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。

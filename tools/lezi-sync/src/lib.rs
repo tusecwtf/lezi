@@ -74,6 +74,7 @@ pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author"
 pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
 pub const CAPABILITY_AUTHORITATIVE_RECONCILE: &str = "authoritative_reconcile_v1";
 pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
+const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 16;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
@@ -124,6 +125,10 @@ pub struct ServerConfig {
     /// Deploy-readable release APK (`app-release.apk` by default).
     /// When unset, defaults to `{data_dir}/app-release.apk`.
     pub app_update_apk_path: Option<PathBuf>,
+    /// Production 0.3.9 startup requires a verified forced-update channel
+    /// before it can expose the new protocol generation/capability. Direct
+    /// constructors keep this false for isolated protocol tests and local dev.
+    pub require_protocol_cutover_release: bool,
     /// Optional LAN-only HTTP origin that serves the first-install APK page.
     pub lan_apk_download_origin: Option<String>,
     clock: Clock,
@@ -155,6 +160,7 @@ impl ServerConfig {
             max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
             app_update_metadata_path: None,
             app_update_apk_path: None,
+            require_protocol_cutover_release: false,
             lan_apk_download_origin: None,
             clock: Arc::new(system_epoch_seconds),
         }
@@ -197,6 +203,7 @@ impl ServerConfig {
         config.app_update_apk_path = std::env::var_os("LEZI_APP_UPDATE_APK_PATH")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
+        config.require_protocol_cutover_release = true;
         config.lan_apk_download_origin = match std::env::var("LEZI_LAN_APK_DOWNLOAD_ORIGIN") {
             Ok(value) if !value.is_empty() => Some(value),
             Ok(_) | Err(std::env::VarError::NotPresent) => None,
@@ -517,20 +524,41 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
     media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
     let validation_media_root = media_root.clone();
-    let validation = store.validate_authority_graph(
-        config.max_media_bytes,
-        move |family_id, media_id, expected_size| {
-            let path = validation_media_root.join(family_id).join(media_id);
-            let metadata = match fs::symlink_metadata(path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(StoreError::Io(error)),
-            };
-            Ok(metadata.file_type().is_file()
-                && metadata.len() > 0
-                && usize::try_from(metadata.len()) == Ok(expected_size))
-        },
-    )?;
+    let validation = store
+        .validate_authority_graph(
+            config.max_media_bytes,
+            move |family_id, media_id, expected_size| {
+                let path = validation_media_root.join(family_id).join(media_id);
+                let metadata = match fs::symlink_metadata(path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(StoreError::Io(error)),
+                };
+                Ok(metadata.file_type().is_file()
+                    && metadata.len() > 0
+                    && usize::try_from(metadata.len()) == Ok(expected_size))
+            },
+        )
+        .map_err(|error| {
+            match &error {
+                StoreError::AuthorityGraphInvalid {
+                    reason_code,
+                    entity_type,
+                    client_uuid,
+                } => tracing::error!(
+                    reason_code,
+                    entity_type,
+                    client_uuid,
+                    "family authority graph validation failed"
+                ),
+                _ => tracing::error!(
+                    reason_code = "authority_graph_storage_failure",
+                    detail = %error,
+                    "family authority graph validation failed"
+                ),
+            }
+            error
+        })?;
     tracing::info!(
         family_count = validation.family_count,
         entity_count = validation.entity_count,
@@ -545,7 +573,31 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         .app_update_apk_path
         .unwrap_or_else(|| config.data_dir.join("app-release.apk"));
     let app_update_cache = Arc::new(app_update::AppUpdateCache::default());
-    if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {
+    if config.require_protocol_cutover_release {
+        let verified = app_update_cache
+            .load_verified(&app_update_metadata_path, &app_update_apk_path)
+            .inspect_err(|error| {
+                tracing::error!(
+                    reason_code = "protocol_cutover_release_unverified",
+                    detail = %error.detail,
+                    "protocol cutover refused without a verified app-update channel"
+                );
+            })?;
+        if verified.version_code < PROTOCOL_CUTOVER_CLIENT_VERSION_CODE
+            || verified.min_supported_version_code < PROTOCOL_CUTOVER_CLIENT_VERSION_CODE
+        {
+            tracing::error!(
+                reason_code = "protocol_cutover_release_floor_too_low",
+                version_code = verified.version_code,
+                min_supported_version_code = verified.min_supported_version_code,
+                required_version_code = PROTOCOL_CUTOVER_CLIENT_VERSION_CODE,
+                "protocol cutover refused before the forced-update floor"
+            );
+            return Err(ApiError::internal(
+                "protocol cutover release channel does not enforce version code 16",
+            ));
+        }
+    } else if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {
         if let Err(error) =
             app_update_cache.load_verified(&app_update_metadata_path, &app_update_apk_path)
         {

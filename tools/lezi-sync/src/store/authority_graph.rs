@@ -310,7 +310,37 @@ impl Store {
                         return Err(entity.invalid("media_bytes_not_ready"));
                     }
                 }
-                "fulfillment_candidate" if entity.deleted_at.is_none() => {
+                "fulfillment_candidate" => {
+                    let submitter = entity
+                        .payload
+                        .get("submitter_membership_id")
+                        .ok_or_else(|| entity.invalid("missing_candidate_server_evidence"))?;
+                    let submitter_role = required_string(entity, "submitter_role")?;
+                    if !matches!(submitter_role, "owner" | "member")
+                        || entity
+                            .payload
+                            .get("confirmed_at")
+                            .and_then(Value::as_i64)
+                            .filter(|value| *value > 0)
+                            .is_none()
+                    {
+                        return Err(entity.invalid("invalid_candidate_server_evidence"));
+                    }
+                    if let Some(membership_id) = submitter.as_str() {
+                        let membership_exists = connection.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM memberships WHERE family_id = ?1 AND id = ?2)",
+                            params![entity.family_id, membership_id],
+                            |row| row.get::<_, bool>(0),
+                        )?;
+                        if !membership_exists {
+                            return Err(entity.invalid("unknown_candidate_submitter"));
+                        }
+                    } else if !submitter.is_null() {
+                        return Err(entity.invalid("invalid_candidate_server_evidence"));
+                    }
+                    if entity.deleted_at.is_some() {
+                        continue;
+                    }
                     let plan_id = required_string(entity, "care_plan_client_uuid")?;
                     let record_id = required_string(entity, "record_client_uuid")?;
                     let plan =

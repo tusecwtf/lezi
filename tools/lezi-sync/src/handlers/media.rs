@@ -365,6 +365,33 @@ pub(crate) async fn commit_bundle(
             media_ready.insert(media_uuid.clone(), digest.is_some());
         }
 
+        for (media_uuid, integrity) in state
+            .store
+            .deferred_fulfillment_media_integrity_for_bundle(
+                &principal.family_id,
+                &bundle_id.to_string(),
+            )?
+        {
+            let media_id = Uuid::parse_str(&media_uuid)
+                .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
+            let final_path = state.media_path(&principal.family_id, media_id)?;
+            let digest = integrity
+                .staged_sha256
+                .as_deref()
+                .and_then(|expected_sha256| {
+                    media_file_integrity_sha256(
+                        &final_path,
+                        integrity.declared_byte_size,
+                        Some(expected_sha256),
+                        &media_uuid,
+                    )
+                });
+            if digest.is_some() {
+                sync_published_media_file(&final_path)?;
+            }
+            media_ready.insert(media_uuid, digest.is_some());
+        }
+
         // Validate the complete staging manifest before the first final-path
         // change. Incomplete/corrupt later entries must not leave earlier files
         // pre-published. The Store still returns the canonical 422 below.

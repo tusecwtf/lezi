@@ -54,12 +54,43 @@ pub(super) fn publish_bundle(
     max_updated_at: i64,
 ) -> Result<BundleCommitResult, StoreError> {
     let bundle_id = Uuid::new_v4().to_string();
-    let media_ready = media
+    let mut media_ready = media
         .iter()
         .filter(|entity| entity.deleted_at.is_none())
         .map(|entity| (entity.client_uuid.clone(), true))
         .collect::<BTreeMap<_, _>>();
+    let staged_media = media
+        .iter()
+        .filter(|entity| entity.deleted_at.is_none())
+        .map(|entity| {
+            Ok::<_, StoreError>((
+                entity.client_uuid.clone(),
+                entity
+                    .payload
+                    .get("byte_size")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .ok_or(StoreError::InvalidStoredPayload)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     store.stage_bundle(principal, &bundle_id, root, media, 1_700_000_000)?;
+    for (media_id, byte_size) in staged_media {
+        store.mark_bundle_media_staged(
+            principal,
+            &bundle_id,
+            &media_id,
+            byte_size,
+            &"a".repeat(64),
+            1_700_000_000,
+        )?;
+    }
+    media_ready.extend(
+        store
+            .deferred_fulfillment_media_integrity_for_bundle(&principal.family_id, &bundle_id)?
+            .into_keys()
+            .map(|media_id| (media_id, true)),
+    );
     store
         .commit_bundle(
             principal,

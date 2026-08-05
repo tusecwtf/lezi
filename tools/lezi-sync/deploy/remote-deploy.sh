@@ -518,6 +518,19 @@ docker run --rm \
   "${image}" \
   -ec 'test -f /data/app-update.json && test -f /data/app-release.apk && test ! -e /data/app-update.json.lezi-staging && test ! -e /data/app-release.apk.lezi-staging'
 
+# The old container remains live until this point. Prove its anonymous LAN
+# install channel can actually serve the just-published APK before activating
+# the new server's forced-update floor and protocol capability.
+if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+  expected_app_update_sha256="$(sha256sum "${DIR}/app-update/app-release.apk" | awk '{print $1}')"
+  served_app_update_sha256="$(curl -fsS --max-time 30 http://127.0.0.1:8767/download/lezi.apk | sha256sum | awk '{print $1}')"
+  if [[ "${served_app_update_sha256}" != "${expected_app_update_sha256}" ]]; then
+    echo "error: live LAN install channel did not serve the packaged APK" >&2
+    exit 1
+  fi
+  echo "==> live LAN install channel verified before protocol cutover: ${served_app_update_sha256}"
+fi
+
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   if ! docker stop "${CONTAINER_NAME}" >/dev/null; then

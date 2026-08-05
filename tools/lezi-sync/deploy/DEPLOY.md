@@ -115,7 +115,7 @@ directory to a separately named legacy archive. Do not copy its `.env` into the 
 
 1. **package-nas.sh** — require a locally inspectable image and measure `.Os=linux` + `.Architecture=amd64` → verify the APK signature against tracked public pin `config/release-apk-signer-sha256.txt` → record Docker's complete `config.digest` (the identity produced by `docker load` and reported by the running container, not a local OCI manifest-list digest) → `docker save` the exact tar → render `docker-compose.yml` → add fail-closed app-update artifacts/current helpers → write `MANIFEST.json` + exact-inventory `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`.
 2. **push-and-deploy.sh** — fresh-package by default (reuse only with explicit `LEZI_SKIP_PACKAGE=1`) → repeat local helper/inventory/checksum and APK-signer attestation → acquire the stable data-bind-derived NAS lease → create a new mode-`700` random-suffixed staging directory → scp and validate there before execution → stream/validate/encrypt the live credential snapshot → replace while retaining the lease. On success promote staging to the stable `NAS_REMOTE_DIR`; a prior exact package is removed only after the promotion validates. Failed staging is left for deliberate inspection/cleanup.
-3. **remote-deploy.sh** (on NAS) — require the outer push lease (direct production execution is forbidden) → revalidate the exact package → resolve live/persistent secret sources → seed or byte-compare the persistent file → revalidate immediately before `docker load` → require loaded id and measured OS/architecture to match → validate persistent TLS and pin exact certificate SHA-256 + SPKI → install APK metadata → require stop and rm to succeed → start via Compose/docker → require the running container `.Image` to equal the manifest id → HTTPS `/health` + `/ready` with exact version → recheck both TLS digests.
+3. **remote-deploy.sh** (on NAS) — require the outer push lease (direct production execution is forbidden) → revalidate the exact package → resolve live/persistent secret sources → seed or byte-compare the persistent file → revalidate immediately before `docker load` → require loaded id and measured OS/architecture to match → validate persistent TLS and pin exact certificate SHA-256 + SPKI → atomically install APK metadata and require the still-running old container's LAN install channel to serve the exact APK hash → require stop and rm to succeed → start via Compose/docker → require the running container `.Image` to equal the manifest id → HTTPS `/health` + `/ready` with exact version → recheck both TLS digests.
 4. A verified fresh/recovery flow with no live container cannot take a pre-replace live backup. It is allowed only with the existing explicit secret/recovery authorization and must complete an encrypted backup immediately after the new container becomes healthy.
 
 ### Package and deployment lease fail-closed behavior
@@ -185,9 +185,11 @@ Metadata contract (`app-update.json`, snake_case):
   write paths**, but can still call the app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
 - On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
-- The server enforces `min_supported_version_code` on authoritative sync and disaster-restore
-  writes **only** when the on-disk channel is verified (metadata + APK sha256). Metadata-only
-  or integrity-failing packages fail open (do not brick into forced upgrade with nothing to install).
+- Older server generations enforce `min_supported_version_code` on authoritative sync and
+  disaster-restore writes **only** when the on-disk channel is verified (metadata + APK sha256),
+  so metadata-only or integrity-failing packages fail open. The 0.3.9 production process is the
+  cutover boundary: it fails startup unless the verified channel already carries versionCode/min
+  16, preventing the new capability from becoming ready without an installable forced update.
 - Joined clients use authenticated `GET /v1/app-update` (JSON) and
   `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
   server-side). Separately, the LAN-only invite-install listener anonymously serves the same

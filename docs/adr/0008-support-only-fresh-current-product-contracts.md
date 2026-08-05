@@ -37,7 +37,8 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   FulfillmentCandidate 都只经 atomic bundle 发布；`/v1/push` 和普通媒体上传已退役，
   `log` 只能作为 Record/CarePlan 包成员，`avatar` 只能作为 Baby 包成员。pull 发出 live
   Record/CarePlan 时须在同页共组其 live `log` 媒体。completed CarePlan 若尚缺关联 Record，
-  只作为耐久延后证据保留且不进入 pull；Record 到达后才在同一事务公开完整关系。客户端不向旧 NAS 降级，服务端也不
+  只作为耐久延后证据保留且不进入 pull；Record 到达后须在同一家庭串行边界重新核对计划媒体
+  publication、bundle manifest、大小、摘要与落盘字节，才在同一事务公开完整关系。客户端不向旧 NAS 降级，服务端也不
   接受为旧客户端保留的字段、别名或 ordinary 发布旁路。
 - Android 为 Record/CarePlan 持久化独立于媒体的本机根发布回执。它只在 atomic commit
   成功或 pull/apply 已提交根后前进；媒体上传 URI 不证明根已发布，过期回执也不能确认
@@ -51,7 +52,8 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   媒体-only wire。发布规划的长期真相由 ADR-0016 约束。
 - 客户端只要求 `/health` 为 `ok` 且 capabilities 至少包含 `atomic_bundle`、
   `record_membership_author`、`authoritative_reconcile_v1` 与
-  `validated_deferred_fulfillment_v1`；最后一项只在启动语义校验完成后暴露，展示用
+  `validated_deferred_fulfillment_v1`；最后一项只在启动语义校验完成且生产进程已验证
+  versionCode 16 强制升级包/最低版本门后暴露，展示用
   `version` 不参与兼容门闩。
 - `membership_id` 是记录作者与 ACL 的唯一家庭身份。`device_id` 只用于当前建家、加入与
   token 会话绑定，不进入 members 响应或 Record 作者 payload。当前 Record 合同允许任一

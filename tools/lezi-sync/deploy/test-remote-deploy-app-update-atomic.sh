@@ -45,6 +45,8 @@ grep -q 'test ! -e /data/app-update.json.lezi-staging' "${REMOTE_DEPLOY}" \
   || fail "post-install check must assert metadata staging leftover is gone"
 grep -q 'test ! -e /data/app-release.apk.lezi-staging' "${REMOTE_DEPLOY}" \
   || fail "post-install check must assert APK staging leftover is gone"
+grep -q 'http://127.0.0.1:8767/download/lezi.apk' "${REMOTE_DEPLOY}" \
+  || fail "ordinary CD must verify the live LAN APK channel before replacement"
 
 # Direct path must write both staging files before either final rename, and
 # promote APK before metadata (so new min never lands ahead of matching APK).
@@ -214,7 +216,8 @@ PY
 DIR="${test_root}/package"
 data_path="${data_path_fallback}"
 image="lezi-sync:test-mock"
-export DIR data_path image
+CONTAINER_NAME="lezi-sync"
+export DIR data_path image CONTAINER_NAME
 
 if ! (
   PATH="${mock_bin}:${PATH}"

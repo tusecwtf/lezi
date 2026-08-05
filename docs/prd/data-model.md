@@ -446,8 +446,9 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 两字段本身也是「同时为空或同时非空」；禁止残缺绑定。`status=completed` 的首次 atomic
 root 写入必须在同一事务携带完整 pair，不能先 completed 再补绑。若 bound Record 已在同
 家庭存在，须与计划同宝宝（否则引用冲突）；传输仍允许 completed CarePlan → Record 的
-前向提交，但 NAS 只把它保留为不可 pull 的延后履行，关联 Record 完整到达并在同一家庭事务
-复验后才公开完整关系。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
+前向提交，但 NAS 只把它保留为不可 pull 的延后履行，关联 Record 完整到达后须复验 ACL/LWW、
+不可变 pair、历史 CustomItem 许可，以及计划媒体 publication/manifest/大小/摘要/文件，才在
+同一家庭事务公开完整关系。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
 清空、改绑其它 Record 或改变确认时间：残缺/清空在 model 边界 `422`，合法完整但改绑/改时
 的 rewrite 返回 `409`，creator 与 owner 遵循相同规则。精确 replay（同 pair）幂等；stage
 与 commit 间的并发 rebind 仍由 commit 时冻结检查拦截。其它计划字段仍可按原 ACL/LWW 更新。

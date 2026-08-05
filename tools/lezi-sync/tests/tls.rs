@@ -14,6 +14,7 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
     let certificate = directory.path().join("server.crt");
     let private_key = directory.path().join("server.key");
     generate_certificate(&certificate, &private_key);
+    write_protocol_cutover_release(directory.path());
     let certificate_before = std::fs::read(&certificate).unwrap();
     let public_port = free_port();
     let internal_port = free_port();
@@ -53,26 +54,30 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
     assert_eq!(std::fs::read(certificate).unwrap(), certificate_before);
 }
 
+fn write_protocol_cutover_release(data_root: &Path) {
+    let apk_bytes = b"tls-black-box-release-apk";
+    std::fs::write(data_root.join("app-release.apk"), apk_bytes).unwrap();
+    std::fs::write(
+        data_root.join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 16,
+            "version_name": "0.3.9",
+            "min_supported_version_code": 16,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn configured_lan_apk_listener_serves_plain_http_and_shuts_down_with_the_server() {
     let directory = tempfile::tempdir().unwrap();
     let certificate = directory.path().join("server.crt");
     let private_key = directory.path().join("server.key");
     generate_certificate(&certificate, &private_key);
-    let apk_bytes = b"tls-black-box-release-apk";
-    std::fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
-    std::fs::write(
-        directory.path().join("app-update.json"),
-        json!({
-            "package_name": "com.lezi.babylog",
-            "version_code": 12,
-            "version_name": "0.3.5",
-            "min_supported_version_code": 6,
-            "sha256": hex::encode(Sha256::digest(apk_bytes)),
-        })
-        .to_string(),
-    )
-    .unwrap();
+    write_protocol_cutover_release(directory.path());
     let public_port = free_port();
     let internal_port = free_port();
     let lan_port = 8767;

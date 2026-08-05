@@ -8537,6 +8537,7 @@ async fn protocol_cutover_validates_defers_and_resolves_legacy_fulfillment_for_p
     )
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
     let peer = approve_new_member(&rig.app, owner_token, "cutover-peer").await;
     let peer_token = peer["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
@@ -8614,14 +8615,61 @@ async fn protocol_cutover_validates_defers_and_resolves_legacy_fulfillment_for_p
         .iter()
         .all(|entity| entity["client_uuid"] != plan_id && entity["client_uuid"] != plan_media_id));
 
-    seed_record_with_id(
+    let record_bundle_id = Uuid::new_v4().to_string();
+    let (record_stage_status, record_stage_body) = json_request(
         &upgraded,
-        owner_token,
-        &missing_record_id,
-        4,
-        record_payload(&baby_id),
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": record_bundle_id,
+            "root": entity_wire(
+                "record",
+                &missing_record_id,
+                4,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
     )
     .await;
+    assert_eq!(record_stage_status, StatusCode::OK, "{record_stage_body}");
+    let plan_media_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(&plan_media_id);
+    fs::write(&plan_media_path, b"bad").unwrap();
+    let corrupt_resolution = json_request(
+        &upgraded,
+        Method::POST,
+        &format!("/v1/bundles/{record_bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        corrupt_resolution.0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "deferred plan media corruption must block resolution: {}",
+        corrupt_resolution.1,
+    );
+    fs::write(&plan_media_path, b"img").unwrap();
+    let repaired_resolution = json_request(
+        &upgraded,
+        Method::POST,
+        &format!("/v1/bundles/{record_bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        repaired_resolution.0,
+        StatusCode::OK,
+        "{repaired_resolution:?}"
+    );
     let (_, resolved) = get_json(
         &upgraded,
         &format!("/v1/pull?cursor={deferred_cursor}"),
@@ -8637,6 +8685,100 @@ async fn protocol_cutover_validates_defers_and_resolves_legacy_fulfillment_for_p
     assert!(resolved_ids.contains(missing_record_id.as_str()));
     assert!(resolved_ids.contains(plan_id.as_str()));
     assert!(resolved_ids.contains(plan_media_id.as_str()));
+}
+
+#[test]
+fn protocol_cutover_requires_a_verified_forced_update_channel() {
+    let missing = TempDir::new().unwrap();
+    let mut missing_config = ServerConfig::new(missing.path());
+    missing_config.require_protocol_cutover_release = true;
+    assert!(
+        build_app(missing_config).is_err(),
+        "0.3.9 production startup accepted a missing forced-update channel",
+    );
+
+    let valid = TempDir::new().unwrap();
+    let apk_bytes = b"verified-0.3.9-release-channel";
+    fs::write(valid.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        valid.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 16,
+            "version_name": "0.3.9",
+            "min_supported_version_code": 16,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut valid_config = ServerConfig::new(valid.path());
+    valid_config.require_protocol_cutover_release = true;
+    assert!(build_app(valid_config).is_ok());
+}
+
+#[tokio::test]
+async fn protocol_cutover_rejects_candidate_without_server_stamped_evidence() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "cutover-candidate-owner",
+        "cutover-candidate-request-000000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = seed_record(&rig.app, token, &baby_id).await;
+    let plan_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire(
+                "care_plan",
+                &plan_id,
+                2,
+                care_plan_payload(&baby_id, "bath"),
+                None,
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    let candidate_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire(
+                "fulfillment_candidate",
+                &candidate_id,
+                3,
+                json!({
+                    "care_plan_client_uuid": plan_id,
+                    "record_client_uuid": record_id,
+                    "actual_timestamp": 100,
+                }),
+                None,
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "UPDATE entities SET payload_json = json_remove(payload_json, '$.confirmed_at') WHERE entity_type = 'fulfillment_candidate' AND client_uuid = ?1",
+            [&candidate_id],
+        )
+        .unwrap();
+
+    assert!(
+        build_app(ServerConfig::new(rig.directory.path())).is_err(),
+        "candidate without immutable server stamp must block startup",
+    );
 }
 
 #[tokio::test]
