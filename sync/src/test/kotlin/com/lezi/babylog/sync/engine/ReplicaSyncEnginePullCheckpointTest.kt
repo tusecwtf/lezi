@@ -205,7 +205,7 @@ class ReplicaSyncEnginePullCheckpointTest {
             trigger = SyncTrigger.PullToRefresh,
         )
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
         assertThat(rig.backend.pullCursors).containsExactly(0L, 1L).inOrder()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
         assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
@@ -419,7 +419,7 @@ class ReplicaSyncEnginePullCheckpointTest {
 
         assertThat(rig.backend.pullCursors).containsExactly(9L, 0L, 2L).inOrder()
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid }).contains("baby-local")
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
     }
 }

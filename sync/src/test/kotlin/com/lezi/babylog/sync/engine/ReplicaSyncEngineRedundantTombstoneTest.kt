@@ -367,7 +367,7 @@ class ReplicaSyncEngineRedundantTombstoneTest {
                 trigger = SyncTrigger.PullToRefresh,
             )
 
-            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
             assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
             assertThat(rig.records.getByClientUuid(recordUuid)).isNotNull()
             assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
@@ -426,7 +426,7 @@ class ReplicaSyncEngineRedundantTombstoneTest {
                 trigger = SyncTrigger.PullToRefresh,
             )
 
-            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
             assertThat(rig.mediaFiles.deleted)
                 .containsExactly("photos/tombstoned.jpg", "photos/tombstoned.jpg")
                 .inOrder()
@@ -483,7 +483,7 @@ class ReplicaSyncEngineRedundantTombstoneTest {
                 trigger = SyncTrigger.PullToRefresh,
             )
 
-            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
             assertThat(rig.mediaFiles.deleted).doesNotContain(reusedPath)
             assertThat(rig.media.getByClientUuid(tombstoneUuid)?.localUri).isEmpty()
         }

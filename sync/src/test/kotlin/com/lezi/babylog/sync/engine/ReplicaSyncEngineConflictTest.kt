@@ -369,7 +369,7 @@ class ReplicaSyncEngineConflictTest {
         val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
         val winner = rig.carePlans.getByClientUuid(planUuid)!!
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
         assertThat(rig.backend.pullCount).isEqualTo(2)
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .containsExactly(planUuid)
@@ -439,7 +439,7 @@ class ReplicaSyncEngineConflictTest {
 
         val outcome = rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
         val record = rig.records.getByClientUuid(recordUuid)!!
         assertThat(record.updatedAt).isEqualTo(300)
         assertThat(record.deletedAt).isEqualTo(300)
