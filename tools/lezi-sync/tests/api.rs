@@ -8767,6 +8767,10 @@ async fn protocol_cutover_rejects_candidate_without_server_stamped_evidence() {
         .0,
         StatusCode::OK,
     );
+    assert!(
+        build_app(ServerConfig::new(rig.directory.path())).is_ok(),
+        "valid server-stamped candidate must pass startup validation",
+    );
     Connection::open(rig.directory.path().join("lezi.db"))
         .unwrap()
         .execute(
@@ -8824,6 +8828,62 @@ async fn protocol_cutover_refuses_ready_when_deferred_fulfillment_evidence_is_mi
     assert!(
         result.is_err(),
         "invalid authority graph must never become ready"
+    );
+}
+
+#[tokio::test]
+async fn protocol_cutover_refuses_deferred_bundle_with_missing_manifest_entity() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "cutover-manifest-owner",
+        "cutover-manifest-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let missing_record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let mut completed_plan = care_plan_payload(&baby_id, "bath");
+    completed_plan["status"] = json!("completed");
+    completed_plan["fulfilled_record_client_uuid"] = json!(missing_record_id);
+    completed_plan["fulfilled_at"] = json!(100);
+    assert_eq!(
+        publish_bundle_with_media(
+            &rig.app,
+            token,
+            entity_wire("care_plan", &plan_id, 2, completed_plan, None),
+            vec![(
+                entity_wire(
+                    "media",
+                    &media_id,
+                    2,
+                    json!({
+                        "kind":"log","record_client_uuid":null,
+                        "care_plan_client_uuid":plan_id,"baby_client_uuid":null,
+                        "mime":"image/jpeg","width":1,"height":1,"byte_size":3
+                    }),
+                    None,
+                ),
+                b"img".to_vec(),
+            )],
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "DELETE FROM entities WHERE entity_type = 'media' AND client_uuid = ?1",
+            [&media_id],
+        )
+        .unwrap();
+
+    assert!(
+        build_app(ServerConfig::new(rig.directory.path())).is_err(),
+        "missing canonical media from retained bundle manifest must block startup",
     );
 }
 

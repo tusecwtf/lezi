@@ -8,6 +8,7 @@
 # 2) Direct-path stage→promote sequence (no docker).
 # 3) Full if/else chain with mocked docker: simulated direct-write failure must
 #    recover via the docker-copy path without leaving new min + old APK on finals.
+# 4) Live-channel failure restores the prior APK and minimum-version metadata.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -47,6 +48,10 @@ grep -q 'test ! -e /data/app-release.apk.lezi-staging' "${REMOTE_DEPLOY}" \
   || fail "post-install check must assert APK staging leftover is gone"
 grep -q 'http://127.0.0.1:8767/download/lezi.apk' "${REMOTE_DEPLOY}" \
   || fail "ordinary CD must verify the live LAN APK channel before replacement"
+grep -q 'app-release.apk.lezi-rollback' "${REMOTE_DEPLOY}" \
+  || fail "ordinary CD must snapshot the prior APK before live-channel proof"
+grep -q 'restore_app_update_pair' "${REMOTE_DEPLOY}" \
+  || fail "ordinary CD must restore the prior update pair when live proof fails"
 
 # Direct path must write both staging files before either final rename, and
 # promote APK before metadata (so new min never lands ahead of matching APK).
@@ -201,7 +206,7 @@ src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8").read().splitlines()
 start = end = None
 for i, line in enumerate(text):
-    if start is None and "install app-update artifacts into" in line:
+    if start is None and "A running old server is the only endpoint" in line:
         start = i
     if start is not None and "stop/remove existing container" in line:
         end = i
@@ -217,7 +222,8 @@ DIR="${test_root}/package"
 data_path="${data_path_fallback}"
 image="lezi-sync:test-mock"
 CONTAINER_NAME="lezi-sync"
-export DIR data_path image CONTAINER_NAME
+container_running=0
+export DIR data_path image CONTAINER_NAME container_running
 
 if ! (
   PATH="${mock_bin}:${PATH}"
@@ -237,5 +243,36 @@ grep -q '"min_supported_version_code":9' "${data_path_fallback}/app-update.json"
   || fail "APK staging leftover after docker fallback"
 [[ ! -e "${data_path_fallback}/app-update.json.lezi-staging" ]] \
   || fail "metadata staging leftover after docker fallback"
+
+# --- Live-channel failure restores the exact prior pair ---
+cat >"${mock_bin}/curl" <<'MOCK_CURL'
+#!/usr/bin/env bash
+exit 22
+MOCK_CURL
+chmod +x "${mock_bin}/curl"
+
+data_path_rollback="${test_root}/data-rollback"
+mkdir -p "${data_path_rollback}"
+printf 'old-apk-bytes-v1\n' >"${data_path_rollback}/app-release.apk"
+printf '{"min_supported_version_code":6,"version_code":7}\n' >"${data_path_rollback}/app-update.json"
+data_path="${data_path_rollback}"
+container_running=1
+export data_path container_running
+
+if (
+  PATH="${mock_bin}:${PATH}"
+  # shellcheck disable=SC1090
+  source "${install_fragment}"
+); then
+  fail "live-channel failure must abort before container replacement"
+fi
+grep -qx 'old-apk-bytes-v1' "${data_path_rollback}/app-release.apk" \
+  || fail "live-channel failure must restore the prior APK"
+grep -q '"min_supported_version_code":6' "${data_path_rollback}/app-update.json" \
+  || fail "live-channel failure must restore the prior minimum-version metadata"
+[[ ! -e "${data_path_rollback}/app-release.apk.lezi-rollback" ]] \
+  || fail "APK rollback snapshot must be removed after restoration"
+[[ ! -e "${data_path_rollback}/app-update.json.lezi-rollback" ]] \
+  || fail "metadata rollback snapshot must be removed after restoration"
 
 echo "remote-deploy app-update atomic pair publish smoke passed"

@@ -1,5 +1,6 @@
 //! Domain store tests.
 
+use super::super::bundles::anonymize_membership_bundle_references;
 use super::super::*;
 use super::test_support::*;
 use crate::{PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
@@ -141,6 +142,68 @@ fn legacy_incomplete_fulfillment_is_deferred_without_blocking_pull() {
             deferred_media_id.to_string(),
         ]),
     );
+}
+
+#[test]
+fn anonymized_committed_bundle_remains_valid_deferred_evidence() {
+    let directory = TempDir::new().unwrap();
+    let store = Store::open(directory.path().join("lezi.db")).unwrap();
+    let family_id = family(&store);
+    let principal = owner_principal(&family_id);
+    let baby_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let missing_record_id = Uuid::new_v4();
+
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "baby",
+            baby_id,
+            1,
+            json!({
+                "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                "avatar_media_uuid":null,"birth_weight_grams":3200
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+    publish_root(
+        &store,
+        &principal,
+        entity(
+            "care_plan",
+            plan_id,
+            2,
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,"scheduled_at":90,
+                "scheduled_zone_id":"Asia/Shanghai","status":"completed",
+                "payload_json":{},"schema_version":2,"note":null,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":missing_record_id,"fulfilled_at":100
+            }),
+        ),
+        10,
+    )
+    .unwrap();
+
+    let mut connection = store.connect().unwrap();
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute(
+            "UPDATE entities SET payload_json = json_set(payload_json, '$.created_by_membership_id', NULL), updated_at = 20, rev = rev + 1 WHERE family_id = ?1 AND entity_type = 'care_plan' AND client_uuid = ?2",
+            rusqlite::params![family_id, plan_id.to_string()],
+        )
+        .unwrap();
+    anonymize_membership_bundle_references(&transaction, &family_id, "m-owner").unwrap();
+    transaction.commit().unwrap();
+
+    let summary = store
+        .validate_authority_graph(10 * 1024 * 1024, |_, _, _| Ok(true))
+        .unwrap();
+    assert_eq!(summary.deferred_fulfillment_count, 1);
 }
 
 #[test]

@@ -545,10 +545,12 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
                     reason_code,
                     entity_type,
                     client_uuid,
+                    rev,
                 } => tracing::error!(
                     reason_code,
                     entity_type,
                     client_uuid,
+                    rev,
                     "family authority graph validation failed"
                 ),
                 _ => tracing::error!(

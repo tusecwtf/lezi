@@ -484,6 +484,29 @@ if [[ ! -f "${DIR}/app-update/app-release.apk" || ! -f "${DIR}/app-update/app-up
   echo "  repackage with package-nas.sh (fail-closed on release APK + metadata)" >&2
   exit 1
 fi
+
+# A running old server is the only endpoint that can prove the new APK before
+# the replacement activates its raised floor. Snapshot the currently served
+# pair first so any live-channel failure restores the prior floor and APK.
+app_update_rollback_pending=0
+restore_app_update_pair() {
+  docker run --rm \
+    --user 10001:10001 \
+    -v "${data_path}:/data" \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ec 'test -f /data/app-release.apk.lezi-rollback && test -f /data/app-update.json.lezi-rollback && cp /data/app-release.apk.lezi-rollback /data/app-release.apk.lezi-staging && cp /data/app-update.json.lezi-rollback /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && rm -f /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback'
+  app_update_rollback_pending=0
+}
+if [[ "${container_running}" == "1" ]]; then
+  docker run --rm \
+    --user 10001:10001 \
+    -v "${data_path}:/data" \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ec 'test -f /data/app-release.apk && test -f /data/app-update.json && rm -f /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback && cp /data/app-release.apk /data/app-release.apk.lezi-rollback && cp /data/app-update.json /data/app-update.json.lezi-rollback'
+  app_update_rollback_pending=1
+fi
 echo "==> install app-update artifacts into ${data_path} (atomic pair: APK then metadata)"
 # Data bind is often mode 700 uid 10001 (SSH user cannot write). Prefer direct
 # install; fall back to docker as uid 10001 with a bind of the package app-update/.
@@ -521,13 +544,25 @@ docker run --rm \
 # The old container remains live until this point. Prove its anonymous LAN
 # install channel can actually serve the just-published APK before activating
 # the new server's forced-update floor and protocol capability.
-if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+if [[ "${container_running}" == "1" ]]; then
   expected_app_update_sha256="$(sha256sum "${DIR}/app-update/app-release.apk" | awk '{print $1}')"
-  served_app_update_sha256="$(curl -fsS --max-time 30 http://127.0.0.1:8767/download/lezi.apk | sha256sum | awk '{print $1}')"
-  if [[ "${served_app_update_sha256}" != "${expected_app_update_sha256}" ]]; then
-    echo "error: live LAN install channel did not serve the packaged APK" >&2
+  if ! served_app_update_sha256="$(curl -fsS --max-time 30 http://127.0.0.1:8767/download/lezi.apk | sha256sum | awk '{print $1}')"; then
+    restore_app_update_pair
+    echo "error: live LAN install channel could not serve the packaged APK; prior update pair restored" >&2
     exit 1
   fi
+  if [[ "${served_app_update_sha256}" != "${expected_app_update_sha256}" ]]; then
+    restore_app_update_pair
+    echo "error: live LAN install channel did not serve the packaged APK; prior update pair restored" >&2
+    exit 1
+  fi
+  docker run --rm \
+    --user 10001:10001 \
+    -v "${data_path}:/data" \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ec 'rm -f /data/app-release.apk.lezi-rollback /data/app-update.json.lezi-rollback'
+  app_update_rollback_pending=0
   echo "==> live LAN install channel verified before protocol cutover: ${served_app_update_sha256}"
 fi
 

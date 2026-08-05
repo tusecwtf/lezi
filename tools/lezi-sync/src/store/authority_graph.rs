@@ -6,9 +6,11 @@ use rusqlite::{params, OptionalExtension};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::model::{EntityValidationContext, RawEntity};
+use crate::model::{Entity, EntityValidationContext, RawEntity};
 
-use super::{parse_payload, AuthorityGraphValidationSummary, Store, StoreError};
+use super::{
+    bundle_content_hash, parse_payload, AuthorityGraphValidationSummary, Store, StoreError,
+};
 
 #[derive(Clone)]
 struct AuthorityEntity {
@@ -16,6 +18,7 @@ struct AuthorityEntity {
     entity_type: String,
     client_uuid: String,
     deleted_at: Option<i64>,
+    rev: i64,
     payload: Map<String, Value>,
 }
 
@@ -33,6 +36,7 @@ impl AuthorityEntity {
             reason_code,
             entity_type: self.entity_type.clone(),
             client_uuid: self.client_uuid.clone(),
+            rev: Some(self.rev),
         }
     }
 }
@@ -79,11 +83,13 @@ fn committed_deferred_evidence_exists(
     connection: &rusqlite::Connection,
     plan: &AuthorityEntity,
     record_id: &str,
+    entities: &HashMap<(String, String, String), AuthorityEntity>,
 ) -> Result<bool, StoreError> {
     let rows = {
         let mut statement = connection.prepare(
             "
-            SELECT root_payload_json, staged_membership_id
+            SELECT root_updated_at, root_deleted_at, root_payload_json,
+                   media_entities_json, content_hash
             FROM sync_bundles
             WHERE family_id = ?1
               AND status = 'committed'
@@ -94,16 +100,40 @@ fn committed_deferred_evidence_exists(
         )?;
         let rows = statement
             .query_map(params![plan.family_id, plan.client_uuid], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
-    for (raw, staged_membership_id) in rows {
-        if staged_membership_id.trim().is_empty() {
-            continue;
-        }
+    let mut found_exact_root = false;
+    for (root_updated_at, root_deleted_at, raw, raw_media, content_hash) in rows {
         let evidence = parse_payload(&raw)?;
+        let media: Vec<Entity> = serde_json::from_str(&raw_media)?;
+        let root = Entity {
+            entity_type: plan.entity_type.clone(),
+            client_uuid: plan.client_uuid.clone(),
+            updated_at: root_updated_at,
+            deleted_at: root_deleted_at,
+            payload: evidence.clone(),
+        };
+        if bundle_content_hash(&root, &media)? != content_hash
+            || media.iter().any(|entry| {
+                entry.entity_type != "media"
+                    || !entities.contains_key(&(
+                        plan.family_id.clone(),
+                        "media".to_owned(),
+                        entry.client_uuid.clone(),
+                    ))
+            })
+        {
+            return Ok(false);
+        }
         let same_binding = evidence
             .get("fulfilled_record_client_uuid")
             .and_then(Value::as_str)
@@ -113,11 +143,12 @@ fn committed_deferred_evidence_exists(
         let same_root = evidence.get("baby_client_uuid") == plan.payload.get("baby_client_uuid")
             && evidence.get("type") == plan.payload.get("type")
             && evidence.get("scheduled_at") == plan.payload.get("scheduled_at");
-        if same_binding && same_root {
-            return Ok(true);
-        }
+        found_exact_root |= same_binding
+            && same_root
+            && evidence == plan.payload
+            && root_deleted_at == plan.deleted_at;
     }
-    Ok(false)
+    Ok(found_exact_root)
 }
 
 impl Store {
@@ -145,12 +176,13 @@ impl Store {
                 reason_code: "invalid_family_id",
                 entity_type: "family".to_owned(),
                 client_uuid: invalid_family_id.clone(),
+                rev: None,
             });
         }
         let rows = {
             let mut statement = connection.prepare(
                 "
-                SELECT family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json
+                SELECT family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
                 FROM entities
                 ORDER BY family_id, rev, entity_type, client_uuid
                 ",
@@ -164,6 +196,7 @@ impl Store {
                         row.get::<_, i64>(3)?,
                         row.get::<_, Option<i64>>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -171,7 +204,8 @@ impl Store {
         };
         let entity_count = rows.len();
         let mut entities = HashMap::with_capacity(entity_count);
-        for (family_id, entity_type, client_uuid, updated_at, deleted_at, raw_payload) in rows {
+        for (family_id, entity_type, client_uuid, updated_at, deleted_at, raw_payload, rev) in rows
+        {
             let payload = parse_payload(&raw_payload)?;
             let context = if entity_type == "media" {
                 EntityValidationContext::AtomicBundleMedia
@@ -183,6 +217,7 @@ impl Store {
                     reason_code: "invalid_entity_uuid",
                     entity_type: entity_type.clone(),
                     client_uuid: client_uuid.clone(),
+                    rev: Some(rev),
                 })?;
             RawEntity {
                 entity_type: entity_type.clone(),
@@ -196,12 +231,14 @@ impl Store {
                 reason_code: "invalid_payload",
                 entity_type: entity_type.clone(),
                 client_uuid: client_uuid.clone(),
+                rev: Some(rev),
             })?;
             let entity = AuthorityEntity {
                 family_id,
                 entity_type,
                 client_uuid,
                 deleted_at,
+                rev,
                 payload,
             };
             entities.insert(entity.key(), entity);
@@ -258,6 +295,7 @@ impl Store {
                                     &connection,
                                     entity,
                                     record_id,
+                                    &entities,
                                 )? {
                                     return Err(entity.invalid("missing_deferred_evidence"));
                                 }
@@ -266,6 +304,7 @@ impl Store {
                                         family_id = %entity.family_id,
                                         entity_type = "care_plan",
                                         client_uuid = %entity.client_uuid,
+                                        rev = entity.rev,
                                         record_client_uuid = %record_id,
                                         reason_code = "legacy_missing_fulfilled_record",
                                         "deferred legacy fulfillment retained outside the public graph"
@@ -328,7 +367,7 @@ impl Store {
                     }
                     if let Some(membership_id) = submitter.as_str() {
                         let membership_exists = connection.query_row(
-                            "SELECT EXISTS(SELECT 1 FROM memberships WHERE family_id = ?1 AND id = ?2)",
+                            "SELECT EXISTS(SELECT 1 FROM memberships WHERE family_id = ?1 AND membership_id = ?2)",
                             params![entity.family_id, membership_id],
                             |row| row.get::<_, bool>(0),
                         )?;

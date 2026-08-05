@@ -332,6 +332,7 @@ pub enum StoreError {
         reason_code: &'static str,
         entity_type: String,
         client_uuid: String,
+        rev: Option<i64>,
     },
 }
 

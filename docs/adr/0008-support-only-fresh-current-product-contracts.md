@@ -37,9 +37,11 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   FulfillmentCandidate 都只经 atomic bundle 发布；`/v1/push` 和普通媒体上传已退役，
   `log` 只能作为 Record/CarePlan 包成员，`avatar` 只能作为 Baby 包成员。pull 发出 live
   Record/CarePlan 时须在同页共组其 live `log` 媒体。completed CarePlan 若尚缺关联 Record，
-  只作为耐久延后证据保留且不进入 pull；Record 到达后须在同一家庭串行边界重新核对计划媒体
+  只作为耐久延后证据保留且不进入 pull；匿名化后的已提交成员证据仍有效，但完整 bundle manifest
+  中任一实体缺失或 hash 不一致都必须阻止 ready。Record 到达后须在同一家庭串行边界重新核对计划媒体
   publication、bundle manifest、大小、摘要与落盘字节，才在同一事务公开完整关系。客户端不向旧 NAS 降级，服务端也不
-  接受为旧客户端保留的字段、别名或 ordinary 发布旁路。
+  接受为旧客户端保留的字段、别名或 ordinary 发布旁路。启动校验的延后/fatal 结构化日志须带
+  reason code、opaque entity id 与权威 revision，不记录完整 payload 或家庭内容。
 - Android 为 Record/CarePlan 持久化独立于媒体的本机根发布回执。它只在 atomic commit
   成功或 pull/apply 已提交根后前进；媒体上传 URI 不证明根已发布，过期回执也不能确认
   较新的本地修订。跨家庭边界必须清空该回执。
