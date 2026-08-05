@@ -3,6 +3,6 @@
   "version_code": 17,
   "version_name": "0.3.10",
   "min_supported_version_code": 16,
-  "sha256": "7d2aa4cb4f48ec9e6078b5c76c1831a39d8168174485c658362dedaa32477b5c",
+  "sha256": "bad01f4473975e419ba4abeacb0a202cb89f888a3a8605776817b49ccf9ae082",
   "release_notes": "0.3.10 近邻落选与记录墓碑永胜；记录/汇总/成长短暂浅同步 chrome；家庭成员页展示各成员上次同步时间（全角色）"
 }
