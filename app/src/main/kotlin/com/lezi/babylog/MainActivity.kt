@@ -25,7 +25,6 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -77,7 +76,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -1088,17 +1086,11 @@ private fun LeziMainScaffold(
                         }
                         NavigationBarItem(
                             selected = selected,
-                            // Single navigation owner: Material onClick. Long-press
-                            // baby cycle is layered via pointerInput with onLongPress
-                            // only — never onTap — so a short press cannot fire twice.
+                            // Short-press navigation owner: Material onClick only.
+                            // Long-press baby cycle: [bottomNavLongPressOnly] (onLongPress,
+                            // never onTap) so short press cannot double-fire.
                             onClick = { navigateToDestination() },
-                            modifier = if (onLongClick != null) {
-                                Modifier.pointerInput(onLongClick) {
-                                    detectTapGestures(onLongPress = { onLongClick() })
-                                }
-                            } else {
-                                Modifier
-                            },
+                            modifier = Modifier.bottomNavLongPressOnly(onLongClick),
                             icon = {
                                 Icon(
                                     if (selected) dest.selectedIcon else dest.unselectedIcon,

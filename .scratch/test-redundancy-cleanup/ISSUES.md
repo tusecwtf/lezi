@@ -5,7 +5,7 @@
 | 00 | Policy grill lock + inventory | **done** (spec + inventory) |
 | 01 | Wave 1 PROCESS-FIX dirty family/composer | **done** |
 | 02 | Wave 1 DELETE Structure/scan suites | **done** |
-| 03 | Wave 1 optional REWRITE (bottom-nav / cleartext / BareMaterial lint) | **partial** — cleartext via `NetworkSecurityConfigTest`; bottom-nav + BareMaterial lint still deferred |
+| 03 | Wave 1 optional REWRITE (bottom-nav / cleartext / BareMaterial) | **done** — cleartext `NetworkSecurityConfigTest`; BareMaterial suite restored; bottom-nav behavior via `bottomNavLongPressOnly` + `BottomNavShortPressDeviceTest` |
 | 04 | Wave 2 layout/calendar device compress | **done** |
 | 04b | Wave 3 guidance thin + owner-takeover JVM + network security | **done** |
 | 05 | Kitchen-sink method inventory (out of round unless reopened) | deferred |
@@ -57,4 +57,12 @@
 | Delete `OwnerTakeoverConfirmationDeviceTest` | `OwnerTakeoverChrome` + `OwnerTakeoverChromeTest` |
 | Add `NetworkSecurityConfigTest` | Release cleartext off + debug loopback-only domains (XML/manifest data, not Kotlin Structure scan) |
 
-**Still deferred:** BareMaterial lint, bottom-nav short-press device, kitchen sinks, Rust.
+## Gate restore landed (2026-08-05)
+
+| Gate | Rewrite |
+|------|---------|
+| BareMaterial Phase A | Restored `DesignsystemSourceFixtures` + `BareMaterialWhitelistContractTest` (intentional chrome whitelist) |
+| Bottom-nav short-press | `Modifier.bottomNavLongPressOnly` used by `MainActivity`; `BottomNavShortPressDeviceTest` proves short-press fires `onClick`, long-press does not steal it |
+| Cleartext | already `NetworkSecurityConfigTest` |
+
+**Still deferred:** kitchen sinks (Q2=A), Rust (Q6=A), detekt alternative for BareMaterial (suite is the gate).
