@@ -24,6 +24,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -117,11 +118,12 @@ class FamilyMembersDevicesPageDeviceTest {
         compose.onNodeWithContentDescription("我的 Pixel，这台设备，刚刚").fetchSemanticsNode()
         compose.onNodeWithText("家庭平板").fetchSemanticsNode()
         compose.onNodeWithText("Pixel 10").fetchSemanticsNode()
-        compose.onNodeWithText("暂无设备").fetchSemanticsNode()
         compose.onAllNodesWithTag("device_overflow_menu").assertCountEquals(3)
         compose.onAllNodesWithTag("device_overflow_menu")[0].performClick()
         compose.onNodeWithText("撤销设备").performClick()
         compose.runOnIdle { assertThat(revokedDevice).isEqualTo("owner-phone") }
+        // Public empty-state copy; scroll via semantics (no product-only LazyColumn testTag).
+        compose.onNodeWithText("暂无设备").performScrollTo().assertIsDisplayed()
         for (technical in listOf("owner-phone", "mom-phone", "pending-request-secret-id", "token", "SPKI")) {
             compose.onAllNodesWithText(technical, substring = true).assertCountEquals(0)
         }

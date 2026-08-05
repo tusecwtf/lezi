@@ -1,6 +1,5 @@
 package com.lezi.babylog.designsystem
 
-import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,8 +7,7 @@ import org.junit.Test
 
 /**
  * Drives the shipped [leziTextFieldLineMode] policy used by [LeziTextField].
- * Multi-line product call sites (notes, diary body) must not stay stuck in
- * single-line mode when they only pass minLines/maxLines after migration.
+ * Product call-site source scans removed (test-redundancy Wave 1 / StructureTest ban).
  */
 class LeziTextFieldLineModeTest {
     @Test
@@ -52,35 +50,4 @@ class LeziTextFieldLineModeTest {
         assertEquals(4, mode.minLines)
         assertEquals(4, mode.maxLines)
     }
-
-    @Test
-    fun `product multi-line note and diary call sites set multi-line bounds`() {
-        val root = repositoryRoot()
-        val sites = listOf(
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordSheet.kt",
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordPurposeFields.kt",
-            "feature/log/src/main/kotlin/com/lezi/babylog/feature/log/composer/QuickRecordPurposeTextFields.kt",
-            "feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt",
-            "feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/NursingCompletionSheet.kt",
-        )
-        for (rel in sites) {
-            val source = root.resolve(rel).readText()
-            assertTrue("$rel must use LeziTextField", source.contains("LeziTextField("))
-            assertTrue(
-                "$rel multi-line fields must request minLines > 1",
-                Regex("""minLines\s*=\s*(?:[2-9]|if)""").containsMatchIn(source),
-            )
-            // Policy in leziTextFieldLineMode covers default singleLine=true + minLines>1;
-            // call sites should also document intent with singleLine = false where multi.
-            assertTrue(
-                "$rel should set singleLine = false on multi-line fields",
-                source.contains("singleLine = false"),
-            )
-        }
-    }
-
-    private fun repositoryRoot(): File = generateSequence(
-        seed = File(requireNotNull(System.getProperty("user.dir"))),
-        nextFunction = { it.parentFile },
-    ).first { candidate -> candidate.resolve("settings.gradle.kts").isFile }
 }
