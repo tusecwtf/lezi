@@ -197,4 +197,5 @@ Full rubric: [rubric.md](./rubric.md).
 ## 12. Comments
 
 - 2026-08-05: P0 15 scenes dual-captured; formula align landed earlier same day; this doc freezes the **diff inventory** for polish tickets.  
-- 2026-08-05 evening: acceptance-verify tracker; P0 debug polish landed; GF mid-frames re-verified; see [../spec-02-acceptance-verify/VERIFICATION.md](../spec-02-acceptance-verify/VERIFICATION.md).
+- 2026-08-05 evening: acceptance-verify tracker; P0 debug polish landed; GF mid-frames re-verified; see [../spec-02-acceptance-verify/VERIFICATION.md](../spec-02-acceptance-verify/VERIFICATION.md).  
+- 2026-08-05: GF↔legacy align campaign tickets published: [../spec-02-gf-legacy-align/](../spec-02-gf-legacy-align/) (10 vertical slices).
