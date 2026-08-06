@@ -1,7 +1,7 @@
 # 跨成员睡眠醒来 ACL — issues
 
 Spec: [`spec.md`](./spec.md)  
-Tracker status: **in-progress** (frontier = **02** — CD/smoke remaining)  
+Tracker status: **complete** (frontier = none)  
 Target: **0.3.11**
 
 ## Graph
@@ -13,11 +13,11 @@ Target: **0.3.11**
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
 | 01 | [`issues/01-family-wake-publishable-and-local-b1.md`](./issues/01-family-wake-publishable-and-local-b1.md) | complete | — |
-| 02 | [`issues/02-release-0.3.11.md`](./issues/02-release-0.3.11.md) | in-progress | 01 |
+| 02 | [`issues/02-release-0.3.11.md`](./issues/02-release-0.3.11.md) | complete | 01 |
 
 ## Frontier
 
-**02** in progress: versions/gates/APK pin landed; NAS CD + dual-device smoke next (user confirmed CD via implement request).
+None for agent work. **0.3.11** released (NAS CD + gates). Residual optional: family dual-phone UI matrix for wake→B1→settle.
 
 ## Notes
 
