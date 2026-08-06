@@ -245,9 +245,12 @@ class RecordComposerViewModel @Inject constructor(
                             .firstOrNull { it.id == record.babyId }
                             ?.birthdayEpochDay
                         val photoPaths = careLog.listRecordPhotoPaths(record.id)
+                        val restrictedB1 = careLog.hasActiveFamilyWakePrivilege(record) &&
+                            !careLog.canManageRecord(record)
                         val draft = QuickRecordDraft.fromRecord(record).copy(
                             photos = photoPaths,
                             sourcePhotos = photoPaths,
+                            restrictedSleepOpenFields = restrictedB1,
                         )
                         Triple(record.babyId, birthday, draft)
                     }
@@ -437,6 +440,21 @@ class RecordComposerViewModel @Inject constructor(
 
     internal fun updateDraft(draft: QuickRecordDraft) {
         if (_state.value.let { it.saving || it.deleting || it.timerHandoffInFlight }) return
+        val baseline = _state.value.draft
+        val clamped = if (
+            baseline != null &&
+            draft.restrictedSleepOpenFields &&
+            draft.type == RecordType.SLEEP
+        ) {
+            // B1 UI: open-start fields cannot change even if a control races.
+            draft.copy(
+                timestamp = baseline.timestamp,
+                isNap = baseline.isNap,
+                restrictedSleepOpenFields = true,
+            )
+        } else {
+            draft
+        }
         _state.update { cur ->
             val request = cur.activeRequest
             val nextCan = if (request == null) {
@@ -444,14 +462,14 @@ class RecordComposerViewModel @Inject constructor(
             } else {
                 computeCanStartNursingTimer(
                     request = request,
-                    draft = draft,
+                    draft = clamped,
                     timerEnabled = cur.timerEnabledSetting,
                 )
             }
-            cur.copy(draft = draft, error = null, canStartNursingTimer = nextCan)
+            cur.copy(draft = clamped, error = null, canStartNursingTimer = nextCan)
         }
         _state.value.activeRequest?.let { request ->
-            savedState.update(request, draft)
+            savedState.update(request, clamped)
         }
     }
 

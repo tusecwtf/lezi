@@ -1128,6 +1128,172 @@ class CareLogRecordWriteTest {
         assertThat(offlineCare.getRecord(offlineId)!!.note).isEqualTo("离线可改")
         assertThat(offlineCare.deleteRecord(offlineId)).isTrue()
     }
+
+    /**
+     * Family wake is a baby-level fact (data-model.md): any member may close another
+     * member's still-open sleep via confirmSleep without gaining full manage rights.
+     * Non-author open→close force-preserves open-start fields, grants device-local B1
+     * restricted edit (end/note/photos) while dirty, and never grants soft-delete.
+     */
+    @Test
+    fun foreignMemberWakeOfOpenSleepClosesSharedIntervalWithLocalB1RestrictedEdit() = runTest {
+        val momSync = RecordingSyncPort(
+            membershipId = "m-mom",
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-mom",
+        )
+        val momFakes = Fakes(momSync)
+        momFakes.wireTransactionalSnapshots()
+        val momCare = momFakes.careLog()
+        val babyId = momFakes.seedFamilyAuthorityBaby()
+        val wakeAt = System.currentTimeMillis() - 1_000L
+        val startedAt = wakeAt - 90 * 60_000L
+        val payload = """{"is_nap":false,"anomaly_flag":false}"""
+        val openId = momCare.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = null,
+            timestamp = startedAt,
+            endTimestamp = null,
+            note = "妈妈记下睡",
+            payloadJson = payload,
+            nowMillis = startedAt + 1_000L,
+            clientUuid = "sleep-open-mom",
+        )
+        val open = momCare.getRecord(openId)!!
+        assertThat(open.createdByMembershipId).isEqualTo("m-mom")
+        assertThat(open.endTimestamp).isNull()
+
+        val dadSync = RecordingSyncPort(
+            membershipId = "m-dad",
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-dad",
+        )
+        val dadFakes = Fakes(dadSync)
+        dadFakes.wireTransactionalSnapshots()
+        dadFakes.records.upsert(momFakes.records.get(openId)!!)
+        dadFakes.babies.upsert(momFakes.babies.get(babyId)!!)
+        val dadCare = dadFakes.careLog()
+        val openOnDad = dadCare.getRecord(openId)!!
+        assertThat(dadCare.canManageRecord(openOnDad)).isFalse()
+        assertThat(dadCare.observeOpenSleep(babyId).first()!!.id).isEqualTo(openId)
+
+        // Client may try to rewrite sleep-down time / is_nap; domain force-preserves.
+        val wakeResultId = dadCare.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = openId,
+            timestamp = startedAt + 60_000L,
+            endTimestamp = wakeAt,
+            note = "爸爸记醒来",
+            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+            nowMillis = wakeAt,
+            clientUuid = "composer-wake-dad-op",
+        )
+
+        assertThat(wakeResultId).isEqualTo(openId)
+        assertThat(dadCare.observeOpenSleep(babyId).first()).isNull()
+        val closed = dadCare.getRecord(openId)!!
+        assertThat(closed.endTimestamp).isEqualTo(wakeAt)
+        assertThat(closed.timestamp).isEqualTo(startedAt)
+        assertThat(closed.createdByMembershipId).isEqualTo("m-mom")
+        assertThat(closed.note).isEqualTo("爸爸记醒来")
+        assertThat(closed.payloadJson).contains("\"is_nap\":false")
+        assertThat(dadFakes.records.get(openId)!!.syncDirty).isTrue()
+        // Full manage still false; B1 grants restricted edit only.
+        assertThat(dadCare.canManageRecord(closed)).isFalse()
+        assertThat(dadCare.canEditRecord(closed)).isTrue()
+        assertThat(dadCare.canDeleteRecord(closed)).isFalse()
+        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isTrue()
+
+        val correctedEnd = wakeAt + 5 * 60_000L
+        dadCare.updateRecord(
+            id = openId,
+            timestamp = startedAt + 999_000L,
+            endTimestamp = correctedEnd,
+            note = "醒来纠错",
+            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+            nowMillis = correctedEnd,
+        )
+        val corrected = dadCare.getRecord(openId)!!
+        assertThat(corrected.endTimestamp).isEqualTo(correctedEnd)
+        assertThat(corrected.note).isEqualTo("醒来纠错")
+        assertThat(corrected.timestamp).isEqualTo(startedAt)
+        assertThat(corrected.payloadJson).contains("\"is_nap\":false")
+
+        assertThat(
+            runCatching { dadCare.deleteRecord(openId) }.exceptionOrNull(),
+        ).isInstanceOf(RecordPermissionException::class.java)
+
+        // Dirty settled (publish ack): B1 ends; further non-author update fails.
+        dadFakes.records.upsert(
+            dadFakes.records.get(openId)!!.copy(syncDirty = false),
+        )
+        val settled = dadCare.getRecord(openId)!!
+        assertThat(dadCare.hasActiveFamilyWakePrivilege(settled)).isFalse()
+        assertThat(dadCare.canEditRecord(settled)).isFalse()
+        assertThat(
+            runCatching {
+                dadCare.updateRecord(
+                    id = openId,
+                    timestamp = startedAt,
+                    endTimestamp = correctedEnd + 1,
+                    note = "收敛后再改",
+                    payloadJson = payload,
+                    nowMillis = correctedEnd + 1,
+                )
+            }.exceptionOrNull(),
+        ).isInstanceOf(RecordPermissionException::class.java)
+        assertThat(dadCare.getRecord(openId)!!.note).isEqualTo("醒来纠错")
+    }
+
+    @Test
+    fun foreignMemberSleepUpAlsoGrantsLocalB1WithoutFullManage() = runTest {
+        val momSync = RecordingSyncPort(
+            membershipId = "m-mom",
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-mom",
+        )
+        val momFakes = Fakes(momSync)
+        momFakes.wireTransactionalSnapshots()
+        val momCare = momFakes.careLog()
+        val babyId = momFakes.seedFamilyAuthorityBaby()
+        val startedAt = System.currentTimeMillis() - 2 * 60 * 60_000L
+        val openId = momCare.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = null,
+            timestamp = startedAt,
+            endTimestamp = null,
+            note = null,
+            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+            nowMillis = startedAt + 1_000L,
+            clientUuid = "sleep-open-mom-up",
+        )
+        val dadSync = RecordingSyncPort(
+            membershipId = "m-dad",
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-dad",
+        )
+        val dadFakes = Fakes(dadSync)
+        dadFakes.wireTransactionalSnapshots()
+        dadFakes.records.upsert(momFakes.records.get(openId)!!)
+        dadFakes.babies.upsert(momFakes.babies.get(babyId)!!)
+        val dadCare = dadFakes.careLog()
+        val wakeAt = startedAt + 90 * 60_000L
+        val closedId = dadCare.sleepUp(babyId, at = wakeAt, nowMillis = wakeAt)
+        assertThat(closedId).isEqualTo(openId)
+        val closed = dadCare.getRecord(openId)!!
+        assertThat(closed.endTimestamp).isEqualTo(wakeAt)
+        assertThat(closed.timestamp).isEqualTo(startedAt)
+        assertThat(closed.payloadJson).contains("\"is_nap\":true")
+        assertThat(dadCare.canManageRecord(closed)).isFalse()
+        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isTrue()
+        assertThat(dadCare.canEditRecord(closed)).isTrue()
+        assertThat(dadCare.canDeleteRecord(closed)).isFalse()
+    }
+
     @Test
     fun cleanupFailureDoesNotMisreportTheCommittedRecordDeleteAsReplayable() = runTest {
         val sync = RecordingSyncPort().apply {

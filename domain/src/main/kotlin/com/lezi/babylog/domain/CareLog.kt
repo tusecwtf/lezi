@@ -44,6 +44,7 @@ import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.domain.carelog.CareLogQueries
 import com.lezi.babylog.domain.carelog.ConflictAuditQueries
 import com.lezi.babylog.domain.carelog.DailySummary
+import com.lezi.babylog.domain.carelog.FamilyWakePrivilegeStore
 import com.lezi.babylog.domain.carelog.PhotoAttachmentReconciler
 import com.lezi.babylog.domain.carelog.RecordMutationCoordinator
 import com.lezi.babylog.domain.carelog.WeekSummary
@@ -156,6 +157,7 @@ class CareLog @Inject constructor(
     /** Process-wide path gate shared with reference-aware media reclaim (Hilt singleton). */
     private val mediaPathGate: MediaLocalPathGate,
     private val localDataMutationEpoch: LocalDataMutationEpoch,
+    private val familyWakePrivileges: FamilyWakePrivilegeStore = FamilyWakePrivilegeStore(),
 ) {
     private val queries = CareLogQueries(
         babyDao = babyDao,
@@ -247,6 +249,7 @@ class CareLog @Inject constructor(
         // active plan-photo path policy (ordering/trim); do not re-read via DAO here.
         listCarePlanPhotoPaths = { carePlans.listCarePlanPhotoPaths(it) },
         requestLocalSync = ::requestLocalSync,
+        familyWakePrivileges = familyWakePrivileges,
     )
     private val babyProfiles: BabyFamilyProfileCoordinator = BabyFamilyProfileCoordinator(
         babyDao = babyDao,
@@ -518,6 +521,18 @@ class CareLog @Inject constructor(
 
     suspend fun canManageRecord(record: Record): Boolean =
         recordMutations.canManageRecord(record)
+
+    /** Full manage or device-local B1 restricted wake correction. */
+    suspend fun canEditRecord(record: Record): Boolean =
+        recordMutations.canEditRecord(record)
+
+    /** Soft-delete: author or owner only; B1 never grants delete. */
+    suspend fun canDeleteRecord(record: Record): Boolean =
+        recordMutations.canDeleteRecord(record)
+
+    /** Active B1 privilege for this record on the current device/session. */
+    suspend fun hasActiveFamilyWakePrivilege(record: Record): Boolean =
+        recordMutations.hasActiveFamilyWakePrivilege(record)
 
 
     /** Active record photo paths. MediaAsset is the sole current photo source. */

@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
+import com.lezi.babylog.domain.carelog.FamilyWakePrivilegeStore
 import com.lezi.babylog.domain.toModel
 
 data class TimelineWindowRequest(
@@ -118,6 +119,7 @@ data class TimelineWindowSnapshot(
 class TimelineWindowRepository @Inject constructor(
     private val timelineWindowDao: TimelineWindowDao,
     private val syncPort: SyncPort,
+    private val familyWakePrivileges: FamilyWakePrivilegeStore = FamilyWakePrivilegeStore(),
 ) {
     private val revisions = AtomicLong(0L)
 
@@ -192,6 +194,12 @@ class TimelineWindowRepository @Inject constructor(
                 creatorAcknowledgementPending = audienceSeed.key.pendingCreatorAcknowledgements
                     .contains(CreatorAcknowledgementRef("record", record.clientUuid)),
             )
+            // B1: non-author who closed open sleep here may restricted-edit while dirty.
+            val canRestrictedWakeEdit = !canManageRecord &&
+                record.syncDirty &&
+                record.type == RecordType.SLEEP &&
+                record.endTimestamp != null &&
+                familyWakePrivileges.isGrantedTo(record.clientUuid, audience.membershipId)
             TimelineRecordRow(
                 revision = revision,
                 record = record,
@@ -208,7 +216,7 @@ class TimelineWindowRepository @Inject constructor(
                 ),
                 capabilities = TimelineRowCapabilities(
                     revision = revision,
-                    canEdit = canManageRecord,
+                    canEdit = canManageRecord || canRestrictedWakeEdit,
                     canDelete = canManageRecord,
                     canFulfill = false,
                     canSkip = false,

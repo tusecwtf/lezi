@@ -7,7 +7,8 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`neighbor-dedup-tombstone-0.3.10`](./neighbor-dedup-tombstone-0.3.10/) | **ready-for-agent** — 0.3.10：近邻隐式落选 + 记录墓碑永胜 + 三数据页短暂浅同步 chrome + 成员上次同步全角色可见；票 01–06（04 发版收口），frontier = 01∥05∥06 |
+| [`family-sleep-wake-acl`](./family-sleep-wake-acl/) | **ready-for-agent** — **0.3.11**：跨成员家庭 wake 可发布 + 本机 B1 受限纠错 + 发版联调；票 01 complete → frontier = **02** |
+| [`neighbor-dedup-tombstone-0.3.10`](./neighbor-dedup-tombstone-0.3.10/) | **implementation-complete + released** — 0.3.10 近邻落选 + 墓碑永胜 + 同步 chrome（历史索引） |
 | [`sync-authoritative-reconciliation`](./sync-authoritative-reconciliation/) | **implementation-complete** — 批量 head-by-UUID 权威裁决、dirty 终态收敛、local-only/技术清理与诚实 pending；等待双端真实服务与 NAS CD 验收 |
 | [`ui-drawing-polish-20260804`](./ui-drawing-polish-20260804/) | **complete** — designsystem chrome 清零、warm/journal 密度表、Lazy 列表、motion/稳定性、有界照片 LRU、空态与截图矩阵（01–13；smoke 矩阵见 tracker `smoke/`） |
 | [`sync-publish-reconcile-first`](./sync-publish-reconcile-first/) | **complete** — 客户端发表计划改为对账优先、临时 plan；Room 26 迁移保留旧 APK 数据与发布意图 |

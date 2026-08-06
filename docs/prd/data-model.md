@@ -121,7 +121,7 @@ rename request；Owner 可批准、拒绝、主动改名或添加 membership。
 
 | | 管理员 | 成员 |
 |--|--------|------|
-| 编辑/删记录 | ✓（全部） | ✓（`created_by_membership_id == self`，含本人其它设备创建） |
+| 编辑/删记录 | ✓（全部） | ✓（`created_by_membership_id == self`，含本人其它设备创建）；**例外**：任一成员可将他人仍开放的 `sleep`（`end_timestamp = null`）闭合为醒来（保留原作者；服务端与本机强制保留开睡字段，只合并 end/备注/照片）。**本机 B1**：闭合者在本机该行仍 dirty 且未被权威更高修订覆盖期间可再改 end/备注/照片（时间轴编辑亮、删除灰）；无 wire closer，dirty 收敛后非作者不能再推 closed 睡眠 |
 | 审批/添加/改名/删除成员 | ✓ | ×（本人改名只能申请） |
 | 查看设备 | 全部 | 仅本人 membership |
 | 撤销设备 | 全部 | 仅退出当前设备 |
@@ -178,9 +178,17 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 规则本身不读数据库和系统时间。本地适配仍在原事务中走本地更新与 dirty 语义；
 pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语义，不伪造待发布事实。
 
-家庭 wake 是宝宝级事实，而不是只作用于某个 sleep UUID：pull 到任一已闭合睡眠后，所有开始
-时间不晚于该 wake 的开放睡眠都在本机闭合到同一 wake，标记 anomaly 并以更高修订发布；时钟
-偏斜导致开始晚于 wake 的开放行保留为唯一 residual，禁止生成负区间。
+家庭 wake 是宝宝级事实，而不是只作用于某个 sleep UUID：
+1. **写入**：任一家庭成员可用本机「醒来 / confirmSleep / sleepUp」闭合当前开放睡眠根（同一
+   `client_uuid`）；服务端对「仍 open 的 sleep → 写入非空 `end_timestamp`」放行非作者成员，
+   强制保留已发布开睡字段（至少主时间与 `is_nap`），只合并 end/备注/照片与同包 log 媒体，
+   并保留首次 `created_by_membership_id`。非作者对**已闭合**睡眠的再次权威推送仍拒绝。
+2. **本机 B1**：仅本机刚用醒来路径闭合的那条，在 `syncDirty` 未收敛且未被权威更高修订覆盖
+   期间，闭合者可受限 update（end+备注+照片）；时间轴 `canEdit=true`、`canDelete=false`；
+   编辑面板锁定睡下时间与开睡字段。资格作废后非作者不可再改。Owner/作者始终全权。
+3. **收敛**：pull 到任一已闭合睡眠后，所有开始时间不晚于该 wake 的开放睡眠都在本机闭合到
+   同一 wake，标记 anomaly 并以更高修订发布；时钟偏斜导致开始晚于 wake 的开放行保留为唯一
+   residual，禁止生成负区间。并发多次闭合走普通 LWW（`updated_at`）。
 
 已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 atomic commit
 与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑或删除不得改写首次作者；
