@@ -769,7 +769,7 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前 0.3.10 / versionCode 17 继续使用契约 v3（由 0.3.8 / versionCode 15 引入）
+相邻升级；当前 0.3.11 / versionCode 18 继续使用契约 v3（由 0.3.8 / versionCode 15 引入）
 与 Room v26，通过
 `OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含 LocalUser、Family、
 Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、CustomItemDef、CarePlan 与 FulfillmentCandidate，

@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.10：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push，并要求服务端完成启动 authority graph 校验；见 ADR-0017 |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.11：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push，并要求服务端完成启动 authority graph 校验；见 ADR-0017 |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.10` |
-| versionCode | `17`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
+| versionName | `0.3.11` |
+| versionCode | `18`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
 | 本地数据契约 | 当前 `v3` / Room v26（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | 应用名 | 乐记 |
 
@@ -306,8 +306,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 16,
-  "version_name": "0.3.10",
+  "version_code": 18,
+  "version_name": "0.3.11",
   "min_supported_version_code": 16,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"

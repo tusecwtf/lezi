@@ -6,12 +6,12 @@
 # Do not run both services against the same data directory.
 
 x-lezi-sync-common: &lezi-sync-common
-  image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.3.10}
+  image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.3.11}
   build:
     context: .
     dockerfile: Dockerfile
     args:
-      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.3.10}
+      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.3.11}
   restart: unless-stopped
   stop_grace_period: 30s
   init: true
