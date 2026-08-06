@@ -229,7 +229,9 @@ fun SummaryMetric(
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 9.dp),
+                // Tight horizontal padding: five equal-width chips must fit compact
+                // durations like "12h20m" without ellipsis on common phone widths.
+                .padding(horizontal = 4.dp, vertical = 9.dp),
             horizontalAlignment = Alignment.Start,
             verticalArrangement = Arrangement.Top,
         ) {
@@ -245,9 +247,16 @@ fun SummaryMetric(
             Spacer(Modifier.height(6.dp))
             Text(
                 value,
-                style = LeziTypography.Mono.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
+                // 11sp mono keeps full-day sleep totals (e.g. 12h20m) readable in a
+                // 1/5-width chip; 14sp was clipping to "12h2…" on typical phones.
+                style = LeziTypography.Mono.copy(
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                ),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                softWrap = false,
             )
             Text(
                 label,

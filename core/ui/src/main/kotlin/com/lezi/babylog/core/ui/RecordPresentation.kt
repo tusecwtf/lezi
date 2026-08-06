@@ -31,6 +31,7 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
@@ -337,7 +338,14 @@ fun RecordSummaryStrip(
                     ) {
                         RecordTypeIcon(item.type, size = 15.dp, tint = color)
                     }
-                    Text(item.value, style = LeziTypography.Mono, maxLines = 1)
+                    Text(
+                        item.value,
+                        // Match warm SummaryMetric: full-day sleep totals (12h20m)
+                        // must fit five equal cells without clipping.
+                        style = LeziTypography.Mono.copy(fontSize = 11.sp, lineHeight = 14.sp),
+                        maxLines = 1,
+                        softWrap = false,
+                    )
                     Text(
                         item.label,
                         style = LeziTypography.Meta,
