@@ -347,6 +347,10 @@ pub enum StoreError {
     BundleMediaIncomplete,
     #[error("bundle root is not newer than the published version")]
     BundleRootNotNewer,
+    /// Fail-closed: LWW bundle commit must not advance entities while a causal
+    /// stable head exists (would leave `version_id` on a stale immutable snapshot).
+    #[error("legacy bundle commit refused for entity with causal stable head")]
+    LegacyBundleCommitOnCausalEntity,
     #[error("authoritative reconcile batch is invalid")]
     InvalidReconcileBatch,
     #[error("conflict not found")]

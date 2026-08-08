@@ -79,6 +79,7 @@ pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
 /// WakeObservation atomic root (wire §1 / §4.5).
 pub const CAPABILITY_WAKE_OBSERVATION: &str = "wake_observation";
 /// Non-destructive source relations API surface (wire §1 / §12).
+/// Not advertised on health/setup-status until declare/resolve HTTP exists.
 pub const CAPABILITY_SOURCE_RELATIONS: &str = "source_relations";
 const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 16;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";

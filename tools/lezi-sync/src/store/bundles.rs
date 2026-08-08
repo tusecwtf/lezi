@@ -2176,6 +2176,21 @@ impl Store {
             return Err(StoreError::ForbiddenBaby);
         }
 
+        // Causal fail-closed: once a stable head exists, only causal commit may
+        // advance the root. LWW here would poison pull `version_id` vs payload.
+        let causal_head_exists = transaction
+            .query_row(
+                "SELECT 1 FROM entity_stable_heads
+                 WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3",
+                params![family_id, root.entity_type, root.client_uuid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if causal_head_exists {
+            return Err(StoreError::LegacyBundleCommitOnCausalEntity);
+        }
+
         if root.updated_at > max_updated_at
             || media
                 .iter()

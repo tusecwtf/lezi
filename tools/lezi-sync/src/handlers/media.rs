@@ -979,6 +979,9 @@ fn map_commit_bundle_store_error(error: StoreError) -> ApiError {
         Ok(StoreError::BundleRootNotNewer) => {
             ApiError::conflict("bundle root is not newer than the published version")
         }
+        Ok(StoreError::LegacyBundleCommitOnCausalEntity) => ApiError::conflict(
+            "legacy bundle commit refused: entity has causal stable head; use causal commit",
+        ),
         Ok(StoreError::BundleMembershipMismatch) => {
             ApiError::conflict("bundle belongs to another family membership")
         }

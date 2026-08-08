@@ -435,6 +435,237 @@ fn set_stable_head(
     Ok(())
 }
 
+/// Project stable_media into pull-visible `entities` type=media rows (and
+/// `media_publications`) so ordinary pull co-groups still discover attachments.
+/// Tombstones live media for this root that left the stable set.
+fn project_stable_media(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    entity_type: &str,
+    client_uuid: &str,
+    media: &[CausalMediaItem],
+    updated_at: i64,
+    root_deleted: bool,
+    tombstone_at: i64,
+) -> Result<(), StoreError> {
+    let prior = load_live_associated_media_uuids(tx, family_id, entity_type, client_uuid)?;
+    let keep: BTreeSet<String> = if root_deleted {
+        BTreeSet::new()
+    } else {
+        media.iter().map(|item| item.media_uuid.clone()).collect()
+    };
+
+    if !root_deleted {
+        for item in media {
+            let payload = media_entity_payload(entity_type, client_uuid, item)?;
+            // Association is immutable once a live media row exists.
+            if let Some(existing) = load_media_entity_row(tx, family_id, &item.media_uuid)? {
+                if existing.kind.as_str() != expected_media_kind(entity_type, &item.role)? {
+                    return Err(StoreError::ImmutableMediaAssociation);
+                }
+                if media_association_owner(&existing.payload)?
+                    != Some((entity_type.to_owned(), client_uuid.to_owned()))
+                {
+                    return Err(StoreError::ImmutableMediaAssociation);
+                }
+            }
+            let rev = advance_rev(tx, family_id)?;
+            upsert_entity_projection(
+                tx,
+                family_id,
+                "media",
+                &item.media_uuid,
+                updated_at,
+                None,
+                &payload,
+                rev,
+            )?;
+            tx.execute(
+                "INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+                 VALUES (?1, ?2, 'ordinary', NULL)
+                 ON CONFLICT(family_id, media_uuid) DO UPDATE SET
+                    source = 'ordinary',
+                    bundle_id = NULL",
+                params![family_id, item.media_uuid],
+            )?;
+        }
+    }
+
+    for media_uuid in prior {
+        if keep.contains(&media_uuid) {
+            continue;
+        }
+        let rev = advance_rev(tx, family_id)?;
+        // Preserve last known payload; only stamp tombstone + rev for pull peers.
+        tx.execute(
+            "UPDATE entities
+             SET deleted_at = ?1, rev = ?2
+             WHERE family_id = ?3 AND entity_type = 'media' AND client_uuid = ?4
+               AND deleted_at IS NULL",
+            params![tombstone_at, rev, family_id, media_uuid],
+        )?;
+        tx.execute(
+            "DELETE FROM media_publications
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            params![family_id, media_uuid],
+        )?;
+    }
+    Ok(())
+}
+
+fn expected_media_kind(entity_type: &str, role: &str) -> Result<&'static str, StoreError> {
+    match (entity_type, role) {
+        ("baby", "avatar") => Ok("avatar"),
+        ("record", "log") => Ok("log"),
+        // Care-plan log media uses role `plan` on the causal manifest, kind `log` on entities.
+        ("care_plan", "plan") => Ok("log"),
+        ("wake_observation", "wake") => Ok("wake"),
+        _ => Err(StoreError::InvalidStoredPayload),
+    }
+}
+
+fn media_entity_payload(
+    entity_type: &str,
+    client_uuid: &str,
+    item: &CausalMediaItem,
+) -> Result<Map<String, Value>, StoreError> {
+    let kind = expected_media_kind(entity_type, &item.role)?;
+    let mut payload = Map::new();
+    payload.insert("kind".to_owned(), Value::String(kind.to_owned()));
+    let (record, baby, care_plan) = match entity_type {
+        "baby" => (None, Some(client_uuid), None),
+        "record" => (Some(client_uuid), None, None),
+        "care_plan" => (None, None, Some(client_uuid)),
+        "wake_observation" => (Some(client_uuid), None, None),
+        _ => return Err(StoreError::InvalidStoredPayload),
+    };
+    payload.insert(
+        "record_client_uuid".to_owned(),
+        record
+            .map(|id| Value::String(id.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    payload.insert(
+        "baby_client_uuid".to_owned(),
+        baby.map(|id| Value::String(id.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    payload.insert(
+        "care_plan_client_uuid".to_owned(),
+        care_plan
+            .map(|id| Value::String(id.to_owned()))
+            .unwrap_or(Value::Null),
+    );
+    payload.insert("mime".to_owned(), Value::String(item.mime.clone()));
+    payload.insert(
+        "width".to_owned(),
+        item.width
+            .map(|w| Value::Number(w.into()))
+            .unwrap_or(Value::Null),
+    );
+    payload.insert(
+        "height".to_owned(),
+        item.height
+            .map(|h| Value::Number(h.into()))
+            .unwrap_or(Value::Null),
+    );
+    payload.insert("byte_size".to_owned(), Value::Number(item.byte_size.into()));
+    Ok(payload)
+}
+
+fn media_association_owner(
+    payload: &Map<String, Value>,
+) -> Result<Option<(String, String)>, StoreError> {
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    Ok(match kind {
+        "avatar" => payload
+            .get("baby_client_uuid")
+            .and_then(Value::as_str)
+            .map(|id| ("baby".to_owned(), id.to_owned())),
+        "log" => payload
+            .get("record_client_uuid")
+            .and_then(Value::as_str)
+            .map(|id| ("record".to_owned(), id.to_owned()))
+            .or_else(|| {
+                payload
+                    .get("care_plan_client_uuid")
+                    .and_then(Value::as_str)
+                    .map(|id| ("care_plan".to_owned(), id.to_owned()))
+            }),
+        "wake" => payload
+            .get("record_client_uuid")
+            .and_then(Value::as_str)
+            .map(|id| ("wake_observation".to_owned(), id.to_owned())),
+        _ => None,
+    })
+}
+
+struct LiveMediaRow {
+    kind: String,
+    payload: Map<String, Value>,
+}
+
+fn load_media_entity_row(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    media_uuid: &str,
+) -> Result<Option<LiveMediaRow>, StoreError> {
+    let row: Option<(String, Option<i64>)> = tx
+        .query_row(
+            "SELECT payload_json, deleted_at FROM entities
+             WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
+            params![family_id, media_uuid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match row {
+        None | Some((_, Some(_))) => Ok(None),
+        Some((payload_json, None)) => {
+            let payload: Map<String, Value> = serde_json::from_str(&payload_json)?;
+            let kind = payload
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::InvalidStoredPayload)?
+                .to_owned();
+            Ok(Some(LiveMediaRow { kind, payload }))
+        }
+    }
+}
+
+fn load_live_associated_media_uuids(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    entity_type: &str,
+    client_uuid: &str,
+) -> Result<BTreeSet<String>, StoreError> {
+    let (kind, field) = match entity_type {
+        "baby" => ("avatar", "baby_client_uuid"),
+        "record" => ("log", "record_client_uuid"),
+        "care_plan" => ("log", "care_plan_client_uuid"),
+        "wake_observation" => ("wake", "record_client_uuid"),
+        // custom_item and unknown roots never own media associations.
+        _ => return Ok(BTreeSet::new()),
+    };
+    let sql = format!(
+        "SELECT client_uuid FROM entities
+         WHERE family_id = ?1
+           AND entity_type = 'media'
+           AND deleted_at IS NULL
+           AND json_extract(payload_json, '$.kind') = ?2
+           AND json_extract(payload_json, '$.{field}') = ?3"
+    );
+    let mut statement = tx.prepare(&sql)?;
+    let rows = statement
+        .query_map(params![family_id, kind, client_uuid], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(rows)
+}
+
 fn save_receipt(
     tx: &Transaction<'_>,
     family_id: &str,
@@ -1530,6 +1761,16 @@ fn commit_accepted_new(
         root,
         rev,
     )?;
+    project_stable_media(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+        media,
+        updated_at,
+        mutation.deleted,
+        deleted_at.unwrap_or_else(|| ctx.now.saturating_mul(1_000)),
+    )?;
     set_stable_head(
         ctx.tx,
         &ctx.principal.family_id,
@@ -1642,6 +1883,16 @@ fn commit_accepted_update(
         deleted_at,
         &root,
         rev,
+    )?;
+    project_stable_media(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+        media,
+        updated_at,
+        mutation.deleted,
+        deleted_at.unwrap_or_else(|| ctx.now.saturating_mul(1_000)),
     )?;
     set_stable_head(
         ctx.tx,
@@ -1779,6 +2030,17 @@ fn commit_merged(
         &merged_root,
         rev,
     )?;
+    let projected_media = media_sorted(merged_media);
+    project_stable_media(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+        &projected_media,
+        updated_at,
+        merged_deleted,
+        deleted_at.unwrap_or_else(|| ctx.now.saturating_mul(1_000)),
+    )?;
     set_stable_head(
         ctx.tx,
         &ctx.principal.family_id,
@@ -1810,7 +2072,7 @@ fn commit_merged(
         mutation_id: mutation.mutation_id.clone(),
         stable_version_id: Some(version_id.clone()),
         stable_root: merged_root,
-        stable_media: media_sorted(merged_media),
+        stable_media: projected_media,
         request_hash: request_hash.to_owned(),
         branch_version_id: None,
         conflict_id: conflict_id.clone(),
@@ -2416,6 +2678,16 @@ impl Store {
             deleted_at,
             &resolved_root,
             rev,
+        )?;
+        project_stable_media(
+            &tx,
+            &principal.family_id,
+            &entity_type,
+            &client_uuid,
+            &resolved_media,
+            updated_at,
+            resolved_deleted,
+            deleted_at.unwrap_or_else(|| now.saturating_mul(1_000)),
         )?;
         set_stable_head(
             &tx,

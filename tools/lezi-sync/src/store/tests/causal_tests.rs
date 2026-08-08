@@ -949,6 +949,133 @@ fn causal_missing_media_bytes_rejected() {
 }
 
 #[test]
+fn causal_commit_projects_stable_media_into_pull_entities() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let m1 = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: "a".repeat(64),
+        byte_size: 12,
+        mime: "image/jpeg".into(),
+        width: Some(2),
+        height: Some(3),
+    };
+    let mut create = mut_unit(
+        "record",
+        record_id,
+        None,
+        record_root(fx.baby_id, "with-photo", 100, 20),
+        false,
+    );
+    create.media = vec![m1.clone()];
+    fx.stage_media_bytes(&m1);
+    let committed = fx
+        .store
+        .causal_commit(&fx.owner, vec![create], 1_700_000_000)
+        .unwrap();
+    assert_eq!(committed.results[0].status, "accepted");
+    let v1 = committed.results[0]
+        .stable_version_id
+        .clone()
+        .expect("stable version");
+
+    let page = fx.store.pull(&fx.family_id, 0).unwrap();
+    let media_row = page
+        .entities
+        .iter()
+        .find(|e| e.entity_type == "media" && e.client_uuid == m1.media_uuid)
+        .expect("pull must include projected media entity");
+    assert!(media_row.deleted_at.is_none());
+    assert_eq!(
+        media_row.payload.get("kind").and_then(Value::as_str),
+        Some("log")
+    );
+    assert_eq!(
+        media_row
+            .payload
+            .get("record_client_uuid")
+            .and_then(Value::as_str),
+        Some(record_id.to_string().as_str())
+    );
+    assert_eq!(
+        media_row.payload.get("byte_size").and_then(Value::as_i64),
+        Some(m1.byte_size)
+    );
+    assert!(fx
+        .store
+        .is_media_published(&fx.family_id, &m1.media_uuid)
+        .unwrap());
+
+    // Remove media on next accepted commit — peers must observe the tombstone.
+    let mut remove = mut_unit(
+        "record",
+        record_id,
+        Some(&v1),
+        record_root(fx.baby_id, "with-photo", 100, 30),
+        false,
+    );
+    remove.media = vec![];
+    let removed = fx
+        .store
+        .causal_commit(&fx.owner, vec![remove], 1_700_000_001)
+        .unwrap();
+    assert_eq!(removed.results[0].status, "accepted");
+    let page2 = fx.store.pull(&fx.family_id, 0).unwrap();
+    let media_row2 = page2
+        .entities
+        .iter()
+        .find(|e| e.entity_type == "media" && e.client_uuid == m1.media_uuid)
+        .expect("tombstoned media remains pull-visible");
+    assert!(media_row2.deleted_at.is_some());
+    assert!(!fx
+        .store
+        .is_media_published(&fx.family_id, &m1.media_uuid)
+        .unwrap());
+}
+
+#[test]
+fn causal_stable_head_blocks_legacy_bundle_commit() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let create = mut_unit(
+        "record",
+        record_id,
+        None,
+        record_root(fx.baby_id, "a", 100, 20),
+        false,
+    );
+    let committed = fx
+        .store
+        .causal_commit(&fx.owner, vec![create], 1_700_000_000)
+        .unwrap();
+    assert_eq!(committed.results[0].status, "accepted");
+
+    let err = publish_root(
+        &fx.store,
+        &fx.owner,
+        entity(
+            "record",
+            record_id,
+            40,
+            json!({
+                "baby_client_uuid": fx.baby_id,
+                "type": "formula",
+                "custom_item_client_uuid": null,
+                "timestamp": 100,
+                "end_timestamp": null,
+                "note": "lww-poison",
+                "payload_json": {"amount_ml": 200},
+                "schema_version": 2,
+            }),
+        ),
+        100,
+    )
+    .unwrap_err();
+    assert!(matches!(err, StoreError::LegacyBundleCommitOnCausalEntity));
+}
+
+#[test]
 fn causal_no_neighbor_losers_on_near_duplicate_records() {
     // Causal path never produces neighbor tombstones (different UUIDs all live).
     let fx = CausalFx::new();
