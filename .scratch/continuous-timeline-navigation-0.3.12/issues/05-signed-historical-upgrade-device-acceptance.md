@@ -16,8 +16,9 @@
 ## Evidence
 
 - On API 35 `lezi_api35_b`, signer-matched release APKs versionCode `6` (Room 24/contract 1),
-  `12` (Room 25/contract 2) and `16` (sync floor) each upgraded to the final versionCode `19`
-  APK with `adb install -r`, launched successfully and retained their system `firstInstallTime`.
+  `12` (Room 25/contract 2), `13` (Room 26/contract 3) and `16` (sync floor) each upgraded to the
+  final versionCode `19` APK with `adb install -r`, launched successfully and retained their system
+  `firstInstallTime`.
 - On API 35 `lezi_api35`, the existing versionCode `18` installation upgraded in place to `19`;
   its original `firstInstallTime`, local baby `年年` and offline identity remained. The final app kept
   an empty timeline rail, dragged today to yesterday, then returned to today with the global date.

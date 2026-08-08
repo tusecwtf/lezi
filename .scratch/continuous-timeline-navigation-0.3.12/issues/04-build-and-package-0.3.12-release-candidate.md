@@ -16,8 +16,10 @@
 
 ## Evidence
 
-- Built from live HEAD `e50776c9` with Android `0.3.12` / versionCode `19`,
-  `lezi-sync` `0.3.12`, Room schema `26`, local-data contract `3` and sync floor `16`.
+- Baseline HEAD was `e50776c9`; the versioned candidate tree was committed as `f7923ba8` with
+  Android `0.3.12` / versionCode `19`, `lezi-sync` `0.3.12`, Room schema `26`, local-data contract
+  `3` and sync floor `16`. The ignored package manifest records the candidate source commit used
+  when the package is emitted.
 - Final APK: package `com.lezi.babylog`; signer certificate SHA-256
   `ce1438c8c50fe75f04f89ae2092631a46660480764cd52071cc5c08707462211`; APK SHA-256
   `8fda237a2970e747ad3598f22d8586cb57fba98a9c5cf1b2d33efb06b15cf4ee`.
