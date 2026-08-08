@@ -52,6 +52,7 @@ val androidReleaseCompatibility =
 val releasedAndroidVersions =
     (androidReleaseCompatibility["released_versions"] as List<*>).map { it as Map<*, *> }
 val androidUpgradeTarget = androidReleaseCompatibility["upgrade_target"] as Map<*, *>
+val cataloguedAndroidVersions = releasedAndroidVersions + androidUpgradeTarget
 val appUpdateMetadataFile = rootProject.file("tools/lezi-sync/deploy/app-update.json")
 val appUpdateMetadata = JsonSlurper().parse(appUpdateMetadataFile) as Map<*, *>
 
@@ -313,7 +314,7 @@ val validateAndroidReleaseCompatibilityCatalog = tasks.register(
             (entry["contract_version"] as Number).toInt() to
                 (entry["room_schema"] as Number).toInt()
         }
-        (releasedAndroidVersions + androidUpgradeTarget).forEach { release ->
+        cataloguedAndroidVersions.forEach { release ->
             val contract = (release["local_data_contract"] as Number).toInt()
             val roomSchema = (release["room_schema"] as Number).toInt()
             check(contractsByVersion[contract] == roomSchema) {
@@ -326,7 +327,7 @@ val validateAndroidReleaseCompatibilityCatalog = tasks.register(
                 (entry["introduced_in_version_code"] as Number).toInt()
         }
         contractsByVersion.keys.forEach { contract ->
-            val firstRelease = releasedAndroidVersions.first {
+            val firstRelease = cataloguedAndroidVersions.first {
                 (it["local_data_contract"] as Number).toInt() == contract
             }
             check(
@@ -355,14 +356,17 @@ val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
         ) {
             "The compatibility catalog and app-update metadata must share one sync floor"
         }
-        val allowedMetadataIdentities = (releasedAndroidVersions + androidUpgradeTarget).map {
+        val allowedMetadataIdentities = listOf(
+            releasedAndroidVersions.last(),
+            androidUpgradeTarget,
+        ).map {
             it["version_code"] to it["version_name"]
         }.toSet()
         check(
             appUpdateMetadata["version_code"] to appUpdateMetadata["version_name"] in
                 allowedMetadataIdentities,
         ) {
-            "App-update metadata must identify a catalogued release or the upgrade target"
+            "App-update metadata must identify the latest release or the upgrade target"
         }
     }
 }
