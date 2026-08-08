@@ -295,7 +295,8 @@ class RealSyncPortFamilyWireTest {
             hasMore = false,
         )
 
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
+        // Family switch ownership stamps arrive on a full pull cycle, not LocalWrite.
+        val result = rig.port.sync(SyncTrigger.Foreground)
 
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.pullCount).isEqualTo(1)
@@ -347,7 +348,8 @@ class RealSyncPortFamilyWireTest {
             hasMore = false,
         )
 
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
+        // Authoritative creator recovery requires pull; use full cycle.
+        val result = rig.port.sync(SyncTrigger.Foreground)
 
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.pullCount).isEqualTo(1)

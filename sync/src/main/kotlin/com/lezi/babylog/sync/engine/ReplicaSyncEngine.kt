@@ -125,10 +125,20 @@ private class AuthorityCasMismatchException : IllegalStateException()
 /**
  * Owns one complete foreground replica cycle behind a single interface.
  *
- * The caller supplies a joined session and trigger. Each cycle reconciles remote state before
- * snapshotting dirty Room entities into an ephemeral publication plan. Every remote page and
- * media retry re-enters the same gate. Failures and cancellation escape without being translated;
- * Room remains authoritative and the next cycle replans from its current state.
+ * The caller supplies a joined session and trigger. Full cycles
+ * ([SyncTrigger.Foreground] / [SyncTrigger.PullToRefresh]) always pull remote pages before
+ * freezing dirty Room entities into an ephemeral publication plan.
+ *
+ * [SyncTrigger.LocalWrite] declares [SyncPlan.pull]=false. That no-pull plan is applied only
+ * when [SyncBackend.supportsCausalWire] is true: freeze current dirty atomic roots and settle
+ * via the same causal reconcile→commit (or legacy fulfillment) seam without incremental pull
+ * or pull-cursor advance. Without causal wire capability, LocalWrite still pulls first so
+ * LWW cannot run as an unsafe faster push. Authenticated [SyncBackend.members] + self-membership
+ * convergence remains a deliberate LocalWrite precondition (roster, not pull cursor).
+ *
+ * Every remote page and media retry re-enters the same gate. Failures and cancellation escape
+ * without being translated; Room remains authoritative and the next cycle replans from its
+ * current state.
  */
 internal class ReplicaSyncEngine(
     private val backend: SyncBackend,
@@ -189,20 +199,29 @@ internal class ReplicaSyncEngine(
         mediaFileCleanup.cleanupPendingTombstones()
         val mediaEditGuard = captureLocalMediaEditGuard()
         val plan = SyncPlan.forTrigger(trigger)
+        // LocalWrite no-pull plan applies only with causal wire; otherwise pull first.
+        // Spec / ADR-0020: no-pull before causal base/three-way/branch is rejected.
+        val doPull = plan.pull || !backend.supportsCausalWire()
         var current = preferences.session.first()
         requireRemoteAllowed(current)
+        // Intentional LocalWrite precondition: authenticated members directory for
+        // self-membership convergence (not an incremental entity pull / cursor advance).
         current = convergeAuthenticatedSelfMembership(
             current,
             backend.members(current),
         )
         var recovered = false
         val neighborLosers = linkedSetOf<String>()
-        try {
-            current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
-        } catch (error: SyncHttpException) {
-            val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-            current = recoverFullResync(current, checkpoint, mediaEditGuard)
-            recovered = true
+        // When doPull is false (LocalWrite + causal): freeze dirty roots → settle only.
+        // Do not incremental-pull and do not advance the pull cursor; full cycles still pull.
+        if (doPull) {
+            try {
+                current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
+            } catch (error: SyncHttpException) {
+                val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
+                current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                recovered = true
+            }
         }
         if (plan.push && !recovered) {
             val captured = captureLocalChanges(current)
@@ -229,7 +248,11 @@ internal class ReplicaSyncEngine(
                 current = recoverFullResync(current, checkpoint, mediaEditGuard)
                 recovered = true
             }
-            if (captured.pendingCreatorAcknowledgements.isNotEmpty() && !recovered) {
+            // Creator-ack and peer convergence require pull; only cycles that pulled do it.
+            if (doPull &&
+                captured.pendingCreatorAcknowledgements.isNotEmpty() &&
+                !recovered
+            ) {
                 try {
                     pullAllPages(current, mediaEditGuard = mediaEditGuard)
                 } catch (error: SyncHttpException) {

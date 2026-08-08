@@ -316,7 +316,7 @@ class ReplicaSyncEngineConflictTest {
     }
 
     @Test
-    fun memberNextFeedLocalWritePullsNasWinnerAgainAfterConcurrentNoOpPush() = runTest {
+    fun memberNextFeedFullCyclePullsNasWinnerAgainAfterConcurrentNoOpPush() = runTest {
         val session = joinedReplicaSession().copy(
             role = FamilyRole.Member,
             membershipId = "member-local",
@@ -366,7 +366,8 @@ class ReplicaSyncEngineConflictTest {
             hasMore = false,
         )
 
-        val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        // NAS winner convergence after concurrent create is a full-cycle (pull) concern.
+        val outcome = rig.engine.synchronize(session, SyncTrigger.Foreground)
 
         val winner = rig.carePlans.getByClientUuid(planUuid)!!
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())

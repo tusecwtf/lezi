@@ -288,6 +288,7 @@ class ReplicaSyncEngineAuthoritySettleTest {
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
             assertThat(rig.backend.reconciledUnits).hasSize(2)
+            // Without causal wire LocalWrite still pulls; recovery full-resync adds two more.
             assertThat(rig.backend.pullCursors).containsExactly(0L, 0L, 0L).inOrder()
             assertThat(rig.babies.getByClientUuid("baby-local")?.syncDirty).isFalse()
         }
@@ -336,6 +337,7 @@ class ReplicaSyncEngineAuthoritySettleTest {
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
             assertThat(rig.backend.reconciledUnits).hasSize(2)
+            // Without causal wire LocalWrite still pulls; recovery full-resync adds two more.
             assertThat(rig.backend.pullCursors).containsExactly(0L, 0L, 0L).inOrder()
             assertThat(rig.babies.getByClientUuid("baby-local")?.syncDirty).isFalse()
         }

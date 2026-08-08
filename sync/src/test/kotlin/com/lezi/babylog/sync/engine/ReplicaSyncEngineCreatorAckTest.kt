@@ -89,9 +89,10 @@ class ReplicaSyncEngineCreatorAckTest {
             hasMore = false,
         )
 
+        // Creator-ack recovery needs a full pull cycle; LocalWrite no longer pulls.
         val outcome = rig.engine.synchronize(
             session = session,
-            trigger = SyncTrigger.LocalWrite,
+            trigger = SyncTrigger.Foreground,
         )
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
@@ -106,7 +107,7 @@ class ReplicaSyncEngineCreatorAckTest {
     }
 
     @Test
-    fun failedCreatorAcknowledgementPullRetriesOnTheNextLocalWrite() = runTest {
+    fun failedCreatorAcknowledgementPullRetriesOnTheNextFullCycle() = runTest {
         val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
         val rig = ReplicaEngineRig(
             session = session,
@@ -133,7 +134,7 @@ class ReplicaSyncEngineCreatorAckTest {
         val firstFailure = runCatching {
             rig.engine.synchronize(
                 session = rig.preferences.current(),
-                trigger = SyncTrigger.LocalWrite,
+                trigger = SyncTrigger.Foreground,
             )
         }.exceptionOrNull()
 
@@ -163,7 +164,7 @@ class ReplicaSyncEngineCreatorAckTest {
 
         val outcome = rig.engine.synchronize(
             session = rig.preferences.current(),
-            trigger = SyncTrigger.LocalWrite,
+            trigger = SyncTrigger.Foreground,
         )
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
@@ -244,9 +245,10 @@ class ReplicaSyncEngineCreatorAckTest {
             hasMore = false,
         )
 
+        // Ack recovery requires a full pull cycle after LocalWrite failed mid-commit.
         val outcome = rig.engine.synchronize(
             session = rig.preferences.current(),
-            trigger = SyncTrigger.LocalWrite,
+            trigger = SyncTrigger.Foreground,
         )
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
@@ -318,9 +320,10 @@ class ReplicaSyncEngineCreatorAckTest {
             hasMore = false,
         )
 
+        // Post-push creator pull only runs on full cycles (Foreground / PullToRefresh).
         val outcome = rig.engine.synchronize(
             session = session,
-            trigger = SyncTrigger.LocalWrite,
+            trigger = SyncTrigger.Foreground,
         )
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
@@ -372,7 +375,7 @@ class ReplicaSyncEngineCreatorAckTest {
         val failure = runCatching {
             rig.engine.synchronize(
                 session = rig.preferences.current(),
-                trigger = SyncTrigger.LocalWrite,
+                trigger = SyncTrigger.Foreground,
             )
         }.exceptionOrNull()
 

@@ -140,7 +140,12 @@ UI 事件
   → Room（立刻成功 → UI 刷新）
   → 标记 syncDirty；LocalWrite 只通知协调器“有待发布内容”
   → 仅当：前台 && availability 健康租约 && trusted HTTPS endpoint && 有效 device session
-        → pull/reconcile → 从 Room 临时 plan → atomic bundle push；回前台/下拉同序执行
+        → LocalWrite（因果 capability 已具备）:
+             冻结 dirty 原子单元 → causal reconcile/commit（可含 media preimage）
+             **不** incremental pull、**不** 推进 pull cursor
+        → Foreground / 网络恢复 / PullToRefresh（完整周期）:
+             pull → 冻结 → causal reconcile/commit（或 legacy fulfillment 路径）
+        → 无因果 wire 时 LocalWrite 不得 no-pull（仍先 pull，避免更快 LWW 覆盖）
 ```
 
 实现继续无后台同步、无推送拉同步。系统 PKI 或 TOFU/SPKI 验证 HTTPS endpoint，每台设备
@@ -152,13 +157,15 @@ Owner 与 Member 使用同一对账优先次序。跨进程只持久化 Room 实
 0.3.8 浅层待同步数量按 Baby+avatar、Record+photos、CarePlan+photos、CustomItem 与
 FulfillmentCandidate 原子单元投影，不再直接求和六类 Room dirty 行。
 升级完成后能在本机看到记录只证明数据保留；家庭侧可见性仍须等待首次成功的
-`pull/reconcile → plan → push`，运营验收不得把“本机可见”误报为“已发布到家庭”。
+发布结算（LocalWrite 无 pull 或完整周期 pull+settle），运营验收不得把“本机可见”误报为
+“已发布到家庭”。
 
 ### 3.1 已实现的权威收敛周期
 
-ADR-0017 在现有写路径之后执行：pull → 冻结 atomic units → 批量
-head-by-UUID 裁决 → 终结 confirmed/adopt/local-only/technical residue → 仅 publish verdict
-进入临时 plan → atomic bundle push。普通路径按本机待对账 UUID 取存在/缺失证明；
+ADR-0017 的对账优先骨架保留；因果代（ADR-0020）下完整周期为：pull → 冻结 atomic units →
+causal reconcile/commit（`confirmed|publish|conflict_preview|rejected` /
+`accepted|merged|branched`），fulfillment 等仍可走 legacy authority 路径。LocalWrite 在
+因果 capability 下跳过 pull 与 cursor 推进，与完整周期共用同一 settlement seam。
 generation/cursor 证明失效时才走全量实体快照。浅层待同步数量按未终态 atomic units 投影，
 静止且完整落库的周期必须把冻结集收敛到零；健康探测成功本身不能清状态。
 
