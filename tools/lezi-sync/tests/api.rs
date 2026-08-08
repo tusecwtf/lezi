@@ -2441,7 +2441,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
     drop(connection);
 
@@ -2466,7 +2466,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        12
     );
 }
 
@@ -2478,7 +2478,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
     connection
         .execute_batch(
             "
-            PRAGMA user_version = 12;
+            PRAGMA user_version = 13;
             CREATE TABLE future_sentinel(value TEXT NOT NULL);
             INSERT INTO future_sentinel(value) VALUES ('preserve-me');
             ",
@@ -2538,7 +2538,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     assert_eq!(
         connection

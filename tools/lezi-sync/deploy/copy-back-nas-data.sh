@@ -34,7 +34,7 @@
 #
 # Shipped gates (kept equal to Rust DATABASE_SCHEMA_VERSION / SERVER_SECRET_BYTES
 # by offline_migrate::cutover unit test — do not free-float without updating that test):
-#   SHIPPED_USER_VERSION=11
+#   SHIPPED_USER_VERSION=12
 #   SHIPPED_MIN_SECRET_BYTES=32
 #
 # Live write requires: rsync (no scp), sqlite3, full validate, remote container absent,
@@ -44,7 +44,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # BEGIN shipped constants (cutover.rs asserts these match Rust)
-SHIPPED_USER_VERSION=11
+SHIPPED_USER_VERSION=12
 SHIPPED_MIN_SECRET_BYTES=32
 # END shipped constants
 

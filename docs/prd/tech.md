@@ -385,13 +385,14 @@ APK。该端口不完成家庭登录，也不放宽同步门禁。首次安装�
 
 **NAS schema / offline-migrate 边界：** 日常启动只接受精确 current schema（fail closed；
 见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。**当前 tree**
-server `DATABASE_SCHEMA_VERSION` 以 `tools/lezi-sync` 源码为准（撰写时 **11**）。
-**0.3.13 规划** 为 schema **12**（版本/冲突/分支/resolution/来源关系等），仅经审计
-offline-migrate 自 v11 复制迁移；旧二进制不得打开 v12。历史 v3
-数据根**不得**在 server startup 自动迁移；唯一出路是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)
-的两阶段路径：维护窗前在备份上用显式 `lezi-sync offline-migrate`（固定源→current、
-独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。发布二进制
-含该子命令 ≠ 滚动兼容；普通 CD 不执行。权威 runbook：
+server `DATABASE_SCHEMA_VERSION` 以 `tools/lezi-sync` 源码为准（撰写时 **12**，含
+不可变版本/冲突/来源关系表）。**v11 仅为 offline-migrate 源**：审计 copy-out 升级到
+v12；旧二进制不得打开 v12。历史 v3 数据根**不得**在 server startup 自动迁移；唯一出路
+是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md) 的两阶段路径：
+维护窗前在备份上用显式 `lezi-sync offline-migrate`（源 user_version **3 或 11**→current、
+独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。0.3.13 的 wire
+minSupported / 客户端能力门与 schema 12 落地分开叙述。发布二进制含该子命令 ≠ 滚动兼容；
+普通 CD 不执行。权威 runbook：
 [`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)。
 
 > **当前同步策略（2026-07-25）**：中心化 NAS、硬家网、仅前台、无即时通知；

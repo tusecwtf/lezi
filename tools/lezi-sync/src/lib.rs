@@ -1404,7 +1404,7 @@ mod tests {
         connection
             .execute_batch(
                 "
-                PRAGMA user_version = 12;
+                PRAGMA user_version = 13;
                 CREATE TABLE future_sentinel(value TEXT NOT NULL);
                 ",
             )

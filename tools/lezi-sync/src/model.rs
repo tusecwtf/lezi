@@ -421,9 +421,12 @@ impl RawEntity {
             (EntityValidationContext::AtomicBundleRoot, "care_plan") => {
                 validate_care_plan(&mut self.payload)?
             }
+            (EntityValidationContext::AtomicBundleRoot, "wake_observation") => {
+                validate_wake_observation(&mut self.payload)?
+            }
             (EntityValidationContext::AtomicBundleRoot, _) => {
                 return Err(ApiError::unprocessable(
-                    "bundle root type must be record, care_plan, baby, custom_item, or fulfillment_candidate",
+                    "bundle root type must be record, care_plan, baby, custom_item, fulfillment_candidate, or wake_observation",
                 ))
             }
             (EntityValidationContext::AtomicBundleMedia, _) => {
@@ -577,6 +580,12 @@ pub(crate) fn validate_bundle_media_for_root(
                     && record.is_none()
                     && care_plan.is_none()
             }
+            "wake_observation" => {
+                kind == Some("wake")
+                    && record == Some(root.client_uuid.as_str())
+                    && care_plan.is_none()
+                    && baby.is_none()
+            }
             "custom_item" | "fulfillment_candidate" => false,
             _ => return Err(ApiError::unprocessable("unsupported bundle root type")),
         };
@@ -688,45 +697,111 @@ fn validate_record(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
             "type",
             "custom_item_client_uuid",
             "timestamp",
-            "end_timestamp",
             "note",
             "payload_json",
             "schema_version",
+        ],
+    )?;
+    uuid(payload, "baby_client_uuid")?;
+    let record_type = current_record_type(payload)?.to_owned();
+    // Dual-compat during causal cutover: legacy rows keep end_timestamp;
+    // migrated/causal sleep uses effective_wake_observation_client_uuid and
+    // must not reintroduce end_timestamp as a wake competition field.
+    let is_causal_sleep = record_type == "sleep"
+        && (payload.contains_key("effective_wake_observation_client_uuid")
+            || !payload.contains_key("end_timestamp"));
+    if is_causal_sleep {
+        allow_keys(
+            payload,
+            &[
+                "baby_client_uuid",
+                "type",
+                "custom_item_client_uuid",
+                "timestamp",
+                "note",
+                "payload_json",
+                "schema_version",
+                "created_by_membership_id",
+                "effective_wake_observation_client_uuid",
+            ],
+        )?;
+        if payload.contains_key("end_timestamp") {
+            return Err(ApiError::unprocessable(
+                "causal sleep must not include end_timestamp (use WakeObservation)",
+            ));
+        }
+        optional_nullable_uuid(payload, "effective_wake_observation_client_uuid")?;
+    } else {
+        require_keys(payload, &["end_timestamp"])?;
+        allow_keys(
+            payload,
+            &[
+                "baby_client_uuid",
+                "type",
+                "custom_item_client_uuid",
+                "timestamp",
+                "end_timestamp",
+                "note",
+                "payload_json",
+                "schema_version",
+                "created_by_membership_id",
+            ],
+        )?;
+        optional_integer(payload, "end_timestamp", 0, i64::MAX)?;
+        let timestamp = payload["timestamp"].as_i64().expect("validated timestamp");
+        if payload
+            .get("end_timestamp")
+            .and_then(Value::as_i64)
+            .is_some_and(|end| end < timestamp)
+        {
+            return Err(ApiError::unprocessable(
+                "end_timestamp must not be before timestamp",
+            ));
+        }
+    }
+    optional_nullable_uuid(payload, "custom_item_client_uuid")?;
+    integer(payload, "timestamp", 0, i64::MAX)?;
+    optional_nullable_string(payload, "note", 0, 20_000)?;
+    validate_current_payload_json(&record_type, payload.get_mut("payload_json"), false)?;
+    integer(payload, "schema_version", 2, 2)?;
+    optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
+    Ok(())
+}
+
+fn validate_wake_observation(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
+    require_keys(
+        payload,
+        &[
+            "sleep_record_client_uuid",
+            "wake_timestamp",
+            "note",
+            "withdrawn",
         ],
     )?;
     allow_keys(
         payload,
         &[
-            "baby_client_uuid",
-            "type",
-            "custom_item_client_uuid",
-            "timestamp",
-            "end_timestamp",
+            "sleep_record_client_uuid",
+            "wake_timestamp",
             "note",
-            "payload_json",
-            "schema_version",
-            "created_by_membership_id",
+            "withdrawn",
+            "observer_membership_id",
         ],
     )?;
-    uuid(payload, "baby_client_uuid")?;
-    let record_type = current_record_type(payload)?.to_owned();
-    optional_nullable_uuid(payload, "custom_item_client_uuid")?;
-    integer(payload, "timestamp", 0, i64::MAX)?;
-    optional_integer(payload, "end_timestamp", 0, i64::MAX)?;
-    let timestamp = payload["timestamp"].as_i64().expect("validated timestamp");
-    if payload
-        .get("end_timestamp")
-        .and_then(Value::as_i64)
-        .is_some_and(|end| end < timestamp)
-    {
+    uuid(payload, "sleep_record_client_uuid")?;
+    integer(payload, "wake_timestamp", 0, i64::MAX)?;
+    optional_nullable_string(payload, "note", 0, 20_000)?;
+    let withdrawn = payload
+        .get("withdrawn")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| ApiError::unprocessable("withdrawn must be a boolean"))?;
+    let _ = withdrawn;
+    optional_nullable_string(payload, "observer_membership_id", 1, 64)?;
+    if payload.contains_key("end_timestamp") {
         return Err(ApiError::unprocessable(
-            "end_timestamp must not be before timestamp",
+            "wake_observation must not include end_timestamp",
         ));
     }
-    optional_nullable_string(payload, "note", 0, 20_000)?;
-    validate_current_payload_json(&record_type, payload.get_mut("payload_json"), false)?;
-    integer(payload, "schema_version", 2, 2)?;
-    optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     Ok(())
 }
 
@@ -777,8 +852,10 @@ fn validate_media(
         ],
     )?;
     let kind = string_value(payload, "kind")?;
-    if kind != "log" && kind != "avatar" {
-        return Err(ApiError::unprocessable("media kind must be log or avatar"));
+    if kind != "log" && kind != "avatar" && kind != "wake" {
+        return Err(ApiError::unprocessable(
+            "media kind must be log, avatar, or wake",
+        ));
     }
     optional_nullable_uuid(payload, "record_client_uuid")?;
     optional_nullable_uuid(payload, "baby_client_uuid")?;
@@ -816,6 +893,16 @@ fn validate_media(
     if kind == "avatar" && (record.is_some() || care_plan.is_some()) {
         return Err(ApiError::unprocessable(
             "avatar media must not reference a record or care_plan",
+        ));
+    }
+    if kind == "wake" && record.is_none() {
+        return Err(ApiError::unprocessable(
+            "wake media requires record_client_uuid (WakeObservation)",
+        ));
+    }
+    if kind == "wake" && (baby.is_some() || care_plan.is_some()) {
+        return Err(ApiError::unprocessable(
+            "wake media must not reference baby or care_plan",
         ));
     }
     Ok(())

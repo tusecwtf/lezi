@@ -37,7 +37,7 @@ pass=$((pass + 1))
 # --- missing confirm flags ---
 mkdir -p "${test_root}/out"
 if command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "${test_root}/out/lezi.db" "PRAGMA user_version=11;"
+  sqlite3 "${test_root}/out/lezi.db" "PRAGMA user_version=12;"
 else
   printf 'x' > "${test_root}/out/lezi.db"
 fi
@@ -70,7 +70,7 @@ pass=$((pass + 1))
 # --- short server.secret ---
 mkdir -p "${test_root}/short"
 if command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "${test_root}/short/lezi.db" "PRAGMA user_version=11;"
+  sqlite3 "${test_root}/short/lezi.db" "PRAGMA user_version=12;"
 else
   printf 'not-a-db' > "${test_root}/short/lezi.db"
 fi
@@ -90,7 +90,7 @@ pass=$((pass + 1))
 # --- version override refused without dual flag ---
 if command -v sqlite3 >/dev/null 2>&1; then
   mkdir -p "${test_root}/ov"
-  sqlite3 "${test_root}/ov/lezi.db" "PRAGMA user_version=11;"
+  sqlite3 "${test_root}/ov/lezi.db" "PRAGMA user_version=12;"
   head -c 32 /dev/urandom > "${test_root}/ov/server.secret"
   if LEZI_OUT_DIR="${test_root}/ov" LEZI_EXPECTED_USER_VERSION=99 \
     env "${DRY_HARNESS[@]}" "${COPY_BACK}" 2>"${test_root}/err_ov"; then
@@ -105,7 +105,7 @@ fi
 if command -v sqlite3 >/dev/null 2>&1; then
   good="${test_root}/good"
   mkdir -p "${good}"
-  sqlite3 "${good}/lezi.db" "PRAGMA user_version=11;"
+  sqlite3 "${good}/lezi.db" "PRAGMA user_version=12;"
   head -c 32 /dev/urandom > "${good}/server.secret"
   out="$(
     LEZI_OUT_DIR="${good}" \
@@ -136,7 +136,7 @@ if command -v sqlite3 >/dev/null 2>&1; then
   # residual WAL refused
   wal="${test_root}/wal"
   mkdir -p "${wal}"
-  sqlite3 "${wal}/lezi.db" "PRAGMA user_version=11;"
+  sqlite3 "${wal}/lezi.db" "PRAGMA user_version=12;"
   head -c 32 /dev/urandom > "${wal}/server.secret"
   touch "${wal}/lezi.db-wal"
   if LEZI_OUT_DIR="${wal}" \
@@ -154,7 +154,7 @@ fi
 # We only assert early gates that run before SSH (skip-validate + missing backup).
 live_gate="${test_root}/livegate"
 mkdir -p "${live_gate}"
-sqlite3 "${live_gate}/lezi.db" "PRAGMA user_version=11;"
+sqlite3 "${live_gate}/lezi.db" "PRAGMA user_version=12;"
 head -c 32 /dev/urandom > "${live_gate}/server.secret"
 
 # skip-validate refused for live even if set
@@ -174,7 +174,7 @@ fi
 pass=$((pass + 1))
 
 # Script source policy smoke
-grep -q 'SHIPPED_USER_VERSION=11' "${COPY_BACK}" || fail "script missing SHIPPED_USER_VERSION"
+grep -q 'SHIPPED_USER_VERSION=12' "${COPY_BACK}" || fail "script missing SHIPPED_USER_VERSION"
 grep -q 'SHIPPED_MIN_SECRET_BYTES=32' "${COPY_BACK}" || fail "script missing SHIPPED_MIN_SECRET_BYTES"
 grep -q 'rsync is required' "${COPY_BACK}" || fail "script must require rsync"
 grep -q 'sqlite3 is required' "${COPY_BACK}" || fail "script must require sqlite3"

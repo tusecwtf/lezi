@@ -40,12 +40,14 @@
 #![allow(dead_code)]
 
 pub(crate) mod boundary;
+pub(crate) mod causal;
 pub(crate) mod cli;
 pub(crate) mod cutover;
 pub(crate) mod inventory;
 pub(crate) mod live_cutover;
 pub(crate) mod media;
 pub(crate) mod migrator;
+pub(crate) mod v11;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -72,3 +74,5 @@ pub(crate) use media::{
 pub(crate) use migrator::{
     migrate_v3_database, MigrateError, MigrateReport, MIN_NEW_ROOT_PASSWORD_LEN, REAUTH_OPS_NOTE,
 };
+#[allow(unused_imports)]
+pub(crate) use v11::{migrate_v11_data_dir, migrate_v11_database, SOURCE_V11_USER_VERSION};

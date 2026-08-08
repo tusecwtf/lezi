@@ -15,7 +15,53 @@ use super::{Store, StoreError};
 
 /// Current SQLite `PRAGMA user_version` / schema contract version.
 /// Offline migration inventory couples to this constant (must not drift).
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 11;
+///
+/// v12 adds immutable causal versions, mutation receipts, conflicts/branches,
+/// resolutions, and source-relation storage. Runtime still opens only exact
+/// current shape (no in-place upgrade). v11→v12 is offline copy-out only.
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 12;
+
+/// Mutable atomic roots that participate in the causal version graph.
+/// Single source of truth for versioned types; must match CHECK fragments in
+/// [`CURRENT_SCHEMA_SQL`] (`VERSIONED_ENTITY_TYPES_SQL`).
+pub(crate) const VERSIONED_ENTITY_TYPES: &[&str] = &[
+    "baby",
+    "record",
+    "care_plan",
+    "custom_item",
+    "wake_observation",
+];
+
+/// SQL `IN (...)` list body for versioned entity types (kept next to the const).
+/// Referenced by schema shape tests so CHECK fragments cannot drift silently.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const VERSIONED_ENTITY_TYPES_SQL: &str =
+    "'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'";
+
+#[cfg(test)]
+mod versioned_types_alignment {
+    use super::{CURRENT_SCHEMA_SQL, VERSIONED_ENTITY_TYPES, VERSIONED_ENTITY_TYPES_SQL};
+
+    #[test]
+    fn versioned_types_sql_matches_const_and_schema_checks() {
+        let joined = VERSIONED_ENTITY_TYPES
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(joined, VERSIONED_ENTITY_TYPES_SQL);
+        // entity_versions / stable_heads / receipts / conflicts all share the fragment.
+        assert!(CURRENT_SCHEMA_SQL.contains(VERSIONED_ENTITY_TYPES_SQL));
+        assert_eq!(
+            CURRENT_SCHEMA_SQL
+                .matches(VERSIONED_ENTITY_TYPES_SQL)
+                .count(),
+            4,
+            "expected CHECK fragment on versions, heads, receipts, conflicts"
+        );
+    }
+}
+
 pub(crate) const CURRENT_SCHEMA_SQL: &str = "
     CREATE TABLE families (
         id TEXT PRIMARY KEY,
@@ -149,7 +195,10 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
 
     CREATE TABLE entities (
         family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-        entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'media', 'care_plan', 'custom_item',
+            'fulfillment_candidate', 'wake_observation'
+        )),
         client_uuid TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER,
@@ -200,6 +249,172 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
             CHECK(source IN ('ordinary', 'bundle_pending', 'bundle')),
         bundle_id TEXT,
         PRIMARY KEY (family_id, media_uuid)
+    );
+
+    -- Causal: immutable root versions (stable projection remains `entities`).
+    CREATE TABLE entity_versions (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        version_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        mutation_id TEXT,
+        origin TEXT NOT NULL CHECK(origin IN (
+            'migration_base', 'accepted', 'merged', 'branched', 'resolved'
+        )),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, version_id)
+    );
+    CREATE INDEX entity_versions_root
+        ON entity_versions(family_id, entity_type, client_uuid);
+
+    CREATE TABLE entity_version_parents (
+        family_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        parent_version_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, version_id, parent_version_id),
+        FOREIGN KEY (family_id, version_id)
+            REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, parent_version_id)
+            REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE entity_version_media (
+        family_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        media_payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        PRIMARY KEY (family_id, version_id, media_uuid),
+        FOREIGN KEY (family_id, version_id)
+            REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE
+    );
+
+    -- O(1) stable head; ordinary pull does not join full version history.
+    CREATE TABLE entity_stable_heads (
+        family_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, entity_type, client_uuid),
+        FOREIGN KEY (family_id, entity_type, client_uuid)
+            REFERENCES entities(family_id, entity_type, client_uuid) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+
+    -- mutation_id unique at family / principal / atomic-root boundary.
+    CREATE TABLE mutation_receipts (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        membership_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        mutation_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('accepted', 'merged', 'branched')),
+        stable_version_id TEXT,
+        branch_version_id TEXT,
+        conflict_id TEXT,
+        receipt_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, membership_id, entity_type, client_uuid, mutation_id)
+    );
+    CREATE INDEX mutation_receipts_lookup
+        ON mutation_receipts(family_id, membership_id, mutation_id);
+
+    CREATE TABLE conflicts (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        conflict_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        base_version_id TEXT,
+        stable_version_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('open', 'resolved')),
+        kind TEXT NOT NULL CHECK(kind IN ('concurrent', 'tombstone_restore')),
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        PRIMARY KEY (family_id, conflict_id),
+        FOREIGN KEY (family_id, stable_version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+    CREATE INDEX conflicts_root
+        ON conflicts(family_id, entity_type, client_uuid, status);
+
+    CREATE TABLE conflict_branches (
+        family_id TEXT NOT NULL,
+        conflict_id TEXT NOT NULL,
+        branch_version_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, conflict_id, branch_version_id),
+        FOREIGN KEY (family_id, conflict_id)
+            REFERENCES conflicts(family_id, conflict_id) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, branch_version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+
+    CREATE TABLE conflict_resolutions (
+        family_id TEXT NOT NULL,
+        conflict_id TEXT NOT NULL,
+        resolution_mutation_id TEXT NOT NULL,
+        resolver_membership_id TEXT NOT NULL,
+        expected_stable_version_id TEXT NOT NULL,
+        expected_branch_versions_json TEXT NOT NULL,
+        conflict_choices_json TEXT NOT NULL,
+        resolved_version_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, conflict_id, resolution_mutation_id),
+        FOREIGN KEY (family_id, conflict_id)
+            REFERENCES conflicts(family_id, conflict_id) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, resolved_version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+
+    -- Source relations are not ordinary record tombstones (independent reason).
+    CREATE TABLE source_relations (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        relation_id TEXT NOT NULL,
+        display_client_uuid TEXT NOT NULL,
+        media_retained INTEGER NOT NULL CHECK(media_retained = 1),
+        reason TEXT NOT NULL CHECK(reason IN (
+            'author_declare', 'owner_group_resolve'
+        )),
+        mutation_id TEXT NOT NULL,
+        created_by_membership_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, relation_id)
+    );
+
+    CREATE TABLE source_relation_members (
+        family_id TEXT NOT NULL,
+        relation_id TEXT NOT NULL,
+        record_client_uuid TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('display', 'source')),
+        PRIMARY KEY (family_id, relation_id, record_client_uuid),
+        FOREIGN KEY (family_id, relation_id)
+            REFERENCES source_relations(family_id, relation_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE source_relation_declarations (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        mutation_id TEXT NOT NULL,
+        record_client_uuid TEXT NOT NULL,
+        equivalent_to_client_uuid TEXT NOT NULL,
+        expected_record_version TEXT NOT NULL,
+        expected_other_version TEXT NOT NULL,
+        author_membership_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'consumed', 'superseded')),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, mutation_id)
     );
 ";
 

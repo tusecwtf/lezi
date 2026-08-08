@@ -26,14 +26,20 @@ HTTPS `/v1/*` 合同只对成员登录 grant 增加可选 `landing_url`；新的
 
 ## 数据目录合同
 
-服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=11`。空数据目录、
-不存在的 `lezi.db` 或零字节空库会初始化为当前 v11 schema；已有数据目录只有在
-`user_version=11` 且表、索引、约束完全匹配当前 schema 时才允许重启并保留数据。
+服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=12`
+（`DATABASE_SCHEMA_VERSION`）。空数据目录、不存在的 `lezi.db` 或零字节空库会初始化为
+**当前 v12 schema**；已有数据目录只有在 `user_version=12` 且表、索引、约束完全匹配
+当前 schema 时才允许重启并保留数据。
 
-任何非空旧版本、未来版本、或声称 v11 但形状不匹配的数据库都在只读预检阶段
+任何非空旧版本、未来版本、或声称 current 但形状不匹配的数据库都在只读预检阶段
 fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
-改变数据根或数据库权限。旧版本数据不是受支持的日常部署输入；部署时必须选择新的空数据根
-（历史 v3 仅允许维护窗前的离线 `offline-migrate` + 已授权切割，见下文与 ADR-0013）。
+改变数据根或数据库权限。旧版本数据不是受支持的日常部署输入；部署时必须选择新的空数据根。
+历史源仅允许维护窗前的离线 `offline-migrate` + 已授权切割（见下文与 ADR-0013）：
+
+| 源 `user_version` | 行为 |
+|---|---|
+| **3** | v3→current：需要 `--new-root-password` / `LEZI_MIGRATE_NEW_ROOT_PASSWORD`；**始终** 重生成 `server.secret`；会话/设备作废，Owner 用新 root 重登 |
+| **11** | v11→v12 因果切割：**保留** `server.secret` 与 identity/session 行；密码参数不使用；校验含因果 heads/投影闭包 |
 
 ```text
 $LEZI_DATA_DIR/

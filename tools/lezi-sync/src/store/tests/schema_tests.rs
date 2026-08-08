@@ -90,7 +90,7 @@ fn empty_database_initializes_current_schema_and_restarts_with_persistence() {
 }
 #[test]
 fn nonempty_unsupported_schema_versions_fail_without_mutation() {
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("lezi.db");
         let connection = Connection::open(&database_path).unwrap();
@@ -144,7 +144,7 @@ fn current_version_with_wrong_shape_fails_without_mutation() {
     connection
         .execute_batch(
             "
-        PRAGMA user_version = 11;
+        PRAGMA user_version = 12;
         CREATE TABLE families(id TEXT PRIMARY KEY);
         INSERT INTO families(id) VALUES ('preserve-me');
         ",
@@ -171,6 +171,112 @@ fn current_version_with_wrong_shape_fails_without_mutation() {
         before_entries
     );
 }
+
+#[test]
+fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("lezi.db");
+    fs::File::create(&database_path).unwrap();
+    let _store = Store::open(&database_path).unwrap();
+    let connection = Connection::open(database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        DATABASE_SCHEMA_VERSION
+    );
+    for table in [
+        "entity_versions",
+        "entity_version_parents",
+        "entity_version_media",
+        "entity_stable_heads",
+        "mutation_receipts",
+        "conflicts",
+        "conflict_branches",
+        "conflict_resolutions",
+        "source_relations",
+        "source_relation_members",
+        "source_relation_declarations",
+    ] {
+        let n: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "missing table {table}");
+    }
+    // entities CHECK includes wake_observation (insert of allowed type must succeed shape-wise).
+    connection
+        .execute(
+            "
+            INSERT INTO families(id, created_at) VALUES ('fam', 1);
+            INSERT INTO entities(
+                family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+            ) VALUES (
+                'fam', 'wake_observation', '11111111-1111-1111-1111-111111111111',
+                1, NULL, '{}', 1
+            );
+            ",
+            [],
+        )
+        .unwrap();
+    // Mutation receipt PK enforces family/principal/atomic-root uniqueness.
+    connection
+        .execute(
+            "
+            INSERT INTO mutation_receipts(
+                family_id, membership_id, entity_type, client_uuid, mutation_id,
+                content_hash, status, receipt_json, created_at
+            ) VALUES (
+                'fam', 'm1', 'record', '11111111-1111-1111-1111-111111111111',
+                '22222222-2222-2222-2222-222222222222', 'hash', 'accepted', '{}', 1
+            );
+            ",
+            [],
+        )
+        .unwrap();
+    let err = connection
+        .execute(
+            "
+            INSERT INTO mutation_receipts(
+                family_id, membership_id, entity_type, client_uuid, mutation_id,
+                content_hash, status, receipt_json, created_at
+            ) VALUES (
+                'fam', 'm1', 'record', '11111111-1111-1111-1111-111111111111',
+                '22222222-2222-2222-2222-222222222222', 'other-hash', 'merged', '{}', 2
+            );
+            ",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("UNIQUE") || err.to_string().contains("unique"),
+        "expected unique violation, got {err}"
+    );
+    // source_relations forbid media_retained != 1
+    let err = connection
+        .execute(
+            "
+            INSERT INTO source_relations(
+                family_id, relation_id, display_client_uuid, media_retained,
+                reason, mutation_id, created_by_membership_id, created_at
+            ) VALUES (
+                'fam', 'rel', '11111111-1111-1111-1111-111111111111', 0,
+                'author_declare', 'm', 'm1', 1
+            );
+            ",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        err.to_string().to_lowercase().contains("check")
+            || err.to_string().to_lowercase().contains("constraint"),
+        "expected check failure for media_retained, got {err}"
+    );
+}
+
 #[test]
 fn current_version_with_nullable_membership_name_fails_without_mutation() {
     let directory = TempDir::new().unwrap();

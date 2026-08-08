@@ -39,7 +39,7 @@ use crate::model::Entity;
 
 pub(crate) use bundles::bundle_content_hash;
 pub(crate) use identity::anonymize_membership_authorship_fields;
-pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
+pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION, VERSIONED_ENTITY_TYPES};
 
 /// Shared chunk size for IN-list entity/media queries (media + bundle LWW loaders).
 pub(in crate::store) const ENTITY_QUERY_CHUNK_SIZE: usize = 400;

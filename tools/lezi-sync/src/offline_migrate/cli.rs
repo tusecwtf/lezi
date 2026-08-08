@@ -19,13 +19,16 @@ use std::path::{Component, Path, PathBuf};
 use crate::store::Store;
 use crate::SERVER_SECRET_BYTES;
 
+use super::causal::validate_causal_integrity;
 use super::cutover::{cutover_help_text, COPY_BACK_RUNBOOK, COPY_BACK_SCRIPT};
+use super::inventory::SOURCE_USER_VERSION;
 use super::live_cutover::live_cutover_help_text;
 use super::media::{cleanup_migrator_data_dir_outputs, migrate_v3_data_dir};
 use super::migrator::{
     validate_new_root_password, MigrateError, MigrateReport, MIN_NEW_ROOT_PASSWORD_LEN,
     REAUTH_OPS_NOTE,
 };
+use super::v11::{migrate_v11_data_dir, SOURCE_V11_USER_VERSION};
 
 /// Process exit: success.
 pub(crate) const EXIT_OK: u8 = 0;
@@ -293,9 +296,8 @@ fn run_migrate(input: &Path, output: &Path, new_root_password: &str) -> CliOutco
     if let Err(message) = ensure_out_empty_for_migrate(output) {
         return usage_outcome(&message);
     }
-    if let Err(error) = validate_new_root_password(new_root_password) {
-        return usage_outcome(&error.to_string());
-    }
+    // Password length is enforced for v3 sources inside migrate_and_validate;
+    // v11→v12 ignores the password (identity preserved).
 
     migrate_and_validate(
         input,
@@ -308,10 +310,6 @@ fn run_migrate(input: &Path, output: &Path, new_root_password: &str) -> CliOutco
 }
 
 fn run_dry_run(input: &Path, new_root_password: &str) -> CliOutcome {
-    if let Err(error) = validate_new_root_password(new_root_password) {
-        return usage_outcome(&error.to_string());
-    }
-
     let temp_root = std::env::temp_dir().join(format!(
         "lezi-offline-migrate-dry-run-{}-{}",
         std::process::id(),
@@ -356,6 +354,10 @@ fn run_dry_run(input: &Path, new_root_password: &str) -> CliOutcome {
 }
 
 /// Shared migrate → validate control flow (dry-run and migrate).
+///
+/// Auto-detects source `lezi.db` user_version:
+/// - **3** → historical v3→current (requires new root password)
+/// - **11** → causal v11→v12 (preserves identity + server.secret; password unused)
 fn migrate_and_validate(
     input: &Path,
     output: &Path,
@@ -364,7 +366,39 @@ fn migrate_and_validate(
     cleanup_out_on_validate_fail: bool,
     durable_out: bool,
 ) -> CliOutcome {
-    match migrate_v3_data_dir(input, output, new_root_password) {
+    let source_version = match read_source_user_version(input) {
+        Ok(v) => v,
+        Err(message) => {
+            return CliOutcome {
+                exit_code: EXIT_FAILURE,
+                stdout: String::new(),
+                stderr: format!("migrate failed: {message}\n"),
+            };
+        }
+    };
+
+    let migrate_result = match source_version {
+        v if v == SOURCE_USER_VERSION => {
+            if let Err(error) = validate_new_root_password(new_root_password) {
+                return usage_outcome(&error.to_string());
+            }
+            migrate_v3_data_dir(input, output, new_root_password)
+        }
+        v if v == SOURCE_V11_USER_VERSION => migrate_v11_data_dir(input, output),
+        other => {
+            return CliOutcome {
+                exit_code: EXIT_FAILURE,
+                stdout: String::new(),
+                stderr: format!(
+                    "migrate failed: unsupported source user_version={other} \
+(expected {SOURCE_USER_VERSION} or {SOURCE_V11_USER_VERSION})\n"
+                ),
+            };
+        }
+    };
+
+    let include_reauth = source_version == SOURCE_USER_VERSION;
+    match migrate_result {
         Ok(report) => match validate_out_data_dir(output) {
             Ok(()) => CliOutcome {
                 exit_code: EXIT_OK,
@@ -372,7 +406,7 @@ fn migrate_and_validate(
                     title_ok,
                     if durable_out { Some(output) } else { None },
                     &report,
-                    /*include_reauth=*/ true,
+                    include_reauth,
                 ),
                 stderr: String::new(),
             },
@@ -400,6 +434,20 @@ authoritative intent: AbortNoCopyBackWithReport (migrator outputs cleaned when d
             failure_outcome(prefix, &error)
         }
     }
+}
+
+fn read_source_user_version(input: &Path) -> Result<i64, String> {
+    let db = input.join("lezi.db");
+    if !db.try_exists().map_err(|e| e.to_string())? {
+        return Err(format!("source lezi.db missing: {}", db.display()));
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|e| e.to_string())
 }
 
 fn usage_outcome(message: &str) -> CliOutcome {
@@ -458,6 +506,13 @@ pub(crate) fn validate_out_data_dir(out: &Path) -> Result<(), String> {
             secret.len()
         ));
     }
+    // Causal v12: version/projection 1:1, wake refs, stable heads.
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open out db for causal validate: {e}"))?;
+    validate_causal_integrity(&conn).map_err(|e| format!("causal integrity: {e}"))?;
     Ok(())
 }
 
@@ -1016,13 +1071,14 @@ mod tests {
         });
         assert_eq!(outcome.exit_code, EXIT_FAILURE, "stderr={}", outcome.stderr);
         assert!(
-            outcome.stderr.contains("dry-run failed"),
+            outcome.stderr.contains("dry-run failed") || outcome.stderr.contains("migrate failed"),
             "{}",
             outcome.stderr
         );
         assert!(
             outcome.stderr.contains("SourceUserVersionNotThree")
-                || outcome.stderr.contains("authoritative"),
+                || outcome.stderr.contains("authoritative")
+                || outcome.stderr.contains("unsupported source user_version"),
             "stderr={}",
             outcome.stderr
         );

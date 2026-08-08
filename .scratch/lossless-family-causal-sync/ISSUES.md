@@ -1,6 +1,6 @@
 # 家庭事实无损因果同步 — issues
 
-Status: ready-for-agent — frontier after 01 = 02 ∥ 04
+Status: ready-for-agent — frontier after 02 = 03 ∥ 04
 
 Spec: [`spec.md`](./spec.md)
 
@@ -24,7 +24,7 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
 | 01 | [`issues/01-freeze-causal-domain-wire-adr.md`](./issues/01-freeze-causal-domain-wire-adr.md) | complete | — |
-| 02 | [`issues/02-server-schema-v12-version-conflict-migration.md`](./issues/02-server-schema-v12-version-conflict-migration.md) | ready-for-agent | 01 |
+| 02 | [`issues/02-server-schema-v12-version-conflict-migration.md`](./issues/02-server-schema-v12-version-conflict-migration.md) | complete | 01 |
 | 03 | [`issues/03-causal-reconcile-commit-pull-resolution.md`](./issues/03-causal-reconcile-commit-pull-resolution.md) | ready-for-agent | 02 |
 | 04 | [`issues/04-android-room27-causal-wake-source-state.md`](./issues/04-android-room27-causal-wake-source-state.md) | ready-for-agent | 01 |
 | 05 | [`issues/05-replica-engine-three-way-merge-and-branches.md`](./issues/05-replica-engine-three-way-merge-and-branches.md) | ready-for-agent | 03, 04 |
@@ -35,8 +35,8 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 
 ## Frontier
 
-`02` and `04` in parallel (both blocked only by complete `01`). No runtime behavior ticket may invent
-a competing shape outside the frozen contract in ticket 01 /
+`03` (blocked by complete `02`) and `04` (blocked only by complete `01`) in parallel. No runtime
+behavior ticket may invent a competing shape outside the frozen contract in ticket 01 /
 [`docs/prd/causal-sync-wire.md`](../../docs/prd/causal-sync-wire.md) / ADR-0019–0021.
 
 ## Primary acceptance seam

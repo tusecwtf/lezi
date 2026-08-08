@@ -26,6 +26,10 @@ pub(crate) enum TableDispositionKind {
     Discard,
     /// Target-only table created empty by current schema init; no v3 source rows.
     TargetOnlyEmpty,
+    /// Target-only tables filled by causal finalize (base versions / empty conflict
+    /// and source-relation shells). Not copied from v3/v11 row-for-row; empty until
+    /// `finalize_causal_v12` (versions/heads) or left empty (receipts/conflicts/relations).
+    TargetCausalMinted,
 }
 
 /// Row-level filter applied **before** field mapping on KeepOrTransform tables.
@@ -587,9 +591,15 @@ pub(crate) enum FailureMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthoritativeFailure {
     SourceUserVersionNotThree,
-    /// Allowlisted v3 table missing, wrong columns/types/nullability/pk, or shape mismatch.
-    /// **Not** used for missing path, constrained value corruption, or target-side invariants.
+    /// v11→v12 source `PRAGMA user_version` is not 11.
+    SourceUserVersionNotEleven,
+    /// Allowlisted source table missing, wrong columns/types/nullability/pk, index/CHECK drift,
+    /// or table-set mismatch. **Not** used for missing path, constrained value corruption,
+    /// or target-side causal invariants.
     SourceShapeMismatch,
+    /// Target-side causal finalize/validate failed after source was accepted
+    /// (heads/projection, wake refs, media closure, etc.).
+    CausalIntegrityFailed,
     /// Any user table not in the v3 allowlist.
     UnknownSourceUserTable,
     /// Constrained text outside the closed CHECK/domain set (e.g. bundle status, publication source).
@@ -612,7 +622,8 @@ pub(crate) enum AuthoritativeFailure {
     MediaFileMissingOrMismatch,
 }
 
-/// Entity types allowed by v3/v11 CHECK contracts (single source for migrator + tests).
+/// Entity types allowed on **source** v3/v11 CHECK contracts (migrator input allowlist).
+/// Target v12 also accepts `wake_observation` (created by causal finalize, never on v11 source).
 pub(crate) const ALLOWED_ENTITY_TYPES: &[&str] = &[
     "baby",
     "record",
@@ -620,6 +631,17 @@ pub(crate) const ALLOWED_ENTITY_TYPES: &[&str] = &[
     "care_plan",
     "custom_item",
     "fulfillment_candidate",
+];
+
+/// Entity types present on current (v12) schema CHECK.
+pub(crate) const TARGET_ALLOWED_ENTITY_TYPES: &[&str] = &[
+    "baby",
+    "record",
+    "media",
+    "care_plan",
+    "custom_item",
+    "fulfillment_candidate",
+    "wake_observation",
 ];
 
 /// `media_publications.source` closed set (CHECK).
@@ -701,7 +723,9 @@ pub(crate) fn failure_mode() -> FailureMode {
 pub(crate) fn authoritative_failures() -> &'static [AuthoritativeFailure] {
     &[
         AuthoritativeFailure::SourceUserVersionNotThree,
+        AuthoritativeFailure::SourceUserVersionNotEleven,
         AuthoritativeFailure::SourceShapeMismatch,
+        AuthoritativeFailure::CausalIntegrityFailed,
         AuthoritativeFailure::UnknownSourceUserTable,
         AuthoritativeFailure::SourceConstrainedValueInvalid,
         AuthoritativeFailure::InvalidMembershipRole,
@@ -1005,6 +1029,73 @@ pub(crate) fn table_dispositions() -> &'static [TableDisposition] {
             kind: TableDispositionKind::TargetOnlyEmpty,
             row_filter: RowFilter::NotApplicable,
             note: "Empty",
+        },
+        // --- schema v12 causal (minted / empty shells; not v3 source tables) ---
+        TableDisposition {
+            source_or_target_name: "entity_versions",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Filled by finalize_causal_v12 migration_base versions",
+        },
+        TableDisposition {
+            source_or_target_name: "entity_version_parents",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after migrate (base versions have no parents)",
+        },
+        TableDisposition {
+            source_or_target_name: "entity_version_media",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Filled by finalize for atomic root media membership",
+        },
+        TableDisposition {
+            source_or_target_name: "entity_stable_heads",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Filled by finalize: one head per versioned entity",
+        },
+        TableDisposition {
+            source_or_target_name: "mutation_receipts",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate (no live mutations yet)",
+        },
+        TableDisposition {
+            source_or_target_name: "conflicts",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate",
+        },
+        TableDisposition {
+            source_or_target_name: "conflict_branches",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate",
+        },
+        TableDisposition {
+            source_or_target_name: "conflict_resolutions",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate",
+        },
+        TableDisposition {
+            source_or_target_name: "source_relations",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate (no duplicate resolutions)",
+        },
+        TableDisposition {
+            source_or_target_name: "source_relation_members",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate",
+        },
+        TableDisposition {
+            source_or_target_name: "source_relation_declarations",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate",
         },
     ]
 }
@@ -1476,6 +1567,8 @@ mod tests {
         let set = authoritative_failures();
         assert!(set.len() >= 10);
         assert!(set.contains(&AuthoritativeFailure::SourceShapeMismatch));
+        assert!(set.contains(&AuthoritativeFailure::SourceUserVersionNotEleven));
+        assert!(set.contains(&AuthoritativeFailure::CausalIntegrityFailed));
         assert!(set.contains(&AuthoritativeFailure::UnknownSourceUserTable));
         assert!(set.contains(&AuthoritativeFailure::SourceConstrainedValueInvalid));
         assert!(set.contains(&AuthoritativeFailure::NotExactlyOneActiveOwner));
@@ -1490,6 +1583,8 @@ mod tests {
                 SOURCE_V3_SCHEMA_SQL.contains(&format!("'{ty}'")),
                 "SOURCE_V3_SCHEMA_SQL missing entity type {ty}"
             );
+        }
+        for ty in TARGET_ALLOWED_ENTITY_TYPES {
             assert!(
                 CURRENT_SCHEMA_SQL.contains(&format!("'{ty}'")),
                 "CURRENT_SCHEMA_SQL missing entity type {ty}"
@@ -1828,10 +1923,12 @@ mod tests {
 
     #[test]
     fn target_only_tables_have_no_keep_field_mappings() {
-        for table in table_dispositions()
-            .iter()
-            .filter(|row| row.kind == TableDispositionKind::TargetOnlyEmpty)
-        {
+        for table in table_dispositions().iter().filter(|row| {
+            matches!(
+                row.kind,
+                TableDispositionKind::TargetOnlyEmpty | TableDispositionKind::TargetCausalMinted
+            )
+        }) {
             let keepish: Vec<_> = field_mappings()
                 .iter()
                 .filter(|row| {
@@ -1847,8 +1944,37 @@ mod tests {
                 .collect();
             assert!(
                 keepish.is_empty(),
-                "TargetOnlyEmpty {} must not have keep mappings",
+                "target-only/causal {} must not have keep mappings",
                 table.source_or_target_name
+            );
+        }
+    }
+
+    #[test]
+    fn every_current_schema_user_table_has_a_disposition() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(CURRENT_SCHEMA_SQL).unwrap();
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                ",
+            )
+            .unwrap();
+        let schema_tables: BTreeSet<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let disposed: BTreeSet<_> = table_dispositions()
+            .iter()
+            .map(|row| row.source_or_target_name.to_owned())
+            .collect();
+        for table in &schema_tables {
+            assert!(
+                disposed.contains(table.as_str()),
+                "CURRENT_SCHEMA table `{table}` missing from table_dispositions"
             );
         }
     }

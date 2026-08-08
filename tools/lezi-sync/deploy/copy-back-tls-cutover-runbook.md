@@ -47,7 +47,7 @@ Full numbered form used by help/script headers:
 | Pre-TLS drift probe | `http://192.168.50.4:8765/health` (plaintext may still answer until cutover) |
 | TLS SAN host | `LEZI_TLS_HOST=192.168.50.4` |
 | Container / compose project | `lezi-sync` / `lezi` |
-| Expected migrated schema | `PRAGMA user_version` = current `DATABASE_SCHEMA_VERSION` (11) |
+| Expected migrated schema | `PRAGMA user_version` = current `DATABASE_SCHEMA_VERSION` (12) |
 | Data bind uid | `10001:10001` (container user; must own `lezi.db` after copy-back) |
 
 Override only via env (`NAS_SSH`, `NAS_SSH_PORT`, `LEZI_DATA_HOST_PATH`, `LEZI_TLS_HOST`, …).
@@ -205,7 +205,7 @@ Script behavior (fail-closed):
 - Requires confirm env flags + (live) `LEZI_NAS_BACKUP_PATH`.
 - Requires `sqlite3` (no “warn and continue”).
 - Runs `lezi-sync offline-migrate validate --out` (full preflight shape + secret), not only `PRAGMA user_version`.
-- Proves `user_version` equals shipped current schema (11); override needs `LEZI_ALLOW_USER_VERSION_OVERRIDE=1`.
+- Proves `user_version` equals shipped current schema (12); override needs `LEZI_ALLOW_USER_VERSION_OVERRIDE=1`.
 - Refuses residual out/ WAL/SHM/journal.
 - Live transport is **rsync only** (scp refused — no merge leftovers / stale WAL).
 - Remote: container absent probe; NAS backup v3 probe.

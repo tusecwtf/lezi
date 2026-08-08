@@ -73,6 +73,10 @@ pub(crate) struct MigrateReport {
     pub discarded_publications: u64,
     /// Authority media files copied under dest `media/` (ticket 03 data-dir path).
     pub media_files_copied: u64,
+    /// Causal migration base versions minted for versioned roots.
+    pub base_versions: u64,
+    /// Historical closed Sleep → WakeObservation rows created.
+    pub wake_observations: u64,
 }
 
 #[derive(Debug, Error)]
@@ -418,6 +422,11 @@ fn transfer_all(
             )));
         }
     }
+
+    // Mint causal base versions + closed-sleep WakeObservation (schema v12).
+    // Media files are not yet on dest for the pure-DB path; wake media UUID
+    // derivation uses staged_sha256 when present.
+    super::causal::finalize_causal_v12(&tx, None, &mut report)?;
 
     tx.commit()?;
     Ok(report)
