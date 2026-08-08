@@ -314,10 +314,27 @@ internal class ReplicaSyncEngine(
                 causalSettlement.settle(session, causalSlice)
                 causalHandled = true
                 // Concurrent user edits keep dirty Room state for the next cycle.
-                // Only fulfillment (legacy) may still need an authority replan loop.
+                // Co-batched create-create (e.g. Sleep then Wake under LocalWrite) can
+                // leave residual dirty causal roots after a recoverable reject such as
+                // missing_sleep_reference once the prior unit is stable — residual-replan
+                // only when the dirty causal set shrank (progress), same pass budget as
+                // legacy authority replan. Fulfillment still uses the legacy loop below.
                 val remaining = captureLocalChanges(session).candidates
+                val remainingCausal = remaining.filter {
+                    it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
+                }
                 val remainingLegacy = remaining.filter {
                     it.entityType == "fulfillment_candidate"
+                }
+                val priorCausalKeys = causalSlice
+                    .map { it.entityType to it.clientUuid }
+                    .toSet()
+                val remainingCausalKeys = remainingCausal
+                    .map { it.entityType to it.clientUuid }
+                    .toSet()
+                if (remainingCausal.isNotEmpty() && remainingCausalKeys != priorCausalKeys) {
+                    candidates = remainingCausal + remainingLegacy
+                    continue
                 }
                 if (remainingLegacy.isEmpty()) {
                     return neighborLosers

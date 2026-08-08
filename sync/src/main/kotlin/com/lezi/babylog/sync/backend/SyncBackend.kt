@@ -158,7 +158,15 @@ data class ConflictResolveRequest(
 )
 
 sealed class ConflictResolveResult {
-    data class Accepted(val stableVersionId: String) : ConflictResolveResult()
+    /**
+     * Wire §8.2 resolved: new stable version plus authoritative root/media so the
+     * resolver device can clear [openConflictId] and project without waiting for pull.
+     */
+    data class Accepted(
+        val stableVersionId: String,
+        val stableRootJson: String = "{}",
+        val stableMedia: List<CausalMediaItem> = emptyList(),
+    ) : ConflictResolveResult()
 
     data class CasMismatch(
         val detail: ConflictDetail? = null,

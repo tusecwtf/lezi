@@ -300,6 +300,94 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
+    fun localWriteCoBatchedSleepAndWakeResettlesWakeAfterSleepAccepted() = runTest {
+        // First reconcile rejects wake (missing_sleep_reference) while sleep publishes;
+        // residual replan in the same LocalWrite cycle must accept wake without a second trigger.
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 6)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val sleepUuid = "sleep-cobatch"
+        val wakeUuid = "wake-cobatch"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = sleepUuid,
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 100,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = null,
+            ),
+        )
+        rig.wakeObservations.seed(
+            com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                clientUuid = wakeUuid,
+                sleepRecordClientUuid = sleepUuid,
+                wakeTimestamp = 200,
+                observerMembershipId = "membership-a",
+                note = "up",
+                withdrawn = false,
+                updatedAt = 200,
+                syncDirty = true,
+                baseVersion = null,
+            ),
+        )
+
+        var reconcilePass = 0
+        rig.backend.onCausalReconcile = { units ->
+            reconcilePass += 1
+            val results = units.map { unit ->
+                when {
+                    unit.entityType == "wake_observation" && reconcilePass == 1 ->
+                        CausalUnitResult(
+                            status = CausalReconcileStatus.REJECTED,
+                            mutationId = unit.mutationId,
+                            requestHash = causalMutationContentHash(unit),
+                            generation = session.pullGeneration,
+                            code = "missing_sleep_reference",
+                            reason = "sleep not yet stable",
+                        )
+                    else -> CausalUnitResult(
+                        status = CausalReconcileStatus.PUBLISH,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                    )
+                }
+            }
+            rig.backend.nextCausalReconcile = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = results,
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(6)
+        // Two settle passes: sleep+wake then residual wake.
+        assertThat(reconcilePass).isEqualTo(2)
+        assertThat(rig.backend.causalReconciledUnits).hasSize(2)
+        assertThat(rig.backend.causalCommittedUnits).isNotEmpty()
+        val sleep = requireNotNull(rig.records.getByClientUuid(sleepUuid))
+        val wake = requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))
+        assertThat(sleep.syncDirty).isFalse()
+        assertThat(sleep.baseVersion).isNotNull()
+        assertThat(wake.syncDirty).isFalse()
+        assertThat(wake.baseVersion).isNotNull()
+        assertThat(wake.openConflictId).isNull()
+    }
+
+    @Test
     fun localWriteWithoutCausalCapabilityStillPullsBeforeLegacySettle() = runTest {
         // Spec: no-pull is forbidden until causal wire is available (no faster LWW).
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 5)

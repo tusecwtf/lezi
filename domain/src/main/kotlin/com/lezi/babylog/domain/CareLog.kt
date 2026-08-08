@@ -199,6 +199,12 @@ class CareLog @Inject constructor(
         conflictSummaryDao = conflictSummaryDao,
         conflictDetailCacheDao = conflictDetailCacheDao,
         syncPort = syncPort,
+        recordDao = recordDao,
+        wakeObservationDao = wakeObservationDao,
+        babyDao = babyDao,
+        carePlanDao = carePlanDao,
+        customItemDao = customItemDao,
+        transactionRunner = transactionRunner,
     )
     private val sourceRelationCoordinator = SourceRelationCoordinator(
         recordDao = recordDao,

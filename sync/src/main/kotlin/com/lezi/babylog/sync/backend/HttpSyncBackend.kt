@@ -876,6 +876,79 @@ class HttpSyncBackend internal constructor(
         return json.toSourceRelationResult("source relation resolve-group")
     }
 
+    override suspend fun fetchConflictDetail(
+        session: SyncSession,
+        conflictId: String,
+    ): ConflictDetail {
+        session.requireCurrentReplicaTransport()
+        val id = conflictId.trim()
+        require(id.isNotEmpty()) { "conflict_id 无效" }
+        val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
+        val json = get(
+            session.baseUrl,
+            "/v1/conflicts/$encoded",
+            session.accessToken,
+        )
+        return json.toConflictDetail("conflict detail")
+    }
+
+    override suspend fun resolveConflict(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictResolveRequest,
+    ): ConflictResolveResult {
+        session.requireCurrentReplicaTransport()
+        val id = conflictId.trim()
+        require(id.isNotEmpty()) { "conflict_id 无效" }
+        require(request.expectedStableVersion.isNotBlank()) {
+            "expected_stable_version 无效"
+        }
+        require(request.resolutionMutationId.isNotBlank()) {
+            "resolution_mutation_id 无效"
+        }
+        val resolvedRoot = runCatching {
+            Json.parseToJsonElement(request.resolvedRootJson)
+        }.getOrNull() as? JsonObject
+            ?: throw IllegalArgumentException("resolved_root 不是对象")
+        val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
+        val body = buildJsonObject {
+            put("expected_stable_version", request.expectedStableVersion)
+            put(
+                "expected_branch_versions",
+                buildJsonArray {
+                    request.expectedBranchVersions.sorted().forEach { version ->
+                        add(JsonPrimitive(version))
+                    }
+                },
+            )
+            put("resolved_root", resolvedRoot)
+            put(
+                "resolved_media",
+                buildJsonArray {
+                    request.resolvedMedia
+                        .sortedBy(CausalMediaItem::mediaUuid)
+                        .forEach { item -> add(item.toJson()) }
+                },
+            )
+            put("resolution_mutation_id", request.resolutionMutationId)
+            put(
+                "conflict_choices",
+                buildJsonObject {
+                    request.conflictChoices.toSortedMap().forEach { (path, value) ->
+                        put(path, value)
+                    }
+                },
+            )
+        }
+        val json = post(
+            session.baseUrl,
+            "/v1/conflicts/$encoded/resolve",
+            session.accessToken,
+            body,
+        )
+        return json.toConflictResolveResult("conflict resolve")
+    }
+
     override suspend fun putCausalMediaPreimage(
         session: SyncSession,
         mediaUuid: String,
@@ -1962,6 +2035,161 @@ private fun JsonObject.optionalSourceRelationSummary(context: String): PullSourc
         peerIds = peers,
     )
 }
+
+/**
+ * Wire §8.1 conflict detail. Server omits entity_type/client_uuid (lookup by
+ * conflict_id); optional fields default so summary pairing can fill CAS roots.
+ */
+private fun JsonObject.toConflictDetail(context: String): ConflictDetail {
+    val stableRoot = when (val root = get("stable_root")) {
+        null, JsonNull -> "{}"
+        is JsonObject -> root.toString()
+        else -> throw IllegalArgumentException("$context.stable_root 无效")
+    }
+    val media = when (val raw = get("stable_media")) {
+        null, JsonNull -> emptyList()
+        is JsonArray -> raw.mapIndexed { index, element ->
+            (element as? JsonObject)?.toCausalMediaItem("$context.stable_media[$index]")
+                ?: throw IllegalArgumentException("$context.stable_media[$index] 不是对象")
+        }
+        else -> throw IllegalArgumentException("$context.stable_media 无效")
+    }
+    val branchesElement = get("branches")
+        ?: throw IllegalArgumentException("$context.branches 缺失")
+    val branchesJson = when (branchesElement) {
+        is JsonArray -> branchesElement.toString()
+        JsonNull -> "[]"
+        else -> throw IllegalArgumentException("$context.branches 无效")
+    }
+    val branchVersionIds = when (branchesElement) {
+        is JsonArray -> branchesElement.mapIndexed { index, element ->
+            val branch = element as? JsonObject
+                ?: throw IllegalArgumentException("$context.branches[$index] 不是对象")
+            branch.requiredNonBlankString("branch_version_id", "$context.branches[$index]")
+        }
+        else -> emptyList()
+    }
+    val conflictingPaths = when (val raw = get("conflicting_paths")) {
+        null, JsonNull -> emptyList()
+        is JsonArray -> raw.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.conflicting_paths[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$context.conflicting_paths 无效")
+    }
+    val autoMerged = when (val raw = get("auto_merged")) {
+        null, JsonNull -> "{}"
+        is JsonObject -> raw.toString()
+        else -> throw IllegalArgumentException("$context.auto_merged 无效")
+    }
+    val baseRoot = when (val raw = get("base_root")) {
+        null, JsonNull -> null
+        is JsonObject -> raw.toString()
+        else -> throw IllegalArgumentException("$context.base_root 无效")
+    }
+    return ConflictDetail(
+        conflictId = requiredNonBlankString("conflict_id", context),
+        entityType = optionalNonBlankString("entity_type", context).orEmpty(),
+        clientUuid = optionalNonBlankString("client_uuid", context).orEmpty(),
+        stableVersionId = requiredNonBlankString("stable_version_id", context),
+        stableRootJson = stableRoot,
+        stableMedia = media,
+        baseRootJson = baseRoot,
+        branchesJson = branchesJson,
+        conflictingPaths = conflictingPaths,
+        autoMergedJson = autoMerged,
+        branchVersionIds = branchVersionIds,
+        kind = optionalNonBlankString("kind", context) ?: "concurrent",
+        baseVersionId = optionalNonBlankString("base_version_id", context),
+        updatedAt = optionalLong("updated_at", context) ?: 0L,
+    )
+}
+
+/** Wire §8.2 resolve result: resolved | cas_mismatch | rejected. */
+private fun JsonObject.toConflictResolveResult(context: String): ConflictResolveResult {
+    val status = requiredNonBlankString("status", context)
+    return when (status) {
+        "resolved" -> {
+            val stableVersionId = requiredNonBlankString("stable_version_id", context)
+            val stableRoot = when (val root = get("stable_root")) {
+                null, JsonNull -> "{}"
+                is JsonObject -> root.toString()
+                else -> throw IllegalArgumentException("$context.stable_root 无效")
+            }
+            val media = when (val raw = get("stable_media")) {
+                null, JsonNull -> emptyList()
+                is JsonArray -> raw.mapIndexed { index, element ->
+                    (element as? JsonObject)
+                        ?.toCausalMediaItem("$context.stable_media[$index]")
+                        ?: throw IllegalArgumentException(
+                            "$context.stable_media[$index] 不是对象",
+                        )
+                }
+                else -> throw IllegalArgumentException("$context.stable_media 无效")
+            }
+            ConflictResolveResult.Accepted(
+                stableVersionId = stableVersionId,
+                stableRootJson = stableRoot,
+                stableMedia = media,
+            )
+        }
+        "cas_mismatch" -> {
+            val detail = when (val raw = get("detail")) {
+                null, JsonNull -> null
+                is JsonObject -> raw.toConflictDetail("$context.detail")
+                else -> throw IllegalArgumentException("$context.detail 无效")
+            }
+            val summary = when (val raw = get("conflict_summary")) {
+                null, JsonNull -> null
+                is JsonObject -> raw.toConflictResolveSummary("$context.conflict_summary")
+                else -> throw IllegalArgumentException("$context.conflict_summary 无效")
+            }
+            ConflictResolveResult.CasMismatch(detail = detail, summary = summary)
+        }
+        "rejected" -> ConflictResolveResult.Rejected(
+            code = optionalNonBlankString("code", context) ?: "rejected",
+            message = optionalNonBlankString("reason", context)
+                ?: optionalNonBlankString("message", context)
+                ?: "冲突解决被拒绝",
+        )
+        else -> ConflictResolveResult.Rejected(
+            code = optionalNonBlankString("code", context) ?: status,
+            message = optionalNonBlankString("reason", context)
+                ?: optionalNonBlankString("message", context)
+                ?: "未知冲突解决状态: $status",
+        )
+    }
+}
+
+private fun JsonObject.toConflictResolveSummary(context: String): ConflictResolveSummary {
+    val branchIds = when (val branches = get("branch_version_ids")) {
+        null -> throw IllegalArgumentException("$context.branch_version_ids 缺失")
+        JsonNull -> emptyList()
+        is JsonArray -> branches.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.branch_version_ids[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$context.branch_version_ids 无效")
+    }
+    return ConflictResolveSummary(
+        conflictId = requiredNonBlankString("conflict_id", context),
+        entityType = requiredNonBlankString("entity_type", context),
+        clientUuid = requiredNonBlankString("client_uuid", context),
+        stableVersionId = requiredNonBlankString("stable_version_id", context),
+        baseVersionId = optionalNonBlankString("base_version_id", context),
+        kind = optionalNonBlankString("kind", context) ?: "concurrent",
+        branchVersionIds = branchIds,
+        updatedAt = optionalLong("updated_at", context) ?: 0L,
+    )
+}
+
+private fun JsonObject.optionalLong(key: String, context: String): Long? =
+    when (val value = get(key)) {
+        null, JsonNull -> null
+        is JsonPrimitive -> value.longOrNull
+            ?: throw IllegalArgumentException("$context.$key 无效")
+        else -> throw IllegalArgumentException("$context.$key 无效")
+    }
 
 private fun JsonObject.toSourceRelationResult(context: String): SourceRelationResult {
     val status = requiredNonBlankString("status", context)
