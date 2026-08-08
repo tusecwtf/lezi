@@ -15,6 +15,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Test
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
@@ -44,6 +45,62 @@ import com.lezi.babylog.sync.RecordingTransactionRunner
 import com.lezi.babylog.sync.TestMediaFileStore
 
 class ReplicaSyncEngineAuthoritySettleTest {
+    @Test
+    fun historicalLiveMediaMetadataIsRepairedBeforeAuthorityReconcile() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session)
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-with-historical-photo",
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 100,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        val mediaUuid = "01234567-89ab-4cde-8fab-0123456789ab"
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = mediaUuid,
+                kind = "log",
+                recordId = recordId,
+                localUri = "record-media/from-v12.png",
+                mime = null,
+                width = null,
+                height = null,
+                byteSize = 0,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.onReconcile = { units ->
+            val payload = Json.parseToJsonElement(
+                units.single().media.single().payloadJson,
+            ).jsonObject
+            require(payload.getValue("byte_size").jsonPrimitive.long > 0) {
+                "byte_size is out of range"
+            }
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val reconciledPayload = Json.parseToJsonElement(
+            rig.backend.reconciledUnits.single().single().media.single().payloadJson,
+        ).jsonObject
+        assertThat(reconciledPayload.getValue("byte_size").jsonPrimitive.long).isEqualTo(12)
+        assertThat(reconciledPayload.getValue("mime").jsonPrimitive.content)
+            .isEqualTo("image/jpeg")
+        assertThat(rig.records.getByClientUuid("record-with-historical-photo")).isNotNull()
+        assertThat(rig.media.getByClientUuid(mediaUuid)).isNotNull()
+    }
+
     @Test
         fun adoptRemoteAtomicallyRemovesLocalMediaMissingFromCanonicalManifest() = runTest {
             val session = joinedReplicaSession().copy(role = FamilyRole.Owner)

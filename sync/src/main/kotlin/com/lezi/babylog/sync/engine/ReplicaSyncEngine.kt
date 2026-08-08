@@ -2159,7 +2159,11 @@ internal class ReplicaSyncEngine(
      */
     private suspend fun repairTechnicalMediaBeforeCapture(session: SyncSession) {
         val orphanPaths = mutableSetOf<String>()
-        for (snapshot in mediaDao.listPendingSync()) {
+        // Authority settle can include a clean media row when its owning root is pending (and
+        // the first settle after disaster recovery can cover an entirely clean restored set).
+        // Inspect the complete local media set so historical zero/null probe fields cannot reach
+        // reconcile merely because the row already has a publication receipt.
+        for (snapshot in mediaDao.listAllIncludingDeleted()) {
             val inspected = snapshot.localUri
                 .takeIf(String::isNotBlank)
                 ?.let { mediaFiles.inspect(it) }
@@ -2185,8 +2189,32 @@ internal class ReplicaSyncEngine(
                     return@run
                 }
                 val invalidDeletedBabyAvatar = current.kind == "avatar" && baby?.deletedAt != null
-                val missingLocalBytes = current.localUri.isBlank() || inspected == null
-                if (!invalidDeletedBabyAvatar && !missingLocalBytes) return@run
+                val missingLocalBytes = current.localUri.isBlank() ||
+                    inspected == null ||
+                    inspected.byteSize <= 0
+                if (!invalidDeletedBabyAvatar && !missingLocalBytes) {
+                    // v12 media rows can retain the default zero/null probe fields even though
+                    // their app-owned file is intact. Authority reconcile validates the manifest
+                    // before the atomic publisher gets a chance to prepare the upload, so repair
+                    // those historical fields under the same revision CAS before capture.
+                    mediaDao.mergePreparedMetadata(
+                        clientUuid = current.clientUuid,
+                        expectedUpdatedAt = current.updatedAt,
+                        expectedLocalUri = current.localUri,
+                        expectedDeletedAt = current.deletedAt,
+                        mime = inspected.mime,
+                        width = inspected.width,
+                        height = inspected.height,
+                        byteSize = inspected.byteSize,
+                    )
+                    return@run
+                }
+
+                // The complete-set scan above exists only to repair intact historical rows.
+                // Preserve the prior pending-only disposition for missing bytes: a clean row
+                // may be waiting for pull-side recovery, and an untrusted receipt-shaped value
+                // must not turn that row into a family tombstone.
+                if (!current.syncDirty) return@run
 
                 if (missingLocalBytes && current.hasReceiptFor(session)) {
                     mediaDao.update(current.copy(localUri = ""))

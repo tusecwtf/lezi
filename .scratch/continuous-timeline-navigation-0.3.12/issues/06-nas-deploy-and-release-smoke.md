@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 — 执行真实历史版本升级与设备验收；执行前还必须取得用户对本次 NAS CD、stop/rm 和容器替换的明确确认。
 
-**Status:** blocked — ticket 05 joined-client TLS/sync acceptance and fresh CD approval are missing
+**Status:** ready-for-confirmation — ticket 05 accepted; fresh CD approval is still required
 
 - [ ] CD 前说明将构建/封装、scp、创建 off-repo age 加密凭证备份并 stop/rm 替换 `lezi-sync`，确认数据 bind 保留、家庭同步会短暂中断以及 age recipients 已配置，再等待用户明确批准
 - [ ] 普通 CD 前只读取得 live TLS certificate SHA-256 和 SPKI、镜像/协议/版本、bootstrap secret 来源与数据 bind 状态；任何证书半缺失、不可验证、secret 漂移、备份失败或协议异常都在替换前失败关闭

@@ -420,19 +420,39 @@ fn authoritative_reconcile_adjudicates_a_disaster_restored_head_without_bundle_h
             vec![baby, record.clone(), media.clone()],
         )
         .unwrap();
+    let restored_record = store
+        .pull(&family_id, 0)
+        .unwrap()
+        .entities
+        .into_iter()
+        .find(|value| value.client_uuid == record_id.to_string())
+        .unwrap();
+    assert_eq!(
+        restored_record
+            .payload
+            .get("created_by_membership_id")
+            .and_then(serde_json::Value::as_str),
+        Some(membership_id.as_str()),
+    );
     let owner = Principal {
-        family_id,
+        family_id: family_id.clone(),
         role: "owner".to_owned(),
-        membership_id,
+        membership_id: membership_id.clone(),
         device_id,
     };
+
+    let mut current_record = record;
+    current_record.payload.insert(
+        "created_by_membership_id".to_owned(),
+        serde_json::Value::String(membership_id),
+    );
 
     let result = store
         .reconcile_units(
             &owner,
             vec![ReconcileUnit {
                 content_hash: "restored-head".to_owned(),
-                root: record,
+                root: current_record,
                 media: vec![media.clone()],
             }],
             100,

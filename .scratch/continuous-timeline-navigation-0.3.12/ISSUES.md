@@ -18,17 +18,17 @@ Target: Android **0.3.12 / versionCode 19**；`lezi-sync:0.3.12`
 | 01 | [`issues/01-continuous-timeline-interaction.md`](./issues/01-continuous-timeline-interaction.md) | complete | — |
 | 02 | [`issues/02-global-date-filter-and-timeline-experience.md`](./issues/02-global-date-filter-and-timeline-experience.md) | complete | 01 |
 | 03 | [`issues/03-all-version-lossless-apk-upgrade.md`](./issues/03-all-version-lossless-apk-upgrade.md) | complete | — |
-| 04 | [`issues/04-build-and-package-0.3.12-release-candidate.md`](./issues/04-build-and-package-0.3.12-release-candidate.md) | complete | 01, 02, 03 |
-| 05 | [`issues/05-signed-historical-upgrade-device-acceptance.md`](./issues/05-signed-historical-upgrade-device-acceptance.md) | in-progress | 04 |
-| 06 | [`issues/06-nas-deploy-and-release-smoke.md`](./issues/06-nas-deploy-and-release-smoke.md) | blocked | 05 + explicit CD confirmation |
+| 04 | [`issues/04-build-and-package-0.3.12-release-candidate.md`](./issues/04-build-and-package-0.3.12-release-candidate.md) | implementation-complete | 01, 02, 03 |
+| 05 | [`issues/05-signed-historical-upgrade-device-acceptance.md`](./issues/05-signed-historical-upgrade-device-acceptance.md) | complete | 04 |
+| 06 | [`issues/06-nas-deploy-and-release-smoke.md`](./issues/06-nas-deploy-and-release-smoke.md) | ready-for-confirmation | explicit CD confirmation |
 
 ## Frontier
 
-Ticket **05** is the current frontier. The same-signer install matrix and local migration/device suites
-are green, but a retained joined-client fixture with real family session, endpoint/SPKI trust and an
-authenticated post-upgrade sync is still required.
-Ticket **06** must not execute NAS replacement until ticket 05 is accepted and the user gives a fresh
-explicit CD confirmation.
+Ticket **05** is accepted: the same-signer matrix, data-rich retained v12 joined fixture, isolated TLS
+recovery, current-wire restore, authenticated sync and final APK identity are evidenced on API 35.
+Ticket **06** is the current frontier. The current APK/metadata and all local Android/Rust gates are
+green; the exact linux/amd64 image and closed NAS package must be rebuilt from the current tree as part
+of the approved CD workflow. No NAS replacement may begin without a fresh explicit confirmation.
 
 ## Release boundary
 
