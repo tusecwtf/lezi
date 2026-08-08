@@ -14,6 +14,22 @@ data class SyncEntity(
     val updatedAt: Long,
     val deletedAt: Long? = null,
     val rev: Long = 0,
+    /**
+     * Opaque stable `version_id` for causal roots (wire §7). Null for media /
+     * fulfillment_candidate and for pre-causal projections without a head.
+     */
+    val versionId: String? = null,
+    /** Bounded open-conflict summary from pull (wire §7). */
+    val conflictSummary: PullConflictSummary? = null,
+)
+
+/** Wire §7 conflict_summary closed keys on ordinary pull entities. */
+data class PullConflictSummary(
+    val conflictId: String,
+    val entityType: String,
+    val clientUuid: String,
+    val stableVersionId: String,
+    val branchVersionIds: List<String>,
 )
 
 data class PullResult(
@@ -24,6 +40,69 @@ data class PullResult(
     /** Current wire always contains family_name; null explicitly clears it. */
     val familyName: String? = null,
 )
+
+/** Wire §4.6 causal media manifest item (no bytes). */
+data class CausalMediaItem(
+    val mediaUuid: String,
+    val role: String,
+    val sha256: String,
+    val byteSize: Long,
+    val mime: String,
+    val width: Long? = null,
+    val height: Long? = null,
+)
+
+/**
+ * Wire §3.1 frozen mutation unit for `/v1/causal/reconcile` and `/v1/causal/commit`.
+ * [rootJson] is the closed-key root object (includes `updated_at`).
+ */
+data class CausalMutationUnit(
+    val mutationId: String,
+    val baseVersion: String?,
+    val entityType: String,
+    val clientUuid: String,
+    val rootJson: String,
+    val media: List<CausalMediaItem> = emptyList(),
+    val deleted: Boolean = false,
+)
+
+/** Wire §5 / §6 unit result. Status is the closed string from the server. */
+data class CausalUnitResult(
+    val status: String,
+    val mutationId: String,
+    val requestHash: String,
+    val generation: String,
+    val stableVersionId: String? = null,
+    val stableRootJson: String = "{}",
+    val stableMedia: List<CausalMediaItem> = emptyList(),
+    val branchVersionId: String? = null,
+    val conflictId: String? = null,
+    val code: String? = null,
+    val reason: String? = null,
+    val conflictingPaths: List<String> = emptyList(),
+)
+
+data class CausalBatchResult(
+    val generation: String,
+    val cursor: Long,
+    val results: List<CausalUnitResult>,
+)
+
+/** Closed causal reconcile statuses (wire §5). */
+object CausalReconcileStatus {
+    const val CONFIRMED = "confirmed"
+    const val PUBLISH = "publish"
+    const val CONFLICT_PREVIEW = "conflict_preview"
+    const val REJECTED = "rejected"
+}
+
+/** Closed causal commit statuses (wire §6). */
+object CausalCommitStatus {
+    const val ACCEPTED = "accepted"
+    const val MERGED = "merged"
+    const val BRANCHED = "branched"
+    const val REJECTED = "rejected"
+}
 
 enum class AuthorityDisposition {
     Confirmed,
@@ -452,6 +531,32 @@ interface SyncBackend {
         session: SyncSession,
         units: List<ReconcileUnitDraft>,
     ): ReconcileResult = throw UnsupportedOperationException("Authoritative reconcile is not implemented")
+
+    /**
+     * When false, [ReplicaSyncEngine] keeps the legacy authority reconcile path and
+     * does not freeze causal mutation epochs. Http backends that speak the causal
+     * reconcile/commit routes return true.
+     */
+    fun supportsCausalWire(): Boolean = false
+
+    /**
+     * Causal dry-run reconcile (wire §5). Does not create stable versions or branches.
+     * Proof is bound to generation, stable versions and request hashes in each unit result.
+     */
+    suspend fun causalReconcile(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult = throw UnsupportedOperationException("Causal reconcile is not implemented")
+
+    /**
+     * Causal atomic commit (wire §6). Returns accepted / merged / branched / rejected
+     * with full stable root/media projection and optional conflict refs.
+     */
+    suspend fun causalCommit(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult = throw UnsupportedOperationException("Causal commit is not implemented")
+
     suspend fun members(session: SyncSession): List<FamilyMember>
     /** Owner updates immediately; ordinary Member receives a pending approval request. */
     suspend fun updateMyDisplayName(

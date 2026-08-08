@@ -10,6 +10,9 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
 import java.io.File
@@ -140,6 +143,9 @@ class RealSyncPort @Inject constructor(
     private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val wakeObservationDao: WakeObservationDao,
+    private val conflictSummaryDao: ConflictSummaryDao,
+    private val conflictDetailCacheDao: ConflictDetailCacheDao,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     private val apkIdentityReader: AppUpdateApkIdentityReader =
@@ -204,6 +210,9 @@ class RealSyncPort @Inject constructor(
             requireAllowed(decision)
             currentStatus.value = SyncStatus.Syncing
         },
+        wakeObservationDao = wakeObservationDao,
+        conflictSummaryDao = conflictSummaryDao,
+        conflictDetailCacheDao = conflictDetailCacheDao,
     )
     private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
         babyDao = babyDao,

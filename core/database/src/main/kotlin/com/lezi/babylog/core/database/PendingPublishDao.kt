@@ -35,6 +35,13 @@ interface PendingPublishDao {
             FROM custom_items c
             WHERE c.syncDirty = 1
             UNION ALL
+            SELECT 'wake_observation:' || w.clientUuid
+            FROM wake_observations w
+            WHERE w.syncDirty = 1 OR EXISTS (
+                SELECT 1 FROM media_assets m
+                WHERE m.wakeObservationId = w.id AND m.kind = 'wake' AND m.syncDirty = 1
+            )
+            UNION ALL
             SELECT 'fulfillment_candidate:' || f.clientUuid
             FROM fulfillment_candidates f
             WHERE f.syncDirty = 1
@@ -42,4 +49,25 @@ interface PendingPublishDao {
         """,
     )
     fun observeCount(): Flow<Int>
+
+    /**
+     * Unresolved conflicts are distinct from publish-pending dirty units.
+     * Product pending indicators must not treat these as infinite push work.
+     */
+    @Query(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT openConflictId FROM babies WHERE openConflictId IS NOT NULL
+            UNION ALL
+            SELECT openConflictId FROM records WHERE openConflictId IS NOT NULL
+            UNION ALL
+            SELECT openConflictId FROM care_plans WHERE openConflictId IS NOT NULL
+            UNION ALL
+            SELECT openConflictId FROM custom_items WHERE openConflictId IS NOT NULL
+            UNION ALL
+            SELECT openConflictId FROM wake_observations WHERE openConflictId IS NOT NULL
+        )
+        """,
+    )
+    fun observeOpenConflictCount(): Flow<Int>
 }

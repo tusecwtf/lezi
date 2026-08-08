@@ -17,6 +17,8 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.OpenSleepCandidate
@@ -34,10 +36,13 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncPlan
 import com.lezi.babylog.sync.SyncTrigger
@@ -139,6 +144,10 @@ internal class ReplicaSyncEngine(
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
+    private val wakeObservationDao: WakeObservationDao,
+    private val conflictSummaryDao: ConflictSummaryDao,
+    private val conflictDetailCacheDao:
+        com.lezi.babylog.core.database.causal.ConflictDetailCacheDao? = null,
 ) : FamilySessionReplica {
     private val publisher = EphemeralPublishPipeline(
         backend = backend,
@@ -149,6 +158,20 @@ internal class ReplicaSyncEngine(
         customItemDao = customItemDao,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
         mediaFiles = mediaFiles,
+        requireRemoteAllowed = requireRemoteAllowed,
+    )
+    private val causalSettlement = CausalSettlement(
+        backend = backend,
+        recordDao = recordDao,
+        carePlanDao = carePlanDao,
+        babyDao = babyDao,
+        mediaDao = mediaDao,
+        customItemDao = customItemDao,
+        wakeObservationDao = wakeObservationDao,
+        conflictSummaryDao = conflictSummaryDao,
+        conflictDetailCacheDao = conflictDetailCacheDao,
+        mediaFiles = mediaFiles,
+        transactionRunner = transactionRunner,
         requireRemoteAllowed = requireRemoteAllowed,
     )
 
@@ -251,8 +274,36 @@ internal class ReplicaSyncEngine(
     ): Set<String> {
         var candidates = initialCandidates
         val neighborLosers = linkedSetOf<String>()
-        repeat(MAX_AUTHORITY_SETTLEMENT_PASSES) {
-            val settlement = reconcileFrozenChanges(session, candidates)
+        for (pass in 0 until MAX_AUTHORITY_SETTLEMENT_PASSES) {
+            // Causal roots (baby/record/care_plan/custom_item/wake + media manifests)
+            // settle via reconcile/commit with exact mutation CAS — not LWW updatedAt.
+            val causalSlice = candidates.filter {
+                it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
+            }
+            var causalHandled = false
+            if (causalSlice.isNotEmpty() && backend.supportsCausalWire()) {
+                causalSettlement.settle(session, causalSlice)
+                causalHandled = true
+                // Concurrent user edits keep dirty Room state for the next cycle.
+                // Only fulfillment (legacy) may still need an authority replan loop.
+                val remaining = captureLocalChanges(session).candidates
+                val remainingLegacy = remaining.filter {
+                    it.entityType == "fulfillment_candidate"
+                }
+                if (remainingLegacy.isEmpty()) {
+                    return neighborLosers
+                }
+                candidates = remainingLegacy
+            }
+            // FulfillmentCandidate remains immutable evidence — legacy authority + bundle path.
+            // When causal is unavailable, the full candidate set uses legacy reconcile/push.
+            val forLegacy = if (causalHandled) {
+                candidates.filter { it.entityType == "fulfillment_candidate" }
+            } else {
+                candidates
+            }
+            if (forLegacy.isEmpty()) return neighborLosers
+            val settlement = reconcileFrozenChanges(session, forLegacy)
             neighborLosers += pushPending(session, settlement.publishable)
             if (settlement.retryCount == 0) return neighborLosers
             require(settlement.publishable.isNotEmpty()) {
@@ -309,6 +360,11 @@ internal class ReplicaSyncEngine(
             // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
             for (entity in entities.filter { it.type == "record" }) {
                 if (!applyRecord(entity, entity.authoritativeIn(authoritativeKeys))) {
+                    unresolved += entity
+                }
+            }
+            for (entity in entities.filter { it.type == "wake_observation" }) {
+                if (!applyWakeObservation(entity, entity.authoritativeIn(authoritativeKeys))) {
                     unresolved += entity
                 }
             }
@@ -378,13 +434,17 @@ internal class ReplicaSyncEngine(
                 .forEach { babyId ->
                     appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
                 }
-            entities.filter { it.type == "record" }
-                .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.babyId }
-                .distinct()
-                .forEach { babyId ->
-                    healOpenSleepsClosedByFamilyWake(babyId)
-                    healDuplicateOpenSleeps(babyId)
-                }
+            // Causal wire: do not invent local care truth by auto-closing overlapping sleeps.
+            // Overlap UX / WakeObservation projection belongs to later tickets.
+            if (!backend.supportsCausalWire()) {
+                entities.filter { it.type == "record" }
+                    .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.babyId }
+                    .distinct()
+                    .forEach { babyId ->
+                        healOpenSleepsClosedByFamilyWake(babyId)
+                        healDuplicateOpenSleeps(babyId)
+                    }
+            }
             (
                 entities.filter { it.type == "baby" }
                     .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
@@ -442,6 +502,25 @@ internal class ReplicaSyncEngine(
         val baby = babyDao.getByClientUuid(wire.babyClientUuid) ?: return false
         val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
             customItemDao.getByClientUuid(customItemUuid)?.id ?: return false
+        }
+        if (!forceAuthority &&
+            existing != null &&
+            !causalSettlement.shouldApplyStablePull(
+                entityType = "care_plan",
+                clientUuid = entity.clientUuid,
+                remoteVersionId = entity.versionId,
+                forceAuthority = false,
+            )
+        ) {
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "care_plan",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
         }
         val concurrentNextFeedCreate = !forceAuthority && existing != null &&
             (
@@ -558,6 +637,14 @@ internal class ReplicaSyncEngine(
                 deletedAt = entity.deletedAt,
                 syncDirty = false,
                 familyPublishedUpdatedAt = entity.updatedAt,
+                baseVersion = entity.versionId ?: existing?.baseVersion,
+                mutationId = if (forceAuthority) null else existing?.mutationId,
+                openConflictId = entity.conflictSummary?.conflictId,
+                localBranchVersionId = if (entity.conflictSummary == null) {
+                    null
+                } else {
+                    existing?.localBranchVersionId
+                },
                 systemCalendarProjectionEnabled =
                     existing?.systemCalendarProjectionEnabled ?: true,
                 systemCalendarEventId = existing?.systemCalendarEventId,
@@ -573,6 +660,14 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
+        entity.conflictSummary?.let {
+            causalSettlement.applyPullConflictSummary(
+                "care_plan",
+                entity.clientUuid,
+                it,
+                entity.updatedAt,
+            )
+        }
         return true
     }
 
@@ -765,6 +860,92 @@ internal class ReplicaSyncEngine(
      * Apply a remote custom item definition with pure updated_at LWW.
      * Preserves local sortOrder (layout). Does not resurrect local layout prefs.
      */
+    private suspend fun applyWakeObservation(
+        entity: SyncEntity,
+        forceAuthority: Boolean = false,
+    ): Boolean {
+        val existing = wakeObservationDao.getByClientUuid(entity.clientUuid)
+        if (!forceAuthority &&
+            existing != null &&
+            !causalSettlement.shouldApplyStablePull(
+                entityType = "wake_observation",
+                clientUuid = entity.clientUuid,
+                remoteVersionId = entity.versionId,
+                forceAuthority = false,
+            )
+        ) {
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "wake_observation",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
+        }
+        if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) {
+            return true
+        }
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val sleepUuid = payload.requireNonBlankString(
+            "sleep_record_client_uuid",
+            "wake_observation",
+        )
+        // Sleep root must already be local (same-page records applied first).
+        if (recordDao.getByClientUuid(sleepUuid) == null) return false
+        val wakeTs = payload.requireLong("wake_timestamp", "wake_observation")
+        val note = if ("note" in payload) {
+            payload.requireNullableString("note", "wake_observation")
+        } else {
+            null
+        }
+        val withdrawn = when (val w = payload["withdrawn"]) {
+            is JsonPrimitive -> w.booleanOrNull
+                ?: w.contentOrNull?.toBooleanStrictOrNull()
+                ?: false
+            else -> false
+        }
+        val observer = if ("observer_membership_id" in payload) {
+            payload.requireNullableString("observer_membership_id", "wake_observation").orEmpty()
+        } else {
+            ""
+        }
+        wakeObservationDao.upsert(
+            com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                id = existing?.id ?: 0,
+                clientUuid = entity.clientUuid,
+                sleepRecordClientUuid = sleepUuid,
+                wakeTimestamp = wakeTs,
+                observerMembershipId = observer.ifBlank {
+                    existing?.observerMembershipId.orEmpty()
+                },
+                note = note,
+                withdrawn = withdrawn,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                syncDirty = false,
+                baseVersion = entity.versionId ?: existing?.baseVersion,
+                mutationId = if (forceAuthority) null else existing?.mutationId,
+                openConflictId = entity.conflictSummary?.conflictId,
+                localBranchVersionId = if (entity.conflictSummary == null) {
+                    null
+                } else {
+                    existing?.localBranchVersionId
+                },
+            ),
+        )
+        entity.conflictSummary?.let {
+            causalSettlement.applyPullConflictSummary(
+                "wake_observation",
+                entity.clientUuid,
+                it,
+                entity.updatedAt,
+            )
+        }
+        return true
+    }
+
     private suspend fun applyCustomItem(
         session: SyncSession,
         entity: SyncEntity,
@@ -773,6 +954,25 @@ internal class ReplicaSyncEngine(
         val existing = customItemDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseCustomItemWire(payload)
+        if (!forceAuthority &&
+            existing != null &&
+            !causalSettlement.shouldApplyStablePull(
+                entityType = "custom_item",
+                clientUuid = entity.clientUuid,
+                remoteVersionId = entity.versionId,
+                forceAuthority = false,
+            )
+        ) {
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "custom_item",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
+        }
         // Match server LWW for business fields. Equal revisions may still carry
         // the NAS-owned immutable creator acknowledgement after a push.
         if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) return true
@@ -798,8 +998,24 @@ internal class ReplicaSyncEngine(
                 deletedAt = entity.deletedAt,
                 createdByMembershipId = creator,
                 syncDirty = false,
+                baseVersion = entity.versionId ?: existing?.baseVersion,
+                mutationId = if (forceAuthority) null else existing?.mutationId,
+                openConflictId = entity.conflictSummary?.conflictId,
+                localBranchVersionId = if (entity.conflictSummary == null) {
+                    null
+                } else {
+                    existing?.localBranchVersionId
+                },
             ),
         )
+        entity.conflictSummary?.let {
+            causalSettlement.applyPullConflictSummary(
+                "custom_item",
+                entity.clientUuid,
+                it,
+                entity.updatedAt,
+            )
+        }
         return true
     }
 
@@ -846,9 +1062,25 @@ internal class ReplicaSyncEngine(
         val existing = babyDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseBabyWire(payload)
-        // Members never own Baby LWW. The NAS snapshot wins even over an old
-        // local dirty/equal revision; local appearance/order/path stay device-local.
+        // Members still accept family authority babies (force path / member role).
         if (existing != null && session.role != FamilyRole.Member && !forceAuthority) {
+            if (!causalSettlement.shouldApplyStablePull(
+                    entityType = "baby",
+                    clientUuid = entity.clientUuid,
+                    remoteVersionId = entity.versionId,
+                    forceAuthority = false,
+                )
+            ) {
+                entity.conflictSummary?.let {
+                    causalSettlement.applyPullConflictSummary(
+                        "baby",
+                        entity.clientUuid,
+                        it,
+                        entity.updatedAt,
+                    )
+                }
+                return true
+            }
             if (existing.updatedAt > entity.updatedAt) return true
             val exactRevision = existing.updatedAt == entity.updatedAt &&
                 existing.nickname == wire.nickname &&
@@ -861,16 +1093,14 @@ internal class ReplicaSyncEngine(
                 if (existing.syncDirty) {
                     babyDao.markSynced(entity.clientUuid, entity.updatedAt)
                 }
+                if (entity.versionId != null && existing.baseVersion != entity.versionId) {
+                    babyDao.update(existing.copy(baseVersion = entity.versionId, syncDirty = false))
+                }
                 return true
             }
-            // Owner LWW ties never let a different server body overwrite the
-            // local body. A dirty tie remains an explicit unresolved conflict;
-            // a clean tie can advance because neither side is strictly newer.
             if (existing.updatedAt == entity.updatedAt) {
                 return !existing.syncDirty
             }
-            // A concurrent owner edit is an explicit conflict. Do not advance the
-            // pull cursor past a remote revision that was not actually applied.
             if (existing.syncDirty) return false
         }
         val familyId = existing?.familyId ?: familyDao.listAll().firstOrNull()?.id ?: return false
@@ -892,8 +1122,24 @@ internal class ReplicaSyncEngine(
                 avatarPath = existing?.avatarPath,
                 familyAuthority = session.role == FamilyRole.Member ||
                     existing?.familyAuthority == true,
+                baseVersion = entity.versionId ?: existing?.baseVersion,
+                mutationId = if (forceAuthority) null else existing?.mutationId,
+                openConflictId = entity.conflictSummary?.conflictId,
+                localBranchVersionId = if (entity.conflictSummary == null) {
+                    null
+                } else {
+                    existing?.localBranchVersionId
+                },
             ),
         )
+        entity.conflictSummary?.let {
+            causalSettlement.applyPullConflictSummary(
+                "baby",
+                entity.clientUuid,
+                it,
+                entity.updatedAt,
+            )
+        }
         return true
     }
 
@@ -906,6 +1152,25 @@ internal class ReplicaSyncEngine(
         val wire = parseRecordWire(payload)
         val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
             customItemDao.getByClientUuid(customItemUuid)?.id ?: return false
+        }
+        if (!forceAuthority &&
+            existing != null &&
+            !causalSettlement.shouldApplyStablePull(
+                entityType = "record",
+                clientUuid = entity.clientUuid,
+                remoteVersionId = entity.versionId,
+                forceAuthority = false,
+            )
+        ) {
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "record",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
         }
         // Match server LWW for business fields. Equal revisions may still carry
         // a server-owned author metadata acknowledgement from the current server.
@@ -920,6 +1185,9 @@ internal class ReplicaSyncEngine(
                 membershipId = wire.createdByMembershipId,
             )
             recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
+            if (entity.versionId != null && existing.baseVersion != entity.versionId) {
+                recordDao.update(existing.copy(baseVersion = entity.versionId, syncDirty = false))
+            }
             return true
         }
         val baby = babyDao.getByClientUuid(wire.babyClientUuid) ?: return false
@@ -943,8 +1211,26 @@ internal class ReplicaSyncEngine(
                 deletedAt = entity.deletedAt,
                 syncDirty = false,
                 familyPublishedUpdatedAt = entity.updatedAt,
+                baseVersion = entity.versionId ?: existing?.baseVersion,
+                mutationId = if (forceAuthority) null else existing?.mutationId,
+                openConflictId = entity.conflictSummary?.conflictId,
+                localBranchVersionId = if (entity.conflictSummary == null) {
+                    null
+                } else {
+                    existing?.localBranchVersionId
+                },
+                effectiveWakeObservationClientUuid = wire.effectiveWakeObservationClientUuid
+                    ?: existing?.effectiveWakeObservationClientUuid,
             ),
         )
+        entity.conflictSummary?.let {
+            causalSettlement.applyPullConflictSummary(
+                "record",
+                entity.clientUuid,
+                it,
+                entity.updatedAt,
+            )
+        }
         return true
     }
 
@@ -1990,6 +2276,7 @@ internal class ReplicaSyncEngine(
         val records = recordDao.listPendingSync()
         val carePlans = carePlanDao.listPendingSync()
         val customItems = customItemDao.listPendingSync()
+        val wakeObservations = wakeObservationDao.listPendingSync()
         val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync()
         val capturedPendingCreatorAcknowledgements = mutableSetOf<CreatorAcknowledgementRef>()
         materializeLocalMedia(
@@ -2018,6 +2305,13 @@ internal class ReplicaSyncEngine(
             carePlans.forEach { plan ->
                 addAll(
                     mediaDao.listForCarePlan(plan.id).filter { media ->
+                        media.deletedAt == null || media.syncDirty
+                    },
+                )
+            }
+            wakeObservations.forEach { wake ->
+                addAll(
+                    mediaDao.listActiveForWakeObservation(wake.id).filter { media ->
                         media.deletedAt == null || media.syncDirty
                     },
                 )
@@ -2078,6 +2372,30 @@ internal class ReplicaSyncEngine(
                     record,
                     babyUuid,
                     customItemUuid,
+                ),
+            )
+        }
+        wakeObservations.forEach { wake ->
+            enqueue(
+                SyncEntity(
+                    type = "wake_observation",
+                    clientUuid = wake.clientUuid,
+                    payloadJson = buildJsonObject {
+                        put("sleep_record_client_uuid", wake.sleepRecordClientUuid)
+                        put("wake_timestamp", wake.wakeTimestamp)
+                        if (wake.note == null) {
+                            put("note", JsonNull)
+                        } else {
+                            put("note", wake.note)
+                        }
+                        put("withdrawn", wake.withdrawn)
+                        put("updated_at", wake.updatedAt)
+                        if (wake.observerMembershipId.isNotBlank()) {
+                            put("observer_membership_id", wake.observerMembershipId)
+                        }
+                    }.toString(),
+                    updatedAt = wake.updatedAt,
+                    deletedAt = wake.deletedAt,
                 ),
             )
         }
@@ -2501,6 +2819,7 @@ private data class RecordWire(
     val note: String?,
     val payload: JsonObject,
     val schemaVersion: Int,
+    val effectiveWakeObservationClientUuid: String? = null,
 )
 
 private data class CarePlanWire(
@@ -2586,8 +2905,7 @@ private fun parseCustomItemWire(payload: JsonObject): CustomItemWire {
 }
 
 private fun parseRecordWire(payload: JsonObject): RecordWire {
-    payload.requireExactKeys(
-        "record",
+    val baseKeys = setOf(
         "baby_client_uuid",
         "created_by_membership_id",
         "type",
@@ -2602,6 +2920,22 @@ private fun parseRecordWire(payload: JsonObject): RecordWire {
         payload.requireNonBlankString("type", "record"),
         "record type",
     )
+    val allowedKeys = if (type == RecordType.SLEEP) {
+        baseKeys + "effective_wake_observation_client_uuid"
+    } else {
+        baseKeys
+    }
+    require(payload.keys == allowedKeys || payload.keys == baseKeys) {
+        "record current wire 字段不完整或包含未知字段: ${payload.keys.sorted()}"
+    }
+    if (type == RecordType.SLEEP) {
+        // Causal sleep: end_timestamp must not appear as a business end (wire §4.2).
+        // Legacy closed sleeps may still carry end_timestamp until WakeObservation lands.
+    } else {
+        require("effective_wake_observation_client_uuid" !in payload) {
+            "record effective_wake_observation_client_uuid 仅允许 sleep"
+        }
+    }
     val customItemUuid = payload.requireNullableString("custom_item_client_uuid", "record")
     require((type == RecordType.CUSTOM) == (customItemUuid != null)) {
         if (type == RecordType.CUSTOM) {
@@ -2618,6 +2952,11 @@ private fun parseRecordWire(payload: JsonObject): RecordWire {
     require("photos" !in nested && "custom_item_id" !in nested) {
         "record payload_json 包含设备本地字段"
     }
+    val effectiveWake = if ("effective_wake_observation_client_uuid" in payload) {
+        payload.requireNullableString("effective_wake_observation_client_uuid", "record")
+    } else {
+        null
+    }
     return RecordWire(
         babyClientUuid = payload.requireNonBlankString("baby_client_uuid", "record"),
         createdByMembershipId = payload.requireNullableString(
@@ -2631,6 +2970,7 @@ private fun parseRecordWire(payload: JsonObject): RecordWire {
         note = payload.requireNullableString("note", "record"),
         payload = nested,
         schemaVersion = SyncWireMapper.recordSchemaVersion(payload),
+        effectiveWakeObservationClientUuid = effectiveWake,
     )
 }
 
@@ -2897,6 +3237,7 @@ internal val ENTITY_ORDER = listOf(
     "baby",
     "custom_item",
     "record",
+    "wake_observation",
     "care_plan",
     "media",
     "fulfillment_candidate",

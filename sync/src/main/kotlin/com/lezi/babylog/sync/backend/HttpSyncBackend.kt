@@ -788,6 +788,61 @@ class HttpSyncBackend internal constructor(
         }
     }
 
+    override fun supportsCausalWire(): Boolean = true
+
+    override suspend fun causalReconcile(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult = postCausalBatch(session, "/v1/causal/reconcile", units)
+
+    override suspend fun causalCommit(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult = postCausalBatch(session, "/v1/causal/commit", units)
+
+    private suspend fun postCausalBatch(
+        session: SyncSession,
+        path: String,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult {
+        session.requireCurrentReplicaTransport()
+        require(units.isNotEmpty() && units.size <= MAX_CAUSAL_UNITS) {
+            "因果同步批次必须包含 1..$MAX_CAUSAL_UNITS 个原子单元"
+        }
+        val expectedKeys = units.map { it.entityType to it.clientUuid }.toSet()
+        require(expectedKeys.size == units.size) { "因果同步请求 key 必须唯一" }
+        val expectedByMutation = units.associateBy(CausalMutationUnit::mutationId)
+        require(expectedByMutation.size == units.size) { "因果同步 mutation_id 必须唯一" }
+        val response = post(
+            session.baseUrl,
+            path,
+            session.accessToken,
+            buildJsonObject {
+                put("generation", session.pullGeneration)
+                put("units", buildJsonArray {
+                    units.forEach { unit ->
+                        add(unit.toCausalJson())
+                    }
+                })
+            },
+        )
+        return try {
+            parseCausalBatchResult(
+                response = response,
+                session = session,
+                expectedKeys = expectedKeys,
+                expectedByMutation = expectedByMutation,
+                context = path,
+            )
+        } catch (error: IllegalArgumentException) {
+            val serverGeneration = response["generation"]?.jsonPrimitive?.contentOrNull
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?: session.pullGeneration
+            throw AuthorityProofException(serverGeneration, error)
+        }
+    }
+
     override suspend fun updateMyDisplayName(
         session: SyncSession,
         displayName: String,
@@ -1490,6 +1545,8 @@ private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     updatedAt = requiredLong("updated_at", context),
     deletedAt = requiredNullableLong("deleted_at", context),
     rev = (get("rev") as? JsonPrimitive)?.longOrNull ?: 0,
+    versionId = optionalNonBlankString("version_id", context),
+    conflictSummary = optionalConflictSummary(context),
 )
 
 private fun validateAuthorityRemoteMedia(
@@ -1560,19 +1617,217 @@ private fun JsonObject.entities(context: String): List<SyncEntity> =
     requiredArray("entities", context).mapIndexed { index, element ->
         val value = element as? JsonObject
             ?: throw IllegalArgumentException("$context.entities[$index] 不是对象")
+        val entityContext = "$context.entities[$index]"
         SyncEntity(
-            type = value.requiredNonBlankString("type", "$context.entities[$index]"),
-            clientUuid = value.requiredNonBlankString(
-                "client_uuid",
-                "$context.entities[$index]",
-            ),
+            type = value.requiredNonBlankString("type", entityContext),
+            clientUuid = value.requiredNonBlankString("client_uuid", entityContext),
             payloadJson = (value["payload"] as? JsonObject)?.toString()
-                ?: throw IllegalArgumentException("$context.entities[$index].payload 缺失或无效"),
-            updatedAt = value.requiredLong("updated_at", "$context.entities[$index]"),
-            deletedAt = value.requiredNullableLong("deleted_at", "$context.entities[$index]"),
-            rev = value.requiredLong("rev", "$context.entities[$index]"),
+                ?: throw IllegalArgumentException("$entityContext.payload 缺失或无效"),
+            updatedAt = value.requiredLong("updated_at", entityContext),
+            deletedAt = value.requiredNullableLong("deleted_at", entityContext),
+            rev = value.requiredLong("rev", entityContext),
+            versionId = value.optionalNonBlankString("version_id", entityContext),
+            conflictSummary = value.optionalConflictSummary(entityContext),
         )
     }
+
+private const val MAX_CAUSAL_UNITS = 64
+
+private fun CausalMutationUnit.toCausalJson(): JsonObject = buildJsonObject {
+    put("mutation_id", mutationId)
+    if (baseVersion == null) {
+        put("base_version", JsonNull)
+    } else {
+        put("base_version", baseVersion)
+    }
+    put("entity_type", entityType)
+    put("client_uuid", clientUuid)
+    put(
+        "root",
+        Json.parseToJsonElement(rootJson).jsonObject,
+    )
+    put(
+        "media",
+        buildJsonArray {
+            media.sortedBy(CausalMediaItem::mediaUuid).forEach { item ->
+                add(item.toJson())
+            }
+        },
+    )
+    put("deleted", deleted)
+}
+
+private fun CausalMediaItem.toJson(): JsonObject = buildJsonObject {
+    put("media_uuid", mediaUuid)
+    put("role", role)
+    put("sha256", sha256)
+    put("byte_size", byteSize)
+    put("mime", mime)
+    if (width == null) put("width", JsonNull) else put("width", width)
+    if (height == null) put("height", JsonNull) else put("height", height)
+}
+
+private fun parseCausalBatchResult(
+    response: JsonObject,
+    session: SyncSession,
+    expectedKeys: Set<Pair<String, String>>,
+    expectedByMutation: Map<String, CausalMutationUnit>,
+    context: String,
+): CausalBatchResult {
+    // Per-unit generation is echoed; batch may omit top-level generation.
+    val results = response.requiredArray("results", context).mapIndexed { index, item ->
+        val value = item as? JsonObject
+            ?: throw IllegalArgumentException("$context.results[$index] 不是对象")
+        val unitContext = "$context.results[$index]"
+        value.toCausalUnitResult(unitContext, session.pullGeneration)
+    }
+    val byMutation = results.groupBy(CausalUnitResult::mutationId)
+    require(byMutation.keys == expectedByMutation.keys && byMutation.values.all { it.size == 1 }) {
+        "家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key"
+    }
+    val byKey = results.groupBy { result ->
+        val unit = expectedByMutation.getValue(result.mutationId)
+        unit.entityType to unit.clientUuid
+    }
+    require(byKey.keys == expectedKeys && byKey.values.all { it.size == 1 }) {
+        "家庭服务器因果响应 key 不完整、重复或包含多余 key"
+    }
+    results.forEach { result ->
+        require(result.generation == session.pullGeneration) {
+            "家庭服务器在因果同步期间变更了同步代际"
+        }
+        when (result.status) {
+            CausalReconcileStatus.CONFIRMED,
+            CausalReconcileStatus.PUBLISH,
+            CausalReconcileStatus.CONFLICT_PREVIEW,
+            CausalCommitStatus.ACCEPTED,
+            CausalCommitStatus.MERGED,
+            -> {
+                // stable projection required for successful non-branch outcomes that settle.
+            }
+            CausalReconcileStatus.CONFIRMED,
+            CausalCommitStatus.ACCEPTED,
+            CausalCommitStatus.MERGED,
+            CausalCommitStatus.BRANCHED,
+            -> {
+                require(!result.stableVersionId.isNullOrBlank()) {
+                    "$context ${result.status} 缺少 stable_version_id"
+                }
+                if (result.status == CausalCommitStatus.BRANCHED) {
+                    require(!result.branchVersionId.isNullOrBlank()) {
+                        "branched 响应缺少 branch_version_id"
+                    }
+                    require(!result.conflictId.isNullOrBlank()) {
+                        "branched 响应缺少 conflict_id"
+                    }
+                }
+            }
+            CausalReconcileStatus.PUBLISH,
+            CausalReconcileStatus.CONFLICT_PREVIEW,
+            -> Unit
+            CausalReconcileStatus.REJECTED, CausalCommitStatus.REJECTED -> Unit
+            else -> throw IllegalArgumentException("$context 未知因果 status: ${result.status}")
+        }
+    }
+    val generation = results.firstOrNull()?.generation ?: session.pullGeneration
+    val cursor = response.requiredLong("cursor", context)
+    require(cursor >= session.pullCursor) {
+        "家庭服务器因果游标早于本机已拉取检查点"
+    }
+    return CausalBatchResult(
+        generation = generation,
+        cursor = cursor,
+        results = results,
+    )
+}
+
+private fun JsonObject.toCausalUnitResult(
+    context: String,
+    fallbackGeneration: String,
+): CausalUnitResult {
+    val status = requiredNonBlankString("status", context)
+    val generation = optionalNonBlankString("generation", context) ?: fallbackGeneration
+    val stableRoot = when (val root = get("stable_root")) {
+        null, JsonNull -> "{}"
+        is JsonObject -> root.toString()
+        else -> throw IllegalArgumentException("$context.stable_root 无效")
+    }
+    val media = when (val raw = get("stable_media")) {
+        null, JsonNull -> emptyList()
+        is JsonArray -> raw.mapIndexed { index, element ->
+            (element as? JsonObject)?.toCausalMediaItem("$context.stable_media[$index]")
+                ?: throw IllegalArgumentException("$context.stable_media[$index] 不是对象")
+        }
+        else -> throw IllegalArgumentException("$context.stable_media 无效")
+    }
+    val conflictingPaths = when (val raw = get("conflicting_paths")) {
+        null, JsonNull -> emptyList()
+        is JsonArray -> raw.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.conflicting_paths[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$context.conflicting_paths 无效")
+    }
+    return CausalUnitResult(
+        status = status,
+        mutationId = requiredNonBlankString("mutation_id", context),
+        requestHash = requiredNonBlankString("request_hash", context),
+        generation = generation,
+        stableVersionId = optionalNonBlankString("stable_version_id", context),
+        stableRootJson = stableRoot,
+        stableMedia = media,
+        branchVersionId = optionalNonBlankString("branch_version_id", context),
+        conflictId = optionalNonBlankString("conflict_id", context),
+        code = optionalNonBlankString("code", context),
+        reason = optionalNonBlankString("reason", context),
+        conflictingPaths = conflictingPaths,
+    )
+}
+
+private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = CausalMediaItem(
+    mediaUuid = requiredNonBlankString("media_uuid", context),
+    role = requiredNonBlankString("role", context),
+    sha256 = requiredNonBlankString("sha256", context),
+    byteSize = requiredLong("byte_size", context),
+    mime = requiredNonBlankString("mime", context),
+    width = requiredNullableLong("width", context),
+    height = requiredNullableLong("height", context),
+)
+
+private fun JsonObject.optionalNonBlankString(key: String, context: String): String? =
+    when (val value = get(key)) {
+        null, JsonNull -> null
+        is JsonPrimitive -> value.contentOrNull?.trim()?.takeIf(String::isNotEmpty).also {
+            require(value.isString) { "$context.$key 无效" }
+        }
+        else -> throw IllegalArgumentException("$context.$key 无效")
+    }
+
+private fun JsonObject.optionalConflictSummary(context: String): PullConflictSummary? {
+    val raw = get("conflict_summary") ?: return null
+    if (raw is JsonNull) return null
+    val value = raw as? JsonObject
+        ?: throw IllegalArgumentException("$context.conflict_summary 不是对象")
+    val summaryContext = "$context.conflict_summary"
+    val branchIds = when (val branches = value["branch_version_ids"]) {
+        null -> throw IllegalArgumentException("$summaryContext.branch_version_ids 缺失")
+        JsonNull -> emptyList()
+        is JsonArray -> branches.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException(
+                    "$summaryContext.branch_version_ids[$index] 无效",
+                )
+        }
+        else -> throw IllegalArgumentException("$summaryContext.branch_version_ids 无效")
+    }
+    return PullConflictSummary(
+        conflictId = value.requiredNonBlankString("conflict_id", summaryContext),
+        entityType = value.requiredNonBlankString("entity_type", summaryContext),
+        clientUuid = value.requiredNonBlankString("client_uuid", summaryContext),
+        stableVersionId = value.requiredNonBlankString("stable_version_id", summaryContext),
+        branchVersionIds = branchIds,
+    )
+}
 
 private fun JsonObject.recordAuthors(): List<CanonicalRecordAuthor> =
     requiredArray("record_authors", "sync response").mapIndexed { index, element ->

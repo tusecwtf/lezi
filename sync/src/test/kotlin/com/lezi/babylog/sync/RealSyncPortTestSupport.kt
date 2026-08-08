@@ -78,6 +78,11 @@ import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CanonicalRecordAuthor
+import com.lezi.babylog.sync.backend.CausalBatchResult
+import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalMutationUnit
+import com.lezi.babylog.sync.backend.CausalReconcileStatus
+import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.DisasterRestoreBatch
@@ -216,6 +221,20 @@ internal class RecordingSyncBackend : SyncBackend {
     val reconciledUnits = mutableListOf<List<ReconcileUnitDraft>>()
     var nextReconcile: ReconcileResult? = null
     var onReconcile: (suspend (List<ReconcileUnitDraft>) -> Unit)? = null
+    val causalReconciledUnits = mutableListOf<List<CausalMutationUnit>>()
+    val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
+    var nextCausalReconcile: CausalBatchResult? = null
+    var nextCausalCommit: CausalBatchResult? = null
+    var onCausalReconcile: (suspend (List<CausalMutationUnit>) -> Unit)? = null
+    var onCausalCommit: (suspend (List<CausalMutationUnit>) -> Unit)? = null
+    /**
+     * Opt-in causal path for ReplicaSyncEngine tests. When false and no causal
+     * hooks/results are prepared, methods throw [UnsupportedOperationException]
+     * so the engine falls back to the legacy authority reconcile path.
+     */
+    var enableCausal: Boolean = false
+    /** When true, default causal reconcile returns confirmed instead of publish. */
+    var causalReconcileConfirmed: Boolean = false
     var afterPush: (() -> Unit)? = null
     var afterCommit: (suspend () -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
@@ -704,6 +723,89 @@ internal class RecordingSyncBackend : SyncBackend {
             },
         )
     }
+
+    override fun supportsCausalWire(): Boolean =
+        enableCausal || onCausalReconcile != null || nextCausalReconcile != null ||
+            onCausalCommit != null || nextCausalCommit != null
+
+    override suspend fun causalReconcile(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult {
+        if (!supportsCausalWire()) {
+            throw UnsupportedOperationException("Causal reconcile is not implemented")
+        }
+        causalReconciledUnits += units
+        syncOrder += "causal_reconcile:${units.size}"
+        onCausalReconcile?.invoke(units)
+        val prepared = nextCausalReconcile
+        nextCausalReconcile = null
+        if (prepared != null) return prepared
+        return defaultCausalBatch(
+            session = session,
+            units = units,
+            status = when {
+                causalReconcileConfirmed -> CausalReconcileStatus.CONFIRMED
+                else -> CausalReconcileStatus.PUBLISH
+            },
+            useContentHash = true,
+        )
+    }
+
+    override suspend fun causalCommit(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalBatchResult {
+        if (!supportsCausalWire()) {
+            throw UnsupportedOperationException("Causal commit is not implemented")
+        }
+        causalCommittedUnits += units
+        syncOrder += "causal_commit:${units.size}"
+        onCausalCommit?.invoke(units)
+        val prepared = nextCausalCommit
+        nextCausalCommit = null
+        if (prepared != null) return prepared
+        return defaultCausalBatch(
+            session = session,
+            units = units,
+            status = CausalCommitStatus.ACCEPTED,
+            mintStableVersion = true,
+            useContentHash = true,
+        )
+    }
+
+    private fun defaultCausalBatch(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+        status: String,
+        mintStableVersion: Boolean = false,
+        useContentHash: Boolean = false,
+    ): CausalBatchResult = CausalBatchResult(
+        generation = session.pullGeneration,
+        cursor = session.pullCursor,
+        results = units.map { unit ->
+            val stableVersion = when {
+                mintStableVersion -> "v-${unit.mutationId.take(8)}"
+                unit.baseVersion != null -> unit.baseVersion
+                else -> "v-confirmed-${unit.mutationId.take(8)}"
+            }
+            CausalUnitResult(
+                status = status,
+                mutationId = unit.mutationId,
+                requestHash = if (useContentHash) {
+                    com.lezi.babylog.sync.engine.causalMutationContentHash(unit)
+                } else {
+                    "hash-${unit.mutationId}"
+                },
+                generation = session.pullGeneration,
+                stableVersionId = stableVersion,
+                stableRootJson = unit.rootJson.ifBlank { "{}" },
+                stableMedia = unit.media,
+                branchVersionId = null,
+                conflictId = null,
+            )
+        },
+    )
 
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         memberCalls++
@@ -1426,8 +1528,10 @@ internal const val TEST_APP_UPDATE_CERT_SHA256 =
 
 internal class TestPendingPublishDao(
     private val count: suspend () -> Int,
+    private val conflictCount: suspend () -> Int = { 0 },
 ) : PendingPublishDao {
     override fun observeCount(): Flow<Int> = flow { emit(count()) }
+    override fun observeOpenConflictCount(): Flow<Int> = flow { emit(conflictCount()) }
 }
 
 internal class SyncRig(
@@ -1452,14 +1556,16 @@ internal class SyncRig(
     val babies = MemoryBabyDao()
     val media = MemoryMediaDao()
     val customItems = MemoryCustomItemDao()
-    val pendingPublish = TestPendingPublishDao {
-        babies.listPendingSync().size +
-            records.listPendingSync().size +
-            carePlans.listPendingSync().size +
-            fulfillmentCandidates.listPendingSync().size +
-            media.listPendingSync().size +
-            customItems.listPendingSync().size
-    }
+    val pendingPublish = TestPendingPublishDao(
+        count = {
+            babies.listPendingSync().size +
+                records.listPendingSync().size +
+                carePlans.listPendingSync().size +
+                fulfillmentCandidates.listPendingSync().size +
+                media.listPendingSync().size +
+                customItems.listPendingSync().size
+        },
+    )
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
     val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
@@ -1474,6 +1580,9 @@ internal class SyncRig(
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
     }
+    val wakeObservations = MemoryWakeObservationDao()
+    val conflictSummaries = MemoryConflictSummaryDao()
+    val conflictDetails = MemoryConflictDetailCacheDao()
     val clock = MutablePolicyClock()
     val foreground = TestForegroundState()
     val port = RealSyncPort(
@@ -1498,6 +1607,9 @@ internal class SyncRig(
         removedDeviceLocalClearGate = removedDeviceLocalClearGate,
         carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
         fulfillmentCandidateDao = fulfillmentCandidates,
+        wakeObservationDao = wakeObservations,
+        conflictSummaryDao = conflictSummaries,
+        conflictDetailCacheDao = conflictDetails,
         clientAppVersion = clientAppVersion,
         appUpdateInstaller = appUpdateInstaller,
         apkIdentityReader = apkIdentityReader,
@@ -2505,5 +2617,130 @@ internal class MemoryFamilyDao : FamilyDao {
     override suspend fun insert(family: FamilyEntity): Long = seed(family)
     override suspend fun deleteAll() {
         rows.clear()
+    }
+}
+
+internal class MemoryWakeObservationDao :
+    com.lezi.babylog.core.database.causal.WakeObservationDao {
+    private val items =
+        mutableListOf<com.lezi.babylog.core.database.causal.WakeObservationEntity>()
+    private val ids = AtomicLong(1)
+
+    fun seed(
+        entity: com.lezi.babylog.core.database.causal.WakeObservationEntity,
+    ): Long {
+        val id = entity.id.takeIf { it != 0L } ?: ids.getAndIncrement()
+        items.removeAll { it.clientUuid == entity.clientUuid }
+        items += entity.copy(id = id)
+        return id
+    }
+
+    override suspend fun getByClientUuid(
+        uuid: String,
+    ): com.lezi.babylog.core.database.causal.WakeObservationEntity? =
+        items.find { it.clientUuid == uuid }
+
+    override suspend fun listForSleep(
+        sleepRecordClientUuid: String,
+    ): List<com.lezi.babylog.core.database.causal.WakeObservationEntity> =
+        items.filter { it.sleepRecordClientUuid == sleepRecordClientUuid }
+
+    override suspend fun listActiveForSleep(
+        sleepRecordClientUuid: String,
+    ): List<com.lezi.babylog.core.database.causal.WakeObservationEntity> =
+        items.filter {
+            it.sleepRecordClientUuid == sleepRecordClientUuid &&
+                it.deletedAt == null &&
+                !it.withdrawn
+        }
+
+    override suspend fun listPendingSync():
+        List<com.lezi.babylog.core.database.causal.WakeObservationEntity> =
+        items.filter { it.syncDirty }
+
+    override suspend fun listOpenConflicts():
+        List<com.lezi.babylog.core.database.causal.WakeObservationEntity> =
+        items.filter { it.openConflictId != null }
+
+    override suspend fun upsert(
+        entity: com.lezi.babylog.core.database.causal.WakeObservationEntity,
+    ): Long = seed(entity)
+
+    override suspend fun update(
+        entity: com.lezi.babylog.core.database.causal.WakeObservationEntity,
+    ) {
+        items.replaceAll { if (it.clientUuid == entity.clientUuid) entity else it }
+    }
+
+    override suspend fun deleteAll() {
+        items.clear()
+    }
+}
+
+internal class MemoryConflictSummaryDao :
+    com.lezi.babylog.core.database.causal.ConflictSummaryDao {
+    private val items =
+        mutableListOf<com.lezi.babylog.core.database.causal.ConflictSummaryEntity>()
+
+    override fun observeOpen():
+        kotlinx.coroutines.flow.Flow<
+            List<com.lezi.babylog.core.database.causal.ConflictSummaryEntity>,
+            > =
+        kotlinx.coroutines.flow.flowOf(items.filter { it.status == "open" })
+
+    override suspend fun listOpen():
+        List<com.lezi.babylog.core.database.causal.ConflictSummaryEntity> =
+        items.filter { it.status == "open" }
+
+    override suspend fun get(
+        conflictId: String,
+    ): com.lezi.babylog.core.database.causal.ConflictSummaryEntity? =
+        items.find { it.conflictId == conflictId }
+
+    override suspend fun listForRoot(
+        entityType: String,
+        clientUuid: String,
+    ): List<com.lezi.babylog.core.database.causal.ConflictSummaryEntity> =
+        items.filter { it.entityType == entityType && it.clientUuid == clientUuid }
+
+    override suspend fun upsert(
+        entity: com.lezi.babylog.core.database.causal.ConflictSummaryEntity,
+    ) {
+        items.removeAll { it.conflictId == entity.conflictId }
+        items += entity
+    }
+
+    override suspend fun delete(conflictId: String) {
+        items.removeAll { it.conflictId == conflictId }
+    }
+
+    override suspend fun deleteAll() {
+        items.clear()
+    }
+}
+
+internal class MemoryConflictDetailCacheDao :
+    com.lezi.babylog.core.database.causal.ConflictDetailCacheDao {
+    private val items =
+        mutableListOf<com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity>()
+
+    override suspend fun get(
+        conflictId: String,
+    ): com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity? =
+        items.find { it.conflictId == conflictId }
+
+    override suspend fun upsert(
+        entity: com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity,
+    ) {
+        items.removeAll { it.conflictId == entity.conflictId }
+        items += entity
+    }
+
+    override suspend fun delete(conflictId: String) {
+        items.removeAll { it.conflictId == conflictId }
+    }
+
+    override suspend fun deleteAll() {
+        items.clear()
     }
 }

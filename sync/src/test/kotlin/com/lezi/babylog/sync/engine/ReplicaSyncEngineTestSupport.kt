@@ -34,12 +34,15 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.receiptFor
 import com.lezi.babylog.sync.MemoryBabyDao
 import com.lezi.babylog.sync.MemoryCarePlanDao
+import com.lezi.babylog.sync.MemoryConflictDetailCacheDao
+import com.lezi.babylog.sync.MemoryConflictSummaryDao
 import com.lezi.babylog.sync.MemoryCustomItemDao
 import com.lezi.babylog.sync.MemoryFamilyDao
 import com.lezi.babylog.sync.MemoryFulfillmentCandidateDao
 import com.lezi.babylog.sync.MemoryMediaDao
 import com.lezi.babylog.sync.MemoryRecordDao
 import com.lezi.babylog.sync.MemorySyncPreferences
+import com.lezi.babylog.sync.MemoryWakeObservationDao
 import com.lezi.babylog.sync.RecordingSyncBackend
 import com.lezi.babylog.sync.RecordingTransactionRunner
 import com.lezi.babylog.sync.TestMediaFileStore
@@ -67,6 +70,9 @@ internal class ReplicaEngineRig(
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
     }
+    val wakeObservations = MemoryWakeObservationDao()
+    val conflictSummaries = MemoryConflictSummaryDao()
+    val conflictDetails = MemoryConflictDetailCacheDao()
     var familyBabyAppliedCalls = 0
     var authorityVisibleAtCallback = false
     val carePlanAppliedBatches = mutableListOf<List<String>>()
@@ -94,6 +100,9 @@ internal class ReplicaEngineRig(
         },
         fulfillmentCandidateDao = fulfillmentCandidates,
         requireRemoteAllowed = {},
+        wakeObservationDao = wakeObservations,
+        conflictSummaryDao = conflictSummaries,
+        conflictDetailCacheDao = conflictDetails,
     )
 }
 
