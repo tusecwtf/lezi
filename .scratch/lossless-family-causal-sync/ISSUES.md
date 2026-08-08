@@ -1,6 +1,6 @@
 # 家庭事实无损因果同步 — issues
 
-Status: ready-for-agent — frontier after 02+04 = 03 (05 waits on 03+04)
+Status: ready-for-agent — frontier after 03+04 complete = 05 (and 06/07/08)
 
 Spec: [`spec.md`](./spec.md)
 
@@ -25,7 +25,7 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 |---|------|--------|------------|
 | 01 | [`issues/01-freeze-causal-domain-wire-adr.md`](./issues/01-freeze-causal-domain-wire-adr.md) | complete | — |
 | 02 | [`issues/02-server-schema-v12-version-conflict-migration.md`](./issues/02-server-schema-v12-version-conflict-migration.md) | complete | 01 |
-| 03 | [`issues/03-causal-reconcile-commit-pull-resolution.md`](./issues/03-causal-reconcile-commit-pull-resolution.md) | ready-for-agent | 02 |
+| 03 | [`issues/03-causal-reconcile-commit-pull-resolution.md`](./issues/03-causal-reconcile-commit-pull-resolution.md) | complete | 02 |
 | 04 | [`issues/04-android-room27-causal-wake-source-state.md`](./issues/04-android-room27-causal-wake-source-state.md) | complete | 01 |
 | 05 | [`issues/05-replica-engine-three-way-merge-and-branches.md`](./issues/05-replica-engine-three-way-merge-and-branches.md) | ready-for-agent | 03, 04 |
 | 06 | [`issues/06-conflict-wake-observation-overlap-ux.md`](./issues/06-conflict-wake-observation-overlap-ux.md) | ready-for-agent | 03, 04, 05 |
@@ -35,7 +35,7 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 
 ## Frontier
 
-`03` (blocked by complete `02`) is the remaining causal API ticket; `04` (Room 27) is complete.
+`03` (causal API) and `04` (Room 27) are complete; next is `05` (ReplicaSyncEngine merge/branch).
 No runtime behavior ticket may invent a competing shape outside the frozen contract in ticket 01 /
 [`docs/prd/causal-sync-wire.md`](../../docs/prd/causal-sync-wire.md) / ADR-0019–0021.
 

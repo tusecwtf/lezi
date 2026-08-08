@@ -19,6 +19,8 @@ fn pulled_entity_from_row(row: &rusqlite::Row<'_>) -> Result<PulledEntity, Store
         deleted_at: row.get(3)?,
         payload,
         rev: row.get(5)?,
+        version_id: None,
+        conflict_summary: None,
     })
 }
 
@@ -60,6 +62,8 @@ fn load_pulled_entity(
                     deleted_at,
                     payload,
                     rev,
+                    version_id: None,
+                    conflict_summary: None,
                 })
             },
         )
@@ -550,6 +554,61 @@ impl Store {
             // entity's older row. Once the snapshot is exhausted it is safe to
             // advance across those gaps to the captured server revision.
             page_cursor = current;
+        }
+        // Attach causal version_id + conflict_summary for versioned roots.
+        // Wire §7: at most MAX_CONFLICT_SUMMARIES_PER_PAGE summaries per page.
+        use super::causal::MAX_CONFLICT_SUMMARIES_PER_PAGE;
+        use super::schema::VERSIONED_ENTITY_TYPES;
+        let mut summary_count = 0usize;
+        for entity in &mut entities {
+            if !VERSIONED_ENTITY_TYPES.contains(&entity.entity_type.as_str()) {
+                continue;
+            }
+            entity.version_id = connection
+                .query_row(
+                    "SELECT version_id FROM entity_stable_heads
+                     WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3",
+                    params![family_id, entity.entity_type, entity.client_uuid],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if summary_count >= MAX_CONFLICT_SUMMARIES_PER_PAGE {
+                continue;
+            }
+            let open = connection
+                .query_row(
+                    "SELECT conflict_id, stable_version_id FROM conflicts
+                     WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3
+                       AND status = 'open'
+                     ORDER BY created_at ASC LIMIT 1",
+                    params![family_id, entity.entity_type, entity.client_uuid],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some((conflict_id, stable_version_id)) = open {
+                let mut branch_ids = Vec::new();
+                {
+                    let mut stmt = connection.prepare(
+                        "SELECT branch_version_id FROM conflict_branches
+                         WHERE family_id = ?1 AND conflict_id = ?2
+                         ORDER BY branch_version_id COLLATE BINARY",
+                    )?;
+                    let rows = stmt.query_map(params![family_id, conflict_id], |row| {
+                        row.get::<_, String>(0)
+                    })?;
+                    for r in rows {
+                        branch_ids.push(r?);
+                    }
+                }
+                entity.conflict_summary = Some(super::ConflictSummary {
+                    conflict_id,
+                    entity_type: entity.entity_type.clone(),
+                    client_uuid: entity.client_uuid.clone(),
+                    stable_version_id,
+                    branch_version_ids: branch_ids,
+                });
+                summary_count += 1;
+            }
         }
         Ok(PullPage {
             entities,

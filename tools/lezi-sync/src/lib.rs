@@ -74,6 +74,12 @@ pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author"
 pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
 pub const CAPABILITY_AUTHORITATIVE_RECONCILE: &str = "authoritative_reconcile_v1";
 pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
+/// Causal version graph + three-way merge (wire §1). Fail-closed without dual-read LWW.
+pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
+/// WakeObservation atomic root (wire §1 / §4.5).
+pub const CAPABILITY_WAKE_OBSERVATION: &str = "wake_observation";
+/// Non-destructive source relations API surface (wire §1 / §12).
+pub const CAPABILITY_SOURCE_RELATIONS: &str = "source_relations";
 const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 16;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
@@ -751,6 +757,13 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         .route("/v1/push", post(sync::retired_ordinary_push))
         .route("/v1/pull", get(sync::pull_entities))
         .route("/v1/reconcile", post(sync::reconcile_entities))
+        .route("/v1/causal/reconcile", post(sync::causal_reconcile))
+        .route("/v1/causal/commit", post(sync::causal_commit))
+        .route("/v1/conflicts/{conflict_id}", get(sync::conflict_detail))
+        .route(
+            "/v1/conflicts/{conflict_id}/resolve",
+            post(sync::resolve_conflict),
+        )
         .route(
             "/v1/media/{client_uuid}",
             put(media::retired_ordinary_media_upload).get(media::get_media),

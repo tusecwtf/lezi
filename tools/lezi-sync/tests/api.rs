@@ -553,7 +553,10 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
             "record_membership_author",
             "device_disaster_restore_v1",
             "authoritative_reconcile_v1",
-            "validated_deferred_fulfillment_v1"
+            "validated_deferred_fulfillment_v1",
+            "causal_versions",
+            "wake_observation",
+            "source_relations"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -978,6 +981,9 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "device_disaster_restore_v1",
                 "authoritative_reconcile_v1",
                 "validated_deferred_fulfillment_v1",
+                "causal_versions",
+                "wake_observation",
+                "source_relations",
             ],
             "family_state": "empty",
         })
@@ -1011,6 +1017,9 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "device_disaster_restore_v1",
                 "authoritative_reconcile_v1",
                 "validated_deferred_fulfillment_v1",
+                "causal_versions",
+                "wake_observation",
+                "source_relations",
             ],
             "family_state": "configured",
         })
@@ -14759,4 +14768,215 @@ async fn custom_item_rejects_layout_fields_on_wire() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+#[tokio::test]
+async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
+    // Isolated in-process server: create → pull version_id → concurrent branch → resolve.
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "causal-smoke-owner",
+        "causal-smoke-request-000000000001",
+    )
+    .await;
+    let token = created["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+
+    let (status, baby_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": null,
+                "entity_type": "baby",
+                "client_uuid": baby_id,
+                "root": {
+                    "nickname": "年年",
+                    "sex": "female",
+                    "birthday": "2025-01-02",
+                    "avatar_media_uuid": null,
+                    "updated_at": 10
+                },
+                "media": [],
+                "deleted": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{baby_body}");
+    assert_eq!(baby_body["results"][0]["status"], "accepted");
+
+    let (status, rec_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": null,
+                "entity_type": "record",
+                "client_uuid": record_id,
+                "root": {
+                    "baby_client_uuid": baby_id,
+                    "type": "formula",
+                    "custom_item_client_uuid": null,
+                    "timestamp": 100,
+                    "end_timestamp": null,
+                    "note": "a",
+                    "payload_json": {"amount_ml": 100},
+                    "schema_version": 2,
+                    "updated_at": 20
+                },
+                "media": [],
+                "deleted": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rec_body}");
+    assert_eq!(rec_body["results"][0]["status"], "accepted");
+    let v1 = rec_body["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let generation = created["generation"].as_str().unwrap_or("generation-a");
+    let (status, pull) = get_json(
+        &rig.app,
+        &format!("/v1/pull?cursor=0&generation={generation}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pull}");
+    let pulled_record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == record_id.to_string())
+        .expect("record in pull");
+    assert_eq!(pulled_record["version_id"], v1);
+
+    // Side A advances note.
+    let (status, left) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": v1,
+                "entity_type": "record",
+                "client_uuid": record_id,
+                "root": {
+                    "baby_client_uuid": baby_id,
+                    "type": "formula",
+                    "custom_item_client_uuid": null,
+                    "timestamp": 100,
+                    "end_timestamp": null,
+                    "note": "b",
+                    "payload_json": {"amount_ml": 100},
+                    "schema_version": 2,
+                    "updated_at": 30
+                },
+                "media": [],
+                "deleted": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{left}");
+    assert_eq!(left["results"][0]["status"], "accepted");
+    let v2 = left["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Side B concurrent note → branched.
+    let (status, right) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": v1,
+                "entity_type": "record",
+                "client_uuid": record_id,
+                "root": {
+                    "baby_client_uuid": baby_id,
+                    "type": "formula",
+                    "custom_item_client_uuid": null,
+                    "timestamp": 100,
+                    "end_timestamp": null,
+                    "note": "c",
+                    "payload_json": {"amount_ml": 100},
+                    "schema_version": 2,
+                    "updated_at": 40
+                },
+                "media": [],
+                "deleted": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{right}");
+    assert_eq!(right["results"][0]["status"], "branched");
+    let conflict_id = right["results"][0]["conflict_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let branch_id = right["results"][0]["branch_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["conflicting_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p == "/note"));
+
+    let (status, resolved) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        json!({
+            "expected_stable_version": v2,
+            "expected_branch_versions": [branch_id],
+            "resolved_root": {
+                "baby_client_uuid": baby_id,
+                "type": "formula",
+                "custom_item_client_uuid": null,
+                "timestamp": 100,
+                "end_timestamp": null,
+                "note": "c",
+                "payload_json": {"amount_ml": 100},
+                "schema_version": 2,
+                "updated_at": 50
+            },
+            "resolved_media": [],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "conflict_choices": {"/note": "c"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["status"], "resolved");
+    assert_eq!(resolved["stable_root"]["note"], "c");
 }

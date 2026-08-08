@@ -18,6 +18,8 @@
 
 mod authority_graph;
 mod bundles;
+mod causal;
+mod causal_merge;
 mod identity;
 mod media;
 mod neighbor;
@@ -38,6 +40,15 @@ use thiserror::Error;
 use crate::model::Entity;
 
 pub(crate) use bundles::bundle_content_hash;
+pub use causal::{
+    CausalBatchResult, CausalMutation, CausalUnitResult, ConflictDetail, ConflictSummary,
+    ResolveConflictInput, ResolveConflictResult, MAX_CAUSAL_UNITS,
+};
+pub use causal_merge::CausalMediaItem;
+
+// Re-exported types are the public Store/HTTP causal seams (ticket 03).
+#[allow(unused_imports)]
+use self::{CausalBatchResult as _, ConflictDetail as _, ResolveConflictResult as _};
 pub(crate) use identity::anonymize_membership_authorship_fields;
 pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION, VERSIONED_ENTITY_TYPES};
 
@@ -156,6 +167,14 @@ pub struct PulledEntity {
     pub deleted_at: Option<i64>,
     pub payload: Map<String, Value>,
     pub rev: i64,
+    /// Opaque stable version for causal roots (wire §7). Omitted for media /
+    /// fulfillment_candidate and for pre-causal projections without a head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    /// Bounded open-conflict summary; discoverable even when stable version_id
+    /// is unchanged after a branch-only write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_summary: Option<ConflictSummary>,
 }
 
 #[derive(Debug)]
@@ -330,6 +349,8 @@ pub enum StoreError {
     BundleRootNotNewer,
     #[error("authoritative reconcile batch is invalid")]
     InvalidReconcileBatch,
+    #[error("conflict not found")]
+    ConflictNotFound,
     #[error("authority graph validation failed ({reason_code}) for {entity_type} {client_uuid}")]
     AuthorityGraphInvalid {
         reason_code: &'static str,

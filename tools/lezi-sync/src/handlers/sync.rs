@@ -2,18 +2,21 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::media::media_entity_is_pullable;
 use crate::model::{
     validate_bundle_media_for_root, Entity, EntityValidationContext, RawEntity,
     MAX_BUNDLE_MEDIA_ENTITIES,
 };
-use crate::store::{ReconcileResult, ReconcileUnit, StoreError};
+use crate::store::{
+    CausalMediaItem, CausalMutation, ReconcileResult, ReconcileUnit, ResolveConflictInput,
+    StoreError, MAX_CAUSAL_UNITS,
+};
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
     MAX_ENTITY_FUTURE_SKEW_MILLIS,
@@ -209,6 +212,246 @@ pub(crate) async fn retired_ordinary_push() -> Result<Json<Value>, ApiError> {
     Err(ApiError::unprocessable(
         "ordinary push is retired; publish an atomic bundle",
     ))
+}
+
+// --- Causal protocol (wire §5–§8) -------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CausalBatchRequest {
+    /// Optional generation stamp (wire authority proof). When present, must match
+    /// server generation; injected by some clients/helpers for CAS safety.
+    #[serde(default)]
+    generation: Option<String>,
+    units: Vec<RawCausalMutation>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCausalMutation {
+    mutation_id: String,
+    #[serde(default)]
+    base_version: Option<String>,
+    entity_type: String,
+    client_uuid: String,
+    root: Map<String, Value>,
+    #[serde(default)]
+    media: Vec<CausalMediaItem>,
+    deleted: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolveRequest {
+    expected_stable_version: String,
+    expected_branch_versions: Vec<String>,
+    resolved_root: Map<String, Value>,
+    #[serde(default)]
+    resolved_media: Vec<CausalMediaItem>,
+    resolution_mutation_id: String,
+    #[serde(default)]
+    conflict_choices: Map<String, Value>,
+}
+
+fn parse_causal_units(request: CausalBatchRequest) -> Result<Vec<CausalMutation>, ApiError> {
+    if request.units.is_empty() || request.units.len() > MAX_CAUSAL_UNITS {
+        return Err(ApiError::unprocessable(format!(
+            "causal units must contain 1..={MAX_CAUSAL_UNITS} items"
+        )));
+    }
+    let mut units = Vec::with_capacity(request.units.len());
+    for raw in request.units {
+        units.push(CausalMutation {
+            mutation_id: raw.mutation_id,
+            base_version: raw.base_version,
+            entity_type: raw.entity_type,
+            client_uuid: raw.client_uuid,
+            root: raw.root,
+            media: raw.media,
+            deleted: raw.deleted,
+        });
+    }
+    Ok(units)
+}
+
+fn causal_unit_json(result: crate::store::CausalUnitResult, generation: &str) -> Value {
+    let mut value = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "generation".to_owned(),
+            Value::String(generation.to_owned()),
+        );
+    }
+    value
+}
+
+pub(crate) async fn causal_reconcile(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<CausalBatchRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let rate_scope = format!(
+        "causal_reconcile:{}:{}:{}",
+        principal.family_id, principal.membership_id, principal.device_id,
+    );
+    if !state
+        .reconcile_limiter
+        .check_and_record(&rate_scope, state.now())
+    {
+        return Err(ApiError::too_many_requests(
+            "Too many causal reconcile attempts; try again later",
+        ));
+    }
+    let request = json_body(body)?;
+    if let Some(gen) = request.generation.as_deref() {
+        if gen != state.generation {
+            return Err(ApiError::conflict_value(
+                state
+                    .recovery_detail(&principal.family_id, "generation_changed")
+                    .await?,
+            ));
+        }
+    }
+    let units = parse_causal_units(request)?;
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let blocking_state = state.clone();
+    let generation = state.generation.clone();
+    let result = run_blocking(move || {
+        blocking_state
+            .store
+            .causal_reconcile(&principal, units, blocking_state.now())
+            .map_err(|error| match error {
+                StoreError::InvalidReconcileBatch => {
+                    ApiError::unprocessable("causal reconcile batch is invalid")
+                }
+                other => other.into(),
+            })
+    })
+    .await?;
+    Ok(Json(json!({
+        "generation": generation,
+        "cursor": result.cursor,
+        "results": result.results
+            .into_iter()
+            .map(|unit| causal_unit_json(unit, &generation))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+pub(crate) async fn causal_commit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<CausalBatchRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let request = json_body(body)?;
+    if let Some(gen) = request.generation.as_deref() {
+        if gen != state.generation {
+            return Err(ApiError::conflict_value(
+                state
+                    .recovery_detail(&principal.family_id, "generation_changed")
+                    .await?,
+            ));
+        }
+    }
+    let units = parse_causal_units(request)?;
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let blocking_state = state.clone();
+    let generation = state.generation.clone();
+    let result = run_blocking(move || {
+        // Causal commit never runs neighbor adjudication (ticket 03 / ADR-0019).
+        blocking_state
+            .store
+            .causal_commit(&principal, units, blocking_state.now())
+            .map_err(|error| match error {
+                StoreError::InvalidReconcileBatch => {
+                    ApiError::unprocessable("causal commit batch is invalid")
+                }
+                StoreError::ForbiddenBaby
+                | StoreError::ForbiddenRecord
+                | StoreError::ForbiddenCarePlan
+                | StoreError::ForbiddenCustomItem => ApiError::unprocessable(error.to_string()),
+                other => other.into(),
+            })
+    })
+    .await?;
+    Ok(Json(json!({
+        "generation": generation,
+        "cursor": result.cursor,
+        "results": result.results
+            .into_iter()
+            .map(|unit| causal_unit_json(unit, &generation))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+pub(crate) async fn conflict_detail(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(conflict_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let blocking_state = state.clone();
+    let detail = run_blocking(move || {
+        blocking_state
+            .store
+            .conflict_detail(&principal, &conflict_id)
+            .map_err(|error| match error {
+                StoreError::ConflictNotFound => ApiError::not_found("conflict not found"),
+                other => other.into(),
+            })
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(detail).map_err(|_| {
+        ApiError::internal("failed to serialize conflict detail")
+    })?))
+}
+
+pub(crate) async fn resolve_conflict(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(conflict_id): Path<String>,
+    body: Result<Json<ResolveRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let request = json_body(body)?;
+    let input = ResolveConflictInput {
+        expected_stable_version: request.expected_stable_version,
+        expected_branch_versions: request.expected_branch_versions,
+        resolved_root: request.resolved_root,
+        resolved_media: request.resolved_media,
+        resolution_mutation_id: request.resolution_mutation_id,
+        conflict_choices: request.conflict_choices,
+    };
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let blocking_state = state.clone();
+    let result = run_blocking(move || {
+        blocking_state
+            .store
+            .resolve_conflict(&principal, &conflict_id, input, blocking_state.now())
+            .map_err(|error| match error {
+                StoreError::ConflictNotFound => ApiError::not_found("conflict not found"),
+                StoreError::ForbiddenBaby
+                | StoreError::ForbiddenRecord
+                | StoreError::ForbiddenCarePlan
+                | StoreError::ForbiddenCustomItem => ApiError::unprocessable(error.to_string()),
+                other => other.into(),
+            })
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(result).map_err(|_| {
+        ApiError::internal("failed to serialize resolve result")
+    })?))
 }
 
 #[cfg(test)]
