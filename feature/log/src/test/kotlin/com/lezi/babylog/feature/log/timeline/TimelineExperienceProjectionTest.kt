@@ -7,7 +7,6 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -25,10 +24,9 @@ class TimelineExperienceProjectionTest {
 
         val presentation = state.toTimelinePresentation(nowMs)
 
-        assertEquals(state.viewport, presentation.viewport)
         assertEquals(1_440, presentation.viewportDurationMinutes)
         assertEquals(1_440 - 16 * 60, presentation.viewportStartMinutes)
-        assertTrue(presentation.showNowLine)
+        assertEquals(presentation.axis.instantToContentMinute(nowMs), presentation.nowContentMinute)
     }
 
     @Test
@@ -44,7 +42,7 @@ class TimelineExperienceProjectionTest {
         val presentation = state.toTimelinePresentation(nowMs)
 
         assertEquals(23 * 60, presentation.viewportDurationMinutes)
-        assertFalse(presentation.showNowLine)
+        assertEquals(null, presentation.nowContentMinute)
     }
 
     @Test

@@ -9,8 +9,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
@@ -99,7 +99,7 @@ class TimelineExperienceDeviceTest {
                     onCategorySelect = selected::set,
                     viewportStartMinutes = 1_440,
                     viewportDurationMinutes = 1_440,
-                    onHorizontalPan = { delta, _ -> reportedDelta.set(delta) },
+                    onHorizontalPan = { pan -> reportedDelta.set(pan.cumulativeDeltaPx) },
                     onPanEnd = { panEnds.incrementAndGet() },
                     modifier = Modifier.testTag("interactive_timeline_rail"),
                 )
@@ -117,13 +117,54 @@ class TimelineExperienceDeviceTest {
 
         assertNotEquals(0f, reportedDelta.get())
         assertNull(selected.get())
-        assertEquals(2, panEnds.get())
+        assertEquals(1, panEnds.get())
 
         careLane.performTouchInput {
             click(Offset(width * 0.25f, height * 0.32f))
         }
         compose.waitForIdle()
         assertEquals("PEE", selected.get())
+    }
+
+    @Test
+    fun disposingRailDuringHorizontalDragCancelsPreviewInsteadOfCommittingIt() {
+        lateinit var hideRail: () -> Unit
+        val reportedDelta = AtomicReference(0f)
+        val panEnds = AtomicInteger(0)
+        val panCancels = AtomicInteger(0)
+        compose.setContent {
+            var showRail by remember { mutableStateOf(true) }
+            hideRail = { showRail = false }
+            LeziTheme(visualStyle = "warm") {
+                if (showRail) {
+                    TimelineRailCard(
+                        sleep = emptyList(),
+                        feed = emptyList(),
+                        care = emptyList(),
+                        recordCount = 0,
+                        nowContentMinute = null,
+                        onHorizontalPan = { pan ->
+                            reportedDelta.set(pan.cumulativeDeltaPx)
+                        },
+                        onPanEnd = { panEnds.incrementAndGet() },
+                        onPanCancel = { panCancels.incrementAndGet() },
+                        modifier = Modifier.testTag("cancellable_timeline_rail"),
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag("timeline_lane_护理", useUnmergedTree = true)
+            .performTouchInput {
+                down(center)
+                moveBy(Offset(-width * 0.4f, 0f))
+            }
+        compose.runOnIdle(hideRail)
+        compose.waitForIdle()
+
+        assertNotEquals(0f, reportedDelta.get())
+        assertEquals(0, panEnds.get())
+        assertEquals(1, panCancels.get())
     }
 
     @Test
@@ -141,7 +182,7 @@ class TimelineExperienceDeviceTest {
                             care = emptyList(),
                             recordCount = 0,
                             nowContentMinute = null,
-                            onHorizontalPan = { _, _ -> },
+                            onHorizontalPan = {},
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }

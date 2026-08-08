@@ -7,8 +7,25 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
 
 class RootRoutingPolicyTest {
+    @Test
+    fun selectedDateProjectsToEveryDateOwnedSurface() {
+        val selectedDate = LocalDate.of(2026, 8, 6)
+
+        assertEquals(
+            RootDateExperience(
+                topBarDate = selectedDate,
+                logExternalDay = selectedDate,
+                summaryAnchorDate = selectedDate,
+                growthInitialDate = selectedDate,
+                calendarInitialDate = selectedDate,
+            ),
+            rootDateExperience(selectedDate),
+        )
+    }
+
     @Test
     fun joinedMemberWithoutAuthorityBabyUsesFamilyShellInsteadOfOnboarding() {
         assertFalse(shouldShowOnboarding(hasBaby = false, familyRole = FamilyRole.Member))

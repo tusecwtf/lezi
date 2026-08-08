@@ -55,6 +55,7 @@ import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.SwipeEditDeleteRow
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
+import com.lezi.babylog.designsystem.TimelinePanGesture
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.carelog.DayChartCategory
 import com.lezi.babylog.domain.carelog.formatClock
@@ -114,8 +115,9 @@ internal fun LogTimelineList(
     timelineViewportStart: Int,
     timelineViewportDuration: Int,
     timelineAxis: ThreeDayTimelineAxis,
-    onTimelinePan: (cumulativeDeltaPx: Float, effectiveWidthPx: Float) -> Unit,
+    onTimelinePan: (TimelinePanGesture) -> Unit,
     onTimelinePanEnd: () -> Unit,
+    onTimelinePanCancel: () -> Unit,
     filteredTimelineRecords: List<Record>,
     onGoToday: () -> Unit,
     onRefresh: () -> Unit,
@@ -312,6 +314,7 @@ internal fun LogTimelineList(
                     hourLabels = timelineAxis.hourLabels(),
                     onHorizontalPan = onTimelinePan,
                     onPanEnd = onTimelinePanEnd,
+                    onPanCancel = onTimelinePanCancel,
                     titleSecondary = "时间轴",
                     modifier = Modifier
                         .padding(horizontal = pageHorizontal)

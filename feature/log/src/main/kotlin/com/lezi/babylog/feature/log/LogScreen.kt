@@ -405,15 +405,17 @@ fun LogRoute(
                             timelineViewportStart = timelinePresentation.viewportStartMinutes,
                             timelineViewportDuration = timelinePresentation.viewportDurationMinutes,
                             timelineAxis = timelinePresentation.axis,
-                            onTimelinePan = { cumulativeDeltaPx, effectiveWidthPx ->
+                            onTimelinePan = { gesture ->
                                 vm.changeTimelineDrag(
-                                    cumulativeDeltaPx = cumulativeDeltaPx,
-                                    effectiveWidthPx = effectiveWidthPx,
+                                    gesture = gesture,
                                     nowMs = nowMs,
                                 )
                             },
                             onTimelinePanEnd = {
                                 vm.endTimelineDrag(nowMs)?.let(onSelectedDayChange)
+                            },
+                            onTimelinePanCancel = {
+                                vm.cancelTimelineDrag(nowMs)
                             },
                             filteredTimelineRecords = filteredTimelineRecords,
                             onGoToday = onGoToday,

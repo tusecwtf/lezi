@@ -10,11 +10,9 @@ private const val MILLIS_PER_MINUTE = 60_000L
 /** Rendering projection of the interaction state's absolute viewport onto its work axis. */
 internal data class TimelinePresentation(
     val axis: ThreeDayTimelineAxis,
-    val viewport: TimelineViewport,
     val viewportStartMinutes: Int,
     val viewportDurationMinutes: Int,
     val nowContentMinute: Int?,
-    val showNowLine: Boolean,
 )
 
 internal fun TimelineInteractionState.toTimelinePresentation(nowMs: Long): TimelinePresentation {
@@ -26,11 +24,9 @@ internal fun TimelineInteractionState.toTimelinePresentation(nowMs: Long): Timel
     val showNowLine = nowMs in viewport.startInstantMs..viewport.endInstantMs
     return TimelinePresentation(
         axis = axis,
-        viewport = viewport,
         viewportStartMinutes = viewportStartMinutes,
         viewportDurationMinutes = viewportDurationMinutes,
         nowContentMinute = axis.instantToContentMinute(nowMs).takeIf { showNowLine },
-        showNowLine = showNowLine,
     )
 }
 

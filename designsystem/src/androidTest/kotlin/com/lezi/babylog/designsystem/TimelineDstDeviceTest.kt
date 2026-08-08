@@ -61,11 +61,11 @@ class TimelineDstDeviceTest {
                     windowGeometry = geometry,
                     hourLabels = emptyList(),
                     onCategorySelect = selected::set,
-                    onHorizontalPan = { totalDeltaPx, axisLengthPx ->
+                    onHorizontalPan = { pan ->
                         val next = TimelineAxis.panViewportStart(
                             currentStartMinutes = initialViewportStart,
-                            deltaPx = totalDeltaPx,
-                            axisLengthPx = axisLengthPx,
+                            deltaPx = pan.cumulativeDeltaPx,
+                            axisLengthPx = pan.axisLengthPx,
                             viewportDurationMinutes = viewportDuration,
                             contentDurationMinutes = geometry.contentDurationMinutes,
                         )

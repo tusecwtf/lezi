@@ -16,11 +16,12 @@
 
 ## Evidence
 
-- `TimelineInteractionTest` and `TimelineExperienceProjectionTest` cover the retained absolute
-  viewport, external-day flow, live/browsing restoration, future clamp, filter lifecycle, DST
-  projection and category empty state through the feature seam.
-- `TimelineExperienceDeviceTest` passed all 3 warm/journal, empty-rail, direct-drag/tap and vertical
-  arbitration cases on `lezi_api35` API 35 emulator on 2026-08-08.
+- `RootRoutingPolicyTest`, `TimelineInteractionTest` and `TimelineExperienceProjectionTest` cover
+  Root's single date projection, retained absolute viewport, external-day flow, live/browsing
+  restoration, future clamp, filter lifecycle, DST projection and category empty state.
+- `TimelineExperienceDeviceTest` passed all 4 warm/journal, empty-rail, direct-drag/tap, cancelled
+  drag and vertical-arbitration cases on `lezi_api35` API 35 emulator on 2026-08-08. Cancellation
+  removes the previewing rail without emitting a release commit.
 - `TimelineDstDeviceTest` passed on the same emulator after the rendering adapter switched to raw
   cumulative pan input.
 - `./gradlew test lintDebug :app:assembleDebug` passed on 2026-08-08; the built debug APK installed

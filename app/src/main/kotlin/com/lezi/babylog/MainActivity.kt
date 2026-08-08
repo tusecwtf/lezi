@@ -749,6 +749,23 @@ internal data class RootChromeVisibility(
     val preserveBottomBarExtent: Boolean,
 )
 
+/** One root-owned selected day projected to every date-consuming product surface. */
+internal data class RootDateExperience(
+    val topBarDate: LocalDate,
+    val logExternalDay: LocalDate,
+    val summaryAnchorDate: LocalDate,
+    val growthInitialDate: LocalDate,
+    val calendarInitialDate: LocalDate,
+)
+
+internal fun rootDateExperience(selectedDate: LocalDate) = RootDateExperience(
+    topBarDate = selectedDate,
+    logExternalDay = selectedDate,
+    summaryAnchorDate = selectedDate,
+    growthInitialDate = selectedDate,
+    calendarInitialDate = selectedDate,
+)
+
 /** Root top bar variants swapped via AnimatedContent (date header ↔ brand bar). */
 private enum class RootHeaderKind { None, Context, Brand }
 
@@ -894,6 +911,7 @@ private fun LeziMainScaffold(
     val backStack by nav.currentBackStackEntryAsState()
     val current = backStack?.destination?.route
     val today = ui.today
+    val dateExperience = rootDateExperience(ui.selectedDate)
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val shallowSyncLine by vm.shallowSyncLine.collectAsStateWithLifecycle()
@@ -907,7 +925,7 @@ private fun LeziMainScaffold(
     val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()
     var showHeaderCalendar by remember { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
-    var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
+    var displayedMonth by remember { mutableStateOf(YearMonth.from(dateExperience.topBarDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
     // Shell chrome / nav transitions — capture outside non-@Composable transitionSpec.
     val shellBaseMs = leziMotionMillis(LeziMotion.Base)
@@ -1029,17 +1047,17 @@ private fun LeziMainScaffold(
                                 babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
                                 avatarPath = ui.baby?.avatarPath,
                                 sleeping = ui.sleeping,
-                                selectedDate = ui.selectedDate,
+                                selectedDate = dateExperience.topBarDate,
                                 today = today,
                                 canCycleBaby = ui.babies.size > 1,
-                                canGoNext = ui.selectedDate.isBefore(today),
+                                canGoNext = dateExperience.topBarDate.isBefore(today),
                                 dark = dark,
                                 onCycleBaby = { vm.cycleBaby() },
                                 onJumpSiblingSameDayAge = { vm.jumpSiblingSameDayAge() },
                                 onPreviousDate = { vm.shiftDay(-1) },
                                 onNextDate = { vm.shiftDay(1) },
                                 onOpenDatePicker = {
-                                    displayedMonth = YearMonth.from(ui.selectedDate)
+                                    displayedMonth = YearMonth.from(dateExperience.topBarDate)
                                     vm.setCalendarMonth(displayedMonth)
                                     showHeaderCalendar = true
                                 },
@@ -1191,7 +1209,7 @@ private fun LeziMainScaffold(
         ) {
             composable(TopDest.Log.route) {
                 LogRoute(
-                    externalDay = ui.selectedDate,
+                    externalDay = dateExperience.logExternalDay,
                     onOpenComposer = vm::openComposer,
                     onGoToday = { vm.setDay(today) },
                     onSelectedDayChange = vm::setDay,
@@ -1203,8 +1221,12 @@ private fun LeziMainScaffold(
                     },
                 )
             }
-            composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
-            composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
+            composable(TopDest.Summary.route) {
+                SummaryRoute(anchorDate = dateExperience.summaryAnchorDate)
+            }
+            composable(TopDest.Growth.route) {
+                GrowthRoute(initialDate = dateExperience.growthInitialDate)
+            }
             composable(TopDest.Family.route) {
                 FamilyRoute()
             }
@@ -1229,7 +1251,7 @@ private fun LeziMainScaffold(
             composable("calendar") {
                 CalendarRoute(
                     onBack = { nav.popBackStack() },
-                    initialDate = ui.selectedDate,
+                    initialDate = dateExperience.calendarInitialDate,
                     onScheduleCare = { type, scheduledAt, customItemId ->
                         val babyId = ui.baby?.id ?: return@CalendarRoute
                         vm.openComposer(
@@ -1361,7 +1383,7 @@ private fun LeziMainScaffold(
 
     if (showHeaderCalendar) {
         HeaderCalendarDialog(
-            selectedDate = ui.selectedDate,
+            selectedDate = dateExperience.topBarDate,
             displayedMonth = displayedMonth,
             today = today,
             recordDays = ui.calendarRecordDays,

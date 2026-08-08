@@ -9,6 +9,7 @@ import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.designsystem.TimelineLaneSegment
+import com.lezi.babylog.designsystem.TimelinePanGesture
 import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
@@ -250,8 +251,7 @@ class LogViewModel @Inject constructor(
     }
 
     internal fun changeTimelineDrag(
-        cumulativeDeltaPx: Float,
-        effectiveWidthPx: Float,
+        gesture: TimelinePanGesture,
         nowMs: Long,
     ) {
         if (timelineInteractionState.value.drag == null) {
@@ -259,8 +259,8 @@ class LogViewModel @Inject constructor(
         }
         reduceTimeline(
             TimelineInteractionEvent.DragChanged(
-                cumulativeDeltaPx = cumulativeDeltaPx.toDouble(),
-                effectiveWidthPx = effectiveWidthPx.toDouble(),
+                cumulativeDeltaPx = gesture.cumulativeDeltaPx.toDouble(),
+                effectiveWidthPx = gesture.axisLengthPx.toDouble(),
                 nowMs = nowMs,
             ),
         )

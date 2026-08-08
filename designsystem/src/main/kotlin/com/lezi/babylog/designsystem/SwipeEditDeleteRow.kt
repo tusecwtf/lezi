@@ -262,6 +262,11 @@ fun SwipeEditDeleteRow(
                                 }
                             }
                         }
+                        val settleGesture: (Boolean) -> Unit = { wasHorizontal ->
+                            if (wasHorizontal) {
+                                settleFromDrag(dragOffset)
+                            }
+                        }
                         trackSlopHorizontalGesture(
                             onGestureStart = {
                                 startOffset = if (dragging) dragOffset else animOffset.value
@@ -272,11 +277,8 @@ fun SwipeEditDeleteRow(
                                 dragging = true
                             },
                             onHorizontalDrag = { totalX -> applyDrag(totalX) },
-                            onGestureEnd = { wasHorizontal ->
-                                if (wasHorizontal) {
-                                    settleFromDrag(dragOffset)
-                                }
-                            },
+                            onGestureEnd = settleGesture,
+                            onGestureCancel = settleGesture,
                         )
                     }
                 } else {
