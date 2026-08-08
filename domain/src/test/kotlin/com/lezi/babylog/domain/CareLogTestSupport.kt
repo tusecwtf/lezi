@@ -1551,7 +1551,8 @@ internal class FakeRecordDao(
                 it.babyId == babyId &&
                     it.type == "sleep" &&
                     it.deletedAt == null &&
-                    it.endTimestamp == null
+                    it.endTimestamp == null &&
+                    it.effectiveWakeObservationClientUuid == null
             }
             .sortedWith(
                 compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.id },
@@ -1564,7 +1565,8 @@ internal class FakeRecordDao(
                     it.babyId == babyId &&
                         it.type == "sleep" &&
                         it.deletedAt == null &&
-                        it.endTimestamp == null
+                        it.endTimestamp == null &&
+                        it.effectiveWakeObservationClientUuid == null
                 }
                 .maxWithOrNull(
                     compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },

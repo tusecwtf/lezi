@@ -372,11 +372,13 @@ internal class CausalRoomUpgradeStep internal constructor(
                     arrayOf(wakeUuid),
                 ).use { it.moveToFirst() }
                 if (exists) {
+                    // Keep denormalized endTimestamp until causal publish + wake-aware
+                    // projection (tickets 05/06). Nulling it makes listOpenSleeps/heal
+                    // and LWW end_timestamp treat closed sleeps as open.
                     sqlite.execSQL(
                         """
                         UPDATE records
-                        SET effectiveWakeObservationClientUuid = ?,
-                            endTimestamp = NULL
+                        SET effectiveWakeObservationClientUuid = ?
                         WHERE clientUuid = ?
                         """.trimIndent(),
                         arrayOf(wakeUuid, sleepUuid),
@@ -421,13 +423,15 @@ internal class CausalRoomUpgradeStep internal constructor(
                     tombstoneAt = updatedAt,
                 )
 
-                // SleepStart-only after transfer: wake time lives on WakeObservation
-                // (wire forbids sleep end_timestamp; matches server offline-migrate).
+                // Dual-compat until tickets 05/06: WakeObservation is the causal
+                // authority and endTimestamp stays denormalized for LWW wire,
+                // open-sleep heal, and timeline/summary readers that still key on it.
+                // Causal sleep wire forbids competing end_timestamp once the engine
+                // publishes WakeObservation roots; do not null here pre-cutover.
                 sqlite.execSQL(
                     """
                     UPDATE records
-                    SET effectiveWakeObservationClientUuid = ?,
-                        endTimestamp = NULL
+                    SET effectiveWakeObservationClientUuid = ?
                     WHERE clientUuid = ?
                     """.trimIndent(),
                     arrayOf(wakeUuid, sleepUuid),

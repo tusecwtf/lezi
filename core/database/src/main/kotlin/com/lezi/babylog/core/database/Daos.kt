@@ -508,6 +508,7 @@ interface RecordDao {
           AND type = 'sleep'
           AND deletedAt IS NULL
           AND endTimestamp IS NULL
+          AND effectiveWakeObservationClientUuid IS NULL
         ORDER BY timestamp DESC
         LIMIT 1
         """,
@@ -521,6 +522,7 @@ interface RecordDao {
           AND type = 'sleep'
           AND deletedAt IS NULL
           AND endTimestamp IS NULL
+          AND effectiveWakeObservationClientUuid IS NULL
         ORDER BY timestamp DESC, id DESC
         """,
     )
@@ -533,6 +535,7 @@ interface RecordDao {
           AND type = 'sleep'
           AND deletedAt IS NULL
           AND endTimestamp IS NULL
+          AND effectiveWakeObservationClientUuid IS NULL
         ORDER BY timestamp DESC
         LIMIT 1
         """,

@@ -551,8 +551,10 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.familyAuthority).isFalse()
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.syncDirty).isTrue()
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.baseVersion).isNull()
-        // Closed sleep becomes SleepStart-only: endTimestamp cleared after WakeObservation transfer.
-        assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.endTimestamp).isNull()
+        // Dual-compat: WakeObservation is projected while denormalized endTimestamp
+        // remains for LWW wire / open-sleep heal / timeline until tickets 05/06.
+        assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.endTimestamp)
+            .isEqualTo(2_000L)
         assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.syncDirty).isTrue()
         assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.note)
             .isEqualTo("slept well")
@@ -571,6 +573,12 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(wake.observerMembershipId).isEqualTo("membership-a")
         assertThat(wake.syncDirty).isTrue()
         assertThat(wake.sleepRecordClientUuid).isEqualTo(CLOSED_SLEEP_UUID)
+        // Closed-with-effective-wake must not appear as open (heal/UI contract).
+        assertThat(
+            room.recordDao().listOpenSleeps(
+                room.babyDao().getByClientUuid(BABY_UUID)!!.id,
+            ).map { it.clientUuid },
+        ).containsExactly(OPEN_SLEEP_UUID)
 
         // Open sleep stays open — no wake, no auto-close.
         assertThat(room.recordDao().getByClientUuid(OPEN_SLEEP_UUID)?.endTimestamp).isNull()

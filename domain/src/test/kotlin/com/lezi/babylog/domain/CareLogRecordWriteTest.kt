@@ -549,6 +549,75 @@ class CareLogRecordWriteTest {
         assertThat(repaired.getValue("a-sleep").payloadJson).contains("\"anomaly_flag\":true")
         assertThat(repaired.getValue("z-sleep").endTimestamp).isEqualTo(500_000L)
     }
+
+    @Test
+    fun effectiveWakeRowsAreNotOpen_andHealDoesNotRewriteWakeTimes() = runTest {
+        val fakes = Fakes()
+        fakes.clock.now = 400_000L
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        // Defense: even with endTimestamp nulled, an effective WakeObservation marks
+        // the sleep closed so multi-row heal cannot invent synthetic ends.
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "closed-a",
+                babyId = babyId,
+                type = RecordType.SLEEP.key,
+                timestamp = 1_000L,
+                endTimestamp = null,
+                note = null,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                updatedAt = 1_000L,
+                effectiveWakeObservationClientUuid = "wake-a",
+            ),
+        )
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "closed-b",
+                babyId = babyId,
+                type = RecordType.SLEEP.key,
+                timestamp = 2_000L,
+                endTimestamp = null,
+                note = null,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                updatedAt = 2_000L,
+                effectiveWakeObservationClientUuid = "wake-b",
+            ),
+        )
+        // Dual-compat denormalized closed sleep (migration keeps endTimestamp).
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "closed-denorm",
+                babyId = babyId,
+                type = RecordType.SLEEP.key,
+                timestamp = 500L,
+                endTimestamp = 1_500L,
+                note = null,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                updatedAt = 1_500L,
+                effectiveWakeObservationClientUuid = "wake-denorm",
+            ),
+        )
+
+        assertThat(fakes.records.listOpenSleeps(babyId)).isEmpty()
+        assertThat(fakes.records.findOpenSleep(babyId)).isNull()
+
+        care.sleepDown(babyId, at = 3_000L)
+        val opens = fakes.records.listOpenSleeps(babyId)
+        assertThat(opens).hasSize(1)
+        assertThat(opens.single().clientUuid).isNotIn(listOf("closed-a", "closed-b", "closed-denorm"))
+
+        val byUuid = fakes.records.listForBaby(babyId).associateBy(RecordEntity::clientUuid)
+        assertThat(byUuid.getValue("closed-a").endTimestamp).isNull()
+        assertThat(byUuid.getValue("closed-a").effectiveWakeObservationClientUuid)
+            .isEqualTo("wake-a")
+        assertThat(byUuid.getValue("closed-b").endTimestamp).isNull()
+        assertThat(byUuid.getValue("closed-b").effectiveWakeObservationClientUuid)
+            .isEqualTo("wake-b")
+        assertThat(byUuid.getValue("closed-denorm").endTimestamp).isEqualTo(1_500L)
+        assertThat(byUuid.getValue("closed-denorm").payloadJson)
+            .doesNotContain("\"anomaly_flag\":true")
+    }
     @Test
     fun completeNursing_payload() = runTest {
         val care = Fakes().careLog()

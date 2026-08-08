@@ -2190,7 +2190,8 @@ internal class MemoryRecordDao : RecordDao {
             it.babyId == babyId &&
                 it.type == "sleep" &&
                 it.deletedAt == null &&
-                it.endTimestamp == null
+                it.endTimestamp == null &&
+                it.effectiveWakeObservationClientUuid == null
         }.sortedWith(
             compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.id },
         )
@@ -2201,7 +2202,8 @@ internal class MemoryRecordDao : RecordDao {
                 record.babyId == babyId &&
                     record.type == "sleep" &&
                     record.deletedAt == null &&
-                    record.endTimestamp == null
+                    record.endTimestamp == null &&
+                    record.effectiveWakeObservationClientUuid == null
             }.maxWithOrNull(
                 compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
             )
