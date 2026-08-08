@@ -198,8 +198,12 @@ data class ClientAppVersion(
     }
 
     companion object {
-        /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
-        val FALLBACK = ClientAppVersion(versionCode = 12, versionName = "0.3.5")
+        /** Generated from the shared released-version compatibility catalog. */
+        val FALLBACK = ClientAppVersion(
+            versionCode = BuildConfig.LATEST_RELEASED_VERSION_CODE,
+            versionName = BuildConfig.LATEST_RELEASED_VERSION_NAME,
+            localDataContractVersion = BuildConfig.LATEST_RELEASED_LOCAL_DATA_CONTRACT,
+        )
     }
 }
 

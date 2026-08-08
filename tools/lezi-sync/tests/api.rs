@@ -715,6 +715,7 @@ async fn lan_install_page_uses_only_verified_release_metadata_and_clears_the_inv
         "{html}"
     );
     assert!(html.contains("href=\"/download/lezi.apk\""), "{html}");
+    assert!(html.contains("原地升级会保留本机记录和家庭配置"), "{html}");
     let scrub = "history.replaceState(null, \"\", location.pathname + location.search);";
     assert!(html.contains(scrub), "{html}");
     assert!(html.find(scrub).unwrap() < html.find("<body>").unwrap());
@@ -859,6 +860,101 @@ async fn lan_apk_download_is_anonymous_integrity_checked_and_non_cacheable() {
         .status(),
         StatusCode::METHOD_NOT_ALLOWED,
     );
+}
+
+#[tokio::test]
+async fn every_released_android_version_keeps_apk_recovery_independent_of_sync_floor() {
+    let catalog: Value = serde_json::from_str(include_str!(
+        "../../../config/android-release-compatibility.json"
+    ))
+    .unwrap();
+    let package_name = catalog["application_id"].as_str().unwrap();
+    let minimum_sync_version_code = catalog["minimum_sync_version_code"].as_u64().unwrap();
+    let target_version_code = catalog["next_release_version_code"].as_u64().unwrap();
+    let released_versions = catalog["released_versions"].as_array().unwrap();
+    let directory = TempDir::new().unwrap();
+    let apk_bytes = b"all-version-recovery-apk";
+    fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        directory.path().join("app-update.json"),
+        json!({
+            "package_name": package_name,
+            "version_code": target_version_code,
+            "version_name": "0.3.12",
+            "min_supported_version_code": minimum_sync_version_code,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut config = ServerConfig::new(directory.path());
+    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    let apps = build_server_apps(config).unwrap();
+    let public = apps.public;
+    let lan = apps.lan_apk_download.unwrap();
+    let owner = create_family(
+        &public,
+        "all-version-recovery-owner",
+        "all-version-recovery-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    let lan_response = request(
+        &lan,
+        Method::GET,
+        "/download/lezi.apk",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(lan_response.status(), StatusCode::OK);
+    assert_eq!(
+        lan_response.into_body().collect().await.unwrap().to_bytes(),
+        apk_bytes.as_slice(),
+    );
+
+    for release in released_versions {
+        let source_version_code = release["version_code"].as_u64().unwrap().to_string();
+        let client_header = [("x-lezi-client-version-code", source_version_code.as_str())];
+        let (metadata_status, metadata) = raw_json_request_with_headers(
+            &public,
+            Method::GET,
+            "/v1/app-update",
+            Some(token),
+            json!({}),
+            &client_header,
+        )
+        .await;
+        assert_eq!(
+            metadata_status,
+            StatusCode::OK,
+            "source={source_version_code}"
+        );
+        assert_eq!(metadata["version_code"], json!(target_version_code));
+
+        let (sync_status, sync_body) = raw_json_request_with_headers(
+            &public,
+            Method::GET,
+            &format!("/v1/pull?cursor=0&generation={generation}"),
+            Some(token),
+            json!({}),
+            &client_header,
+        )
+        .await;
+        if release["version_code"].as_u64().unwrap() < minimum_sync_version_code {
+            assert_eq!(
+                sync_status,
+                StatusCode::FORBIDDEN,
+                "source={source_version_code}"
+            );
+            assert_eq!(sync_body["code"], json!("client_update_required"));
+        } else {
+            assert_eq!(sync_status, StatusCode::OK, "source={source_version_code}");
+        }
+    }
 }
 
 #[tokio::test]

@@ -287,7 +287,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 项 | 合同 |
 |----|------|
 | 通道 | 平台 `PackageInstaller.Session` + 家庭服务器鉴权元数据/APK；无 FCM、无后台推包 |
-| 资格 | **仅已加入家庭**、endpoint 已信任、有效设备会话；未加入 / 离线模式无下载通道 |
+| 资格 | 鉴权 `/v1/app-update*` 仅供已加入家庭且 endpoint 已信任、会话有效的客户端；所有 `config/android-release-compatibility.json` 已枚举正式版本都可在家庭 LAN 通过独立 HTTP `8767` 取得同一个已验证 APK，恢复下载资格不受 `min_supported_version_code` 控制 |
 | 版本语义 | 比较与门槛只用整数 **versionCode**；**versionName** 仅展示 |
 | 双档 | `local < latest` → 可选；`local < minSupportedVersionCode` → 强制全屏（无「稍后」绕过主功能） |
 | 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
@@ -299,6 +299,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；鉴权 `/v1/app-update*` 不设匿名旁路，同一已验证 APK 可由 §4.3 的隔离邀请安装页提供首装 |
 | 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`（`ForcedAppUpdateState?`）、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
 | 安装约束 | 装前解析 APK 归档：`packageName` == 本机 applicationId == 元数据；`versionCode` == 元数据且 &gt; 本机；签名证书与已装乐记一致；再 PackageInstaller 同签名原地替换；仅 release `applicationId = com.lezi.babylog`；本轮不承诺 debug 后缀包自更新 |
+| 历史枚举 | `config/android-release-compatibility.json` 是 versionCode、versionName、Room schema、本地数据契约与当前同步 floor 的单一清单；Gradle、Android 更新矩阵、Room 迁移夹具和 lezi-sync 路由矩阵共同校验。永久无损基线仍是 0.3.0 / versionCode 6 / contract 1，后续正式版必须连续追加 |
 | 无残留 | 流程结束后应用私有目录无 APK；**不**承诺清除系统 PackageInstaller 内部缓存 |
 
 元数据形状（wire **snake_case**；部署文件 `app-update.json`）：
@@ -332,17 +333,19 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 2. **先抬 floor：** 在 `app-update.json` 将 `min_supported_version_code` 提到**能解析新 shape 的最低官方 versionCode**；同时准备该 versionCode（或更高）的 **已签名 release APK**，`sha256` 与包一致。
 3. **先发布可安装通道：** CD 原子对发布（APK 再 metadata），确认 `load_verified` 成功；旧客户端随后在权威 sync / restore 写路径收到 `client_update_required` 并能装包。
 4. **再启用新写入：** 仅当通道已验证后，再让新客户端/服务端发布破坏性 shape。
-5. **支持范围内 wire 冻结：** 当前 floor（例如 `min_supported=6`）到最新 versionCode 之间，wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。
+5. **支持范围内 wire 冻结：** 当前 floor（`min_supported=16`）到最新 versionCode 之间，wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
 
 完整运维条目见 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)「Wire-break checklist」。
 
 ---
 
-## 4.3 邀请安装页（首次安装分发）
+## 4.3 LAN 安装页（首次安装与历史版本恢复）
 
 尚未安装乐记的受邀 Android 设备可用系统相机扫描同一个成员登录二维码，在家庭 LAN 内进入
-由 lezi-sync 提供的邀请安装页。该能力不是应用内更新，也不完成家庭登录：安装结束后用户必须
-打开乐记并重新扫描管理员仍在展示的二维码；十分钟 grant 已过期时由管理员重新生成。
+由 lezi-sync 提供的安装页；无法使用当前鉴权 HTTPS 更新流的历史正式版本也可直接下载同一个
+APK。该端口不完成家庭登录，也不放宽同步门禁。首次安装结束后用户必须打开乐记并重新扫描
+管理员仍在展示的二维码；同签名原地升级保留本机数据、家庭 session、endpoint 与 SPKI 信任，
+只有原会话本来就处于 reauth 时才继续既有重新登录流程。
 
 | 项 | 合同 |
 |----|------|

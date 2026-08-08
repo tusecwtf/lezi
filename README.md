@@ -165,7 +165,8 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)。
 
 **邀请首装**：启用 `LEZI_LAN_APK_DOWNLOAD_ORIGIN` 后，同一成员登录 QR 可被系统相机打开到
-独立 8767 安装页；页面匿名提供同一个已校验 Release APK，安装后仍须回到乐记重扫二维码。
+独立 8767 安装页；页面匿名提供同一个已校验 Release APK。首次安装后须回到乐记重扫二维码；
+历史正式版本原地升级会保留本机数据与家庭配置，不因同步最低版本门禁失去下载出口。
 8767 不提供家庭 API，并且只允许可信家庭 LAN；明文链路的页面/APK 替换与 grant 盗用风险见
 [ADR-0015](docs/adr/0015-isolate-lan-invite-install-distribution.md)。
 
