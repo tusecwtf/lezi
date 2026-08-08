@@ -1,5 +1,5 @@
 ---
-status: accepted (0.3.13 planning freeze; not runtime-delivered)
+status: accepted (0.3.13; runtime landing via lossless-family-causal-sync tickets 04–07)
 ---
 
 # WakeObservation 与非破坏性疑似重复分组
@@ -75,4 +75,6 @@ status: accepted (0.3.13 planning freeze; not runtime-delivered)
 
 ## 实现状态
 
-规划目标随 0.3.13 因果切割一并交付。本 ADR 为文档冻结，不含运行时证明。
+规划目标随 0.3.13 因果切割一并交付。Store/API、Room、domain soft-group、bounds 与
+timeline/summary 投影已在 `lossless-family-causal-sync` 票 04–07 落地；两客户端 E2E 与
+发版验收仍由票 09 收口。

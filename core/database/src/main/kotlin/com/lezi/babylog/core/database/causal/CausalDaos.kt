@@ -240,6 +240,9 @@ interface SourceRelationDao {
     @Query("SELECT * FROM source_relation_members WHERE relationId = :relationId")
     suspend fun listMembers(relationId: String): List<SourceRelationMemberEntity>
 
+    @Query("SELECT * FROM source_relation_members")
+    suspend fun listAllMembers(): List<SourceRelationMemberEntity>
+
     @Query(
         """
         SELECT * FROM source_relation_members
@@ -264,6 +267,31 @@ interface SourceRelationDao {
     suspend fun listPendingDeclarations(): List<SourceRelationDeclarationEntity>
 
     /**
+     * Apply a source relation + members (+ optional declaration status) atomically.
+     * Never mutates Record.deletedAt or ordinary media tombstones.
+     */
+    @Transaction
+    suspend fun applyRelation(
+        relation: SourceRelationEntity,
+        members: List<SourceRelationMemberEntity>,
+        declaration: SourceRelationDeclarationEntity? = null,
+    ) {
+        require(relation.mediaRetained) { "source relations must retain media" }
+        require(
+            relation.reason == SourceRelationReason.AUTHOR_DECLARE ||
+                relation.reason == SourceRelationReason.OWNER_GROUP_RESOLVE ||
+                relation.reason == SourceRelationReason.PULL_SUMMARY,
+        ) {
+            "unknown source relation reason: ${relation.reason}"
+        }
+        upsert(relation)
+        members.forEach { upsertMember(it) }
+        if (declaration != null) {
+            upsertDeclaration(declaration)
+        }
+    }
+
+    /**
      * Apply an Owner group resolution: write relation + members in one transaction.
      * Never mutates Record.deletedAt or ordinary media tombstones.
      */
@@ -272,12 +300,22 @@ interface SourceRelationDao {
         relation: SourceRelationEntity,
         members: List<SourceRelationMemberEntity>,
     ) {
-        require(relation.mediaRetained) { "source relations must retain media" }
-        require(relation.reason == "owner_group_resolve") {
+        require(relation.reason == SourceRelationReason.OWNER_GROUP_RESOLVE) {
             "applyOwnerGroupResolution requires owner_group_resolve reason"
         }
-        upsert(relation)
-        members.forEach { upsertMember(it) }
+        applyRelation(relation, members)
+    }
+
+    @Transaction
+    suspend fun applyAuthorDeclaration(
+        relation: SourceRelationEntity,
+        members: List<SourceRelationMemberEntity>,
+        declaration: SourceRelationDeclarationEntity,
+    ) {
+        require(relation.reason == SourceRelationReason.AUTHOR_DECLARE) {
+            "applyAuthorDeclaration requires author_declare reason"
+        }
+        applyRelation(relation, members, declaration)
     }
 
     @Query("DELETE FROM source_relation_members")

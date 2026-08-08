@@ -21,6 +21,8 @@ data class SyncEntity(
     val versionId: String? = null,
     /** Bounded open-conflict summary from pull (wire §7). */
     val conflictSummary: PullConflictSummary? = null,
+    /** Wire §12.3 optional source-relation summary on record roots. */
+    val sourceRelationSummary: PullSourceRelationSummary? = null,
 )
 
 /** Wire §7 conflict_summary closed keys on ordinary pull entities. */
@@ -30,6 +32,42 @@ data class PullConflictSummary(
     val clientUuid: String,
     val stableVersionId: String,
     val branchVersionIds: List<String>,
+)
+
+/** Wire §12.3 `source_relation_summary` on stable pull entities. */
+data class PullSourceRelationSummary(
+    val relationId: String,
+    /** display | source */
+    val role: String,
+    val peerIds: List<String>,
+)
+
+/** Wire §12.1 author declare request. */
+data class SourceRelationDeclareRequest(
+    val mutationId: String,
+    val recordClientUuid: String,
+    val equivalentToClientUuid: String,
+    val expectedRecordVersion: String,
+    val expectedOtherVersion: String,
+)
+
+/** Wire §12.2 Owner group resolve request. */
+data class SourceRelationResolveGroupRequest(
+    val mutationId: String,
+    val memberClientUuids: List<String>,
+    val displayClientUuid: String,
+    val expectedVersions: Map<String, String>,
+)
+
+/** Wire §12 declare / resolve-group receipt. */
+data class SourceRelationResult(
+    val status: String,
+    val relationId: String? = null,
+    val displayClientUuid: String? = null,
+    val sourceClientUuids: List<String> = emptyList(),
+    val mediaRetained: Boolean? = null,
+    val code: String? = null,
+    val latestVersions: Map<String, String> = emptyMap(),
 )
 
 data class PullResult(
@@ -640,6 +678,22 @@ interface SyncBackend {
         conflictId: String,
         request: ConflictResolveRequest,
     ): ConflictResolveResult = throw UnsupportedOperationException("Conflict resolve is not implemented")
+
+    /**
+     * Author equivalence declare (wire §12.1).
+     */
+    suspend fun declareSourceRelation(
+        session: SyncSession,
+        request: SourceRelationDeclareRequest,
+    ): SourceRelationResult = throw UnsupportedOperationException("Source relation declare is not implemented")
+
+    /**
+     * Owner full-group resolve (wire §12.2).
+     */
+    suspend fun resolveSourceRelationGroup(
+        session: SyncSession,
+        request: SourceRelationResolveGroupRequest,
+    ): SourceRelationResult = throw UnsupportedOperationException("Source relation resolve-group is not implemented")
 
     suspend fun members(session: SyncSession): List<FamilyMember>
     /** Owner updates immediately; ordinary Member receives a pending approval request. */

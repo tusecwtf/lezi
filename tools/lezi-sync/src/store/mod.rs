@@ -27,6 +27,7 @@ mod pull;
 mod reconciliation;
 mod restore;
 mod schema;
+mod source_relations;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -39,12 +40,18 @@ use thiserror::Error;
 
 use crate::model::Entity;
 
+#[allow(unused_imports)]
+use self::SourceRelationReceipt as _;
 pub(crate) use bundles::bundle_content_hash;
 pub use causal::{
     CausalBatchResult, CausalMutation, CausalUnitResult, ConflictDetail, ConflictSummary,
     ResolveConflictInput, ResolveConflictResult, MAX_CAUSAL_UNITS,
 };
 pub use causal_merge::CausalMediaItem;
+pub use source_relations::{
+    DeclareSourceRelationInput, ResolveSourceRelationGroupInput, SourceRelationReceipt,
+    SourceRelationSummary,
+};
 
 // Re-exported types are the public Store/HTTP causal seams (ticket 03).
 #[allow(unused_imports)]
@@ -175,6 +182,9 @@ pub struct PulledEntity {
     /// is unchanged after a branch-only write.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conflict_summary: Option<ConflictSummary>,
+    /// Optional source-relation summary (wire §12.3); omitted when no relation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_relation_summary: Option<SourceRelationSummary>,
 }
 
 #[derive(Debug)]
@@ -355,6 +365,8 @@ pub enum StoreError {
     InvalidReconcileBatch,
     #[error("conflict not found")]
     ConflictNotFound,
+    #[error("source relation request invalid: {0}")]
+    InvalidSourceRelationRequest(&'static str),
     #[error("authority graph validation failed ({reason_code}) for {entity_type} {client_uuid}")]
     AuthorityGraphInvalid {
         reason_code: &'static str,

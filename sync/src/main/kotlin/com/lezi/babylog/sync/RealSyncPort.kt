@@ -12,6 +12,7 @@ import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.SourceRelationDao
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
@@ -38,6 +39,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -149,6 +151,7 @@ class RealSyncPort @Inject constructor(
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictDetailCacheDao: ConflictDetailCacheDao,
+    private val sourceRelationDao: SourceRelationDao? = null,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     private val apkIdentityReader: AppUpdateApkIdentityReader =
@@ -174,9 +177,7 @@ class RealSyncPort @Inject constructor(
     /** Process-session "稍后" suppressions keyed by server package versionCode. */
     private val dismissedOptionalUpdateVersionCodes =
         java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
-    private val neighborAlignmentHintEvents = MutableSharedFlow<String>(
-        extraBufferCapacity = 1,
-    )
+
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -216,6 +217,7 @@ class RealSyncPort @Inject constructor(
         wakeObservationDao = wakeObservationDao,
         conflictSummaryDao = conflictSummaryDao,
         conflictDetailCacheDao = conflictDetailCacheDao,
+        sourceRelationDao = sourceRelationDao,
     )
     private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
         babyDao = babyDao,
@@ -486,7 +488,7 @@ class RealSyncPort @Inject constructor(
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = preferences.pendingMemberLogin
     override fun memberLoginChecks(): Flow<MemberLoginCheckResult> = memberLoginCheckEvents
 
-    override fun neighborAlignmentHints(): Flow<String> = neighborAlignmentHintEvents
+    override fun neighborAlignmentHints(): Flow<String> = emptyFlow()
     override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         optionalAppUpdateState
 
@@ -670,6 +672,22 @@ class RealSyncPort @Inject constructor(
         val session = preferences.session.first()
         check(session.isJoined) { "未加入家庭，无法解决冲突" }
         return backend.resolveConflict(session, conflictId, request)
+    }
+
+    override suspend fun declareSourceRelation(
+        request: com.lezi.babylog.sync.backend.SourceRelationDeclareRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法声明来源关系" }
+        return backend.declareSourceRelation(session, request)
+    }
+
+    override suspend fun resolveSourceRelationGroup(
+        request: com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法解决疑似重复组" }
+        return backend.resolveSourceRelationGroup(session, request)
     }
 
     override suspend fun saveEndpointConfig(
@@ -1870,32 +1888,11 @@ class RealSyncPort @Inject constructor(
         cachedSession = preferences.session.first()
         currentStatus.value = when (outcome) {
             is ReplicaSyncOutcome.Synchronized -> {
-                maybeEmitNeighborAlignmentHint(
-                    session = session,
-                    neighborLoserClientUuids = outcome.neighborLoserClientUuids,
-                )
+                // Causal generation: do not toast neighbor_losers or interpret
+                // ordinary remote tombstones as duplicates (ADR-0021 / ticket 07).
                 SyncStatus.Idle
             }
         }
-    }
-
-    /**
-     * At most one light hint per sync cycle when the server explicitly listed a
-     * neighbor-loser uuid authored by the current membership. Ordinary remote
-     * deletes without that signal never use this copy.
-     */
-    private suspend fun maybeEmitNeighborAlignmentHint(
-        session: SyncSession,
-        neighborLoserClientUuids: Set<String>,
-    ) {
-        if (neighborLoserClientUuids.isEmpty()) return
-        val membershipId = session.membershipId
-        if (membershipId.isBlank()) return
-        val selfAuthored = neighborLoserClientUuids.any { uuid ->
-            recordDao.getByClientUuid(uuid)?.createdByMembershipId == membershipId
-        }
-        if (!selfAuthored) return
-        neighborAlignmentHintEvents.tryEmit("已与家人同一时间的记录对齐")
     }
 
     private suspend fun requireRetainedOwnerSession(): SyncSession =

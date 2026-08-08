@@ -91,6 +91,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -120,12 +121,22 @@ data class ChartWindowTotals(
 
 data class SummaryTotals(
     val feedMl: Int = 0,
+    val feedMlMin: Int = feedMl,
+    val feedMlMax: Int = feedMl,
     val nursingMin: Long = 0,
+    val nursingMinMin: Long = nursingMin,
+    val nursingMinMax: Long = nursingMin,
     val feedCount: Int = 0,
+    val feedCountMin: Int = feedCount,
+    val feedCountMax: Int = feedCount,
     val sleepMin: Long = 0,
     val sleepSegments: Int = 0,
     val pee: Int = 0,
+    val peeMin: Int = pee,
+    val peeMax: Int = pee,
     val poop: Int = 0,
+    val poopMin: Int = poop,
+    val poopMax: Int = poop,
     val tempAvg: Double? = null,
     val tempDays: Int = 0,
     val dayValuesFeed: List<Float> = emptyList(),
@@ -137,6 +148,12 @@ data class SummaryTotals(
     val dayValuesTemp: List<Float> = emptyList(),
     val feedTimeBuckets: List<Float> = List(4) { 0f },
     val chartWindows: ChartWindowTotals = ChartWindowTotals(),
+    /** True when unresolved suspected-duplicate groups make totals a range. */
+    val hasDuplicateUncertainty: Boolean = false,
+    val feedMlLabel: String? = null,
+    val feedCountLabel: String? = null,
+    val peeLabel: String? = null,
+    val poopLabel: String? = null,
 )
 
 data class SummaryUi(
@@ -234,7 +251,9 @@ class SummaryViewModel @Inject constructor(
                 startDayInclusive = queryStart,
                 endDayExclusive = queryEnd,
                 zone = zone,
-            ).map { records ->
+            ).mapLatest { records ->
+                val sourceRoles = careLog.sourceRoleClientUuids()
+                val openGroups = careLog.listOpenSuspectedDuplicateGroups(records)
                 SummaryAggregationRequest(
                     records = records,
                     range = selectedRange,
@@ -244,6 +263,8 @@ class SummaryViewModel @Inject constructor(
                     comparePrevWeek = preferences.comparePrevWeek,
                     babyName = baby.nickname,
                     zone = zone,
+                    sourceRoleClientUuids = sourceRoles,
+                    openGroups = openGroups,
                 )
             }.calculateLatest(aggregationEngine)
         }

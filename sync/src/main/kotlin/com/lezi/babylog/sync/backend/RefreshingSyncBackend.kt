@@ -191,6 +191,16 @@ internal class RefreshingSyncBackend(
         request: ConflictResolveRequest,
     ) = authenticated(session) { delegate.resolveConflict(it, conflictId, request) }
 
+    override suspend fun declareSourceRelation(
+        session: SyncSession,
+        request: SourceRelationDeclareRequest,
+    ) = authenticated(session) { delegate.declareSourceRelation(it, request) }
+
+    override suspend fun resolveSourceRelationGroup(
+        session: SyncSession,
+        request: SourceRelationResolveGroupRequest,
+    ) = authenticated(session) { delegate.resolveSourceRelationGroup(it, request) }
+
     private suspend fun <T> authenticated(
         requested: SyncSession,
         operation: suspend (SyncSession) -> T,

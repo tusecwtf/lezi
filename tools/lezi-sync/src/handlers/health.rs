@@ -27,7 +27,6 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
             CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
             CAPABILITY_CAUSAL_VERSIONS,
             CAPABILITY_WAKE_OBSERVATION,
-            // Schema + room model ready; declare/resolve HTTP lands with ticket 07.
             CAPABILITY_SOURCE_RELATIONS,
         ],
     }))

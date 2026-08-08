@@ -21,6 +21,7 @@ fn pulled_entity_from_row(row: &rusqlite::Row<'_>) -> Result<PulledEntity, Store
         rev: row.get(5)?,
         version_id: None,
         conflict_summary: None,
+        source_relation_summary: None,
     })
 }
 
@@ -64,6 +65,7 @@ fn load_pulled_entity(
                     rev,
                     version_id: None,
                     conflict_summary: None,
+                    source_relation_summary: None,
                 })
             },
         )
@@ -608,6 +610,13 @@ impl Store {
                     branch_version_ids: branch_ids,
                 });
                 summary_count += 1;
+            }
+            if entity.entity_type == "record" {
+                entity.source_relation_summary = Store::source_relation_summary_for(
+                    &connection,
+                    family_id,
+                    &entity.client_uuid,
+                )?;
             }
         }
         Ok(PullPage {

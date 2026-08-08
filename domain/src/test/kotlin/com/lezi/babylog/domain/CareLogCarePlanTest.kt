@@ -885,6 +885,7 @@ class CareLogCarePlanTest {
             wakeObservationDao = memberFakes.wakeObservations,
             conflictSummaryDao = memberFakes.conflictSummaries,
             conflictDetailCacheDao = memberFakes.conflictDetailCache,
+            sourceRelationDao = memberFakes.sourceRelations,
         )
         val audits = adminCare.listConflictNotAdoptedAudits(carePlanClientUuid = planUuid)
         assertThat(audits).hasSize(1)

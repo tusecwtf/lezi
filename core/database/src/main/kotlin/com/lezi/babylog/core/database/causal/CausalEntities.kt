@@ -127,7 +127,7 @@ data class SourceRelationEntity(
     /** Permanent media retention invariant; always true for new rows. */
     @ColumnInfo(defaultValue = "1")
     val mediaRetained: Boolean = true,
-    /** author_declare | owner_group_resolve */
+    /** See [SourceRelationReason]. */
     val reason: String,
     val mutationId: String,
     val createdByMembershipId: String,
@@ -142,7 +142,7 @@ data class SourceRelationEntity(
 data class SourceRelationMemberEntity(
     val relationId: String,
     val recordClientUuid: String,
-    /** display | source */
+    /** See [SourceRelationRole]. */
     val role: String,
 )
 
@@ -160,10 +160,30 @@ data class SourceRelationDeclarationEntity(
     val expectedRecordVersion: String,
     val expectedOtherVersion: String,
     val authorMembershipId: String,
-    /** pending | consumed | superseded */
+    /** See [SourceRelationDeclarationStatus]. */
     val status: String,
     val createdAt: Long,
 )
+
+/** Wire/Room vocabulary for source-relation reason (client + server author_declare/owner_group_resolve). */
+object SourceRelationReason {
+    const val AUTHOR_DECLARE = "author_declare"
+    const val OWNER_GROUP_RESOLVE = "owner_group_resolve"
+    /** Local pull attach only — never invents Owner resolution provenance. */
+    const val PULL_SUMMARY = "pull_summary"
+}
+
+object SourceRelationRole {
+    const val DISPLAY = "display"
+    const val SOURCE = "source"
+}
+
+object SourceRelationDeclarationStatus {
+    const val PENDING = "pending"
+    const val CONSUMED = "consumed"
+    const val SUPERSEDED = "superseded"
+    const val FAILED = "failed"
+}
 
 /**
  * Media reference holders that may keep bytes alive independently of a single

@@ -327,9 +327,9 @@ interface SyncPort {
         pendingPublishCount = pendingPublishCount(),
     )
     /**
-     * One-shot light hints after a sync cycle where this membership's authored
-     * records were explicitly marked neighbor losers by the family server.
-     * At most one emission per cycle; never uses neighbor copy for ordinary deletes.
+     * Retired neighbor-loser toast path (0.3.10–0.3.12). Causal generation never
+     * emits; ordinary remote tombstones must not be interpreted as duplicates.
+     * Kept as an empty flow so existing collectors compile without toast UX.
      */
     fun neighborAlignmentHints(): Flow<String> = kotlinx.coroutines.flow.emptyFlow()
     /** Dirty Room entity count for the current retained family. */
@@ -385,6 +385,19 @@ interface SyncPort {
         request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
     ): com.lezi.babylog.sync.backend.ConflictResolveResult =
         throw UnsupportedOperationException("Conflict resolve is not implemented")
+
+    /** Author equivalence declare (wire §12.1). */
+    suspend fun declareSourceRelation(
+        request: com.lezi.babylog.sync.backend.SourceRelationDeclareRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult =
+        throw UnsupportedOperationException("Source relation declare is not implemented")
+
+    /** Owner full-group resolve (wire §12.2). */
+    suspend fun resolveSourceRelationGroup(
+        request: com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult =
+        throw UnsupportedOperationException("Source relation resolve-group is not implemented")
+
     /** Persists an endpoint origin; trust is established separately by setup probe. */
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
     /**

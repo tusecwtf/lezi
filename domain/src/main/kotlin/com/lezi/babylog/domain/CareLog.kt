@@ -18,6 +18,7 @@ import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.SourceRelationDao
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.session.PolicyClock
@@ -46,11 +47,16 @@ import com.lezi.babylog.domain.calendar.NoOpSystemCalendarPort
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.domain.carelog.CareLogQueries
 import com.lezi.babylog.domain.carelog.ConflictAuditQueries
+import com.lezi.babylog.domain.carelog.CareDayBounds
 import com.lezi.babylog.domain.carelog.ConflictResolutionCoordinator
 import com.lezi.babylog.domain.carelog.DailySummary
 import com.lezi.babylog.domain.carelog.PhotoAttachmentReconciler
 import com.lezi.babylog.domain.carelog.RecordMutationCoordinator
 import com.lezi.babylog.domain.carelog.SleepRecordProjection
+import com.lezi.babylog.domain.carelog.SourceRelationCoordinator
+import com.lezi.babylog.domain.carelog.SourceRelationOutcome
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateBounds
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
 import com.lezi.babylog.domain.carelog.WakeObservation
 import com.lezi.babylog.domain.carelog.WakeObservationCoordinator
 import com.lezi.babylog.domain.carelog.WeekSummary
@@ -166,6 +172,7 @@ class CareLog @Inject constructor(
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictDetailCacheDao: ConflictDetailCacheDao,
+    private val sourceRelationDao: SourceRelationDao,
 ) {
     private val photoAttachmentReconciler = PhotoAttachmentReconciler(
         mediaAssetDao = mediaAssetDao,
@@ -192,6 +199,14 @@ class CareLog @Inject constructor(
         conflictSummaryDao = conflictSummaryDao,
         conflictDetailCacheDao = conflictDetailCacheDao,
         syncPort = syncPort,
+    )
+    private val sourceRelationCoordinator = SourceRelationCoordinator(
+        recordDao = recordDao,
+        sourceRelationDao = sourceRelationDao,
+        syncPort = syncPort,
+        currentMembershipId = { carePlans.currentMembershipActorId() },
+        isFamilyOwner = { carePlans.isFamilyAdmin() },
+        nowMillis = { clock.nowMillis() },
     )
     private val queries = CareLogQueries(
         babyDao = babyDao,
@@ -751,6 +766,83 @@ class CareLog @Inject constructor(
             conflictChoices = conflictChoices,
             resolutionMutationId = resolutionMutationId,
         )
+
+    // --- Suspected duplicates + source relations (ticket 07) ---
+
+    suspend fun listOpenSuspectedDuplicateGroups(records: List<Record>): List<SuspectedDuplicateGroup> =
+        sourceRelationCoordinator.openSuspectedGroups(records)
+
+    suspend fun sourceRoleClientUuids(): Set<String> =
+        sourceRelationCoordinator.sourceRoleClientUuids()
+
+    /**
+     * Ordinary timeline/stats projection: drop source-role UUIDs, keep display + independents.
+     */
+    suspend fun projectOrdinaryRecords(records: List<Record>): List<Record> =
+        SuspectedDuplicateBounds.filterDisplayProjection(
+            records,
+            sourceRelationCoordinator.sourceRoleClientUuids(),
+        )
+
+    suspend fun daySummaryBounds(
+        records: List<Record>,
+        date: LocalDate,
+        zone: ZoneId = ZoneId.systemDefault(),
+        now: Long = clock.nowMillis(),
+    ): CareDayBounds {
+        val projected = projectOrdinaryRecords(records)
+        val openGroups = sourceRelationCoordinator.openSuspectedGroups(projected)
+        return SuspectedDuplicateBounds.day(projected, openGroups, date, zone, now)
+    }
+
+    suspend fun rangeSummaryBounds(
+        records: List<Record>,
+        startDate: LocalDate,
+        dayCount: Int,
+        zone: ZoneId = ZoneId.systemDefault(),
+        now: Long = clock.nowMillis(),
+    ): com.lezi.babylog.domain.carelog.CareRangeBounds {
+        val projected = projectOrdinaryRecords(records)
+        val openGroups = sourceRelationCoordinator.openSuspectedGroups(projected)
+        return SuspectedDuplicateBounds.range(
+            records = projected,
+            openGroups = openGroups,
+            startDate = startDate,
+            dayCount = dayCount,
+            zone = zone,
+            now = now,
+        )
+    }
+
+    suspend fun timelineDuplicateRows(
+        records: List<Record>,
+        expandedGroupIds: Set<String>? = null,
+    ): List<com.lezi.babylog.domain.carelog.TimelineDuplicateRow> {
+        val sourceRoles = sourceRelationCoordinator.sourceRoleClientUuids()
+        val openGroups = sourceRelationCoordinator.openSuspectedGroups(records)
+        return com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation.timelineRows(
+            records = records,
+            openGroups = openGroups,
+            sourceRoleClientUuids = sourceRoles,
+            expandedGroupIds = expandedGroupIds,
+        )
+    }
+
+    suspend fun declareRecordEquivalent(
+        recordClientUuid: String,
+        equivalentToClientUuid: String,
+    ): SourceRelationOutcome = sourceRelationCoordinator.declareEquivalent(
+        recordClientUuid = recordClientUuid,
+        equivalentToClientUuid = equivalentToClientUuid,
+    )
+
+    suspend fun resolveSuspectedDuplicateGroupAsOwner(
+        memberClientUuids: List<String>,
+        displayClientUuid: String,
+    ): SourceRelationOutcome = sourceRelationCoordinator.resolveGroupAsOwner(
+        memberClientUuids = memberClientUuids,
+        displayClientUuid = displayClientUuid,
+    )
 
     suspend fun getRecord(id: Long): Record? = queries.getRecord(id)
 

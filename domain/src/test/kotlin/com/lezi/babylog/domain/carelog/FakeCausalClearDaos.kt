@@ -179,6 +179,8 @@ internal class FakeSourceRelationDao : SourceRelationDao {
     override suspend fun listMembers(relationId: String): List<SourceRelationMemberEntity> =
         members.filter { it.relationId == relationId }
 
+    override suspend fun listAllMembers(): List<SourceRelationMemberEntity> = members.toList()
+
     override suspend fun listMembersForRecord(
         recordClientUuid: String,
     ): List<SourceRelationMemberEntity> =

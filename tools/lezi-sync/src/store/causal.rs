@@ -1037,12 +1037,7 @@ fn validate_wake_against_sleep_start(
     let Some(sleep) = sleep else {
         return Err("missing_sleep_reference");
     };
-    if sleep
-        .root
-        .get("type")
-        .and_then(Value::as_str)
-        != Some("sleep")
-    {
+    if sleep.root.get("type").and_then(Value::as_str) != Some("sleep") {
         return Err("missing_sleep_reference");
     }
     let sleep_start = sleep
@@ -1362,7 +1357,8 @@ fn evaluate_unit(
     }
     // Wire §4.5: wake_timestamp must be >= target SleepStart timestamp.
     if mutation.entity_type == "wake_observation" {
-        if let Err(code) = validate_wake_against_sleep_start(ctx.tx, &ctx.principal.family_id, mutation)
+        if let Err(code) =
+            validate_wake_against_sleep_start(ctx.tx, &ctx.principal.family_id, mutation)
         {
             return Ok(rejected(
                 &mutation.mutation_id,

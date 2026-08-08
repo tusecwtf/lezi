@@ -384,6 +384,7 @@ internal class Fakes(
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
         conflictDetailCacheDao = conflictDetailCache,
+        sourceRelationDao = sourceRelations,
     )
 
     fun reminderProjection() = CarePlanReminderProjection(

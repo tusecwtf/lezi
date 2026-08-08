@@ -79,7 +79,6 @@ pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
 /// WakeObservation atomic root (wire §1 / §4.5).
 pub const CAPABILITY_WAKE_OBSERVATION: &str = "wake_observation";
 /// Non-destructive source relations API surface (wire §1 / §12).
-/// Advertised once schema is current; declare/resolve HTTP completes ticket 07.
 pub const CAPABILITY_SOURCE_RELATIONS: &str = "source_relations";
 const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 16;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
@@ -768,6 +767,14 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         .route(
             "/v1/conflicts/{conflict_id}/resolve",
             post(sync::resolve_conflict),
+        )
+        .route(
+            "/v1/source-relations/declare",
+            post(sync::declare_source_relation),
+        )
+        .route(
+            "/v1/source-relations/resolve-group",
+            post(sync::resolve_source_relation_group),
         )
         .route(
             "/v1/media/{client_uuid}",

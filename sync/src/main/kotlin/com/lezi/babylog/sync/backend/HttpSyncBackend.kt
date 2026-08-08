@@ -821,6 +821,61 @@ class HttpSyncBackend internal constructor(
         units: List<CausalMutationUnit>,
     ): CausalBatchResult = postCausalBatch(session, "/v1/causal/commit", units)
 
+    override suspend fun declareSourceRelation(
+        session: SyncSession,
+        request: SourceRelationDeclareRequest,
+    ): SourceRelationResult {
+        session.requireCurrentReplicaTransport()
+        val body = buildJsonObject {
+            put("mutation_id", request.mutationId)
+            put("record_client_uuid", request.recordClientUuid)
+            put("equivalent_to_client_uuid", request.equivalentToClientUuid)
+            put("expected_record_version", request.expectedRecordVersion)
+            put("expected_other_version", request.expectedOtherVersion)
+        }
+        val json = post(
+            session.baseUrl,
+            "/v1/source-relations/declare",
+            session.accessToken,
+            body,
+        )
+        return json.toSourceRelationResult("source relation declare")
+    }
+
+    override suspend fun resolveSourceRelationGroup(
+        session: SyncSession,
+        request: SourceRelationResolveGroupRequest,
+    ): SourceRelationResult {
+        session.requireCurrentReplicaTransport()
+        val body = buildJsonObject {
+            put("mutation_id", request.mutationId)
+            put(
+                "member_client_uuids",
+                buildJsonArray {
+                    request.memberClientUuids.sorted().forEach { uuid ->
+                        add(JsonPrimitive(uuid))
+                    }
+                },
+            )
+            put("display_client_uuid", request.displayClientUuid)
+            put(
+                "expected_versions",
+                buildJsonObject {
+                    request.expectedVersions.toSortedMap().forEach { (uuid, version) ->
+                        put(uuid, JsonPrimitive(version))
+                    }
+                },
+            )
+        }
+        val json = post(
+            session.baseUrl,
+            "/v1/source-relations/resolve-group",
+            session.accessToken,
+            body,
+        )
+        return json.toSourceRelationResult("source relation resolve-group")
+    }
+
     override suspend fun putCausalMediaPreimage(
         session: SyncSession,
         mediaUuid: String,
@@ -1598,6 +1653,7 @@ private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     rev = (get("rev") as? JsonPrimitive)?.longOrNull ?: 0,
     versionId = optionalNonBlankString("version_id", context),
     conflictSummary = optionalConflictSummary(context),
+    sourceRelationSummary = optionalSourceRelationSummary(context),
 )
 
 private fun validateAuthorityRemoteMedia(
@@ -1679,6 +1735,7 @@ private fun JsonObject.entities(context: String): List<SyncEntity> =
             rev = value.requiredLong("rev", entityContext),
             versionId = value.optionalNonBlankString("version_id", entityContext),
             conflictSummary = value.optionalConflictSummary(entityContext),
+            sourceRelationSummary = value.optionalSourceRelationSummary(entityContext),
         )
     }
 
@@ -1877,6 +1934,66 @@ private fun JsonObject.optionalConflictSummary(context: String): PullConflictSum
         clientUuid = value.requiredNonBlankString("client_uuid", summaryContext),
         stableVersionId = value.requiredNonBlankString("stable_version_id", summaryContext),
         branchVersionIds = branchIds,
+    )
+}
+
+private fun JsonObject.optionalSourceRelationSummary(context: String): PullSourceRelationSummary? {
+    val raw = get("source_relation_summary") ?: return null
+    if (raw is JsonNull) return null
+    val value = raw as? JsonObject
+        ?: throw IllegalArgumentException("$context.source_relation_summary 不是对象")
+    val summaryContext = "$context.source_relation_summary"
+    val role = value.requiredNonBlankString("role", summaryContext)
+    require(role == "display" || role == "source") {
+        "$summaryContext.role 必须是 display 或 source"
+    }
+    val peers = when (val peerRaw = value["peer_ids"]) {
+        null -> emptyList()
+        JsonNull -> emptyList()
+        is JsonArray -> peerRaw.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$summaryContext.peer_ids[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$summaryContext.peer_ids 无效")
+    }
+    return PullSourceRelationSummary(
+        relationId = value.requiredNonBlankString("relation_id", summaryContext),
+        role = role,
+        peerIds = peers,
+    )
+}
+
+private fun JsonObject.toSourceRelationResult(context: String): SourceRelationResult {
+    val status = requiredNonBlankString("status", context)
+    val sources = when (val raw = get("source_client_uuids")) {
+        null, JsonNull -> emptyList()
+        is JsonArray -> raw.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.source_client_uuids[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$context.source_client_uuids 无效")
+    }
+    val latest = when (val raw = get("latest_versions")) {
+        null, JsonNull -> emptyMap()
+        is JsonObject -> raw.mapValues { (_, v) ->
+            (v as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.latest_versions 值无效")
+        }
+        else -> throw IllegalArgumentException("$context.latest_versions 无效")
+    }
+    val mediaRetained = when (val raw = get("media_retained")) {
+        null, JsonNull -> null
+        is JsonPrimitive -> raw.booleanOrNull
+        else -> throw IllegalArgumentException("$context.media_retained 无效")
+    }
+    return SourceRelationResult(
+        status = status,
+        relationId = optionalNonBlankString("relation_id", context),
+        displayClientUuid = optionalNonBlankString("display_client_uuid", context),
+        sourceClientUuids = sources,
+        mediaRetained = mediaRetained,
+        code = optionalNonBlankString("code", context),
+        latestVersions = latest,
     )
 }
 

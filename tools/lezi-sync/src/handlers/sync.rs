@@ -465,6 +465,106 @@ mod reconcile_bounds_tests {
     }
 }
 
+// --- Source relations (wire §12) --------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeclareSourceRelationRequest {
+    mutation_id: String,
+    record_client_uuid: String,
+    equivalent_to_client_uuid: String,
+    expected_record_version: String,
+    expected_other_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolveSourceRelationGroupRequest {
+    mutation_id: String,
+    member_client_uuids: Vec<String>,
+    display_client_uuid: String,
+    expected_versions: Map<String, Value>,
+}
+
+/// HTTP `POST /v1/source-relations/declare` — author equivalence (wire §12.1).
+pub(crate) async fn declare_source_relation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<DeclareSourceRelationRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let request = json_body(body)?;
+    let input = crate::store::DeclareSourceRelationInput {
+        mutation_id: request.mutation_id,
+        record_client_uuid: request.record_client_uuid,
+        equivalent_to_client_uuid: request.equivalent_to_client_uuid,
+        expected_record_version: request.expected_record_version,
+        expected_other_version: request.expected_other_version,
+    };
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let blocking_state = state.clone();
+    let result = run_blocking(move || {
+        blocking_state
+            .store
+            .declare_source_relation(&principal, input, blocking_state.now())
+            .map_err(map_source_relation_error)
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(result).map_err(|_| {
+        ApiError::internal("failed to serialize source relation declare result")
+    })?))
+}
+
+/// HTTP `POST /v1/source-relations/resolve-group` — Owner full-group resolve (wire §12.2).
+pub(crate) async fn resolve_source_relation_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<ResolveSourceRelationGroupRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let request = json_body(body)?;
+    let mut expected_versions = std::collections::BTreeMap::new();
+    for (uuid, value) in request.expected_versions {
+        let version = value.as_str().ok_or_else(|| {
+            ApiError::unprocessable("expected_versions values must be version_id strings")
+        })?;
+        expected_versions.insert(uuid, version.to_owned());
+    }
+    let input = crate::store::ResolveSourceRelationGroupInput {
+        mutation_id: request.mutation_id,
+        member_client_uuids: request.member_client_uuids,
+        display_client_uuid: request.display_client_uuid,
+        expected_versions,
+    };
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let blocking_state = state.clone();
+    let result = run_blocking(move || {
+        blocking_state
+            .store
+            .resolve_source_relation_group(&principal, input, blocking_state.now())
+            .map_err(map_source_relation_error)
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(result).map_err(|_| {
+        ApiError::internal("failed to serialize source relation resolve result")
+    })?))
+}
+
+fn map_source_relation_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::ForbiddenRecord
+        | StoreError::ForbiddenBaby
+        | StoreError::ForbiddenCarePlan
+        | StoreError::ForbiddenCustomItem => ApiError::unprocessable(error.to_string()),
+        StoreError::InvalidSourceRelationRequest(message) => ApiError::unprocessable(message),
+        other => other.into(),
+    }
+}
+
 /// Query DTO for [`pull_entities`]. Must be at least as visible as that handler
 /// (`private_interfaces`); not a cross-module seam.
 #[derive(Debug, Deserialize)]

@@ -1,6 +1,6 @@
 # 家庭事实无损因果同步 — issues
 
-Status: ready-for-agent — frontier after 06 complete = 07/08
+Status: ready-for-agent — frontier after 07 complete = 08
 
 Spec: [`spec.md`](./spec.md)
 
@@ -29,15 +29,14 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 | 04 | [`issues/04-android-room27-causal-wake-source-state.md`](./issues/04-android-room27-causal-wake-source-state.md) | complete | 01 |
 | 05 | [`issues/05-replica-engine-three-way-merge-and-branches.md`](./issues/05-replica-engine-three-way-merge-and-branches.md) | complete | 03, 04 |
 | 06 | [`issues/06-conflict-wake-observation-overlap-ux.md`](./issues/06-conflict-wake-observation-overlap-ux.md) | complete | 03, 04, 05 |
-| 07 | [`issues/07-nondestructive-duplicate-groups-and-bounds.md`](./issues/07-nondestructive-duplicate-groups-and-bounds.md) | ready-for-agent | 03, 04, 05 |
+| 07 | [`issues/07-nondestructive-duplicate-groups-and-bounds.md`](./issues/07-nondestructive-duplicate-groups-and-bounds.md) | complete | 03, 04, 05 |
 | 08 | [`issues/08-localwrite-causal-no-pull-fast-path.md`](./issues/08-localwrite-causal-no-pull-fast-path.md) | ready-for-agent | 03, 05 |
 | 09 | [`issues/09-two-client-cutover-release-and-acceptance.md`](./issues/09-two-client-cutover-release-and-acceptance.md) | ready-for-agent | 02, 03, 04, 05, 06, 07, 08 |
 
 ## Frontier
 
-`06` (conflict + WakeObservation + overlap UX) is complete; next is `07` / `08` (duplicate groups,
-LocalWrite no-pull). No runtime behavior ticket may invent a competing shape outside the frozen
-contract in ticket 01 /
+`07` (non-destructive duplicate groups + bounds) is complete; next is `08` (LocalWrite no-pull).
+No runtime behavior ticket may invent a competing shape outside the frozen contract in ticket 01 /
 [`docs/prd/causal-sync-wire.md`](../../docs/prd/causal-sync-wire.md) / ADR-0019–0021.
 
 ## Primary acceptance seam

@@ -10,10 +10,13 @@ import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelinePanGesture
-import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
+import com.lezi.babylog.domain.carelog.CareDayBounds
 import com.lezi.babylog.domain.carelog.DailySummary
+import com.lezi.babylog.domain.carelog.SourceRelationOutcome
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
+import com.lezi.babylog.domain.carelog.TimelineDuplicateRow
 import com.lezi.babylog.domain.timeline.TimelineCarePlanRow
 import com.lezi.babylog.domain.timeline.TimelineRecordRow
 import com.lezi.babylog.domain.timeline.TimelineWindowRepository
@@ -35,7 +38,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import com.lezi.babylog.feature.log.timeline.*
@@ -51,6 +54,12 @@ data class LogUiState(
     val day: LocalDate,
     val records: List<Record> = emptyList(),
     val summary: DailySummary = DailySummary(),
+    /** When non-null and [CareDayBounds.hasUncertainty], day summary shows min–max bounds. */
+    val summaryBounds: CareDayBounds? = null,
+    /** Soft open suspected-duplicate groups for the current record snapshot. */
+    val openDuplicateGroups: List<SuspectedDuplicateGroup> = emptyList(),
+    /** Timeline projection: containers + expanded sources + ordinary rows. */
+    val timelineDuplicateRows: List<TimelineDuplicateRow> = emptyList(),
     val sleepLanes: List<TimelineLaneSegment> = emptyList(),
     val feedLanes: List<TimelineLaneSegment> = emptyList(),
     val careLanes: List<TimelineLaneSegment> = emptyList(),
@@ -161,18 +170,35 @@ class LogViewModel @Inject constructor(
                     zoneId = zone,
                     nowMillis = screenTime.epochMillis,
                 ),
-            ).map { snapshot ->
-                val records = snapshot.recordRows.map(TimelineRecordRow::record)
-                val railRecords = snapshot.railRecordRows.map(TimelineRecordRow::record)
+            ).mapLatest { snapshot ->
+                val rawRecords = snapshot.recordRows.map(TimelineRecordRow::record)
+                val rawRail = snapshot.railRecordRows.map(TimelineRecordRow::record)
+                val sourceRoles = careLog.sourceRoleClientUuids()
+                val records = careLog.projectOrdinaryRecords(rawRecords)
+                val railRecords = careLog.projectOrdinaryRecords(rawRail)
+                val openGroups = careLog.listOpenSuspectedDuplicateGroups(rawRecords)
+                val bounds = careLog.daySummaryBounds(
+                    records = rawRecords,
+                    date = day,
+                    zone = zone,
+                    now = screenTime.epochMillis,
+                )
+                val duplicateRows = careLog.timelineDuplicateRows(rawRecords)
                 val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan)
                 val timelineAxis = ThreeDayTimelineAxis(day, zone)
-                val summary = CareAggregation.day(records, day, zone).toDailySummary()
+                val summary = if (bounds.hasUncertainty) {
+                    bounds.toDailySummaryPreferMax()
+                } else {
+                    bounds.toDailySummaryPreferMax()
+                }
                 val lanes = buildTimelineLanes(
                     records = railRecords,
                     axis = timelineAxis,
                     nowMs = screenTime.epochMillis,
                 )
-                val recordMetadata = snapshot.recordRows.associateBy { it.record.id }
+                val recordMetadata = snapshot.recordRows
+                    .filter { it.record.clientUuid !in sourceRoles }
+                    .associateBy { it.record.id }
                 val planMetadata = snapshot.planRows.associateBy { it.carePlan.id }
                 LogUiState(
                     loading = false,
@@ -181,13 +207,17 @@ class LogViewModel @Inject constructor(
                     day = day,
                     records = records,
                     summary = summary,
+                    summaryBounds = bounds.takeIf { it.hasUncertainty },
+                    openDuplicateGroups = openGroups,
+                    timelineDuplicateRows = duplicateRows,
                     sleepLanes = lanes.sleep,
                     feedLanes = lanes.feed,
                     careLanes = lanes.care,
                     settings = settings,
                     openSleep = snapshot.openSleep,
                     uploaderLabels = snapshot.recordRows.mapNotNull { row ->
-                        row.uploaderLabel?.let { row.record.id to it }
+                        if (row.record.clientUuid in sourceRoles) null
+                        else row.uploaderLabel?.let { row.record.id to it }
                     }.toMap(),
                     customItems = customItems,
                     pendingPlans = plans,
@@ -244,6 +274,35 @@ class LogViewModel @Inject constructor(
 
     internal fun setTimelineRecords(records: List<Record>) {
         reduceTimeline(TimelineInteractionEvent.RecordsRefreshed(records))
+    }
+
+    /** Author: declare self-authored record equivalent to another source UUID. */
+    fun declareDuplicateEquivalent(
+        recordClientUuid: String,
+        equivalentToClientUuid: String,
+        onResult: (SourceRelationOutcome) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            onResult(
+                careLog.declareRecordEquivalent(recordClientUuid, equivalentToClientUuid),
+            )
+        }
+    }
+
+    /** Owner: resolve complete open group with chosen display UUID. */
+    fun resolveDuplicateGroupAsOwner(
+        memberClientUuids: List<String>,
+        displayClientUuid: String,
+        onResult: (SourceRelationOutcome) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            onResult(
+                careLog.resolveSuspectedDuplicateGroupAsOwner(
+                    memberClientUuids = memberClientUuids,
+                    displayClientUuid = displayClientUuid,
+                ),
+            )
+        }
     }
 
     internal fun selectTimelineCategory(categoryKey: String?, dayRecords: List<Record>) {

@@ -408,8 +408,6 @@ class RootViewModel @Inject constructor(
             ),
         )
 
-    val neighborAlignmentHints = syncPort.neighborAlignmentHints()
-
     val ui = combine(
         baseUi,
         sleepingBaby,
@@ -921,11 +919,6 @@ private fun LeziMainScaffold(
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val shallowSyncLine by vm.shallowSyncLine.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) {
-        vm.neighborAlignmentHints.collect { message ->
-            snackbar.showSnackbar(message)
-        }
-    }
     val composerRequest = ui.composerRequest
     val systemCalendarId by vm.systemCalendarId.collectAsStateWithLifecycle()
     val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()

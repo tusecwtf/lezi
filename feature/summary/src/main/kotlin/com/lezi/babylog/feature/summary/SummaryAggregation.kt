@@ -1,9 +1,16 @@
 package com.lezi.babylog.feature.summary
 
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.carelog.CareDay
+import com.lezi.babylog.domain.carelog.CareDayBounds
 import com.lezi.babylog.domain.carelog.CareRange
+import com.lezi.babylog.domain.carelog.CareRangeBounds
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateBounds
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateGrouping
+import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
 import com.lezi.babylog.domain.carelog.WeekSummary
 import com.lezi.babylog.domain.carelog.weekStartFor
 import java.time.LocalDate
@@ -25,12 +32,16 @@ data class SummaryAggregationRequest(
     val comparePrevWeek: Boolean = false,
     val babyName: String,
     val zone: ZoneId,
+    /** Source-role UUIDs excluded from ordinary stats (live for 来源详情). */
+    val sourceRoleClientUuids: Set<String> = emptySet(),
+    /** Precomputed open soft groups (empty → exact CareAggregation path). */
+    val openGroups: List<SuspectedDuplicateGroup> = emptyList(),
 )
 
 /** Background calculation boundary used by the Summary presentation layer. */
 class SummaryAggregationEngine(
     private val computationDispatcher: CoroutineDispatcher = Dispatchers.Default,
-    private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val nowMillis: () -> Long = { RecordTime.currentTimeMillis() },
 ) {
     suspend fun calculate(request: SummaryAggregationRequest): SummaryUi =
         withContext(computationDispatcher) {
@@ -56,14 +67,62 @@ class SummaryAggregationEngine(
                 .atStartOfDay(request.zone)
                 .toInstant()
                 .toEpochMilli()
+            // Prefer cancel-friendly CareAggregation.window first. Only materialize
+            // a filtered list when source roles exist; open groups come precomputed.
+            // Anchor-end exclusion is owned by recordStartBefore (not a full pre-scan).
+            val records = if (request.sourceRoleClientUuids.isEmpty()) {
+                request.records
+            } else {
+                SuspectedDuplicateBounds.filterDisplayProjection(
+                    request.records,
+                    request.sourceRoleClientUuids,
+                )
+            }
+            val openGroups = request.openGroups
             val window = CareAggregation.window(
-                records = request.records,
+                records = records,
                 startDate = windowStart,
                 dayCount = ChronoUnit.DAYS.between(windowStart, windowEnd).toInt(),
                 zone = request.zone,
                 now = now,
                 recordStartBefore = anchorEnd,
             )
+            // Bounds only when open groups exist — avoids N× full scans on common path.
+            val rangeBounds = if (openGroups.isEmpty()) {
+                null
+            } else {
+                SuspectedDuplicateBounds.range(
+                    records = records,
+                    openGroups = openGroups,
+                    startDate = rangeStart,
+                    dayCount = request.range.dayCount,
+                    zone = request.zone,
+                    now = now,
+                )
+            }
+            val detailBounds = if (openGroups.isEmpty()) {
+                null
+            } else {
+                SuspectedDuplicateBounds.range(
+                    records = records,
+                    openGroups = openGroups,
+                    startDate = detailStart,
+                    dayCount = 7,
+                    zone = request.zone,
+                    now = now,
+                )
+            }
+            val anchorBounds = if (openGroups.isEmpty()) {
+                null
+            } else {
+                SuspectedDuplicateBounds.day(
+                    records = records,
+                    openGroups = openGroups,
+                    date = request.anchorDate,
+                    zone = request.zone,
+                    now = now,
+                )
+            }
             assembleSummaryUi(
                 range = request.range,
                 anchorDate = request.anchorDate,
@@ -82,6 +141,9 @@ class SummaryAggregationEngine(
                 showAvgSleep = request.showAvgSleep,
                 comparePrevWeek = request.comparePrevWeek,
                 babyName = request.babyName,
+                rangeBounds = rangeBounds,
+                anchorBounds = anchorBounds,
+                detailBounds = detailBounds,
             )
         }
 }
@@ -108,30 +170,62 @@ internal fun buildSummaryUi(
     comparePrevWeek: Boolean = false,
     babyName: String,
     zone: ZoneId,
+    sourceRoleClientUuids: Set<String> = emptySet(),
+    openGroups: List<SuspectedDuplicateGroup> = emptyList(),
 ): SummaryUi {
-    val now = System.currentTimeMillis()
+    val now = RecordTime.currentTimeMillis()
     val anchorEnd = anchorDate.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val visibleRecords = records.filter { it.timestamp < anchorEnd }
+    val visible = records.filter { it.timestamp < anchorEnd }
+    val projected = if (sourceRoleClientUuids.isEmpty()) {
+        visible
+    } else {
+        SuspectedDuplicateBounds.filterDisplayProjection(visible, sourceRoleClientUuids)
+    }
+    val groups = openGroups.ifEmpty {
+        // Synchronous helper path may recompute; engine path expects precomputed.
+        SuspectedDuplicateGrouping.group(projected)
+    }
     val rangeStart = range.startDate(anchorDate, weekStartDay)
+    val detailStart = weekStartFor(anchorDate, weekStartDay)
+    val rangeBounds = if (groups.isEmpty()) {
+        null
+    } else {
+        SuspectedDuplicateBounds.range(
+            projected, groups, rangeStart, range.dayCount, zone, now,
+        )
+    }
+    val detailBounds = if (groups.isEmpty()) {
+        null
+    } else {
+        SuspectedDuplicateBounds.range(
+            projected, groups, detailStart, 7, zone, now,
+        )
+    }
+    val anchorBounds = if (groups.isEmpty()) {
+        null
+    } else {
+        SuspectedDuplicateBounds.day(
+            projected, groups, anchorDate, zone, now,
+        )
+    }
     val rangeSummary = CareAggregation.range(
-        records = visibleRecords,
+        records = projected,
         startDate = rangeStart,
         dayCount = range.dayCount,
         zone = zone,
         now = now,
     )
-    val detailStart = weekStartFor(anchorDate, weekStartDay)
     val detailSummary = CareAggregation.range(
-        records = visibleRecords,
+        records = projected,
         startDate = detailStart,
         dayCount = 7,
         zone = zone,
         now = now,
     )
-    val anchorDay = CareAggregation.day(visibleRecords, anchorDate, zone, now)
+    val anchorDay = CareAggregation.day(projected, anchorDate, zone, now)
     val previousWeek = if (range == SummaryRange.Week && comparePrevWeek) {
         CareAggregation.range(
-            records = visibleRecords,
+            records = projected,
             startDate = rangeStart.minusDays(7),
             dayCount = 7,
             zone = zone,
@@ -152,6 +246,9 @@ internal fun buildSummaryUi(
         showAvgSleep = showAvgSleep,
         comparePrevWeek = comparePrevWeek,
         babyName = babyName,
+        rangeBounds = rangeBounds,
+        anchorBounds = anchorBounds,
+        detailBounds = detailBounds,
     )
 }
 
@@ -167,6 +264,9 @@ private fun assembleSummaryUi(
     showAvgSleep: Boolean,
     comparePrevWeek: Boolean,
     babyName: String,
+    rangeBounds: CareRangeBounds? = null,
+    anchorBounds: CareDayBounds? = null,
+    detailBounds: CareRangeBounds? = null,
 ): SummaryUi {
     val allTemperatures = rangeSummary.temperatures
     val chartWindows = ChartWindowTotals(
@@ -178,14 +278,25 @@ private fun assembleSummaryUi(
         dayPee = anchorDay.bucket.pee,
         dayPoop = anchorDay.bucket.poop,
     )
+    val rb = rangeBounds
     val totals = SummaryTotals(
-        feedMl = rangeSummary.feedMl,
-        nursingMin = rangeSummary.nursingMinutes,
-        feedCount = rangeSummary.feedCount,
-        sleepMin = rangeSummary.sleepMinutes,
-        sleepSegments = rangeSummary.sleepSegments,
-        pee = rangeSummary.peeCount,
-        poop = rangeSummary.poopCount,
+        feedMl = rb?.feedMl?.max ?: rangeSummary.feedMl,
+        feedMlMin = rb?.feedMl?.min ?: rangeSummary.feedMl,
+        feedMlMax = rb?.feedMl?.max ?: rangeSummary.feedMl,
+        nursingMin = rb?.nursingMinutes?.max ?: rangeSummary.nursingMinutes,
+        nursingMinMin = rb?.nursingMinutes?.min ?: rangeSummary.nursingMinutes,
+        nursingMinMax = rb?.nursingMinutes?.max ?: rangeSummary.nursingMinutes,
+        feedCount = rb?.feedCount?.max ?: rangeSummary.feedCount,
+        feedCountMin = rb?.feedCount?.min ?: rangeSummary.feedCount,
+        feedCountMax = rb?.feedCount?.max ?: rangeSummary.feedCount,
+        sleepMin = rb?.sleepMinutes?.max ?: rangeSummary.sleepMinutes,
+        sleepSegments = rb?.sleepSegments?.max ?: rangeSummary.sleepSegments,
+        pee = rb?.peeCount?.max ?: rangeSummary.peeCount,
+        peeMin = rb?.peeCount?.min ?: rangeSummary.peeCount,
+        peeMax = rb?.peeCount?.max ?: rangeSummary.peeCount,
+        poop = rb?.poopCount?.max ?: rangeSummary.poopCount,
+        poopMin = rb?.poopCount?.min ?: rangeSummary.poopCount,
+        poopMax = rb?.poopCount?.max ?: rangeSummary.poopCount,
         tempAvg = allTemperatures.takeIf { it.isNotEmpty() }?.average(),
         tempDays = rangeSummary.days.count { it.bucket.temps.isNotEmpty() },
         dayValuesFeed = rangeSummary.days.map { it.bucket.feedMl.toFloat() },
@@ -198,7 +309,20 @@ private fun assembleSummaryUi(
         },
         feedTimeBuckets = anchorDay.feedTimeBuckets,
         chartWindows = chartWindows,
+        hasDuplicateUncertainty = rb?.hasUncertainty == true ||
+            anchorBounds?.hasUncertainty == true,
+        feedMlLabel = rb?.feedMl?.let {
+            SuspectedDuplicatePresentation.formatMetricBound(it, "ml")
+        },
+        feedCountLabel = rb?.feedCount?.let {
+            SuspectedDuplicatePresentation.formatMetricBound(it)
+        },
+        peeLabel = rb?.peeCount?.let { SuspectedDuplicatePresentation.formatMetricBound(it) },
+        poopLabel = rb?.poopCount?.let { SuspectedDuplicatePresentation.formatMetricBound(it) },
     )
+    // silence unused detailBounds for now (kept for future week detail bound labels)
+    @Suppress("UNUSED_VARIABLE")
+    val _detail = detailBounds
     val previousWeekTotals = previousWeek?.let { previous ->
         SummaryTotals(
             feedMl = previous.feedMl,
