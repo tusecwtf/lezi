@@ -16,7 +16,7 @@ Target: Android **0.3.12 / versionCode 19**；`lezi-sync:0.3.12`
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
 | 01 | [`issues/01-continuous-timeline-interaction.md`](./issues/01-continuous-timeline-interaction.md) | complete | — |
-| 02 | [`issues/02-global-date-filter-and-timeline-experience.md`](./issues/02-global-date-filter-and-timeline-experience.md) | ready-for-agent | 01 |
+| 02 | [`issues/02-global-date-filter-and-timeline-experience.md`](./issues/02-global-date-filter-and-timeline-experience.md) | complete | 01 |
 | 03 | [`issues/03-all-version-lossless-apk-upgrade.md`](./issues/03-all-version-lossless-apk-upgrade.md) | ready-for-agent | — |
 | 04 | [`issues/04-build-and-package-0.3.12-release-candidate.md`](./issues/04-build-and-package-0.3.12-release-candidate.md) | ready-for-agent | 01, 02, 03 |
 | 05 | [`issues/05-signed-historical-upgrade-device-acceptance.md`](./issues/05-signed-historical-upgrade-device-acceptance.md) | ready-for-agent | 04 |
@@ -24,8 +24,8 @@ Target: Android **0.3.12 / versionCode 19**；`lezi-sync:0.3.12`
 
 ## Frontier
 
-Tickets **02** and **03** are the current frontier. Ticket **02** consumes the completed pure
-interaction seam from 01; the two implementation chains converge at **04**. Ticket **06** must not
+Ticket **03** is the current frontier. Ticket **02** has consumed the completed pure interaction
+seam from 01; the two implementation chains converge at **04**. Ticket **06** must not
 execute NAS replacement until ticket 05 is accepted and the user gives a fresh explicit CD confirmation.
 
 ## Release boundary

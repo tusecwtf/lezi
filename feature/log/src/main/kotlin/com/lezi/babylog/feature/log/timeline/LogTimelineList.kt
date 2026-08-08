@@ -114,7 +114,8 @@ internal fun LogTimelineList(
     timelineViewportStart: Int,
     timelineViewportDuration: Int,
     timelineAxis: ThreeDayTimelineAxis,
-    onTimelineViewportStartChange: (Int) -> Unit,
+    onTimelinePan: (cumulativeDeltaPx: Float, effectiveWidthPx: Float) -> Unit,
+    onTimelinePanEnd: () -> Unit,
     filteredTimelineRecords: List<Record>,
     onGoToday: () -> Unit,
     onRefresh: () -> Unit,
@@ -295,27 +296,27 @@ internal fun LogTimelineList(
                 }
             }
 
-            // ViewModel already gates this on the D−1 / D / D+1 rail-record union.
-            if (state.showDayChart) {
-                item {
-                    TimelineRailCard(
-                        sleep = state.sleepLanes,
-                        feed = state.feedLanes,
-                        care = state.careLanes,
-                        recordCount = state.records.size,
-                        nowContentMinute = nowContentMinute,
-                        selectedCategoryKey = dayChartFilter?.name,
-                        onCategorySelect = onSelectDayChartCategory,
-                        legend = dayChartLegend,
-                        viewportStartMinutes = timelineViewportStart,
-                        viewportDurationMinutes = timelineViewportDuration,
-                        windowGeometry = timelineAxis.windowGeometry,
-                        hourLabels = timelineAxis.hourLabels(),
-                        onViewportStartChange = onTimelineViewportStartChange,
-                        titleSecondary = "时间轴",
-                        modifier = Modifier.padding(horizontal = pageHorizontal),
-                    )
-                }
+            item {
+                TimelineRailCard(
+                    sleep = state.sleepLanes,
+                    feed = state.feedLanes,
+                    care = state.careLanes,
+                    recordCount = state.records.size,
+                    nowContentMinute = nowContentMinute,
+                    selectedCategoryKey = dayChartFilter?.name,
+                    onCategorySelect = onSelectDayChartCategory,
+                    legend = dayChartLegend,
+                    viewportStartMinutes = timelineViewportStart,
+                    viewportDurationMinutes = timelineViewportDuration,
+                    windowGeometry = timelineAxis.windowGeometry,
+                    hourLabels = timelineAxis.hourLabels(),
+                    onHorizontalPan = onTimelinePan,
+                    onPanEnd = onTimelinePanEnd,
+                    titleSecondary = "时间轴",
+                    modifier = Modifier
+                        .padding(horizontal = pageHorizontal)
+                        .testTag("log_timeline_rail"),
+                )
             }
 
             if (state.day != today) {
@@ -512,7 +513,7 @@ internal fun LogTimelineList(
                 }
             }
 
-            if (state.loading || state.records.isEmpty()) {
+            if (state.loading || filteredTimelineRecords.isEmpty()) {
                 item(key = "records_phase", contentType = "records_phase") {
                     Crossfade(
                         targetState = state.loading,
@@ -530,14 +531,14 @@ internal fun LogTimelineList(
                                     .testTag("log_records_loading"),
                             )
                         } else {
-                            // Empty day: ring mark + quiet color via StateKind.Empty — not a spinner.
+                            val emptyState = timelineRecordsEmptyState(dayChartFilter)
                             StateContainer(
                                 kind = StateKind.Empty,
-                                title = "还没有记录",
-                                message = "点下方快捷入口添加第一条记录",
+                                title = emptyState.title,
+                                message = emptyState.message,
                                 modifier = Modifier
                                     .padding(horizontal = pageHorizontal)
-                                    .testTag("log_records_empty"),
+                                    .testTag(emptyState.testTag),
                             )
                         }
                     }

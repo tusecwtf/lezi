@@ -1194,6 +1194,7 @@ private fun LeziMainScaffold(
                     externalDay = ui.selectedDate,
                     onOpenComposer = vm::openComposer,
                     onGoToday = { vm.setDay(today) },
+                    onSelectedDayChange = vm::setDay,
                     onLayoutEditModeChanged = { active ->
                         logLayoutEditActive = active
                     },

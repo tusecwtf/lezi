@@ -11,7 +11,6 @@ import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.domain.carelog.DayChartCategories
 import com.lezi.babylog.domain.carelog.DayChartCategory
 import com.lezi.babylog.domain.carelog.formatClock
-import java.time.LocalDate
 import com.lezi.babylog.feature.log.*
 import com.lezi.babylog.feature.log.dock.*
 import com.lezi.babylog.feature.log.composer.*
@@ -23,28 +22,6 @@ internal data class TimelineLanes(
     val feed: List<TimelineLaneSegment>,
     val care: List<TimelineLaneSegment>,
 )
-
-/**
- * Day-keyed **initial** viewport for the rail. Today centers on wall-clock now;
- * non-today uses D-primary peeks. Pan mutates a separate UI state that is only
- * reset when [selectedDay] changes (including 「返回今天」) — never every recompose.
- */
-internal fun initialThreeDayViewportStartMinutes(
-    selectedDay: LocalDate,
-    today: LocalDate,
-    nowMs: Long,
-    axis: ThreeDayTimelineAxis,
-    viewportDurationMinutes: Int = axis.defaultViewportDurationMinutes,
-): Int {
-    require(axis.selectedDay == selectedDay) { "timeline axis must match selected day" }
-    if (selectedDay == today) {
-        val nowMin = axis.instantToContentMinute(nowMs)
-        if (nowMin != null) {
-            return axis.centeredViewportStartMinutes(nowMin, viewportDurationMinutes)
-        }
-    }
-    return axis.defaultViewportStartMinutes
-}
 
 /**
  * Build rail segments on the calendar-derived continuous [axis].
@@ -234,75 +211,6 @@ internal fun summaryRecordType(category: DayChartCategory?): RecordType? = when 
     null -> null
 }
 
-internal fun reduceSummaryDayChartSelection(
-    state: DayChartFilterState,
-    type: RecordType,
-    records: List<Record>,
-): DayChartFilterState {
-    val category = summaryDayChartCategory(type) ?: return state
-    // Toggle off same category; A2 gate lives in Select via day-D records.
-    val nextKey = category.name.takeUnless { state.selection == category }
-    return reduceDayChartFilter(
-        state,
-        DayChartFilterAction.Select(nextKey, dayRecords = records),
-    )
-}
-
-internal data class DayChartFilterContext(
-    val babyId: Long?,
-    val day: LocalDate,
-)
-
-internal data class DayChartFilterState(
-    val context: DayChartFilterContext,
-    val selection: DayChartCategory? = null,
-)
-
-internal sealed interface DayChartFilterAction {
-    data class ChangeContext(val context: DayChartFilterContext) : DayChartFilterAction
-
-    /**
-     * Proposed filter key after designsystem toggle/clear.
-     * [dayRecords] must be selected-day **D** only (A2 gate); never the three-day rail union.
-     */
-    data class Select(
-        val categoryKey: String?,
-        val dayRecords: List<Record>,
-    ) : DayChartFilterAction
-
-    data class RefreshRecords(val records: List<Record>) : DayChartFilterAction
-}
-
-internal fun reduceDayChartFilter(
-    state: DayChartFilterState,
-    action: DayChartFilterAction,
-): DayChartFilterState = when (action) {
-    is DayChartFilterAction.ChangeContext -> {
-        if (action.context == state.context) state
-        else DayChartFilterState(context = action.context)
-    }
-
-    is DayChartFilterAction.Select -> {
-        val proposed = resolveDayChartSelection(action.categoryKey)
-        state.copy(
-            selection = DayChartCategories.commitSelection(
-                current = state.selection,
-                proposed = proposed,
-                dayRecords = action.dayRecords,
-            ),
-        )
-    }
-
-    is DayChartFilterAction.RefreshRecords -> {
-        state.copy(
-            selection = DayChartCategories.reconcileSelection(
-                state.selection,
-                action.records,
-            ),
-        )
-    }
-}
-
 /** Legend swatch colors for day-chart categories (feature owns labels/keys; designsystem stays free of domain). */
 internal fun dayChartLegendColorRole(
     category: DayChartCategory,
@@ -313,4 +221,3 @@ internal fun dayChartLegendColorRole(
     DayChartCategory.PEE -> LeziRecordColorRole.Pee
     DayChartCategory.POOP -> LeziRecordColorRole.Poop
 }
-

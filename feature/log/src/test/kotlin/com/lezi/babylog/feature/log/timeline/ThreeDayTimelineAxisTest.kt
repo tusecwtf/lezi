@@ -75,7 +75,7 @@ class ThreeDayTimelineAxisTest {
     }
 
     @Test
-    fun todayViewportCentersOnNowAndClampsToDynamicWindow() {
+    fun centeredViewportGeometryClampsToDynamicWindow() {
         val axis = ThreeDayTimelineAxis(LocalDate.of(2026, 7, 22), zone)
         val duration = axis.defaultViewportDurationMinutes
         val noon = axis.primaryStartMinutes + 12 * 60
@@ -85,34 +85,6 @@ class ThreeDayTimelineAxisTest {
         assertEquals(
             axis.contentDurationMinutes - duration,
             axis.centeredViewportStartMinutes(axis.contentDurationMinutes - 10, duration),
-        )
-    }
-
-    @Test
-    fun initialViewportCentersTodayAndUsesPrimaryPeekForHistory() {
-        val today = LocalDate.of(2026, 7, 22)
-        val todayAxis = ThreeDayTimelineAxis(today, zone)
-        val noonMs = today.atTime(12, 0).atZone(zone).toInstant().toEpochMilli()
-
-        val todayStart = initialThreeDayViewportStartMinutes(
-            selectedDay = today,
-            today = today,
-            nowMs = noonMs,
-            axis = todayAxis,
-        )
-        val noonContent = todayAxis.primaryStartMinutes + 12 * 60
-        assertEquals(noonContent - todayAxis.defaultViewportDurationMinutes / 2, todayStart)
-
-        val history = today.minusDays(3)
-        val historyAxis = ThreeDayTimelineAxis(history, zone)
-        assertEquals(
-            historyAxis.defaultViewportStartMinutes,
-            initialThreeDayViewportStartMinutes(
-                selectedDay = history,
-                today = today,
-                nowMs = noonMs,
-                axis = historyAxis,
-            ),
         )
     }
 

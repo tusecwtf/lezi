@@ -194,7 +194,7 @@ fun TimelineLane(
                 .testTag("timeline_lane_$label")
                 .semantics {
                     contentDescription = if (onHorizontalPan != null) {
-                        "$label 轨道，点按可按类型筛选明细，横向拖动可窥视邻日"
+                        "$label 轨道，点按可按类型筛选明细，横向拖动可连续浏览日期"
                     } else {
                         "$label 轨道，点按可按类型筛选明细"
                     }
@@ -496,9 +496,9 @@ internal data class SleepPaintSlice(val startMin: Int, val endMin: Int)
  * and [viewportDurationMinutes] select the visible slice. Selection is owned by the
  * caller (page state): all marks that share [selectedCategoryKey] highlight together.
  *
- * When [onViewportStartChange] is non-null, horizontal drag pans a **single shared
- * viewport** for all lanes (clamped to content); tap still filters; pan never
- * changes selected day D.
+ * When [onHorizontalPan] is non-null, every lane reports one shared cumulative
+ * direct-manipulation gesture. The feature state machine owns the absolute viewport,
+ * date effect and future clamp; tap still filters.
  */
 @Composable
 fun TimelineRailCard(
@@ -514,11 +514,8 @@ fun TimelineRailCard(
     viewportStartMinutes: Int = 0,
     viewportDurationMinutes: Int = TimelineAxis.MINUTES_PER_DAY,
     windowGeometry: TimelineWindowGeometry = TimelineWindowGeometry.SingleDay,
-    /**
-     * When non-null, enables horizontal pan across [windowGeometry]. Caller owns day-keyed viewport
-     * state and must clamp via [TimelineAxis.clampViewportStart] / pan helper.
-     */
-    onViewportStartChange: ((Int) -> Unit)? = null,
+    onHorizontalPan: ((totalDeltaPx: Float, axisLengthPx: Float) -> Unit)? = null,
+    onPanEnd: (() -> Unit)? = null,
     /**
      * Hour labels drawn relative to the content axis. Defaults to a single-day
      * 00/06/12/18/24 fill when the viewport is the classic 24h window.
@@ -547,34 +544,6 @@ fun TimelineRailCard(
     val primaryTitle = titlePrimary?.takeIf { it.isNotBlank() }
     val secondaryTitle = titleSecondary?.takeIf { it.isNotBlank() }
     val showTitleBlock = primaryTitle != null || secondaryTitle != null
-    // One shared viewport for all lanes: origin fixed for the life of a pan gesture.
-    val viewportStartState by rememberUpdatedState(viewportStartMinutes)
-    val onViewportChangeState by rememberUpdatedState(onViewportStartChange)
-    val panSession = remember { TimelinePanSession() }
-    val onHorizontalPan: ((Float, Float) -> Unit)? =
-        if (onViewportStartChange != null) {
-            { totalDeltaPx, axisLengthPx ->
-                val origin = panSession.originStartMinutes
-                    ?: viewportStartState.also { panSession.originStartMinutes = it }
-                val next = TimelineAxis.panViewportStart(
-                    currentStartMinutes = origin,
-                    deltaPx = totalDeltaPx,
-                    axisLengthPx = axisLengthPx,
-                    viewportDurationMinutes = safeViewportDuration,
-                    contentDurationMinutes = windowGeometry.contentDurationMinutes,
-                )
-                onViewportChangeState?.invoke(next)
-            }
-        } else {
-            null
-        }
-    val onPanEnd: (() -> Unit)? =
-        if (onViewportStartChange != null) {
-            { panSession.originStartMinutes = null }
-        } else {
-            null
-        }
-
     val panel: @Composable (@Composable ColumnScope.() -> Unit) -> Unit = { body ->
         if (journal) {
             LeziSurfacePanel(
@@ -689,11 +658,6 @@ fun TimelineRailCard(
             )
         }
     }
-}
-
-/** Holds the viewport start at the beginning of a multi-lane pan gesture. */
-private class TimelinePanSession {
-    var originStartMinutes: Int? = null
 }
 
 @Composable

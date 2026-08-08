@@ -205,8 +205,8 @@ fun PreviewTimelineThreeDay() {
             ),
             recordCount = 4,
             nowContentMinute = nowMin,
-            viewportStartMinutes = TimelineAxis.todayCenteredViewportStartMinutes(nowMin),
-            viewportDurationMinutes = TimelineAxis.defaultViewportDurationMinutes(),
+            viewportStartMinutes = nowMin - TimelineAxis.MINUTES_PER_DAY,
+            viewportDurationMinutes = TimelineAxis.MINUTES_PER_DAY,
             legend = listOf(
                 TimelineLegendEntry("SLEEP", "睡眠", LeziRecordColorRole.Sleep, isBar = true),
                 TimelineLegendEntry("MILK", "奶", LeziRecordColorRole.Milk),

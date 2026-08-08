@@ -13,7 +13,6 @@ import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.carelog.DailySummary
-import com.lezi.babylog.domain.carelog.DayChartCategories
 import com.lezi.babylog.domain.timeline.TimelineCarePlanRow
 import com.lezi.babylog.domain.timeline.TimelineRecordRow
 import com.lezi.babylog.domain.timeline.TimelineWindowRepository
@@ -30,6 +29,8 @@ import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -74,11 +75,6 @@ data class LogUiState(
         state = ShallowSyncState.Unjoined,
         text = "尚未加入家庭 · 数据仅保存在本机",
     ),
-    /**
-     * Whether to render the three-local-day time bar: true when **any** of D−1 / D / D+1
-     * has a day-chart type. Summary / list / legend stay on [records] (day D only).
-     */
-    val showDayChart: Boolean = false,
 )
 
 @HiltViewModel
@@ -91,6 +87,19 @@ class LogViewModel @Inject constructor(
     private val initialScreenTime = SystemRecordScreenClock.snapshot()
     private val screenTimeFlow = MutableStateFlow(initialScreenTime)
     private val dayFlow = MutableStateFlow(initialScreenTime.localDate)
+    private val timelineInteractionState = MutableStateFlow(
+        TimelineInteraction.reduce(
+            null,
+            TimelineInteractionEvent.Initialize(
+                selectedDay = initialScreenTime.localDate,
+                babyId = null,
+                nowMs = initialScreenTime.epochMillis,
+                zoneId = initialScreenTime.zoneId,
+            ),
+        ).state,
+    )
+    internal val timelineInteraction: StateFlow<TimelineInteractionState> =
+        timelineInteractionState.asStateFlow()
     private val refreshing = MutableStateFlow(false)
     private val deviceLayoutWriter = DeviceLayoutSnapshotWriter(viewModelScope) { snapshot ->
         settingsStore.setDeviceLayoutSnapshot(snapshot)
@@ -162,8 +171,6 @@ class LogViewModel @Inject constructor(
                     axis = timelineAxis,
                     nowMs = screenTime.epochMillis,
                 )
-                // Rail visibility uses the three-day union; list/summary stay on D.
-                val showDayChart = DayChartCategories.shouldShowDayChart(railRecords)
                 val recordMetadata = snapshot.recordRows.associateBy { it.record.id }
                 val planMetadata = snapshot.planRows.associateBy { it.carePlan.id }
                 LogUiState(
@@ -186,7 +193,6 @@ class LogViewModel @Inject constructor(
                     recordMetadata = recordMetadata,
                     planMetadata = planMetadata,
                     familyJoined = snapshot.audience.isFamilyJoined,
-                    showDayChart = showDayChart,
                 )
             }
         }
@@ -207,11 +213,73 @@ class LogViewModel @Inject constructor(
     )
 
     fun setExternalDay(day: LocalDate) {
+        val current = timelineInteractionState.value
+        if (day != current.selectedDay) {
+            reduceTimeline(
+                TimelineInteractionEvent.ExternalDaySelected(
+                    selectedDay = day,
+                    nowMs = screenTimeFlow.value.epochMillis,
+                    zoneId = screenTimeFlow.value.zoneId,
+                ),
+            )
+        }
         dayFlow.value = day
     }
 
-    internal fun setScreenTime(snapshot: RecordScreenTimeSnapshot) {
+    internal fun setScreenTime(snapshot: RecordScreenTimeSnapshot): LocalDate? {
         screenTimeFlow.value = snapshot
+        return reduceTimeline(
+            TimelineInteractionEvent.ClockAdvanced(
+                nowMs = snapshot.epochMillis,
+                zoneId = snapshot.zoneId,
+            ),
+        )
+    }
+
+    internal fun setTimelineBaby(babyId: Long?) {
+        if (timelineInteractionState.value.babyId == babyId) return
+        reduceTimeline(TimelineInteractionEvent.BabyChanged(babyId))
+    }
+
+    internal fun setTimelineRecords(records: List<Record>) {
+        reduceTimeline(TimelineInteractionEvent.RecordsRefreshed(records))
+    }
+
+    internal fun selectTimelineCategory(categoryKey: String?, dayRecords: List<Record>) {
+        reduceTimeline(TimelineInteractionEvent.SelectCategory(categoryKey, dayRecords))
+    }
+
+    internal fun changeTimelineDrag(
+        cumulativeDeltaPx: Float,
+        effectiveWidthPx: Float,
+        nowMs: Long,
+    ) {
+        if (timelineInteractionState.value.drag == null) {
+            reduceTimeline(TimelineInteractionEvent.DragStarted)
+        }
+        reduceTimeline(
+            TimelineInteractionEvent.DragChanged(
+                cumulativeDeltaPx = cumulativeDeltaPx.toDouble(),
+                effectiveWidthPx = effectiveWidthPx.toDouble(),
+                nowMs = nowMs,
+            ),
+        )
+    }
+
+    internal fun endTimelineDrag(nowMs: Long): LocalDate? =
+        reduceTimeline(TimelineInteractionEvent.DragEnded(nowMs))
+
+    internal fun cancelTimelineDrag(nowMs: Long) {
+        reduceTimeline(TimelineInteractionEvent.DragCancelled(nowMs))
+    }
+
+    private fun reduceTimeline(event: TimelineInteractionEvent): LocalDate? {
+        val result = TimelineInteraction.reduce(timelineInteractionState.value, event)
+        timelineInteractionState.value = result.state
+        val selectedDay =
+            (result.effect as? TimelineInteractionEffect.CommitSelectedDay)?.selectedDay
+        if (selectedDay != null) dayFlow.value = selectedDay
+        return selectedDay
     }
 
     /** Persist a full device-layout snapshot from 布局编辑态. */
