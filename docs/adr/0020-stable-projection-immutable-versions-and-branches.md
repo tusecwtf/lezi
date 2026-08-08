@@ -54,7 +54,8 @@ status: accepted (0.3.13 planning freeze; not runtime-delivered)
 
 - 基于 **当前** 稳定版本的删除 → 稳定 tombstone（mutation `deleted=true` ↔ pull
   `deleted_at` 同构，wire §2）。
-- 同一 live base 上的删除与离线编辑 → 真并发分支（wire 例 E）。
+- 同一 live base 上的删除与离线编辑 → 顺序 commit 下先到 accepted、后到 branched
+  （stable = 先接受版本；wire 例 E；删除先到见例 J）。
 - 稳定 tombstone 之后：
   - 无 parent 证明的陈旧 live → **`rejected` `stale_live_over_tombstone`**（wire 例 F）；
   - `incoming.base_version ∈ parents(stable_tombstone)` 的并发 live 编辑 → **`branched`**，

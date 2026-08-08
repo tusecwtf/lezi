@@ -69,7 +69,7 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | `generation` | 权威 generation |
 | `request_hash` | 请求内容 hash 回显 |
 | `branch_version_id` | 仅 `branched`：**必填**；其它 status 必须省略或 `null` |
-| `conflict_id` | 仅存在未解决冲突时：**必填** string 句柄；无冲突时必须省略或 `null`。**唯一**冲突句柄名（禁止 `conflict_ref`） |
+| `conflict_id` | 存在未解决并发冲突时：**必填** string 句柄；稳定变为纯 tombstone（无未解决分支）时亦**必填** tombstone-scoped 句柄（§8.2）；既无并发冲突也非 restorable tombstone 时必须省略或 `null`。**唯一**冲突句柄名（禁止 `conflict_ref`） |
 
 失败：稳定 `code` + 可映射 reason；不泄露跨家庭存在性。
 
@@ -120,6 +120,7 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | `type` | 是 | 既有 RecordType 字面量 |
 | `custom_item_client_uuid` | 是 (非 custom 时为 null) | |
 | `timestamp` | 是 | 主时间 / SleepStart |
+| `end_timestamp` | 见下 | 闭集内键；sleep 禁止；非 sleep 允许 |
 | `note` | 是 (可为 null) | |
 | `payload_json` | 是 | object；typed closed keys 沿用现网 schema v2 白名单（data-model §3.6） |
 | `schema_version` | 是 | 字面量 `2` |
@@ -127,8 +128,14 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | `created_by_membership_id` | pull 有；mutation 可省略 | server |
 | `effective_wake_observation_client_uuid` | **仅** `type=sleep`：是 (可为 null) | 有效 WakeObservation；非 sleep 禁止出现 |
 
-**SleepStart（`type=sleep`）禁止键：** `end_timestamp`（**不得**出现，含 null）。出现 → `rejected` `forbidden_field`。
-**非 sleep：** `end_timestamp` 键允许且语义与 0.3.12 相同（区间类若有）；当前非 sleep 类型保持 null。
+**`end_timestamp`（closed 键，按 `type` 分叉）：**
+
+| `type` | 必填 | 规则 |
+|--------|------|------|
+| `sleep` | 禁止 | 键**不得**出现（含 null）→ `rejected` `forbidden_field`（醒来走 WakeObservation，§4.5） |
+| 非 sleep | 否（`null` 可） | 键允许；类型 `integer \| null`；语义与 0.3.12 相同（区间类若有）；当前非 sleep 类型保持 `null` |
+
+未知键 → reject。
 
 `payload_json` for sleep：仅 `anomaly_flag`、`is_nap`（与现网 allowlist 一致）。
 
@@ -242,7 +249,7 @@ Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
 | `root` | 是 | closed keys |
 | `media` | 是 | canonical 排序 |
 | `deleted_at` | 是 | `integer \| null`（§2） |
-| `conflict_summary` | 否 | 有未解决冲突时必填 |
+| `conflict_summary` | 否 | 有未解决并发分支时**必填**；纯 restorable tombstone（`branch_version_ids=[]`，§8.2）时亦**必填** |
 
 **conflict_summary closed keys：**
 
@@ -252,7 +259,15 @@ Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
 | `entity_type` | 是 |
 | `client_uuid` | 是 |
 | `stable_version_id` | 是 |
-| `branch_version_ids` | 是（数组，字典序） |
+| `branch_version_ids` | 是（数组，字典序；纯 tombstone restore 句柄时为 `[]`） |
+
+**游标 / 可发现性（冻结）：** 实体表拥有增量 pull cursor/rev。下列任一耐久写入**必须**推进该实体的 pull cursor/rev，即使稳定 `version_id` 未变：
+
+- 新建或更新未解决的 `conflict_id`；
+- 新建 `branch_version_id`（`branched` 提交）；
+- 更新 tombstone-scoped restore 句柄（§8.2）的可见摘要。
+
+`conflict_summary` 在存在未解决并发分支**或** restorable 纯 tombstone 句柄时必填；无上述情况时省略。页界仍适用。对端不得因「stable version_id 未变」而永久看不到分支或 restore 句柄。
 
 **不** 在普通 pull 返回：分支 root 全文、媒体 bytes、版本图。每页 conflict_summary ≤ 32。
 
@@ -281,7 +296,7 @@ Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
 | 字段 | 必填 |
 |------|------|
 | `expected_stable_version` | 是 |
-| `expected_branch_versions` | 是（完整集合，字典序） |
+| `expected_branch_versions` | 是（完整集合，字典序；**无分支时必须 `[]`**） |
 | `resolved_root` | 是 |
 | `resolved_media` | 是（canonical 排序） |
 | `resolution_mutation_id` | 是 |
@@ -296,7 +311,19 @@ Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
 
 授权：Record/WakeObservation 作者或 Owner；其它根既有 ACL。
 CAS 失败：返回最新 summary，不改状态。
-显式 restore（tombstone→live）：仅本 CAS（`deleted_at` 稳定 + choices/resolved live）。
+
+**显式 restore（tombstone→live）— 唯一路径（冻结为本 CAS，禁止普通 mutation revive）：**
+
+1. **有未解决并发分支时**（例 E/J 后）：使用既有并发 `conflict_id`；`expected_branch_versions` = 完整分支集合；`conflicting_paths` 含 `/_mutation.deleted`（及真实业务冲突路径）；choices/resolved 选 live → 新稳定 live。
+2. **纯 tombstone、无未解决并发分支时**（当前 base 删除已 accepted，例 D/G）：服务器为该稳定 tombstone 维护 **tombstone-scoped** `conflict_id`：
+   - 绑定 `(entity_type, client_uuid, stable_tombstone_version_id)`；同一三元组幂等同一 `conflict_id`（可在 delete `accepted`/`merged` 时铸造，或首次授权 detail 懒铸造，但不得漂移）。
+   - `branch_version_ids` / `expected_branch_versions` **必须为 `[]`**。
+   - detail 的 `conflicting_paths` **至少** 含 `/_mutation.deleted`；`auto_merged` 为 tombstone 根/媒体规范投影。
+   - `conflict_choices["/_mutation.deleted"] = false`，且 `resolved_root`/`resolved_media` 为授权方期望的 live 完整根（须通过 `auto_merged ⊕ choices` 重建校验）。
+   - 成功 → 新稳定 live；该 `conflict_id` 关闭；pull 不再带该 restore 句柄。
+   - 若随后有并发 live 分支附着（例 J）：**同一** `conflict_id` 升级为非空 `branch_version_ids`（不再是纯空分支句柄）；resolve 改走本条 1。
+3. **禁止** 用 §6 `commit` / 普通 mutation 将稳定 tombstone 推回 live（例 F：`stale_live_over_tombstone`）。
+4. 历史无法证明原因的迁移 tombstone：无批量恢复；单条若产品开放，仍仅本 CAS + 同一 ACL，不得另开旁路。
 
 ---
 
@@ -353,15 +380,35 @@ base/left/right 仅 /note 分别为 a/b/c → branched；stable 仍 base
 **例 D — 当前 base 删除**
 
 ```text
-live V1; mutation deleted=true, base_version=V1 → accepted; stable tombstone V2, deleted_at≠null
+live V1; mutation deleted=true, base_version=V1
+→ accepted; stable tombstone V2, deleted_at≠null
+→ 响应/pull 带 tombstone-scoped conflict_id（branch_version_ids=[]；§8.2 供显式 restore）
 ```
 
-**例 E — 并发删/改（均自 live V1）**
+**例 E — 并发删/改（均自 live V1；顺序 commit）**
 
 ```text
-left: deleted=true, base=V1
-right: note 改, deleted=false, base=V1
-→ branched；stable 仍 V1 live 直到 resolution
+双方 mutation 均 base_version=V1：
+  D: deleted=true
+  E: deleted=false，业务字段相对 V1 有改动
+
+顺序提交（服务器无「双 unit 同时冻住 stable」路径；真并发 = 同 base 先后到达）：
+
+  先 D 后 E（删除先到）：
+    D → accepted → stable tombstone V2，V2.parent 含 V1；
+      响应带 tombstone-scoped conflict_id（§8.2）
+    E → branched（例 J 特化）：编辑保留为分支；stable 仍 tombstone V2；
+      conflict_id + branch_version_id 必填
+
+  先 E 后 D（编辑先到）：
+    E → accepted → 新稳定 live V2'（note 等已变），V2'.parent 含 V1
+    D → branched：删除意图保留为分支；stable 仍 live V2'；
+      conflict_id + branch_version_id 必填；conflicting_paths 含 /_mutation.deleted
+
+任一顺序：先到者 accepted（或可 merged），后到者同 base 并发 mutation → branched；
+**stable = 先接受的版本**，不会停留在 V1。
+未 commit 前：reconcile 可将双方标为 conflict_preview（仍不写稳定版本）。
+最终可见性变更（删↔活或选字段）仅经 §8.2 resolve CAS。
 ```
 
 **例 F — 稳定 tombstone 后陈旧 live replay（非并发证明）**
@@ -375,11 +422,21 @@ incoming: deleted=false, base_version=V1 以外的旧证明 / null / 与 parent 
 → 不得 revive；不得 branched；客户端 pending 不得靠 confirmed 清掉
 ```
 
-**例 G — 显式 restore**
+**例 G — 显式 restore（唯一路径 = §8.2 resolve CAS）**
 
 ```text
-resolve CAS on conflict or tombstone with authorized resolved live
-→ 新稳定 live V3
+# 纯 tombstone（无未解决并发分支）— 例 D 之后
+stable tombstone V2；tombstone-scoped conflict_id C（branch_version_ids=[]）
+POST /conflicts/C/resolve
+  expected_stable_version=V2
+  expected_branch_versions=[]
+  conflict_choices["/_mutation.deleted"]=false
+  resolved_* = 授权 live 完整根/媒体
+→ 新稳定 live V3；C 关闭
+
+# 有并发分支时 — 例 E/J 之后
+既有 conflict_id + 非空 expected_branch_versions；choices 含 live / 业务路径
+→ 新稳定 live（或仍 tombstone，若 choices 选删除）
 ```
 
 **例 H — mutation_id 内容漂移 → rejected content_drift**
@@ -412,21 +469,33 @@ later mutation E: deleted=false, base_version=V1, mutation_id=Me≠Md, 业务字
 
 ```text
 NAMESPACE = 7c9e6679-7425-40de-944b-e07fc1f90ae7   # frozen, lezi wake migration
-NAME      = "wake_obs_v1:" + sleep_client_uuid + ":" + decimal(legacy_updated_at)
-client_uuid(WakeObservation) = UUIDv5(NAMESPACE, UTF-8(NAME))
+
+# WakeObservation client_uuid
+NAME_OBS  = "wake_obs_v1:" + sleep_client_uuid + ":" + decimal(legacy_updated_at)
+client_uuid(WakeObservation) = UUIDv5(NAMESPACE, UTF-8(NAME_OBS))
+
+# log→wake 媒体 media_uuid（禁止 random UUID）
+NAME_MEDIA = "wake_media_v1:" + sleep_client_uuid + ":" + legacy_media_uuid
+             + ":" + lowercase_hex_sha256 + ":wake"
+media_uuid(wake) = UUIDv5(NAMESPACE, UTF-8(NAME_MEDIA))
 ```
 
 | 输入 | 含义 |
 |------|------|
 | `sleep_client_uuid` | 原 sleep Record UUID |
 | `legacy_updated_at` | 迁移前所用 closed sleep 行的 `updated_at`（integer epoch ms） |
+| `legacy_media_uuid` | 迁移前 sleep 上 `role=log` 媒体行的 `media_uuid`（原样字符串） |
+| `lowercase_hex_sha256` | 该媒体行的 `sha256`（64 lowercase hex；与字节一致） |
 
-字段转移：`wake_timestamp = legacy end_timestamp`；`note`、log→wake 媒体字节与
-sha256 复制为新 `media_uuid`（新 uuid，hash 相同可）；`observer_membership_id =
-created_by_membership_id`（legacy 作者）；`withdrawn=false`；Sleep
+字段转移：`wake_timestamp = legacy end_timestamp`；`note` 原样；每条 log 媒体：
+**字节与 sha256 原样复用**，`role=wake`，`media_uuid` **仅** 按上式 UUIDv5 生成
+（hash 相同不足以代替 uuid 公式；双端必须得到同一 `media_uuid` 才能对齐
+`stable_media` / 引用 CAS）。`observer_membership_id = created_by_membership_id`
+（legacy 作者）；`withdrawn=false`；Sleep
 `effective_wake_observation_client_uuid =` 该观察 uuid。
 开放 sleep：不创建 WakeObservation。
-禁止各端自创不同 hash 输入。
+**禁止** 迁移路径使用 random/UUIDv4 或各端自创不同 NAME 输入；禁止只对齐 sha256
+而放任 `media_uuid` 分叉。
 
 ---
 
