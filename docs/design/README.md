@@ -16,6 +16,7 @@
 
 | 文件 | Status | 说明 |
 |------|--------|------|
+| [2026-08-08-continuous-timeline-navigation.md](./2026-08-08-continuous-timeline-navigation.md) | Active | 今天最近 24 小时、连续历史浏览、全局换日与实时吸附状态机；`ui.md` §3 / §5.2 为产品权威 |
 | [2026-07-29-timeline-swipe-edit-delete.md](./2026-07-29-timeline-swipe-edit-delete.md) | Implemented | 时间轴左右滑细则；`ui.md` §5.2 链到本文 |
 | [2026-07-30-trusted-sync-onboarding-ui.md](./2026-07-30-trusted-sync-onboarding-ui.md) | Active | 服务器连接、根密码管理员、成员审批/QR、设备与浅同步状态 UI；`ui.md` / `sync-trusted-endpoint` 的 UI companion |
 
