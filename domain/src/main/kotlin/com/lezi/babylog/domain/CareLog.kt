@@ -16,6 +16,9 @@ import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.SyncPort
@@ -43,10 +46,13 @@ import com.lezi.babylog.domain.calendar.NoOpSystemCalendarPort
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.domain.carelog.CareLogQueries
 import com.lezi.babylog.domain.carelog.ConflictAuditQueries
+import com.lezi.babylog.domain.carelog.ConflictResolutionCoordinator
 import com.lezi.babylog.domain.carelog.DailySummary
-import com.lezi.babylog.domain.carelog.FamilyWakePrivilegeStore
 import com.lezi.babylog.domain.carelog.PhotoAttachmentReconciler
 import com.lezi.babylog.domain.carelog.RecordMutationCoordinator
+import com.lezi.babylog.domain.carelog.SleepRecordProjection
+import com.lezi.babylog.domain.carelog.WakeObservation
+import com.lezi.babylog.domain.carelog.WakeObservationCoordinator
 import com.lezi.babylog.domain.carelog.WeekSummary
 import com.lezi.babylog.domain.carelog.WidgetSummaryDto
 import com.lezi.babylog.domain.careplan.CarePlanCoordinator
@@ -157,17 +163,42 @@ class CareLog @Inject constructor(
     /** Process-wide path gate shared with reference-aware media reclaim (Hilt singleton). */
     private val mediaPathGate: MediaLocalPathGate,
     private val localDataMutationEpoch: LocalDataMutationEpoch,
-    private val familyWakePrivileges: FamilyWakePrivilegeStore = FamilyWakePrivilegeStore(),
+    private val wakeObservationDao: WakeObservationDao,
+    private val conflictSummaryDao: ConflictSummaryDao,
+    private val conflictDetailCacheDao: ConflictDetailCacheDao,
 ) {
+    private val photoAttachmentReconciler = PhotoAttachmentReconciler(
+        mediaAssetDao = mediaAssetDao,
+        pathGate = mediaPathGate,
+    )
+    /**
+     * Serializes record create, update, delete, and confirm operations that may
+     * change active sleep state. Room transactions provide atomic writes; this
+     * lock makes read-check-write sequences deterministic inside this process.
+     */
+    private val sleepMutationMutex = Mutex()
+    private val wakeObservationCoordinator = WakeObservationCoordinator(
+        recordDao = recordDao,
+        wakeObservationDao = wakeObservationDao,
+        mediaAssetDao = mediaAssetDao,
+        transactionRunner = transactionRunner,
+        syncPort = syncPort,
+        sleepMutationMutex = sleepMutationMutex,
+        currentMembershipActorId = { carePlans.currentMembershipActorId() },
+        requestLocalSync = ::requestLocalSync,
+        pathGate = mediaPathGate,
+    )
+    private val conflictResolutionCoordinator = ConflictResolutionCoordinator(
+        conflictSummaryDao = conflictSummaryDao,
+        conflictDetailCacheDao = conflictDetailCacheDao,
+        syncPort = syncPort,
+    )
     private val queries = CareLogQueries(
         babyDao = babyDao,
         recordDao = recordDao,
         carePlanDao = carePlanDao,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
-    )
-    private val photoAttachmentReconciler = PhotoAttachmentReconciler(
-        mediaAssetDao = mediaAssetDao,
-        pathGate = mediaPathGate,
+        wakeObservationCoordinator = wakeObservationCoordinator,
     )
     private val reminderProjection = CarePlanReminderProjection(
         carePlanDao = carePlanDao,
@@ -199,12 +230,6 @@ class CareLog @Inject constructor(
         requestLocalSync = ::requestLocalSync,
     )
 
-    /**
-     * Serializes record create, update, delete, and confirm operations that may
-     * change active sleep state. Room transactions provide atomic writes; this
-     * lock makes read-check-write sequences deterministic inside this process.
-     */
-    private val sleepMutationMutex = Mutex()
     private lateinit var carePlans: CarePlanCoordinator
     private val recordMutations: RecordMutationCoordinator = RecordMutationCoordinator(
         recordDao = recordDao,
@@ -249,7 +274,7 @@ class CareLog @Inject constructor(
         // active plan-photo path policy (ordering/trim); do not re-read via DAO here.
         listCarePlanPhotoPaths = { carePlans.listCarePlanPhotoPaths(it) },
         requestLocalSync = ::requestLocalSync,
-        familyWakePrivileges = familyWakePrivileges,
+        wakeObservations = this.wakeObservationCoordinator,
     )
     private val babyProfiles: BabyFamilyProfileCoordinator = BabyFamilyProfileCoordinator(
         babyDao = babyDao,
@@ -621,6 +646,111 @@ class CareLog @Inject constructor(
         recordMutations.sleepUp(babyId, at, nowMillis)
     }
 
+    // --- WakeObservation (ticket 06 / ADR-0021) ---
+
+    suspend fun listWakeObservations(sleepRecordClientUuid: String): List<WakeObservation> =
+        wakeObservationCoordinator.listForSleep(sleepRecordClientUuid)
+
+    suspend fun getWakeObservation(clientUuid: String): WakeObservation? =
+        wakeObservationCoordinator.get(clientUuid)
+
+    suspend fun projectSleepRecord(recordId: Long): SleepRecordProjection? {
+        val entity = recordDao.get(recordId) ?: return null
+        if (entity.type != RecordType.SLEEP.key) return null
+        return wakeObservationCoordinator.projectSleep(entity)
+    }
+
+    suspend fun recordWakeObservation(
+        babyId: Long,
+        at: Long = System.currentTimeMillis(),
+        note: String? = null,
+        photoLocalPaths: List<String> = emptyList(),
+        nowMillis: Long = System.currentTimeMillis(),
+        sleepRecordId: Long? = null,
+        clientUuid: String = newClientUuid(),
+    ): Long = localDataMutationEpoch.withMutation {
+        wakeObservationCoordinator.recordWake(
+            babyId = babyId,
+            at = at,
+            note = note,
+            photoLocalPaths = photoLocalPaths,
+            nowMillis = nowMillis,
+            sleepRecordId = sleepRecordId,
+            clientUuid = clientUuid,
+        )
+    }
+
+    suspend fun updateWakeObservation(
+        clientUuid: String,
+        wakeTimestamp: Long,
+        note: String?,
+        photoLocalPaths: List<String>? = null,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) = localDataMutationEpoch.withMutation {
+        wakeObservationCoordinator.updateWake(
+            clientUuid,
+            wakeTimestamp,
+            note,
+            photoLocalPaths,
+            nowMillis,
+        )
+    }
+
+    suspend fun withdrawWakeObservation(clientUuid: String) = localDataMutationEpoch.withMutation {
+        wakeObservationCoordinator.withdrawWake(clientUuid)
+    }
+
+    suspend fun selectEffectiveWakeObservation(
+        sleepRecordClientUuid: String,
+        wakeObservationClientUuid: String?,
+    ) = localDataMutationEpoch.withMutation {
+        wakeObservationCoordinator.selectEffectiveWake(
+            sleepRecordClientUuid,
+            wakeObservationClientUuid,
+        )
+    }
+
+    suspend fun canEditWakeObservation(clientUuid: String): Boolean =
+        wakeObservationCoordinator.canEditWake(clientUuid)
+
+    suspend fun canSelectEffectiveWakeObservation(sleepRecordClientUuid: String): Boolean =
+        wakeObservationCoordinator.canSelectEffectiveWake(sleepRecordClientUuid)
+
+    // --- Causal conflict badge / resolver (ticket 06) ---
+
+    fun observeOpenConflictSummaries(): Flow<List<com.lezi.babylog.domain.carelog.OpenConflictSummary>> =
+        conflictResolutionCoordinator.observeOpenSummaries()
+
+    suspend fun listOpenConflictSummaries(): List<com.lezi.babylog.domain.carelog.OpenConflictSummary> =
+        conflictResolutionCoordinator.listOpenSummaries()
+
+    suspend fun conflictSummaryForRecord(clientUuid: String): com.lezi.babylog.domain.carelog.OpenConflictSummary? =
+        conflictResolutionCoordinator.summaryForRoot("record", clientUuid)
+
+    suspend fun loadConflictDetail(
+        conflictId: String,
+        forceRefresh: Boolean = true,
+    ): com.lezi.babylog.domain.carelog.ConflictResolverDetail? =
+        conflictResolutionCoordinator.loadDetail(conflictId, forceRefresh)
+
+    suspend fun resolveConflict(
+        conflictId: String,
+        expectedStableVersion: String,
+        expectedBranchVersions: List<String>,
+        resolvedRootJson: String,
+        resolvedMedia: List<com.lezi.babylog.sync.backend.CausalMediaItem> = emptyList(),
+        conflictChoices: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
+        resolutionMutationId: String = newClientUuid(),
+    ): com.lezi.babylog.domain.carelog.ConflictResolveOutcome =
+        conflictResolutionCoordinator.resolve(
+            conflictId = conflictId,
+            expectedStableVersion = expectedStableVersion,
+            expectedBranchVersions = expectedBranchVersions,
+            resolvedRootJson = resolvedRootJson,
+            resolvedMedia = resolvedMedia,
+            conflictChoices = conflictChoices,
+            resolutionMutationId = resolutionMutationId,
+        )
 
     suspend fun getRecord(id: Long): Record? = queries.getRecord(id)
 
@@ -970,6 +1100,8 @@ internal fun RecordEntity.toModel(): Record =
         deletedAt = deletedAt,
         syncDirty = syncDirty,
         familyPublishedUpdatedAt = familyPublishedUpdatedAt,
+        openConflictId = openConflictId,
+        effectiveWakeObservationClientUuid = effectiveWakeObservationClientUuid,
     )
 
 internal fun CustomItemEntity.toModel(): CustomRecordItem =

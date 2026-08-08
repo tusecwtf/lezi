@@ -49,6 +49,8 @@ internal fun buildTimelineLanes(
     for (r in records) {
         when (r.type) {
             RecordType.SLEEP -> {
+                // Domain projection fills endTimestamp for provisional/effective/legacy ends.
+                // Only truly open SleepStarts (no projected end) stay running.
                 val open = r.endTimestamp == null
                 val rawEnd = r.endTimestamp ?: nowMs
                 // Clip only to the three-local-day window — do not split at midnight.

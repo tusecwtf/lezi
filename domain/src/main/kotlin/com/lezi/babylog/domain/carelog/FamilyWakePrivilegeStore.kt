@@ -5,17 +5,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Device-local B1 privilege for cross-membership family wake.
- *
- * After a non-author closes an open sleep on this device, they may make restricted
- * updates (end + note + photos) while the row stays [syncDirty] and before family
- * authority overwrites it. There is no wire closer stamp — once dirty settles or a
- * higher authoritative revision replaces the row, privilege ends and the server
- * still rejects non-author edits on closed sleep.
- *
- * Process-local only (no Room column): survives for the typical wake→correct→publish
- * window; process death drops the grant (wake fact itself remains dirty for sync).
+ * **Retired (ticket 06 / ADR-0021).** Process-local B1 closer privilege is no longer
+ * granted. Wake correction is observer self-edit of [WakeObservation], not Sleep row
+ * restricted edit. Type retained only so Hilt graphs and residual call sites compile
+ * until a follow-up removes the empty shell.
  */
+@Deprecated("Ticket 06: use WakeObservation self-edit; B1 closer privilege is retired")
 @Singleton
 class FamilyWakePrivilegeStore @Inject constructor() {
     private val grantsByClientUuid = ConcurrentHashMap<String, String>()

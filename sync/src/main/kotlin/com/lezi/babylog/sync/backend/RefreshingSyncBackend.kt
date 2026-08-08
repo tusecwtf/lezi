@@ -180,6 +180,17 @@ internal class RefreshingSyncBackend(
         delegate.putCausalMediaPreimage(it, mediaUuid, source, sha256)
     }
 
+    override suspend fun fetchConflictDetail(
+        session: SyncSession,
+        conflictId: String,
+    ) = authenticated(session) { delegate.fetchConflictDetail(it, conflictId) }
+
+    override suspend fun resolveConflict(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictResolveRequest,
+    ) = authenticated(session) { delegate.resolveConflict(it, conflictId, request) }
+
     private suspend fun <T> authenticated(
         requested: SyncSession,
         operation: suspend (SyncSession) -> T,

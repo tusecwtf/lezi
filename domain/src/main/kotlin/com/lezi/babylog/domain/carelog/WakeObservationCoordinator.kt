@@ -1,0 +1,470 @@
+package com.lezi.babylog.domain.carelog
+
+import com.lezi.babylog.core.common.newClientUuid
+import com.lezi.babylog.core.database.DatabaseTransactionRunner
+import com.lezi.babylog.core.database.MediaAssetDao
+import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.WakeObservationDao
+import com.lezi.babylog.core.database.causal.WakeObservationEntity
+import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
+import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.SleepIntervalProjection
+import com.lezi.babylog.core.model.WakeObservationFact
+import com.lezi.babylog.core.model.isWakeShortcutTarget
+import com.lezi.babylog.core.model.projectSleepInterval
+import com.lezi.babylog.core.model.validateWakeTimestamp
+import com.lezi.babylog.domain.RecordPermissionException
+import com.lezi.babylog.domain.nextSyncUpdatedAt
+import com.lezi.babylog.domain.toModel
+import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.session.FamilyRole
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * Public domain view of a WakeObservation atomic root.
+ */
+data class WakeObservation(
+    val id: Long = 0,
+    val clientUuid: String,
+    val sleepRecordClientUuid: String,
+    val wakeTimestamp: Long,
+    val observerMembershipId: String = "",
+    val note: String? = null,
+    val withdrawn: Boolean = false,
+    val updatedAt: Long,
+    val deletedAt: Long? = null,
+    val syncDirty: Boolean = true,
+    val openConflictId: String? = null,
+    val photoLocalPaths: List<String> = emptyList(),
+)
+
+/**
+ * Domain projection for one sleep record: display interval + all visible observations.
+ */
+data class SleepRecordProjection(
+    val sleepClientUuid: String,
+    val babyId: Long,
+    val recordId: Long,
+    val interval: SleepIntervalProjection,
+    val observations: List<WakeObservation>,
+    val openConflictId: String? = null,
+)
+
+/**
+ * CareLog-owned wake observation mutations and sleep interval projection.
+ *
+ * SleepStart end is never rewritten for wake; LocalWrite is notified after commit.
+ */
+internal class WakeObservationCoordinator(
+    private val recordDao: RecordDao,
+    private val wakeObservationDao: WakeObservationDao,
+    private val mediaAssetDao: MediaAssetDao,
+    private val transactionRunner: DatabaseTransactionRunner,
+    private val syncPort: SyncPort,
+    private val sleepMutationMutex: Mutex,
+    private val currentMembershipActorId: suspend () -> String,
+    private val requestLocalSync: () -> Unit,
+    private val pathGate: com.lezi.babylog.core.database.MediaLocalPathGate,
+) {
+    suspend fun listForSleep(sleepRecordClientUuid: String): List<WakeObservation> {
+        val rows = wakeObservationDao.listForSleep(sleepRecordClientUuid)
+            .filter { it.deletedAt == null }
+        return rows.map { it.toDomain(photoPaths = listWakePhotoPaths(it.id)) }
+    }
+
+    suspend fun get(clientUuid: String): WakeObservation? {
+        val row = wakeObservationDao.getByClientUuid(clientUuid) ?: return null
+        if (row.deletedAt != null) return null
+        return row.toDomain(photoPaths = listWakePhotoPaths(row.id))
+    }
+
+    suspend fun projectSleep(record: RecordEntity): SleepRecordProjection {
+        val observations = wakeObservationDao.listForSleep(record.clientUuid)
+        val peers = if (record.endTimestamp == null &&
+            record.effectiveWakeObservationClientUuid == null
+        ) {
+            recordDao.listOpenSleeps(record.babyId)
+                .filter { it.clientUuid != record.clientUuid }
+                .map { it.clientUuid to it.timestamp }
+        } else {
+            emptyList()
+        }
+        val interval = projectSleepInterval(
+            sleepClientUuid = record.clientUuid,
+            startTimestamp = record.timestamp,
+            effectiveWakeObservationClientUuid = record.effectiveWakeObservationClientUuid,
+            observations = observations.map { it.toFact() },
+            legacyEndTimestamp = record.endTimestamp,
+            peerOpenSleepStarts = peers,
+        )
+        val live = observations.filter { it.deletedAt == null }
+        return SleepRecordProjection(
+            sleepClientUuid = record.clientUuid,
+            babyId = record.babyId,
+            recordId = record.id,
+            interval = interval,
+            observations = live.map { it.toDomain(photoPaths = listWakePhotoPaths(it.id)) },
+            openConflictId = record.openConflictId,
+        )
+    }
+
+    /**
+     * Latest open SleepStart for the dock wake shortcut (excludes provisional/effective/
+     * legacy-closed and older overlaps).
+     */
+    suspend fun findWakeShortcutTarget(babyId: Long): RecordEntity? {
+        val opens = recordDao.listOpenSleeps(babyId)
+        if (opens.isEmpty()) return null
+        val withProjection = opens.map { entity ->
+            entity to projectSleep(entity).interval
+        }
+        return withProjection
+            .filter { (_, interval) -> isWakeShortcutTarget(interval) }
+            .maxWithOrNull(
+                compareBy<Pair<RecordEntity, SleepIntervalProjection>> { it.second.startTimestamp }
+                    .thenBy { it.first.clientUuid },
+            )
+            ?.first
+    }
+
+    suspend fun listTrulyOpenSleeps(babyId: Long): List<RecordEntity> {
+        return recordDao.listOpenSleeps(babyId).filter { entity ->
+            projectSleep(entity).interval.isOpen
+        }
+    }
+
+    /**
+     * Record a wake observation against the current wake-shortcut SleepStart (or a
+     * specific open sleep). Does **not** rewrite Sleep.endTimestamp.
+     *
+     * @return local WakeObservation id
+     */
+    suspend fun recordWake(
+        babyId: Long,
+        at: Long = System.currentTimeMillis(),
+        note: String? = null,
+        photoLocalPaths: List<String> = emptyList(),
+        nowMillis: Long = System.currentTimeMillis(),
+        sleepRecordId: Long? = null,
+        clientUuid: String = newClientUuid(),
+    ): Long {
+        RecordTime.pointError(at, nowMillis)?.let { throw IllegalArgumentException(it) }
+        require(clientUuid.isNotBlank()) { "醒来观察标识不能为空" }
+        val photos = photoLocalPaths.map(String::trim).filter(String::isNotEmpty).distinct()
+        require(photos.size <= MAX_RECORD_PHOTOS) {
+            "每条记录最多 $MAX_RECORD_PHOTOS 张照片"
+        }
+        val id = pathGate.withLocks(photos) {
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
+                    val replay = wakeObservationDao.getByClientUuid(clientUuid)
+                    if (replay != null) {
+                        check(replay.deletedAt == null) { "这次醒来观察已删除，请重新填写" }
+                        return@run replay.id
+                    }
+                    val target = if (sleepRecordId != null) {
+                        val entity = recordDao.get(sleepRecordId)
+                            ?: throw IllegalArgumentException("睡眠记录不存在")
+                        require(entity.babyId == babyId && entity.type == RecordType.SLEEP.key) {
+                            "醒来必须关联本宝宝的睡眠记录"
+                        }
+                        require(entity.deletedAt == null) { "睡眠记录已删除" }
+                        entity
+                    } else {
+                        findWakeShortcutTarget(babyId)
+                            ?: throw IllegalStateException("当前没有进行中的睡眠")
+                    }
+                    validateWakeTimestamp(target.timestamp, at)?.let {
+                        throw IllegalArgumentException(it)
+                    }
+                    val membershipId = currentMembershipActorId().trim()
+                    val now = System.currentTimeMillis()
+                    val wakeId = wakeObservationDao.upsert(
+                        WakeObservationEntity(
+                            clientUuid = clientUuid,
+                            sleepRecordClientUuid = target.clientUuid,
+                            wakeTimestamp = at,
+                            observerMembershipId = membershipId,
+                            note = note,
+                            withdrawn = false,
+                            updatedAt = now,
+                            syncDirty = true,
+                        ),
+                    )
+                    // Room autoGenerate may return rowid; re-read for stable local id.
+                    val stored = wakeObservationDao.getByClientUuid(clientUuid)
+                        ?: error("WakeObservation missing after upsert")
+                    val localId = if (stored.id > 0L) stored.id else wakeId
+                    reconcileWakePhotos(localId, photos, now)
+                    localId
+                }
+            }
+        }
+        requestLocalSync()
+        return id
+    }
+
+    /**
+     * Observer corrects own observation fields (time/note/photos). Not a tombstone.
+     */
+    suspend fun updateWake(
+        clientUuid: String,
+        wakeTimestamp: Long,
+        note: String?,
+        photoLocalPaths: List<String>? = null,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        RecordTime.pointError(wakeTimestamp, nowMillis)?.let {
+            throw IllegalArgumentException(it)
+        }
+        val photos = photoLocalPaths?.map(String::trim)?.filter(String::isNotEmpty)?.distinct()
+        if (photos != null) {
+            require(photos.size <= MAX_RECORD_PHOTOS) {
+                "每条记录最多 $MAX_RECORD_PHOTOS 张照片"
+            }
+        }
+        pathGate.withLocks(photos.orEmpty()) {
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
+                    val existing = wakeObservationDao.getByClientUuid(clientUuid)
+                        ?: throw IllegalArgumentException("醒来观察不存在")
+                    require(existing.deletedAt == null) { "醒来观察已删除" }
+                    requireObserverCanEdit(existing)
+                    val sleep = recordDao.getByClientUuid(existing.sleepRecordClientUuid)
+                        ?: throw IllegalArgumentException("关联睡眠不存在")
+                    validateWakeTimestamp(sleep.timestamp, wakeTimestamp)?.let {
+                        throw IllegalArgumentException(it)
+                    }
+                    val now = System.currentTimeMillis()
+                    wakeObservationDao.update(
+                        existing.copy(
+                            wakeTimestamp = wakeTimestamp,
+                            note = note,
+                            withdrawn = false,
+                            updatedAt = nextSyncUpdatedAt(existing.updatedAt, now),
+                            syncDirty = true,
+                        ),
+                    )
+                    if (photos != null) {
+                        reconcileWakePhotos(existing.id, photos, now)
+                    }
+                }
+            }
+        }
+        requestLocalSync()
+    }
+
+    /**
+     * Observer withdraws own observation (`withdrawn=true`, root stays live).
+     * If this observation is the Sleep's effective selection, clear effective so
+     * projection re-enters explicit unconfirmed (provisional/open) state.
+     */
+    suspend fun withdrawWake(clientUuid: String) {
+        sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val existing = wakeObservationDao.getByClientUuid(clientUuid)
+                    ?: throw IllegalArgumentException("醒来观察不存在")
+                require(existing.deletedAt == null) { "醒来观察已删除" }
+                requireObserverCanEdit(existing)
+                val now = System.currentTimeMillis()
+                wakeObservationDao.update(
+                    existing.copy(
+                        withdrawn = true,
+                        updatedAt = nextSyncUpdatedAt(existing.updatedAt, now),
+                        syncDirty = true,
+                    ),
+                )
+                val sleep = recordDao.getByClientUuid(existing.sleepRecordClientUuid)
+                if (
+                    sleep != null &&
+                    sleep.effectiveWakeObservationClientUuid == existing.clientUuid
+                ) {
+                    // Same local transaction: clear effective without requiring
+                    // author/Owner re-select when the chosen observation is withdrawn.
+                    recordDao.update(
+                        sleep.copy(
+                            effectiveWakeObservationClientUuid = null,
+                            updatedAt = nextSyncUpdatedAt(sleep.updatedAt, now),
+                            syncDirty = true,
+                        ),
+                    )
+                }
+            }
+        }
+        requestLocalSync()
+    }
+
+    /**
+     * Sleep author or Owner selects the effective observation (or clears with null).
+     * Updates Sleep Record projection pointer only; never deletes other observations.
+     */
+    suspend fun selectEffectiveWake(
+        sleepRecordClientUuid: String,
+        wakeObservationClientUuid: String?,
+    ) {
+        sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val sleep = recordDao.getByClientUuid(sleepRecordClientUuid)
+                    ?: throw IllegalArgumentException("睡眠记录不存在")
+                require(sleep.type == RecordType.SLEEP.key && sleep.deletedAt == null) {
+                    "只能为睡眠记录选择有效醒来"
+                }
+                requireSleepAuthorOrOwner(sleep)
+                val selected = wakeObservationClientUuid?.trim()?.takeIf { it.isNotEmpty() }
+                if (selected != null) {
+                    val wake = wakeObservationDao.getByClientUuid(selected)
+                        ?: throw IllegalArgumentException("醒来观察不存在")
+                    require(wake.sleepRecordClientUuid == sleep.clientUuid) {
+                        "醒来观察不属于该睡眠"
+                    }
+                    require(wake.deletedAt == null && !wake.withdrawn) {
+                        "不能选择已撤回的醒来观察"
+                    }
+                    validateWakeTimestamp(sleep.timestamp, wake.wakeTimestamp)?.let {
+                        throw IllegalArgumentException(it)
+                    }
+                }
+                val now = System.currentTimeMillis()
+                recordDao.update(
+                    sleep.copy(
+                        effectiveWakeObservationClientUuid = selected,
+                        updatedAt = nextSyncUpdatedAt(sleep.updatedAt, now),
+                        syncDirty = true,
+                    ),
+                )
+            }
+        }
+        requestLocalSync()
+    }
+
+    suspend fun canEditWake(clientUuid: String): Boolean {
+        val existing = wakeObservationDao.getByClientUuid(clientUuid) ?: return false
+        if (existing.deletedAt != null) return false
+        return runCatching { requireObserverCanEdit(existing) }.isSuccess
+    }
+
+    suspend fun canSelectEffectiveWake(sleepRecordClientUuid: String): Boolean {
+        val sleep = recordDao.getByClientUuid(sleepRecordClientUuid) ?: return false
+        return runCatching { requireSleepAuthorOrOwner(sleep) }.isSuccess
+    }
+
+    private suspend fun requireObserverCanEdit(existing: WakeObservationEntity) {
+        val session = syncPort.session().first()
+        val actor = session.membershipId.trim()
+        val isOwner = session.role == FamilyRole.Owner
+        val isObserver = existing.observerMembershipId.isNotBlank() &&
+            existing.observerMembershipId == actor
+        // Offline / pre-join: empty observer stamp may edit own local dirty wake.
+        val localUnstamped = existing.observerMembershipId.isBlank() &&
+            actor.isEmpty() &&
+            existing.syncDirty
+        if (!isObserver && !isOwner && !localUnstamped) {
+            throw RecordPermissionException()
+        }
+        // Owner may not edit another member's observation content — only select effective.
+        if (isOwner && !isObserver && existing.observerMembershipId.isNotBlank()) {
+            throw RecordPermissionException()
+        }
+    }
+
+    private suspend fun requireSleepAuthorOrOwner(sleep: RecordEntity) {
+        val session = syncPort.session().first()
+        val actor = session.membershipId.trim()
+        val isOwner = session.role == FamilyRole.Owner
+        val isAuthor = sleep.createdByMembershipId.isNotBlank() &&
+            sleep.createdByMembershipId == actor
+        val localAuthor = sleep.createdByMembershipId.isBlank() && actor.isEmpty()
+        if (!isAuthor && !isOwner && !localAuthor) {
+            throw RecordPermissionException()
+        }
+    }
+
+    private suspend fun listWakePhotoPaths(wakeObservationId: Long): List<String> =
+        if (wakeObservationId <= 0L) {
+            emptyList()
+        } else {
+            mediaAssetDao.listActiveForWakeObservation(wakeObservationId)
+                .map(MediaAssetEntity::localUri)
+                .filter { it.isNotBlank() }
+        }
+
+    private suspend fun reconcileWakePhotos(
+        wakeObservationId: Long,
+        photoLocalPaths: List<String>,
+        at: Long,
+    ) {
+        if (wakeObservationId <= 0L) return
+        val existing = mediaAssetDao.listActiveForWakeObservation(wakeObservationId)
+            .filter { it.kind == "wake" }
+        val desired = photoLocalPaths.toSet()
+        photoLocalPaths.forEach { path ->
+            if (existing.any { it.localUri == path }) return@forEach
+            mediaAssetDao.upsert(
+                MediaAssetEntity(
+                    wakeObservationId = wakeObservationId,
+                    clientUuid = newClientUuid(),
+                    kind = "wake",
+                    localUri = path,
+                    createdAt = at,
+                    updatedAt = at,
+                    syncDirty = true,
+                ),
+            )
+        }
+        existing.filter { it.localUri !in desired }.forEach { asset ->
+            mediaAssetDao.update(
+                asset.copy(
+                    deletedAt = at,
+                    updatedAt = nextSyncUpdatedAt(asset.updatedAt, at),
+                    syncDirty = true,
+                ),
+            )
+        }
+    }
+}
+
+internal fun WakeObservationEntity.toFact(): WakeObservationFact =
+    WakeObservationFact(
+        clientUuid = clientUuid,
+        wakeTimestamp = wakeTimestamp,
+        withdrawn = withdrawn,
+        observerMembershipId = observerMembershipId,
+        note = note,
+        deleted = deletedAt != null,
+    )
+
+internal fun WakeObservationEntity.toDomain(photoPaths: List<String> = emptyList()): WakeObservation =
+    WakeObservation(
+        id = id,
+        clientUuid = clientUuid,
+        sleepRecordClientUuid = sleepRecordClientUuid,
+        wakeTimestamp = wakeTimestamp,
+        observerMembershipId = observerMembershipId,
+        note = note,
+        withdrawn = withdrawn,
+        updatedAt = updatedAt,
+        deletedAt = deletedAt,
+        syncDirty = syncDirty,
+        openConflictId = openConflictId,
+        photoLocalPaths = photoPaths,
+    )
+
+/**
+ * Map a Sleep [RecordEntity] to domain [com.lezi.babylog.core.model.Record] with
+ * projected display end filled into [com.lezi.babylog.core.model.Record.endTimestamp].
+ */
+internal fun RecordEntity.toProjectedSleepRecord(
+    interval: SleepIntervalProjection,
+): com.lezi.babylog.core.model.Record {
+    val base = toModel()
+    if (base.type != RecordType.SLEEP) return base
+    return base.copy(
+        endTimestamp = interval.endTimestamp,
+    )
+}
+

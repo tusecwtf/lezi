@@ -88,6 +88,60 @@ data class CausalBatchResult(
     val results: List<CausalUnitResult>,
 )
 
+/** Wire §8.1 conflict detail payload (closed keys). */
+data class ConflictDetail(
+    val conflictId: String,
+    val entityType: String,
+    val clientUuid: String,
+    val stableVersionId: String,
+    val stableRootJson: String,
+    val stableMedia: List<CausalMediaItem> = emptyList(),
+    val baseRootJson: String? = null,
+    /** JSON array of branch objects (branch_version_id, root, media, mutation_id?). */
+    val branchesJson: String = "[]",
+    val conflictingPaths: List<String> = emptyList(),
+    /** JSON object of path → frozen auto-merged value. */
+    val autoMergedJson: String = "{}",
+    val branchVersionIds: List<String> = emptyList(),
+    val kind: String = "concurrent",
+    val baseVersionId: String? = null,
+    val updatedAt: Long = 0L,
+)
+
+/** Wire §8.2 resolve request. */
+data class ConflictResolveRequest(
+    val expectedStableVersion: String,
+    val expectedBranchVersions: List<String>,
+    val resolvedRootJson: String,
+    val resolvedMedia: List<CausalMediaItem> = emptyList(),
+    val resolutionMutationId: String,
+    /** path → chosen JSON value; only conflicting_paths keys. */
+    val conflictChoices: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
+)
+
+sealed class ConflictResolveResult {
+    data class Accepted(val stableVersionId: String) : ConflictResolveResult()
+
+    data class CasMismatch(
+        val detail: ConflictDetail? = null,
+        val summary: ConflictResolveSummary? = null,
+    ) : ConflictResolveResult()
+
+    data class Rejected(val code: String, val message: String) : ConflictResolveResult()
+}
+
+/** Bounded summary returned with CAS mismatch refresh. */
+data class ConflictResolveSummary(
+    val conflictId: String,
+    val entityType: String,
+    val clientUuid: String,
+    val stableVersionId: String,
+    val baseVersionId: String? = null,
+    val kind: String = "concurrent",
+    val branchVersionIds: List<String> = emptyList(),
+    val updatedAt: Long = 0L,
+)
+
 /** Closed causal reconcile statuses (wire §5). */
 object CausalReconcileStatus {
     const val CONFIRMED = "confirmed"
@@ -569,6 +623,23 @@ interface SyncBackend {
         source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
         sha256: String,
     ): Unit = throw UnsupportedOperationException("Causal media preimage upload is not implemented")
+
+    /**
+     * On-demand conflict detail (wire §8.1). Not included in ordinary pull pages.
+     */
+    suspend fun fetchConflictDetail(
+        session: SyncSession,
+        conflictId: String,
+    ): ConflictDetail = throw UnsupportedOperationException("Conflict detail is not implemented")
+
+    /**
+     * CAS conflict resolution (wire §8.2). Expected stable + complete branch set required.
+     */
+    suspend fun resolveConflict(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictResolveRequest,
+    ): ConflictResolveResult = throw UnsupportedOperationException("Conflict resolve is not implemented")
 
     suspend fun members(session: SyncSession): List<FamilyMember>
     /** Owner updates immediately; ordinary Member receives a pending approval request. */

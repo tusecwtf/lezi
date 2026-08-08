@@ -367,6 +367,24 @@ interface SyncPort {
     suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
     /** Reclaims exact committed media tombstones; logical mutation success is independent. */
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
+
+    /**
+     * On-demand conflict detail for the resolver (wire §8.1). Default: unavailable.
+     * Must not block ordinary CareLog local saves.
+     */
+    suspend fun fetchConflictDetail(
+        conflictId: String,
+    ): com.lezi.babylog.sync.backend.ConflictDetail =
+        throw UnsupportedOperationException("Conflict detail is not implemented")
+
+    /**
+     * CAS conflict resolution (wire §8.2). Default: unavailable.
+     */
+    suspend fun resolveConflict(
+        conflictId: String,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
+    ): com.lezi.babylog.sync.backend.ConflictResolveResult =
+        throw UnsupportedOperationException("Conflict resolve is not implemented")
     /** Persists an endpoint origin; trust is established separately by setup probe. */
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
     /**
@@ -587,6 +605,15 @@ class NoOpSyncPort : SyncPort {
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
+    override suspend fun fetchConflictDetail(
+        conflictId: String,
+    ): com.lezi.babylog.sync.backend.ConflictDetail =
+        throw UnsupportedOperationException("Conflict detail is not implemented")
+    override suspend fun resolveConflict(
+        conflictId: String,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
+    ): com.lezi.babylog.sync.backend.ConflictResolveResult =
+        throw UnsupportedOperationException("Conflict resolve is not implemented")
     override suspend fun saveEndpointConfig(config: FamilyEndpointConfig) = Result.success(Unit)
     override suspend fun createFamily(
         displayName: String,

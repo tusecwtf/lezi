@@ -501,15 +501,27 @@ interface RecordDao {
     @Query("UPDATE records SET syncDirty = 1")
     suspend fun markAllPendingSync()
 
+    /**
+     * Latest truly open SleepStart: no effective wake, no legacy end, and no
+     * non-withdrawn legal WakeObservation (ticket 06 provisional close).
+     * Observes both `records` and `wake_observations` for live invalidation.
+     */
     @Query(
         """
-        SELECT * FROM records
-        WHERE babyId = :babyId
-          AND type = 'sleep'
-          AND deletedAt IS NULL
-          AND endTimestamp IS NULL
-          AND effectiveWakeObservationClientUuid IS NULL
-        ORDER BY timestamp DESC
+        SELECT r.* FROM records r
+        WHERE r.babyId = :babyId
+          AND r.type = 'sleep'
+          AND r.deletedAt IS NULL
+          AND r.endTimestamp IS NULL
+          AND r.effectiveWakeObservationClientUuid IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM wake_observations w
+            WHERE w.sleepRecordClientUuid = r.clientUuid
+              AND w.deletedAt IS NULL
+              AND w.withdrawn = 0
+              AND w.wakeTimestamp >= r.timestamp
+          )
+        ORDER BY r.timestamp DESC, r.clientUuid DESC
         LIMIT 1
         """,
     )
@@ -517,26 +529,40 @@ interface RecordDao {
 
     @Query(
         """
-        SELECT * FROM records
-        WHERE babyId = :babyId
-          AND type = 'sleep'
-          AND deletedAt IS NULL
-          AND endTimestamp IS NULL
-          AND effectiveWakeObservationClientUuid IS NULL
-        ORDER BY timestamp DESC, id DESC
+        SELECT r.* FROM records r
+        WHERE r.babyId = :babyId
+          AND r.type = 'sleep'
+          AND r.deletedAt IS NULL
+          AND r.endTimestamp IS NULL
+          AND r.effectiveWakeObservationClientUuid IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM wake_observations w
+            WHERE w.sleepRecordClientUuid = r.clientUuid
+              AND w.deletedAt IS NULL
+              AND w.withdrawn = 0
+              AND w.wakeTimestamp >= r.timestamp
+          )
+        ORDER BY r.timestamp DESC, r.clientUuid DESC
         """,
     )
     suspend fun listOpenSleeps(babyId: Long): List<RecordEntity>
 
     @Query(
         """
-        SELECT * FROM records
-        WHERE babyId = :babyId
-          AND type = 'sleep'
-          AND deletedAt IS NULL
-          AND endTimestamp IS NULL
-          AND effectiveWakeObservationClientUuid IS NULL
-        ORDER BY timestamp DESC
+        SELECT r.* FROM records r
+        WHERE r.babyId = :babyId
+          AND r.type = 'sleep'
+          AND r.deletedAt IS NULL
+          AND r.endTimestamp IS NULL
+          AND r.effectiveWakeObservationClientUuid IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM wake_observations w
+            WHERE w.sleepRecordClientUuid = r.clientUuid
+              AND w.deletedAt IS NULL
+              AND w.withdrawn = 0
+              AND w.wakeTimestamp >= r.timestamp
+          )
+        ORDER BY r.timestamp DESC, r.clientUuid DESC
         LIMIT 1
         """,
     )

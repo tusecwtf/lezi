@@ -445,11 +445,12 @@ class CareLogRecordWriteTest {
     }
 
     @Test
-    fun sleepEndMustBeStrictlyAfterStart() = runTest {
+    fun sleepLegacyEndMustBeStrictlyAfterStart_wakeAllowsEqualityPerWire() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
         val start = 1_700_000_000_000L
 
+        // Dual-compat denormalized sleep end still requires end > start.
         val addFailure = runCatching {
             care.addRecord(
                 babyId = babyId,
@@ -458,14 +459,22 @@ class CareLogRecordWriteTest {
                 endTimestamp = start,
             )
         }.exceptionOrNull()
-        val openId = care.sleepDown(babyId, start)
-        val closeFailure = runCatching {
-            care.sleepUp(babyId, start)
-        }.exceptionOrNull()
-
         assertThat(addFailure).isInstanceOf(IllegalArgumentException::class.java)
-        assertThat(closeFailure).isInstanceOf(IllegalArgumentException::class.java)
-        assertThat(care.getRecord(openId)!!.endTimestamp).isNull()
+
+        val openId = care.sleepDown(babyId, start)
+        // Wire §4.5: wake_timestamp >= sleep.timestamp (equality legal).
+        care.sleepUp(babyId, start, nowMillis = start)
+        val entityEnd = // raw entity stays null
+            // use fakes via getRecord projected end
+            care.getRecord(openId)!!.endTimestamp
+        assertThat(entityEnd).isEqualTo(start)
+        // Pre-start still rejected.
+        val open2 = care.sleepDown(babyId, start + 10_000L)
+        val preStart = runCatching {
+            care.sleepUp(babyId, start + 10_000L - 1L, nowMillis = start + 10_000L)
+        }.exceptionOrNull()
+        assertThat(preStart).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(care.observeOpenSleep(babyId).first()?.id).isEqualTo(open2)
     }
     @Test
     fun sleepDownTwice_keepsOneOpenSleepAndMarksAnomaly() = runTest {
@@ -484,7 +493,7 @@ class CareLogRecordWriteTest {
         assertThat(all.single().payloadJson).contains("\"anomaly_flag\":true")
     }
     @Test
-    fun sleepUp_healsDuplicateOpenSleepsBeforeClosingLatest() = runTest {
+    fun sleepUp_doesNotAutoCloseOlderOpenSleeps_wakesOnlyLatest() = runTest {
         val f = Fakes()
         val care = f.careLog()
         val babyId = care.createBaby(
@@ -521,33 +530,36 @@ class CareLogRecordWriteTest {
 
         val all = f.records.listForBaby(babyId)
         assertThat(all).hasSize(2)
-        assertThat(all.none { it.endTimestamp == null }).isTrue()
         val stale = all.single { it.clientUuid == "sleep-stale" }
         val latest = all.single { it.clientUuid == "sleep-latest" }
-        assertThat(stale.endTimestamp).isEqualTo(t0 + 60 * 60_000L)
-        assertThat(stale.payloadJson).contains("\"anomaly_flag\":true")
-        assertThat(latest.endTimestamp).isEqualTo(t0 + 2 * 60 * 60_000L)
+        // Ticket 06: older open retained (overlap pending); no synthetic end.
+        assertThat(stale.endTimestamp).isNull()
+        assertThat(stale.payloadJson).doesNotContain("\"anomaly_flag\":true")
+        assertThat(latest.endTimestamp).isNull()
+        assertThat(care.listWakeObservations("sleep-latest")).hasSize(1)
+        assertThat(care.listWakeObservations("sleep-stale")).isEmpty()
         assertThat(closedId).isEqualTo(latest.id)
-        assertThat(care.observeOpenSleep(babyId).first()).isNull()
+        // Latest is no longer open (has provisional wake); older open may still surface.
+        assertThat(care.observeOpenSleep(babyId).first()?.clientUuid).isEqualTo("sleep-stale")
     }
     @Test
-    fun localOpenSleepRepairUsesStableUuidAndInjectedClock() = runTest {
+    fun equalStartOpenSleeps_wakeTargetsLexicalLatestWithoutClosingPeer() = runTest {
         val fakes = Fakes()
         fakes.clock.now = 400_000L
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
         val start = 1_000L
-        // Give lexical winner `z` the smaller local row id. A local-id tie-break
-        // would keep `a` and diverge from another replica.
+        // Equal starts: latest by client UUID is wake target; peer stays open.
         fakes.records.upsert(openSleep("z-sleep", babyId, start))
         fakes.records.upsert(openSleep("a-sleep", babyId, start))
 
         care.sleepUp(babyId, at = 500_000L)
 
-        val repaired = fakes.records.listForBaby(babyId).associateBy(RecordEntity::clientUuid)
-        assertThat(repaired.getValue("a-sleep").endTimestamp).isEqualTo(400_000L)
-        assertThat(repaired.getValue("a-sleep").payloadJson).contains("\"anomaly_flag\":true")
-        assertThat(repaired.getValue("z-sleep").endTimestamp).isEqualTo(500_000L)
+        val rows = fakes.records.listForBaby(babyId).associateBy(RecordEntity::clientUuid)
+        assertThat(rows.getValue("a-sleep").endTimestamp).isNull()
+        assertThat(rows.getValue("z-sleep").endTimestamp).isNull()
+        assertThat(care.listWakeObservations("z-sleep")).hasSize(1)
+        assertThat(care.listWakeObservations("a-sleep")).isEmpty()
     }
 
     @Test
@@ -852,8 +864,15 @@ class CareLogRecordWriteTest {
 
         assertThat(replay).isEqualTo(first)
         assertThat(fakes.records.listForBaby(babyId)).hasSize(1)
+        // Projected end from WakeObservation; Sleep note stays the open-start note.
         assertThat(care.getRecord(openId)!!.endTimestamp).isEqualTo(endedAt)
-        assertThat(care.getRecord(openId)!!.note).isEqualTo("醒来")
+        assertThat(fakes.records.get(openId)!!.endTimestamp).isNull()
+        assertThat(care.getRecord(openId)!!.note).isEqualTo("睡下")
+        val wakes = care.listWakeObservations(care.getRecord(openId)!!.clientUuid)
+        assertThat(wakes).hasSize(1)
+        assertThat(wakes.single().clientUuid).isEqualTo("composer-wake-operation-identity")
+        assertThat(wakes.single().note).isEqualTo("醒来")
+        assertThat(wakes.single().wakeTimestamp).isEqualTo(endedAt)
     }
     @Test
     fun convertRecord_replayWithComposerClientUuidKeepsOnePlan() = runTest {
@@ -1199,13 +1218,12 @@ class CareLogRecordWriteTest {
     }
 
     /**
-     * Family wake is a baby-level fact (data-model.md): any member may close another
-     * member's still-open sleep via confirmSleep without gaining full manage rights.
-     * Non-author open→close force-preserves open-start fields, grants device-local B1
-     * restricted edit (end/note/photos) while dirty, and never grants soft-delete.
+     * Family wake is a baby-level fact: any member may record a WakeObservation on
+     * another's open SleepStart. SleepStart fields are never rewritten; B1 closer
+     * privilege is replaced by observer self-edit of the WakeObservation.
      */
     @Test
-    fun foreignMemberWakeOfOpenSleepClosesSharedIntervalWithLocalB1RestrictedEdit() = runTest {
+    fun foreignMemberWakeOfOpenSleepCreatesObservationWithoutRewritingSleepStart() = runTest {
         val momSync = RecordingSyncPort(
             membershipId = "m-mom",
             role = com.lezi.babylog.sync.session.FamilyRole.Member,
@@ -1248,7 +1266,7 @@ class CareLogRecordWriteTest {
         assertThat(dadCare.canManageRecord(openOnDad)).isFalse()
         assertThat(dadCare.observeOpenSleep(babyId).first()!!.id).isEqualTo(openId)
 
-        // Client may try to rewrite sleep-down time / is_nap; domain force-preserves.
+        // Client may try to rewrite sleep-down time / is_nap; wake path ignores them.
         val wakeResultId = dadCare.confirmSleep(
             babyId = babyId,
             expectedOpenSleepId = openId,
@@ -1262,62 +1280,46 @@ class CareLogRecordWriteTest {
 
         assertThat(wakeResultId).isEqualTo(openId)
         assertThat(dadCare.observeOpenSleep(babyId).first()).isNull()
+        val sleepEntity = dadFakes.records.get(openId)!!
+        assertThat(sleepEntity.endTimestamp).isNull()
+        assertThat(sleepEntity.timestamp).isEqualTo(startedAt)
+        assertThat(sleepEntity.createdByMembershipId).isEqualTo("m-mom")
+        assertThat(sleepEntity.note).isEqualTo("妈妈记下睡")
+        assertThat(sleepEntity.payloadJson).contains("\"is_nap\":false")
+        val wakes = dadCare.listWakeObservations(sleepEntity.clientUuid)
+        assertThat(wakes).hasSize(1)
+        assertThat(wakes.single().note).isEqualTo("爸爸记醒来")
+        assertThat(wakes.single().wakeTimestamp).isEqualTo(wakeAt)
+        assertThat(wakes.single().observerMembershipId).isEqualTo("m-dad")
+        // Sleep manage stays author-only; B1 gone; observer may edit own wake.
         val closed = dadCare.getRecord(openId)!!
-        assertThat(closed.endTimestamp).isEqualTo(wakeAt)
-        assertThat(closed.timestamp).isEqualTo(startedAt)
-        assertThat(closed.createdByMembershipId).isEqualTo("m-mom")
-        assertThat(closed.note).isEqualTo("爸爸记醒来")
-        assertThat(closed.payloadJson).contains("\"is_nap\":false")
-        assertThat(dadFakes.records.get(openId)!!.syncDirty).isTrue()
-        // Full manage still false; B1 grants restricted edit only.
         assertThat(dadCare.canManageRecord(closed)).isFalse()
-        assertThat(dadCare.canEditRecord(closed)).isTrue()
+        assertThat(dadCare.canEditRecord(closed)).isFalse()
         assertThat(dadCare.canDeleteRecord(closed)).isFalse()
-        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isTrue()
+        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isFalse()
+        assertThat(dadCare.canEditWakeObservation(wakes.single().clientUuid)).isTrue()
 
         val correctedEnd = wakeAt + 5 * 60_000L
-        dadCare.updateRecord(
-            id = openId,
-            timestamp = startedAt + 999_000L,
-            endTimestamp = correctedEnd,
+        dadCare.updateWakeObservation(
+            clientUuid = wakes.single().clientUuid,
+            wakeTimestamp = correctedEnd,
             note = "醒来纠错",
-            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
             nowMillis = correctedEnd,
         )
-        val corrected = dadCare.getRecord(openId)!!
-        assertThat(corrected.endTimestamp).isEqualTo(correctedEnd)
-        assertThat(corrected.note).isEqualTo("醒来纠错")
-        assertThat(corrected.timestamp).isEqualTo(startedAt)
-        assertThat(corrected.payloadJson).contains("\"is_nap\":false")
+        assertThat(dadCare.getWakeObservation(wakes.single().clientUuid)!!.wakeTimestamp)
+            .isEqualTo(correctedEnd)
+        assertThat(dadCare.getWakeObservation(wakes.single().clientUuid)!!.note)
+            .isEqualTo("醒来纠错")
+        // SleepStart fields untouched.
+        assertThat(dadFakes.records.get(openId)!!.timestamp).isEqualTo(startedAt)
 
         assertThat(
             runCatching { dadCare.deleteRecord(openId) }.exceptionOrNull(),
         ).isInstanceOf(RecordPermissionException::class.java)
-
-        // Dirty settled (publish ack): B1 ends; further non-author update fails.
-        dadFakes.records.upsert(
-            dadFakes.records.get(openId)!!.copy(syncDirty = false),
-        )
-        val settled = dadCare.getRecord(openId)!!
-        assertThat(dadCare.hasActiveFamilyWakePrivilege(settled)).isFalse()
-        assertThat(dadCare.canEditRecord(settled)).isFalse()
-        assertThat(
-            runCatching {
-                dadCare.updateRecord(
-                    id = openId,
-                    timestamp = startedAt,
-                    endTimestamp = correctedEnd + 1,
-                    note = "收敛后再改",
-                    payloadJson = payload,
-                    nowMillis = correctedEnd + 1,
-                )
-            }.exceptionOrNull(),
-        ).isInstanceOf(RecordPermissionException::class.java)
-        assertThat(dadCare.getRecord(openId)!!.note).isEqualTo("醒来纠错")
     }
 
     @Test
-    fun foreignMemberSleepUpAlsoGrantsLocalB1WithoutFullManage() = runTest {
+    fun foreignMemberSleepUpCreatesOwnWakeWithoutSleepManage() = runTest {
         val momSync = RecordingSyncPort(
             membershipId = "m-mom",
             role = com.lezi.babylog.sync.session.FamilyRole.Member,
@@ -1354,13 +1356,16 @@ class CareLogRecordWriteTest {
         val closedId = dadCare.sleepUp(babyId, at = wakeAt, nowMillis = wakeAt)
         assertThat(closedId).isEqualTo(openId)
         val closed = dadCare.getRecord(openId)!!
-        assertThat(closed.endTimestamp).isEqualTo(wakeAt)
+        assertThat(closed.endTimestamp).isEqualTo(wakeAt) // projected
+        assertThat(dadFakes.records.get(openId)!!.endTimestamp).isNull()
         assertThat(closed.timestamp).isEqualTo(startedAt)
         assertThat(closed.payloadJson).contains("\"is_nap\":true")
         assertThat(dadCare.canManageRecord(closed)).isFalse()
-        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isTrue()
-        assertThat(dadCare.canEditRecord(closed)).isTrue()
+        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isFalse()
+        assertThat(dadCare.canEditRecord(closed)).isFalse()
         assertThat(dadCare.canDeleteRecord(closed)).isFalse()
+        val wake = dadCare.listWakeObservations(closed.clientUuid).single()
+        assertThat(dadCare.canEditWakeObservation(wake.clientUuid)).isTrue()
     }
 
     @Test

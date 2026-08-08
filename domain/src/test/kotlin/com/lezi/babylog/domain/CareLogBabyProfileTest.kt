@@ -907,7 +907,7 @@ class CareLogBabyProfileTest {
         assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
     }
     @Test
-    fun mergeBabyProfilesKeepsOnlyLatestSleepOpen() = runTest {
+    fun mergeBabyProfilesRetainsOverlappingOpenSleepsWithoutAutoClose() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
         val target = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -917,11 +917,15 @@ class CareLogBabyProfileTest {
 
         assertThat(care.mergeBabyProfiles(source, target)).isTrue()
 
+        // Ticket 06: merge must not synthesize ends on older open SleepStarts.
         val opens = fakes.records.listOpenSleeps(target)
-        assertThat(opens.map { it.id }).containsExactly(latestOpenId)
+        assertThat(opens.map { it.id }).containsExactly(latestOpenId, staleOpenId)
         val stale = requireNotNull(fakes.records.get(staleOpenId))
-        assertThat(stale.endTimestamp).isEqualTo(2_000L)
-        assertThat(stale.payloadJson).contains("\"anomaly_flag\":true")
+        assertThat(stale.endTimestamp).isNull()
+        assertThat(stale.payloadJson).doesNotContain("\"anomaly_flag\":true")
+        val staleProj = care.projectSleepRecord(staleOpenId)!!
+        assertThat(staleProj.interval.isOpen).isTrue()
+        assertThat(staleProj.interval.isOverlapPending).isTrue()
     }
     @Test
     fun multiBaby_isolation() = runTest {

@@ -499,12 +499,18 @@ internal fun timelineRecordPublishLabel(
     metadata: TimelineRecordRow?,
     familyJoined: Boolean,
     lastSyncFailed: Boolean,
-): String? = localRecordPublishLabel(
-    syncDirty = record.syncDirty,
-    familyJoined = familyJoined,
-    lastSyncFailed = lastSyncFailed,
-    publicationState = metadata?.publicationState ?: RootPublicationState.NEVER_PUBLISHED,
-)
+): String? {
+    // Causal open conflict is not a transport failure and must not read as “已同步”.
+    if (!record.openConflictId.isNullOrBlank()) {
+        return com.lezi.babylog.domain.carelog.SleepPresentation.CONFLICT_PENDING_LABEL
+    }
+    return localRecordPublishLabel(
+        syncDirty = record.syncDirty,
+        familyJoined = familyJoined,
+        lastSyncFailed = lastSyncFailed,
+        publicationState = metadata?.publicationState ?: RootPublicationState.NEVER_PUBLISHED,
+    )
+}
 
 /** Missing metadata is fail-closed as never published; it never grants a row action. */
 internal fun timelineCarePlanPublishLabel(

@@ -35,6 +35,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
+import com.lezi.babylog.domain.carelog.FakeWakeObservationDao
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TimelineWindowRepositoryTest {
@@ -57,6 +58,7 @@ class TimelineWindowRepositoryTest {
                 media = emptyList(),
             ),
             syncPort = sync,
+            wakeObservationDao = FakeWakeObservationDao(),
         )
 
         val snapshot = withTimeout(1_000) {
@@ -88,6 +90,7 @@ class TimelineWindowRepositoryTest {
         val repository = TimelineWindowRepository(
             timelineWindowDao = database,
             syncPort = TimelineSyncPort(),
+            wakeObservationDao = FakeWakeObservationDao(),
         )
 
         val snapshot = repository.observe(
@@ -150,6 +153,7 @@ class TimelineWindowRepositoryTest {
                     ),
                 ),
             ),
+            wakeObservationDao = FakeWakeObservationDao(),
         )
 
         val snapshot = repository.observe(request(day, at)).first()
@@ -196,6 +200,7 @@ class TimelineWindowRepositoryTest {
         val owner = TimelineWindowRepository(
             timelineWindowDao = database,
             syncPort = TimelineSyncPort(joinedSession(FamilyRole.Owner, "owner")),
+            wakeObservationDao = FakeWakeObservationDao(),
         ).observe(request(day, at)).first()
         assertThat(owner.planRows.single { it.carePlan.id == 4L }.capabilities.canEdit).isTrue()
         assertThat(owner.recordRows.single { it.record.id == 2L }.capabilities.canEdit).isTrue()
@@ -207,6 +212,7 @@ class TimelineWindowRepositoryTest {
                 plans = listOf(plan(6, at, 100, null, creator = "")),
             ),
             syncPort = TimelineSyncPort(),
+            wakeObservationDao = FakeWakeObservationDao(),
         ).observe(request(day, at)).first()
         assertThat(offline.planRows.single().capabilities.canEdit).isTrue()
         assertThat(offline.recordRows.single().capabilities.canEdit).isTrue()
@@ -245,7 +251,7 @@ class TimelineWindowRepositoryTest {
                     listOf(FamilyMember("妈妈", FamilyRole.Member, true, "self")),
                 ),
             )
-            val snapshot = TimelineWindowRepository(database, sync)
+            val snapshot = TimelineWindowRepository(database, sync, FakeWakeObservationDao())
                 .observe(request(day, at))
                 .first()
             assertThat(snapshot.recordRows).hasSize(rootCount)
@@ -276,6 +282,7 @@ class TimelineWindowRepositoryTest {
         val snapshot = TimelineWindowRepository(
             database,
             TimelineSyncPort(joinedSession(FamilyRole.Member, "self")),
+            wakeObservationDao = FakeWakeObservationDao(),
         ).observe(request(day, at)).first()
 
         val revisions = buildList {
@@ -305,7 +312,7 @@ class TimelineWindowRepositoryTest {
             media = listOf(media(3, recordId = 1, localUri = "photos/old.jpg", remoteUri = null)),
         )
         val snapshots = async {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            TimelineWindowRepository(database, TimelineSyncPort(), FakeWakeObservationDao())
                 .observe(request(day, at))
                 .take(2)
                 .toList()
@@ -344,7 +351,7 @@ class TimelineWindowRepositoryTest {
         }
         val requests = MutableSharedFlow<TimelineWindowRequest>(extraBufferCapacity = 2)
         val result = async(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            TimelineWindowRepository(database, TimelineSyncPort(), FakeWakeObservationDao())
                 .observe(requests)
                 .first()
         }
@@ -373,7 +380,7 @@ class TimelineWindowRepositoryTest {
             session = joinedSession(FamilyRole.Member, "self-a", familyId = "family-a"),
         )
         val result = async(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, sync)
+            TimelineWindowRepository(database, sync, FakeWakeObservationDao())
                 .observe(request(day, at))
                 .first { it.audience.familyId == "family-b" }
         }
@@ -403,6 +410,7 @@ class TimelineWindowRepositoryTest {
                 media = emptyList(),
             ),
             syncPort = sync,
+            wakeObservationDao = FakeWakeObservationDao(),
         )
         val newer = async(start = CoroutineStart.UNDISPATCHED) {
             repository.observe(request(day, at))
@@ -432,7 +440,7 @@ class TimelineWindowRepositoryTest {
         }
         var publishedCount = 0
         val collection = launch(start = CoroutineStart.UNDISPATCHED) {
-            TimelineWindowRepository(database, TimelineSyncPort())
+            TimelineWindowRepository(database, TimelineSyncPort(), FakeWakeObservationDao())
                 .observe(request(day, at))
                 .collect { publishedCount += 1 }
         }

@@ -561,6 +561,9 @@ internal fun LogTimelineList(
                         familyJoined = state.familyJoined,
                         lastSyncFailed = state.lastSyncFailed,
                     )
+                    // Prefer conflict summary chrome; sleep provisional/overlap badges otherwise.
+                    val sleepBadge = recordMetadata?.sleepEndBadge
+                    val conflictBadge = recordMetadata?.conflictSummaryLabel
                     val recordRowId = "record-${record.id}"
                     val recordRevealed = managementState.revealedSwipeRowId == recordRowId
                     val editRecordAction = {
@@ -594,14 +597,17 @@ internal fun LogTimelineList(
                             summary = timelineRecordSummary(
                                 recordSummaryLine(record),
                                 state.uploaderLabels[record.id],
-                                publishLabel,
+                                listOfNotNull(sleepBadge, conflictBadge, publishLabel)
+                                    .distinct()
+                                    .joinToString(" · ")
+                                    .takeIf { it.isNotBlank() },
                             ),
                             relative = relativeTimeLabel(record.timestamp, nowMs),
                             tone = record.type.presentationTone(),
+                            // Anomaly is payload-only. Projected null end means open SleepStart,
+                            // not a broken/anomalous closed wake interval.
                             anomaly =
-                                (record.payload.payload as? SleepPayload)?.anomaly == true ||
-                                    (record.type == RecordType.SLEEP &&
-                                        record.endTimestamp == null),
+                                (record.payload.payload as? SleepPayload)?.anomaly == true,
                             leading = { RecordTypeIcon(record.type) },
                             onClick = {
                                 if (recordRevealed) {

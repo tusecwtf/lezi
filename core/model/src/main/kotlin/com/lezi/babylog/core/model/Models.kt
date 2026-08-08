@@ -108,6 +108,13 @@ data class Record(
     val createdByMembershipId: String = "",
     /** Device-local receipt for the last atomically published root revision. */
     val familyPublishedUpdatedAt: Long? = null,
+    /**
+     * Open causal conflict handle for this root (pull summary / local branched receipt).
+     * Null when there is no unresolved conflict. Distinct from [syncDirty] pending publish.
+     */
+    val openConflictId: String? = null,
+    /** Effective WakeObservation for sleep; null when unconfirmed or non-sleep. */
+    val effectiveWakeObservationClientUuid: String? = null,
 ) {
     val payload: RecordPayloadDocument
         get() = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)

@@ -245,12 +245,11 @@ class RecordComposerViewModel @Inject constructor(
                             .firstOrNull { it.id == record.babyId }
                             ?.birthdayEpochDay
                         val photoPaths = careLog.listRecordPhotoPaths(record.id)
-                        val restrictedB1 = careLog.hasActiveFamilyWakePrivilege(record) &&
-                            !careLog.canManageRecord(record)
+                        // B1 closer privilege retired (ticket 06): wake uses WakeObservation edit.
                         val draft = QuickRecordDraft.fromRecord(record).copy(
                             photos = photoPaths,
                             sourcePhotos = photoPaths,
-                            restrictedSleepOpenFields = restrictedB1,
+                            restrictedSleepOpenFields = false,
                         )
                         Triple(record.babyId, birthday, draft)
                     }

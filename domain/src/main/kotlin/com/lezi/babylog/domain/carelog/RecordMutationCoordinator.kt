@@ -13,7 +13,6 @@ import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.NursingPayload
-import com.lezi.babylog.core.model.OpenSleepCandidate
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
@@ -21,7 +20,7 @@ import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.isPlanableCarePlanType
-import com.lezi.babylog.core.model.normalizeOpenSleeps
+import com.lezi.babylog.core.model.validateWakeTimestamp
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.SyncPort
@@ -77,7 +76,7 @@ internal class RecordMutationCoordinator(
      */
     private val listCarePlanPhotoPaths: suspend (Long) -> List<String>,
     private val requestLocalSync: () -> Unit,
-    private val familyWakePrivileges: FamilyWakePrivilegeStore = FamilyWakePrivilegeStore(),
+    private val wakeObservations: WakeObservationCoordinator,
 ) {
     suspend fun addRecord(
         babyId: Long,
@@ -201,8 +200,7 @@ internal class RecordMutationCoordinator(
                 transactionRunner.run {
                     val existing = recordDao.get(id) ?: return@run emptySet<String>()
                     val canManage = actorCanManageRecord(existing)
-                    val restrictedWakeEdit = !canManage && actorHasActiveFamilyWakePrivilege(existing)
-                    if (!canManage && !restrictedWakeEdit) {
+                    if (!canManage) {
                         throw RecordPermissionException()
                     }
                     requireActiveBaby(existing.babyId)
@@ -215,34 +213,14 @@ internal class RecordMutationCoordinator(
                     ) {
                         throw IllegalArgumentException("已完成的睡眠不可改为进行中")
                     }
-                    val effectiveTimestamp: Long
-                    val effectivePayload: String
-                    val effectiveSchema: Int
-                    if (restrictedWakeEdit) {
-                        // B1: end + note + photos only; open-start fields stay published.
-                        if (type != RecordType.SLEEP || existing.endTimestamp == null) {
-                            throw RecordPermissionException()
-                        }
-                        if (endTimestamp == null) {
-                            throw IllegalArgumentException("已完成的睡眠不可改为进行中")
-                        }
-                        effectiveTimestamp = existing.timestamp
-                        effectivePayload = preserveSleepOpenStartPayload(
-                            existingPayloadJson = existing.payloadJson,
-                            existingSchemaVersion = existing.schemaVersion,
-                            incomingPayloadJson = payloadJson,
-                            incomingSchemaVersion = schemaVersion,
-                        )
-                        effectiveSchema = existing.schemaVersion
-                    } else {
-                        effectiveTimestamp = timestamp
-                        effectivePayload = requireCurrentPayloadJson(
-                            type = type,
-                            payloadJson = payloadJson,
-                            schemaVersion = schemaVersion,
-                        )
-                        effectiveSchema = schemaVersion
-                    }
+                    // Sleep wake corrections go through WakeObservationCoordinator, not B1.
+                    val effectiveTimestamp = timestamp
+                    val effectivePayload = requireCurrentPayloadJson(
+                        type = type,
+                        payloadJson = payloadJson,
+                        schemaVersion = schemaVersion,
+                    )
+                    val effectiveSchema = schemaVersion
                     validateSleepInterval(type, effectiveTimestamp, endTimestamp)
                     updateRecordEntity(
                         existing.copy(
@@ -482,30 +460,18 @@ internal class RecordMutationCoordinator(
         )
     }
 
-    /**
-     * Timeline edit chrome: full manage or active B1 restricted wake correction.
-     */
-    suspend fun canEditRecord(record: Record): Boolean {
-        if (canManageRecord(record)) return true
-        return hasActiveFamilyWakePrivilege(record)
-    }
+    /** Timeline edit chrome: author or Owner only (B1 closer privilege retired). */
+    suspend fun canEditRecord(record: Record): Boolean = canManageRecord(record)
 
-    /** Delete stays author-or-owner; B1 never grants soft-delete. */
+    /** Delete stays author-or-owner. */
     suspend fun canDeleteRecord(record: Record): Boolean = canManageRecord(record)
 
     /**
-     * Device-local B1: this membership closed the sleep here, row still dirty,
-     * and family authority has not replaced the local revision.
+     * @deprecated Ticket 06: B1 family-wake privilege is retired. Always false.
+     * Use [WakeObservationCoordinator.canEditWake] for wake corrections.
      */
-    suspend fun hasActiveFamilyWakePrivilege(record: Record): Boolean {
-        if (!record.syncDirty) {
-            familyWakePrivileges.clear(record.clientUuid)
-            return false
-        }
-        if (record.type != RecordType.SLEEP || record.endTimestamp == null) return false
-        val membershipId = syncPort.session().first().membershipId.trim()
-        return familyWakePrivileges.isGrantedTo(record.clientUuid, membershipId)
-    }
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun hasActiveFamilyWakePrivilege(record: Record): Boolean = false
 
     private suspend fun actorCanManageRecord(record: RecordEntity): Boolean {
         val session = syncPort.session().first()
@@ -520,62 +486,9 @@ internal class RecordMutationCoordinator(
         )
     }
 
-    private suspend fun actorHasActiveFamilyWakePrivilege(record: RecordEntity): Boolean {
-        if (!record.syncDirty) {
-            familyWakePrivileges.clear(record.clientUuid)
-            return false
-        }
-        if (record.type != RecordType.SLEEP.key || record.endTimestamp == null) return false
-        val membershipId = syncPort.session().first().membershipId.trim()
-        return familyWakePrivileges.isGrantedTo(record.clientUuid, membershipId)
-    }
-
     private suspend fun requireCanManageRecord(record: RecordEntity) {
         if (!actorCanManageRecord(record)) throw RecordPermissionException()
     }
-
-    private suspend fun grantFamilyWakePrivilegeIfNeeded(closed: RecordEntity) {
-        if (actorCanManageRecord(closed)) return
-        val membershipId = currentMembershipActorId().trim()
-        if (membershipId.isEmpty()) return
-        familyWakePrivileges.grant(closed.clientUuid, membershipId)
-    }
-
-    /**
-     * Keep published open-start sleep fields (timestamp is applied by caller;
-     * is_nap here). Incoming anomaly is ignored so B1/wake cannot clear heal flags.
-     */
-    private fun preserveSleepOpenStartPayload(
-        existingPayloadJson: String,
-        existingSchemaVersion: Int,
-        incomingPayloadJson: String,
-        incomingSchemaVersion: Int,
-    ): String {
-        val existingDoc = requireCurrentPayloadDocument(
-            RecordType.SLEEP,
-            existingPayloadJson,
-            existingSchemaVersion,
-        )
-        // Validate incoming shape; open-start values are taken from existing.
-        requireCurrentPayloadDocument(
-            RecordType.SLEEP,
-            incomingPayloadJson,
-            incomingSchemaVersion,
-        )
-        val existingSleep = existingDoc.payload as? SleepPayload
-            ?: return existingPayloadJson
-        return RecordPayloadCodec.encode(
-            RecordPayloadDocument(
-                type = RecordType.SLEEP,
-                payload = SleepPayload(
-                    isNap = existingSleep.isNap,
-                    anomaly = existingSleep.anomaly,
-                ),
-                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-            ),
-        )
-    }
-
 
     suspend fun completeNursing(
         babyId: Long,
@@ -720,12 +633,10 @@ internal class RecordMutationCoordinator(
      * The check and local write share one process-level critical section so
      * two confirmations cannot both act on the same observed sleep state.
      *
-     * Wake (closing an open interval) is a family-global baby fact: any joined
-     * membership may close the current open sleep without [requireCanManageRecord].
-     * Non-author closes force-preserve open-start fields (timestamp / is_nap) and
-     * grant device-local B1 restricted edit while the row stays dirty. Ordinary
-     * later full manage/delete still use author-or-owner ACL. The NAS accepts this
-     * specific open→closed sleep push from non-authors (see canonicalize_record_authors).
+     * Wake (closing an open interval) creates an independent WakeObservation
+     * (ticket 06 / ADR-0021) and does **not** rewrite SleepStart `endTimestamp`.
+     * Any joined membership may record a wake. Observer self-edit/withdraw
+     * replaces device-local B1 closer privilege.
      */
     suspend fun confirmSleep(
         babyId: Long,
@@ -739,9 +650,19 @@ internal class RecordMutationCoordinator(
         nowMillis: Long = System.currentTimeMillis(),
         clientUuid: String = newClientUuid(),
     ): Long {
-        // Create/close path: zero clock skew on start and closed end.
-        RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
-            throw IllegalArgumentException(it)
+        // Create path: zero clock skew on start; wake end validated separately.
+        if (expectedOpenSleepId == null) {
+            RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
+                throw IllegalArgumentException(it)
+            }
+        } else if (endTimestamp != null) {
+            RecordTime.pointError(endTimestamp, nowMillis)?.let {
+                throw IllegalArgumentException(it)
+            }
+        } else {
+            RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
+                throw IllegalArgumentException(it)
+            }
         }
         require(clientUuid.isNotBlank()) { "睡眠写入标识不能为空" }
         val photos = photoLocalPaths
@@ -750,6 +671,45 @@ internal class RecordMutationCoordinator(
             payloadJson = payloadJson,
             schemaVersion = schemaVersion,
         )
+        val isWakeClose = expectedOpenSleepId != null && endTimestamp != null
+        // Wake close: photos attach to WakeObservation, not Sleep log media.
+        // [clientUuid] is the WakeObservation identity (composer idempotency), not Sleep.
+        if (isWakeClose) {
+            val wakeCoordinator = wakeObservations
+            val wakeAt = requireNotNull(endTimestamp)
+            val openId = requireNotNull(expectedOpenSleepId)
+            // Exact replay by wake mutation identity.
+            val existingWake = wakeCoordinator.get(clientUuid)
+            if (existingWake != null) {
+                return openId
+            }
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
+                    requireActiveBaby(babyId)
+                    val current = recordDao.get(openId)
+                        ?: throw SleepStateChangedException()
+                    val openCandidates = wakeCoordinator.listTrulyOpenSleeps(babyId)
+                    if (openCandidates.none { it.id == openId }) {
+                        // Already provisionally closed with same end+note (legacy replay).
+                        val match = wakeCoordinator.listForSleep(current.clientUuid).firstOrNull {
+                            it.wakeTimestamp == wakeAt && it.note == note && !it.withdrawn
+                        }
+                        if (match != null) return@run
+                        throw SleepStateChangedException()
+                    }
+                }
+            }
+            wakeCoordinator.recordWake(
+                babyId = babyId,
+                at = wakeAt,
+                note = note,
+                photoLocalPaths = photos,
+                nowMillis = nowMillis,
+                sleepRecordId = openId,
+                clientUuid = clientUuid,
+            )
+            return openId
+        }
         val ownerHint = expectedOpenSleepId?.let(PhotoAttachmentOwner::Record)
         val (id, cleanupCandidates) = photoAttachmentReconciler.withInvolvedPaths(
             owner = ownerHint,
@@ -770,11 +730,15 @@ internal class RecordMutationCoordinator(
                         }
                         return@run replay.id to emptySet<String>()
                     }
-                    healDuplicateOpenSleeps(babyId)
-                    val currentOpen = recordDao.findOpenSleep(babyId)
+                    // Ticket 06: never auto-close overlapping open SleepStarts.
+                    val currentOpen = wakeObservations.findWakeShortcutTarget(babyId)
                     if (expectedOpenSleepId == null) {
                         if (currentOpen != null) throw SleepStateChangedException()
-                        validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
+                        // New SleepStart only — end_timestamp forbidden on wire for sleep.
+                        require(endTimestamp == null) {
+                            "新睡眠只能记录入睡；醒来请使用醒来观察"
+                        }
+                        validateSleepInterval(RecordType.SLEEP, timestamp, null)
                         val now = System.currentTimeMillis()
                         val inserted = insertRecord(
                             RecordEntity(
@@ -782,7 +746,7 @@ internal class RecordMutationCoordinator(
                                 babyId = babyId,
                                 type = RecordType.SLEEP.key,
                                 timestamp = timestamp,
-                                endTimestamp = endTimestamp,
+                                endTimestamp = null,
                                 note = note,
                                 payloadJson = incomingPayload,
                                 schemaVersion = schemaVersion,
@@ -796,65 +760,28 @@ internal class RecordMutationCoordinator(
                         )
                         inserted to photoMutation.tombstonedClientUuids
                     } else {
+                        // Non-wake edit of open sleep (rare): author manages start fields only.
                         if (currentOpen?.id != expectedOpenSleepId) {
-                            val committed = recordDao.getIncludingDeleted(expectedOpenSleepId)
-                            if (
-                                committed != null &&
-                                committed.deletedAt == null &&
-                                committed.babyId == babyId &&
-                                committed.type == RecordType.SLEEP.key &&
-                                committed.endTimestamp == endTimestamp &&
-                                committed.note == note
-                            ) {
-                                // Replay after non-author force-preserve may differ on
-                                // client-sent timestamp/is_nap; accept same end+note close.
-                                return@run committed.id to emptySet<String>()
-                            }
                             throw SleepStateChangedException()
                         }
+                        requireCanManageRecord(currentOpen)
                         requireCurrentPayloadDocument(
                             RecordType.SLEEP,
                             currentOpen.payloadJson,
                             currentOpen.schemaVersion,
                         )
-                        val canManageOpen = actorCanManageRecord(currentOpen)
-                        val isWakeClose = endTimestamp != null
-                        val effectiveTimestamp: Long
-                        val effectivePayload: String
-                        val effectiveSchema: Int
-                        if (isWakeClose && !canManageOpen) {
-                            // Non-author family wake: preserve open-start fields.
-                            effectiveTimestamp = currentOpen.timestamp
-                            effectivePayload = preserveSleepOpenStartPayload(
-                                existingPayloadJson = currentOpen.payloadJson,
-                                existingSchemaVersion = currentOpen.schemaVersion,
-                                incomingPayloadJson = payloadJson,
-                                incomingSchemaVersion = schemaVersion,
-                            )
-                            effectiveSchema = currentOpen.schemaVersion
-                        } else {
-                            effectiveTimestamp = timestamp
-                            effectivePayload = incomingPayload
-                            effectiveSchema = schemaVersion
-                        }
-                        validateSleepInterval(RecordType.SLEEP, effectiveTimestamp, endTimestamp)
+                        validateSleepInterval(RecordType.SLEEP, timestamp, null)
                         val now = System.currentTimeMillis()
                         updateRecordEntity(
                             currentOpen.copy(
-                                timestamp = effectiveTimestamp,
-                                endTimestamp = endTimestamp,
+                                timestamp = timestamp,
+                                endTimestamp = null,
                                 note = note,
-                                payloadJson = effectivePayload,
-                                schemaVersion = effectiveSchema,
+                                payloadJson = incomingPayload,
+                                schemaVersion = schemaVersion,
                                 updatedAt = now,
                             ),
                         )
-                        if (isWakeClose) {
-                            val closed = recordDao.get(expectedOpenSleepId)
-                            if (closed != null) {
-                                grantFamilyWakePrivilegeIfNeeded(closed)
-                            }
-                        }
                         val photoMutation = photoAttachmentReconciler.reconcile(
                             PhotoAttachmentOwner.Record(expectedOpenSleepId),
                             photos,
@@ -879,8 +806,11 @@ internal class RecordMutationCoordinator(
         val id = sleepMutationMutex.withLock {
             transactionRunner.run {
                 requireActiveBaby(babyId)
-                healDuplicateOpenSleeps(babyId)
-                val open = recordDao.findOpenSleep(babyId)
+                // Ticket 06: keep overlapping open SleepStarts; do not auto-close.
+                // If a true open already exists (no wake yet), refuse a second silent
+                // open via this shortcut — mark anomaly on the latest open only when
+                // the user retries sleepDown while still open (historical UX).
+                val open = wakeObservations.findWakeShortcutTarget(babyId)
                 if (open != null) {
                     val flagged = withAnomaly(open.payloadJson, open.schemaVersion)
                     if (flagged.first != open.payloadJson) {
@@ -920,43 +850,51 @@ internal class RecordMutationCoordinator(
         return id
     }
 
+    /**
+     * Record wake for the latest open SleepStart as a WakeObservation.
+     *
+     * Does **not** rewrite Sleep `endTimestamp`. Returns the Sleep record local id
+     * (stable for dock/composer callers that expect the sleep row id).
+     */
     suspend fun sleepUp(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
         nowMillis: Long = System.currentTimeMillis(),
     ): Long {
-        // Close/create path: wake time must not be in the future (0 skew).
         RecordTime.pointError(at, nowMillis)?.let { throw IllegalArgumentException(it) }
-        val id = sleepMutationMutex.withLock {
+        val wakeCoordinator = wakeObservations
+        requireActiveBaby(babyId)
+        val open = sleepMutationMutex.withLock {
             transactionRunner.run {
-                requireActiveBaby(babyId)
-                healDuplicateOpenSleeps(babyId)
-                val open = recordDao.findOpenSleep(babyId)
-                if (open != null) {
-                    validateSleepInterval(RecordType.SLEEP, open.timestamp, at)
-                    // sleepUp already preserves open-start fields (only sets end).
-                    updateRecordEntity(
-                        open.copy(
-                            endTimestamp = at,
-                            updatedAt = System.currentTimeMillis(),
-                        ),
-                    )
-                    val closed = recordDao.get(open.id)
-                    if (closed != null) {
-                        grantFamilyWakePrivilegeIfNeeded(closed)
-                    }
-                    return@run open.id
-                }
+                wakeCoordinator.findWakeShortcutTarget(babyId)
+            }
+        }
+        if (open != null) {
+            validateWakeTimestamp(open.timestamp, at)?.let {
+                throw IllegalArgumentException(it)
+            }
+            wakeCoordinator.recordWake(
+                babyId = babyId,
+                at = at,
+                nowMillis = nowMillis,
+                sleepRecordId = open.id,
+            )
+            return open.id
+        }
 
+        // No open sleep: create SleepStart + WakeObservation (1-minute anomaly interval).
+        val start = at - 60_000L
+        validateWakeTimestamp(start, at)?.let { throw IllegalArgumentException(it) }
+        val sleepId = sleepMutationMutex.withLock {
+            transactionRunner.run {
                 val now = System.currentTimeMillis()
-                val start = at - 60_000L
                 insertRecord(
                     RecordEntity(
                         clientUuid = newClientUuid(),
                         babyId = babyId,
                         type = RecordType.SLEEP.key,
                         timestamp = start,
-                        endTimestamp = at,
+                        endTimestamp = null,
                         note = null,
                         payloadJson = RecordPayloadCodec.encode(
                             RecordPayloadDocument(
@@ -971,8 +909,13 @@ internal class RecordMutationCoordinator(
                 )
             }
         }
-        requestLocalSync()
-        return id
+        wakeCoordinator.recordWake(
+            babyId = babyId,
+            at = at,
+            nowMillis = nowMillis,
+            sleepRecordId = sleepId,
+        )
+        return sleepId
     }
 
 
@@ -1019,35 +962,12 @@ internal class RecordMutationCoordinator(
     }
 
     /**
-     * Keep at most one open sleep per baby. Older open intervals are closed at
-     * the next open's start and flagged anomaly (covers sync-introduced dups).
+     * Ticket 06 / ADR-0021: overlapping open SleepStarts are retained.
+     * Older opens surface as overlap-pending via [projectSleepInterval]; this
+     * method is intentionally a no-op so pull/sync never synthesizes end times.
      */
     internal suspend fun healDuplicateOpenSleeps(babyId: Long) {
-        val opens = recordDao.listOpenSleeps(babyId)
-        if (opens.size <= 1) return
-        val now = clock.nowMillis()
-        val decision = normalizeOpenSleeps(
-            candidates = opens.map { open ->
-                OpenSleepCandidate(
-                    stableKey = open.clientUuid,
-                    startedAtMillis = open.timestamp,
-                )
-            },
-            repairAtMillis = now,
-        )
-        val byClientUuid = opens.associateBy(RecordEntity::clientUuid)
-        for (closure in decision.closures) {
-            val current = byClientUuid.getValue(closure.candidate.stableKey)
-            val flagged = withAnomaly(current.payloadJson, current.schemaVersion)
-            updateRecordEntity(
-                current.copy(
-                    endTimestamp = closure.closedAtMillis,
-                    payloadJson = flagged.first,
-                    schemaVersion = flagged.second,
-                    updatedAt = now,
-                ),
-            )
-        }
+        // No-op: do not auto-close, edit, or tombstone older open SleepStarts.
     }
 
 

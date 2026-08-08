@@ -1016,6 +1016,46 @@ fn authorize_resolve(
     }
 }
 
+/// Wire §4.5 `invalid_wake_timestamp`: wake must not precede SleepStart.
+/// Equality is legal (`wake_timestamp >= sleep.timestamp`).
+fn validate_wake_against_sleep_start(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    mutation: &CausalMutation,
+) -> Result<(), &'static str> {
+    let sleep_uuid = mutation
+        .root
+        .get("sleep_record_client_uuid")
+        .and_then(Value::as_str)
+        .ok_or("missing_required_field")?;
+    let wake_ts = mutation
+        .root
+        .get("wake_timestamp")
+        .and_then(Value::as_i64)
+        .ok_or("missing_required_field")?;
+    let sleep = load_stable(tx, family_id, "record", sleep_uuid).map_err(|_| "internal")?;
+    let Some(sleep) = sleep else {
+        return Err("missing_sleep_reference");
+    };
+    if sleep
+        .root
+        .get("type")
+        .and_then(Value::as_str)
+        != Some("sleep")
+    {
+        return Err("missing_sleep_reference");
+    }
+    let sleep_start = sleep
+        .root
+        .get("timestamp")
+        .and_then(Value::as_i64)
+        .ok_or("missing_sleep_reference")?;
+    if wake_ts < sleep_start {
+        return Err("invalid_wake_timestamp");
+    }
+    Ok(())
+}
+
 fn validate_mutation_shape(mutation: &CausalMutation) -> Result<(), &'static str> {
     if !is_causal_type(&mutation.entity_type) {
         return Err("unsupported_entity_type");
@@ -1319,6 +1359,19 @@ fn evaluate_unit(
             code,
             None,
         ));
+    }
+    // Wire §4.5: wake_timestamp must be >= target SleepStart timestamp.
+    if mutation.entity_type == "wake_observation" {
+        if let Err(code) = validate_wake_against_sleep_start(ctx.tx, &ctx.principal.family_id, mutation)
+        {
+            return Ok(rejected(
+                &mutation.mutation_id,
+                &request_hash,
+                code,
+                code,
+                None,
+            ));
+        }
     }
 
     // Idempotent receipt.

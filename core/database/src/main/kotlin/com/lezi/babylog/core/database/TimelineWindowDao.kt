@@ -22,17 +22,29 @@ data class TimelineWindowDbSnapshot(
  */
 @Dao
 interface TimelineWindowDao {
+    /**
+     * Invalidation probe for timeline windows. Includes wake_observations and
+     * conflict_summaries so WakeObservation create/edit/withdraw/select and
+     * conflict summary updates re-assemble the rail without mutating Sleep rows.
+     */
     @Query(
         """
         SELECT
             (SELECT COUNT(*) FROM records) +
             (SELECT COUNT(*) FROM care_plans) +
             (SELECT COUNT(*) FROM media_assets) +
-            (SELECT COUNT(*) FROM fulfillment_candidates)
+            (SELECT COUNT(*) FROM fulfillment_candidates) +
+            (SELECT COUNT(*) FROM wake_observations) +
+            (SELECT COUNT(*) FROM conflict_summaries)
         """,
     )
     fun observeInvalidations(): Flow<Long>
 
+    /**
+     * Sleep overlap uses projected end when possible:
+     * effective wake time, else earliest legal active wake, else legacy endTimestamp,
+     * else open (null end) still overlaps any window after its start.
+     */
     @Query(
         """
         SELECT * FROM records
@@ -48,7 +60,25 @@ interface TimelineWindowDao {
               timestamp >= :startInclusive
               OR (
                   type = 'sleep'
-                  AND (endTimestamp IS NULL OR endTimestamp > :startInclusive)
+                  AND COALESCE(
+                      (
+                          SELECT w.wakeTimestamp FROM wake_observations w
+                          WHERE w.clientUuid = records.effectiveWakeObservationClientUuid
+                            AND w.deletedAt IS NULL
+                            AND w.withdrawn = 0
+                            AND w.wakeTimestamp >= records.timestamp
+                          LIMIT 1
+                      ),
+                      (
+                          SELECT MIN(w.wakeTimestamp) FROM wake_observations w
+                          WHERE w.sleepRecordClientUuid = records.clientUuid
+                            AND w.deletedAt IS NULL
+                            AND w.withdrawn = 0
+                            AND w.wakeTimestamp >= records.timestamp
+                      ),
+                      records.endTimestamp,
+                      9223372036854775807
+                  ) > :startInclusive
               )
           )
         ORDER BY timestamp DESC
@@ -102,10 +132,26 @@ interface TimelineWindowDao {
                         records.timestamp >= :recordStartInclusive
                         OR (
                             records.type = 'sleep'
-                            AND (
-                                records.endTimestamp IS NULL
-                                OR records.endTimestamp > :recordStartInclusive
-                            )
+                            AND COALESCE(
+                                (
+                                    SELECT w.wakeTimestamp FROM wake_observations w
+                                    WHERE w.clientUuid =
+                                        records.effectiveWakeObservationClientUuid
+                                      AND w.deletedAt IS NULL
+                                      AND w.withdrawn = 0
+                                      AND w.wakeTimestamp >= records.timestamp
+                                    LIMIT 1
+                                ),
+                                (
+                                    SELECT MIN(w.wakeTimestamp) FROM wake_observations w
+                                    WHERE w.sleepRecordClientUuid = records.clientUuid
+                                      AND w.deletedAt IS NULL
+                                      AND w.withdrawn = 0
+                                      AND w.wakeTimestamp >= records.timestamp
+                                ),
+                                records.endTimestamp,
+                                9223372036854775807
+                            ) > :recordStartInclusive
                         )
                     )
               )

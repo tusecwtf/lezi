@@ -882,6 +882,9 @@ class CareLogCarePlanTest {
             memberFakes.clock,
             mediaPathGate = com.lezi.babylog.core.database.MediaLocalPathGate(),
             localDataMutationEpoch = memberFakes.localDataMutationEpoch,
+            wakeObservationDao = memberFakes.wakeObservations,
+            conflictSummaryDao = memberFakes.conflictSummaries,
+            conflictDetailCacheDao = memberFakes.conflictDetailCache,
         )
         val audits = adminCare.listConflictNotAdoptedAudits(carePlanClientUuid = planUuid)
         assertThat(audits).hasSize(1)

@@ -20,12 +20,20 @@ import kotlinx.coroutines.flow.flowOf
 /** Minimal causal DAOs for clear persistence in CareLog unit tests. */
 internal class FakeWakeObservationDao : WakeObservationDao {
     private val items = mutableListOf<WakeObservationEntity>()
+    private var nextId = 1L
+    /** Invoked after local wake mutations so open-sleep flows can recompute. */
+    var onMutation: (() -> Unit)? = null
+
+    fun itemsSnapshot(): List<WakeObservationEntity> = items.toList()
 
     override suspend fun getByClientUuid(uuid: String): WakeObservationEntity? =
         items.find { it.clientUuid == uuid }
 
     override suspend fun listForSleep(sleepRecordClientUuid: String): List<WakeObservationEntity> =
         items.filter { it.sleepRecordClientUuid == sleepRecordClientUuid }
+            .sortedWith(
+                compareBy(WakeObservationEntity::wakeTimestamp, WakeObservationEntity::clientUuid),
+            )
 
     override suspend fun listActiveForSleep(
         sleepRecordClientUuid: String,
@@ -34,7 +42,9 @@ internal class FakeWakeObservationDao : WakeObservationDao {
             it.sleepRecordClientUuid == sleepRecordClientUuid &&
                 it.deletedAt == null &&
                 !it.withdrawn
-        }
+        }.sortedWith(
+            compareBy(WakeObservationEntity::wakeTimestamp, WakeObservationEntity::clientUuid),
+        )
 
     override suspend fun listPendingSync(): List<WakeObservationEntity> =
         items.filter { it.syncDirty }
@@ -43,17 +53,29 @@ internal class FakeWakeObservationDao : WakeObservationDao {
         items.filter { it.openConflictId != null }
 
     override suspend fun upsert(entity: WakeObservationEntity): Long {
-        items.removeAll { it.clientUuid == entity.clientUuid }
-        items += entity
-        return 1L
+        val existingIdx = items.indexOfFirst { it.clientUuid == entity.clientUuid }
+        val id = if (existingIdx >= 0) {
+            val kept = items[existingIdx].id.takeIf { it > 0L } ?: nextId++
+            items[existingIdx] = entity.copy(id = kept)
+            kept
+        } else {
+            val minted = if (entity.id > 0L) entity.id else nextId++
+            if (minted >= nextId) nextId = minted + 1L
+            items += entity.copy(id = minted)
+            minted
+        }
+        onMutation?.invoke()
+        return id
     }
 
     override suspend fun update(entity: WakeObservationEntity) {
         items.replaceAll { if (it.clientUuid == entity.clientUuid) entity else it }
+        onMutation?.invoke()
     }
 
     override suspend fun deleteAll() {
         items.clear()
+        onMutation?.invoke()
     }
 }
 

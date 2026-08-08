@@ -3,6 +3,7 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.MilkPayload
@@ -13,6 +14,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.transform
 import com.lezi.babylog.domain.toModel
 
 /**
@@ -27,6 +29,7 @@ internal class CareLogQueries(
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
     fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val wakeObservationCoordinator: WakeObservationCoordinator? = null,
 ) {
     private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
 
@@ -42,8 +45,9 @@ internal class CareLogQueries(
         val start = startDayInclusive.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = endDayExclusive.atStartOfDay(zone).toInstant().toEpochMilli()
         // DAO ordinary queries already exclude conflict-not-adopted fulfillment records.
-        return recordDao.observeRange(babyId, start, end).map { rows ->
-            rows.map { it.toModel() }
+        // transform (not mapLatest) so rapid StateFlow updates do not drop emissions.
+        return recordDao.observeRange(babyId, start, end).transform { rows ->
+            emit(rows.map { projectRecord(it) })
         }
     }
 
@@ -54,7 +58,10 @@ internal class CareLogQueries(
     ): Flow<List<Record>> = observeRecords(babyId, day, day.plusDays(1), zone)
 
     fun observeOpenSleep(babyId: Long): Flow<Record?> =
-        recordDao.observeOpenSleep(babyId).map { it?.toModel() }
+        // SQL already excludes sleeps with active legal WakeObservations (ticket 06).
+        recordDao.observeOpenSleep(babyId).transform { entity ->
+            emit(entity?.let { projectRecord(it) })
+        }
 
     fun observeCarePlansInRange(
         babyId: Long,
@@ -75,7 +82,7 @@ internal class CareLogQueries(
     ): List<Record> {
         val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return recordDao.listDay(babyId, start, end).map { it.toModel() }
+        return recordDao.listDay(babyId, start, end).map { projectRecord(it) }
     }
 
     suspend fun daySummary(
@@ -90,7 +97,16 @@ internal class CareLogQueries(
         now = now,
     ).toDailySummary()
 
-    suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.toModel()
+    suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.let { projectRecord(it) }
+
+    private suspend fun projectRecord(entity: RecordEntity): Record {
+        val wake = wakeObservationCoordinator
+        if (wake == null || entity.type != RecordType.SLEEP.key) {
+            return entity.toModel()
+        }
+        val interval = wake.projectSleep(entity).interval
+        return entity.toProjectedSleepRecord(interval)
+    }
 
     suspend fun getCarePlan(id: Long): CarePlan? = carePlanDao.get(id)?.toModel()
 

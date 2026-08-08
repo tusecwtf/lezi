@@ -2316,30 +2316,39 @@ internal class MemoryRecordDao : RecordDao {
         rows.value = rows.value.map { it.copy(syncDirty = true) }
     }
 
+    /** Optional wake table for open-sleep filtering (ticket 06). */
+    var wakeObservationRows:
+        (() -> List<com.lezi.babylog.core.database.causal.WakeObservationEntity>)? = null
+
+    private fun RecordEntity.isTrulyOpenSleep(): Boolean {
+        if (type != "sleep" || deletedAt != null || endTimestamp != null) return false
+        if (effectiveWakeObservationClientUuid != null) return false
+        val wakes = wakeObservationRows?.invoke().orEmpty()
+        return wakes.none { wake ->
+            wake.sleepRecordClientUuid == clientUuid &&
+                wake.deletedAt == null &&
+                !wake.withdrawn &&
+                wake.wakeTimestamp >= timestamp
+        }
+    }
+
     override suspend fun findOpenSleep(babyId: Long): RecordEntity? =
         listOpenSleeps(babyId).firstOrNull()
 
     override suspend fun listOpenSleeps(babyId: Long): List<RecordEntity> =
         rows.value.filter {
-            it.babyId == babyId &&
-                it.type == "sleep" &&
-                it.deletedAt == null &&
-                it.endTimestamp == null &&
-                it.effectiveWakeObservationClientUuid == null
+            it.babyId == babyId && it.isTrulyOpenSleep()
         }.sortedWith(
-            compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.id },
+            compareByDescending<RecordEntity> { it.timestamp }
+                .thenByDescending { it.clientUuid },
         )
 
     override fun observeOpenSleep(babyId: Long): Flow<RecordEntity?> =
         rows.map {
             it.filter { record ->
-                record.babyId == babyId &&
-                    record.type == "sleep" &&
-                    record.deletedAt == null &&
-                    record.endTimestamp == null &&
-                    record.effectiveWakeObservationClientUuid == null
+                record.babyId == babyId && record.isTrulyOpenSleep()
             }.maxWithOrNull(
-                compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
+                compareBy<RecordEntity> { it.timestamp }.thenBy { it.clientUuid },
             )
         }
 

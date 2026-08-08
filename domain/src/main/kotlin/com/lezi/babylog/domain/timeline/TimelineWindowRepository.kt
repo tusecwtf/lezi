@@ -1,16 +1,27 @@
 package com.lezi.babylog.domain.timeline
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.TimelineWindowDao
 import com.lezi.babylog.core.database.TimelineWindowDbSnapshot
+import com.lezi.babylog.core.database.causal.WakeObservationDao
+import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RootPublicationState
+import com.lezi.babylog.core.model.SleepIntervalProjection
+import com.lezi.babylog.core.model.WakeObservationFact
+import com.lezi.babylog.core.model.isWakeShortcutTarget
+import com.lezi.babylog.core.model.projectSleepInterval
 import com.lezi.babylog.core.model.rootPublicationState
+import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
+import com.lezi.babylog.domain.carelog.SleepPresentation
+import com.lezi.babylog.domain.carelog.toProjectedSleepRecord
+import com.lezi.babylog.domain.toModel
+import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.UploaderMemberRef
 import com.lezi.babylog.sync.session.resolveRecordUploaderLabel
@@ -29,9 +40,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
-import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
-import com.lezi.babylog.domain.carelog.FamilyWakePrivilegeStore
-import com.lezi.babylog.domain.toModel
 
 data class TimelineWindowRequest(
     val babyId: Long,
@@ -95,6 +103,12 @@ data class TimelineRecordRow(
     val media: TimelineMediaSnapshot,
     val uploaderLabel: String?,
     val capabilities: TimelineRowCapabilities,
+    /** Sleep interval projection; null for non-sleep rows. */
+    val sleepInterval: SleepIntervalProjection? = null,
+    /** Product chrome: 暂定 / 重叠待确认. */
+    val sleepEndBadge: String? = null,
+    /** Concise open-conflict card summary when [Record.openConflictId] is set. */
+    val conflictSummaryLabel: String? = null,
 )
 
 data class TimelineCarePlanRow(
@@ -119,7 +133,7 @@ data class TimelineWindowSnapshot(
 class TimelineWindowRepository @Inject constructor(
     private val timelineWindowDao: TimelineWindowDao,
     private val syncPort: SyncPort,
-    private val familyWakePrivileges: FamilyWakePrivilegeStore = FamilyWakePrivilegeStore(),
+    private val wakeObservationDao: WakeObservationDao,
 ) {
     private val revisions = AtomicLong(0L)
 
@@ -184,9 +198,43 @@ class TimelineWindowRepository @Inject constructor(
             role = audienceSeed.key.role,
             members = audienceSeed.members,
         )
+
+        // Load wakes for every sleep root in the window so projection matches CareLogQueries.
+        val sleepEntities = database.records.filter { it.type == RecordType.SLEEP.key }
+        val wakesBySleep = linkedMapOf<String, List<WakeObservationEntity>>()
+        for (sleep in sleepEntities) {
+            context.ensureActive()
+            wakesBySleep[sleep.clientUuid] = wakeObservationDao.listForSleep(sleep.clientUuid)
+        }
+        val openPeerStarts = sleepEntities
+            .asSequence()
+            .map { entity ->
+                entity to projectEntity(
+                    entity = entity,
+                    observations = wakesBySleep[entity.clientUuid].orEmpty(),
+                    peerOpenSleepStarts = emptyList(),
+                )
+            }
+            .filter { (_, interval) -> interval.isOpen }
+            .map { (entity, interval) -> entity.clientUuid to interval.startTimestamp }
+            .toList()
+
         val allRecordRows = database.records.map { entity ->
             context.ensureActive()
-            val record = entity.toModel()
+            val sleepInterval = if (entity.type == RecordType.SLEEP.key) {
+                projectEntity(
+                    entity = entity,
+                    observations = wakesBySleep[entity.clientUuid].orEmpty(),
+                    peerOpenSleepStarts = openPeerStarts.filter { it.first != entity.clientUuid },
+                )
+            } else {
+                null
+            }
+            val record = if (sleepInterval != null) {
+                entity.toProjectedSleepRecord(sleepInterval)
+            } else {
+                entity.toModel()
+            }
             val canManageRecord = canManageCreatorOwnedFamilyEntity(
                 creatorMembershipId = record.createdByMembershipId,
                 actorMembershipId = audience.membershipId,
@@ -194,12 +242,6 @@ class TimelineWindowRepository @Inject constructor(
                 creatorAcknowledgementPending = audienceSeed.key.pendingCreatorAcknowledgements
                     .contains(CreatorAcknowledgementRef("record", record.clientUuid)),
             )
-            // B1: non-author who closed open sleep here may restricted-edit while dirty.
-            val canRestrictedWakeEdit = !canManageRecord &&
-                record.syncDirty &&
-                record.type == RecordType.SLEEP &&
-                record.endTimestamp != null &&
-                familyWakePrivileges.isGrantedTo(record.clientUuid, audience.membershipId)
             TimelineRecordRow(
                 revision = revision,
                 record = record,
@@ -216,10 +258,17 @@ class TimelineWindowRepository @Inject constructor(
                 ),
                 capabilities = TimelineRowCapabilities(
                     revision = revision,
-                    canEdit = canManageRecord || canRestrictedWakeEdit,
+                    // B1 closer privilege retired: edit is author/Owner only on the Sleep root.
+                    // Wake correction uses WakeObservation self-edit seams, not Sleep edit.
+                    canEdit = canManageRecord,
                     canDelete = canManageRecord,
                     canFulfill = false,
                     canSkip = false,
+                ),
+                sleepInterval = sleepInterval,
+                sleepEndBadge = sleepInterval?.let(SleepPresentation::endBadge),
+                conflictSummaryLabel = SleepPresentation.conflictCardSummary(
+                    hasOpenConflict = !record.openConflictId.isNullOrBlank(),
                 ),
             )
         }
@@ -266,6 +315,15 @@ class TimelineWindowRepository @Inject constructor(
             }.thenBy { it.carePlan.scheduledAt },
         )
         context.ensureActive()
+        val openSleep = allRecordRows.asSequence()
+            .filter { row ->
+                val interval = row.sleepInterval
+                interval != null && isWakeShortcutTarget(interval)
+            }
+            .map(TimelineRecordRow::record)
+            .maxWithOrNull(
+                compareBy<Record> { it.timestamp }.thenBy { it.clientUuid },
+            )
         return TimelineWindowSnapshot(
             revision = revision,
             request = request,
@@ -273,13 +331,32 @@ class TimelineWindowRepository @Inject constructor(
             recordRows = selectedRows,
             railRecordRows = allRecordRows,
             planRows = planRows,
-            openSleep = allRecordRows.asSequence()
-                .map(TimelineRecordRow::record)
-                .filter { it.type == RecordType.SLEEP && it.endTimestamp == null }
-                .maxByOrNull(Record::timestamp),
+            openSleep = openSleep,
         )
     }
 }
+
+private fun projectEntity(
+    entity: RecordEntity,
+    observations: List<WakeObservationEntity>,
+    peerOpenSleepStarts: Collection<Pair<String, Long>>,
+): SleepIntervalProjection = projectSleepInterval(
+    sleepClientUuid = entity.clientUuid,
+    startTimestamp = entity.timestamp,
+    effectiveWakeObservationClientUuid = entity.effectiveWakeObservationClientUuid,
+    observations = observations.map { wake ->
+        WakeObservationFact(
+            clientUuid = wake.clientUuid,
+            wakeTimestamp = wake.wakeTimestamp,
+            withdrawn = wake.withdrawn,
+            observerMembershipId = wake.observerMembershipId,
+            note = wake.note,
+            deleted = wake.deletedAt != null,
+        )
+    },
+    legacyEndTimestamp = entity.endTimestamp,
+    peerOpenSleepStarts = peerOpenSleepStarts,
+)
 
 private data class TimelineAudienceKey(
     val isFamilyJoined: Boolean,
@@ -315,7 +392,11 @@ private fun mediaSnapshot(
     )
 }
 
-private fun recordOverlapsWindow(
+/**
+ * Window overlap uses projected display end (CareLog seam). Open sleep (null end)
+ * still overlaps any window after its start.
+ */
+internal fun recordOverlapsWindow(
     record: Record,
     startInclusive: Long,
     endExclusive: Long,

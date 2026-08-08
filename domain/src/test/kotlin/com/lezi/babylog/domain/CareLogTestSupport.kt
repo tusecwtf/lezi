@@ -262,6 +262,7 @@ internal class Fakes(
     val memberships = FakeMembershipDao()
     val babies = FakeBabyDao()
     val fulfillmentCandidates = FakeFulfillmentCandidateDao()
+    val wakeObservations = FakeWakeObservationDao()
     val records = FakeRecordDao(
         conflictExcluded = {
             fulfillmentCandidates.itemsSnapshot()
@@ -273,11 +274,18 @@ internal class Fakes(
                 .map { it.recordClientUuid }
                 .toSet()
         },
+        hasActiveLegalWake = { sleepClientUuid, sleepStart ->
+            wakeObservations.itemsSnapshot().any { wake ->
+                wake.sleepRecordClientUuid == sleepClientUuid &&
+                    wake.deletedAt == null &&
+                    !wake.withdrawn &&
+                    wake.wakeTimestamp >= sleepStart
+            }
+        },
     )
     val carePlans = FakeCarePlanDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
-    val wakeObservations = FakeWakeObservationDao()
     val conflictSummaries = FakeConflictSummaryDao()
     val conflictDetailCache = FakeConflictDetailCacheDao()
     val suspectedDuplicates = FakeSuspectedDuplicateGroupDao()
@@ -290,6 +298,11 @@ internal class Fakes(
     val transactions = RecordingTransactionRunner()
     val calendarReminderMutationGuard = CalendarReminderMutationGuard()
     val clock = FakePolicyClock()
+
+    init {
+        // Wake mutations must re-emit open-sleep observers (Room joins both tables).
+        wakeObservations.onMutation = { records.touch() }
+    }
 
     fun wireTransactionalSnapshots() {
         transactions.onBegin += {
@@ -368,6 +381,9 @@ internal class Fakes(
         clock,
         mediaPathGate = com.lezi.babylog.core.database.MediaLocalPathGate(),
         localDataMutationEpoch = localDataMutationEpoch,
+        wakeObservationDao = wakeObservations,
+        conflictSummaryDao = conflictSummaries,
+        conflictDetailCacheDao = conflictDetailCache,
     )
 
     fun reminderProjection() = CarePlanReminderProjection(
@@ -1415,6 +1431,8 @@ internal class FakeBabyDao : BabyDao {
 
 internal class FakeRecordDao(
     private val conflictExcluded: () -> Set<String> = { emptySet() },
+    private val hasActiveLegalWake: (sleepClientUuid: String, sleepStart: Long) -> Boolean =
+        { _, _ -> false },
 ) : RecordDao {
     private val items = MutableStateFlow<List<RecordEntity>>(emptyList())
     private val seq = AtomicLong(1)
@@ -1423,6 +1441,18 @@ internal class FakeRecordDao(
 
     private fun RecordEntity.isSurfaceRecord(): Boolean =
         clientUuid !in conflictExcluded()
+
+    private fun RecordEntity.isTrulyOpenSleep(): Boolean =
+        type == "sleep" &&
+            deletedAt == null &&
+            endTimestamp == null &&
+            effectiveWakeObservationClientUuid == null &&
+            !hasActiveLegalWake(clientUuid, timestamp)
+
+    /** Force open-sleep / range observers to recompute after wake mutations. */
+    fun touch() {
+        items.value = items.value.toList()
+    }
 
     fun beginTx() {
         txSnapshot = items.value
@@ -1547,29 +1577,18 @@ internal class FakeRecordDao(
 
     override suspend fun listOpenSleeps(babyId: Long): List<RecordEntity> =
         items.value
-            .filter {
-                it.babyId == babyId &&
-                    it.type == "sleep" &&
-                    it.deletedAt == null &&
-                    it.endTimestamp == null &&
-                    it.effectiveWakeObservationClientUuid == null
-            }
+            .filter { it.babyId == babyId && it.isTrulyOpenSleep() }
             .sortedWith(
-                compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.id },
+                compareByDescending<RecordEntity> { it.timestamp }
+                    .thenByDescending { it.clientUuid },
             )
 
     override fun observeOpenSleep(babyId: Long): Flow<RecordEntity?> =
         items.map { records ->
             records
-                .filter {
-                    it.babyId == babyId &&
-                        it.type == "sleep" &&
-                        it.deletedAt == null &&
-                        it.endTimestamp == null &&
-                        it.effectiveWakeObservationClientUuid == null
-                }
+                .filter { it.babyId == babyId && it.isTrulyOpenSleep() }
                 .maxWithOrNull(
-                    compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
+                    compareBy<RecordEntity> { it.timestamp }.thenBy { it.clientUuid },
                 )
         }
 

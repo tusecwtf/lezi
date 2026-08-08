@@ -655,6 +655,23 @@ class RealSyncPort @Inject constructor(
             }
         }
 
+    override suspend fun fetchConflictDetail(
+        conflictId: String,
+    ): com.lezi.babylog.sync.backend.ConflictDetail {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法加载冲突详情" }
+        return backend.fetchConflictDetail(session, conflictId)
+    }
+
+    override suspend fun resolveConflict(
+        conflictId: String,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
+    ): com.lezi.babylog.sync.backend.ConflictResolveResult {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法解决冲突" }
+        return backend.resolveConflict(session, conflictId, request)
+    }
+
     override suspend fun saveEndpointConfig(
         config: FamilyEndpointConfig,
     ): Result<Unit> =

@@ -557,10 +557,10 @@ class CareLogMediaTest {
             photoLocalPaths = listOf(path, removedPath),
         )
         assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path, removedPath)
-        val removedUuid = fakes.media.listActiveForRecord(openId)
-            .single { it.localUri == removedPath }
-            .clientUuid
 
+        // Ticket 06: wake close attaches photos to WakeObservation, not Sleep log media.
+        // Sleep open-start photos remain; wake photos are independent wake media.
+        val wakePath = "/data/user/0/com.lezi/files/record-media/wake.jpg"
         care.confirmSleep(
             babyId = babyId,
             expectedOpenSleepId = openId,
@@ -568,10 +568,14 @@ class CareLogMediaTest {
             endTimestamp = 3_600_000L,
             note = "小睡",
             payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
-            photoLocalPaths = listOf(path),
+            photoLocalPaths = listOf(wakePath),
         )
-        assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path)
-        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(removedUuid))
+        assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path, removedPath)
+        val wakes = care.listWakeObservations(fakes.records.get(openId)!!.clientUuid)
+        assertThat(wakes).hasSize(1)
+        assertThat(wakes.single().note).isEqualTo("小睡")
+        assertThat(wakes.single().photoLocalPaths).containsExactly(wakePath)
+        assertThat(fakes.records.get(openId)!!.endTimestamp).isNull()
         assertThat(fakes.records.get(openId)!!.payloadJson).doesNotContain("sleep.jpg")
     }
     @Test
