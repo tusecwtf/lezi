@@ -1,6 +1,6 @@
 # 0.3.12 · 连续时间条与最近 24 小时升级
 
-Status: ready-for-agent
+Status: in-progress — local release candidate complete; joined-client acceptance and NAS CD pending
 
 Target release: Android **versionName `0.3.12` / versionCode `19`**；家庭 NAS
 `lezi-sync:0.3.12`。若实现前 live HEAD 已占用 versionCode 19，只能继续单调增加，

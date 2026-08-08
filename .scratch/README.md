@@ -7,7 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`continuous-timeline-navigation-0.3.12`](./continuous-timeline-navigation-0.3.12/) | **ready-for-agent** — **0.3.12**：今天最近 24 小时实时吸附、连续历史拖动换日、跨日筛选与全版本签名 APK/NAS 更新交付；票 01–02 complete，frontier = **03** |
+| [`continuous-timeline-navigation-0.3.12`](./continuous-timeline-navigation-0.3.12/) | **in-progress** — **0.3.12**：票 01–04 complete；签名升级安装矩阵已跑，票 05 等待携带完整家庭会话的 TLS/sync 夹具，票 06 仍需其通过及新的 CD 批准 |
 | [`family-sleep-wake-acl`](./family-sleep-wake-acl/) | **ready-for-agent** — **0.3.11**：跨成员家庭 wake 可发布 + 本机 B1 受限纠错 + 发版联调；票 01 complete → frontier = **02** |
 | [`neighbor-dedup-tombstone-0.3.10`](./neighbor-dedup-tombstone-0.3.10/) | **implementation-complete + released** — 0.3.10 近邻落选 + 墓碑永胜 + 同步 chrome（历史索引） |
 | [`sync-authoritative-reconciliation`](./sync-authoritative-reconciliation/) | **implementation-complete** — 批量 head-by-UUID 权威裁决、dirty 终态收敛、local-only/技术清理与诚实 pending；等待双端真实服务与 NAS CD 验收 |

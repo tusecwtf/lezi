@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 18,
-  "version_name": "0.3.11",
+  "version_code": 19,
+  "version_name": "0.3.12",
   "min_supported_version_code": 16,
-  "sha256": "e2d8a35c57cbecd66291bd975e1705c846f36107001d6506490447f45c65a4bc",
-  "release_notes": "0.3.11 跨成员家庭 wake：非作者可闭合开放睡眠并同步；强制保留开睡字段；本机 B1 脏窗内可改 end/备注/照片；日汇总芯片字号收紧使睡眠时长完整显示；无 wire closer，收敛后非作者不可再改删"
+  "sha256": "8fda237a2970e747ad3598f22d8586cb57fba98a9c5cf1b2d33efb06b15cf4ee",
+  "release_notes": "0.3.12 时间轴默认展示最近 24 小时并实时吸附，可连续拖动换日；全局日期与跨日类型筛选保持一致；所有历史正式版本均可通过同签名 APK 无损升级"
 }
