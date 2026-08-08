@@ -215,9 +215,12 @@ home LAN safety is entirely the min floor + installable package:
    versionCode, treat schema/allowlist/entity set as frozen. Do not rely on older phones
    skipping unknown keys. Next break → repeat 2–4.
 
-Relationship to today's baseline: e.g. floor `6` means versionCodes in the supported range
-share one frozen wire; raising the floor is how a home LAN forces upgrades before silent
-pull stalls. Product narrative: [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
+The permanent lossless APK baseline is versionCode `6`; it is not the current sync floor.
+The current floor is `16`, so versionCodes 16 through the latest release share one frozen wire.
+Versions 6 through 15 remain sync-blocked but must still reach the same verified APK through the
+authenticated update route when available or LAN recovery on 8767. Raising the floor is how a home
+LAN forces upgrades before silent pull stalls. Product narrative:
+[`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
 
 Invite-install smoke after deploy is separate from readiness: `curl -fsS
 http://<LEZI_TLS_HOST>:8767/join` must return the branded page, and

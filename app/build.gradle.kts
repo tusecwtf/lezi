@@ -51,6 +51,7 @@ val androidReleaseCompatibility =
     JsonSlurper().parse(androidReleaseCompatibilityFile) as Map<*, *>
 val releasedAndroidVersions =
     (androidReleaseCompatibility["released_versions"] as List<*>).map { it as Map<*, *> }
+val androidUpgradeTarget = androidReleaseCompatibility["upgrade_target"] as Map<*, *>
 val appUpdateMetadataFile = rootProject.file("tools/lezi-sync/deploy/app-update.json")
 val appUpdateMetadata = JsonSlurper().parse(appUpdateMetadataFile) as Map<*, *>
 
@@ -279,7 +280,7 @@ val validateAndroidReleaseCompatibilityCatalog = tasks.register(
 ) {
     group = "verification"
     description = "Validates the released Android upgrade-source compatibility catalog."
-    inputs.files(androidReleaseCompatibilityFile, localDataContractFile, appUpdateMetadataFile)
+    inputs.files(androidReleaseCompatibilityFile, localDataContractFile)
     doLast {
         check(androidReleaseCompatibility["application_id"] == android.defaultConfig.applicationId) {
             "Release compatibility application_id must match the Android applicationId"
@@ -290,36 +291,29 @@ val validateAndroidReleaseCompatibilityCatalog = tasks.register(
         val versionCodes = releasedAndroidVersions.map {
             (it["version_code"] as Number).toInt()
         }
-        check(versionCodes == (baseline..android.defaultConfig.versionCode!!).toList()) {
-            "Released production versionCodes must be contiguous through the current Android build"
+        check(versionCodes == (baseline..versionCodes.last()).toList()) {
+            "Released production upgrade-source versionCodes must be contiguous"
         }
         val lastRelease = releasedAndroidVersions.last()
-        check(lastRelease["version_name"] == android.defaultConfig.versionName) {
-            "Release compatibility catalog must end at the current Android versionName"
+        val targetVersionCode = (androidUpgradeTarget["version_code"] as Number).toInt()
+        check(targetVersionCode == versionCodes.last() + 1) {
+            "upgrade_target must immediately follow the last released upgrade source"
         }
+        val allowedBuildIdentities = setOf(
+            lastRelease["version_code"] to lastRelease["version_name"],
+            androidUpgradeTarget["version_code"] to androidUpgradeTarget["version_name"],
+        )
         check(
-            appUpdateMetadata["package_name"] == androidReleaseCompatibility["application_id"] &&
-                appUpdateMetadata["version_code"] == lastRelease["version_code"] &&
-                appUpdateMetadata["version_name"] == lastRelease["version_name"],
+            android.defaultConfig.versionCode to android.defaultConfig.versionName in
+                allowedBuildIdentities,
         ) {
-            "Current app-update metadata must match the last released compatibility entry"
-        }
-        check(
-            appUpdateMetadata["min_supported_version_code"] ==
-                androidReleaseCompatibility["minimum_sync_version_code"],
-        ) {
-            "The compatibility catalog and app-update metadata must share one sync floor"
-        }
-        val nextReleaseVersionCode =
-            (androidReleaseCompatibility["next_release_version_code"] as Number).toInt()
-        check(nextReleaseVersionCode == versionCodes.last() + 1) {
-            "next_release_version_code must be the next monotonic Android versionCode"
+            "Android build must match the latest released source or the explicit upgrade target"
         }
         val contractsByVersion = localDataContractEntries.associate { entry ->
             (entry["contract_version"] as Number).toInt() to
                 (entry["room_schema"] as Number).toInt()
         }
-        releasedAndroidVersions.forEach { release ->
+        (releasedAndroidVersions + androidUpgradeTarget).forEach { release ->
             val contract = (release["local_data_contract"] as Number).toInt()
             val roomSchema = (release["room_schema"] as Number).toInt()
             check(contractsByVersion[contract] == roomSchema) {
@@ -341,6 +335,34 @@ val validateAndroidReleaseCompatibilityCatalog = tasks.register(
             ) {
                 "Local-data contract $contract introduction must match the release catalog"
             }
+        }
+    }
+}
+
+val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
+    "validateAndroidAppUpdateMetadataCompatibility",
+) {
+    group = "verification"
+    description = "Validates update metadata against the release compatibility policy."
+    inputs.files(androidReleaseCompatibilityFile, appUpdateMetadataFile)
+    doLast {
+        check(appUpdateMetadata["package_name"] == androidReleaseCompatibility["application_id"]) {
+            "App-update metadata package_name must match the Android applicationId"
+        }
+        check(
+            appUpdateMetadata["min_supported_version_code"] ==
+                androidReleaseCompatibility["minimum_sync_version_code"],
+        ) {
+            "The compatibility catalog and app-update metadata must share one sync floor"
+        }
+        val allowedMetadataIdentities = (releasedAndroidVersions + androidUpgradeTarget).map {
+            it["version_code"] to it["version_name"]
+        }.toSet()
+        check(
+            appUpdateMetadata["version_code"] to appUpdateMetadata["version_name"] in
+                allowedMetadataIdentities,
+        ) {
+            "App-update metadata must identify a catalogued release or the upgrade target"
         }
     }
 }

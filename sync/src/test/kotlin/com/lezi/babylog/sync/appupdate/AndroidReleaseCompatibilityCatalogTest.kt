@@ -1,8 +1,12 @@
-package com.lezi.babylog.sync
+package com.lezi.babylog.sync.appupdate
 
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.sync.appupdate.StagedApkIdentity
-import com.lezi.babylog.sync.appupdate.verifyStagedApkIdentity
+import com.lezi.babylog.sync.AppUpdateCheckResult
+import com.lezi.babylog.sync.ClientAppVersion
+import com.lezi.babylog.sync.ForcedAppUpdateState
+import com.lezi.babylog.sync.SyncRig
+import com.lezi.babylog.sync.joinedSession
+import com.lezi.babylog.sync.sampleAppUpdateMetadata
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -21,13 +25,11 @@ class AndroidReleaseCompatibilityCatalogTest {
                 .getValue("minimum_sync_version_code")
                 .jsonPrimitive
                 .int
-            val targetVersionCode = catalog
-                .getValue("next_release_version_code")
-                .jsonPrimitive
-                .int
+            val upgradeTarget = catalog.getValue("upgrade_target").jsonObject
+            val targetVersionCode = upgradeTarget.getValue("version_code").jsonPrimitive.int
             val metadata = sampleAppUpdateMetadata(
                 versionCode = targetVersionCode,
-                versionName = "0.3.12",
+                versionName = upgradeTarget.getValue("version_name").jsonPrimitive.content,
                 minSupportedVersionCode = minimumSyncVersionCode,
             )
             val latestReleased = releasedVersions(catalog).last()
@@ -57,7 +59,10 @@ class AndroidReleaseCompatibilityCatalogTest {
                             packageName = metadata.packageName,
                             versionCode = metadata.versionCode,
                             signingCertSha256 = setOf(signingCert),
-                            localDataContractVersion = 3,
+                            localDataContractVersion = upgradeTarget
+                                .getValue("local_data_contract")
+                                .jsonPrimitive
+                                .int,
                             minimumMigratableLocalDataContractVersion = 1,
                         ),
                         installedCerts = setOf(signingCert),

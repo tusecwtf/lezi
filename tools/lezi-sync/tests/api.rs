@@ -870,7 +870,8 @@ async fn every_released_android_version_keeps_apk_recovery_independent_of_sync_f
     .unwrap();
     let package_name = catalog["application_id"].as_str().unwrap();
     let minimum_sync_version_code = catalog["minimum_sync_version_code"].as_u64().unwrap();
-    let target_version_code = catalog["next_release_version_code"].as_u64().unwrap();
+    let upgrade_target = &catalog["upgrade_target"];
+    let target_version_code = upgrade_target["version_code"].as_u64().unwrap();
     let released_versions = catalog["released_versions"].as_array().unwrap();
     let directory = TempDir::new().unwrap();
     let apk_bytes = b"all-version-recovery-apk";
@@ -880,7 +881,7 @@ async fn every_released_android_version_keeps_apk_recovery_independent_of_sync_f
         json!({
             "package_name": package_name,
             "version_code": target_version_code,
-            "version_name": "0.3.12",
+            "version_name": upgrade_target["version_name"],
             "min_supported_version_code": minimum_sync_version_code,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
