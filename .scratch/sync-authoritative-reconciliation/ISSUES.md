@@ -2,6 +2,10 @@
 
 Status: implementation-complete — live acceptance pending
 
+**0.3.13 规划 supersession：** head-by-UUID + LWW verdict 词汇由
+`lossless-family-causal-sync` / ADR-0019/0020 的因果 reconcile/commit 取代；先对账/
+终态收敛骨架保留。本 tracker 描述 **已交付** 裁决，不是无损因果目标合同。
+
 | # | File | Title | Blocked by | Status |
 |---|------|-------|------------|--------|
 | 01 | [issues/01-server-authoritative-reconcile.md](./issues/01-server-authoritative-reconcile.md) | 服务端批量 head-by-UUID 权威裁决 | — | complete |

@@ -3,6 +3,10 @@
 Spec: [`spec.md`](./spec.md)  
 Tracker status: **implementation-complete + released** (0.3.10 CD done 2026-08-05)
 
+**0.3.13 规划 supersession：** 服务器近邻自动落选与相关产品出口由
+`lossless-family-causal-sync` / ADR-0021 取代（新数据）；历史 tombstone 不批量复活。
+本 tracker 仍是 0.3.10 **已交付** 事实索引，不是 0.3.13 目标合同。
+
 ## Graph
 
 ```text

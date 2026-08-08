@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: partially superseded by ADR-0021 (and ADR-0019/0020) for 0.3.13+ new causal data — server neighbor auto-lose and universal “tombstone forever / only new UUID” as the sole recovery story; retained as historical 0.3.10–0.3.12 delivery and for unclassifiable historical tombstones that stay hidden
 ---
 
 # 跨成员近邻重复由服务器隐式落选，护理记录墓碑永胜
+
+## 0.3.10–0.3.12 已交付范围（历史合同）
 
 家庭同步里两类「看起来像冲突」必须分开处理：**同 `client_uuid` 的身份修订** 与
 **不同 UUID 的语义双记**。前者不再允许 live 用更高 `updated_at` 清零 `deleted_at`；
@@ -13,7 +15,25 @@ status: accepted
 与
 [`docs/research/2026-08-05-sync-conflict-and-duplicate-resolution.md`](../research/2026-08-05-sync-conflict-and-duplicate-resolution.md)。
 
-## 决策
+## 0.3.13 规划 supersession（非已交付）
+
+[ADR-0021](./0021-wake-observation-and-nondestructive-duplicate-groups.md) **废止**
+本 ADR 对 **新因果数据** 的：
+
+- 服务器隐式近邻采纳与落选 tombstone；
+- `neighbor_losers` 提示信号作为跨 UUID 产品出口；
+- 将「误删/落选后只能新 UUID、永不显式 restore」写成与因果 CAS restore 冲突的唯一故事。
+
+**保留：** 迁移后无法证明原因的历史 Record tombstone 继续隐藏，不批量复活；同 membership
+窗内多记不作为疑似重复；白名单与 30 分钟窗作为 **客户端疑似重复提示** 输入被复用。
+同 UUID 删除的因果语义见 ADR-0020，不再依赖「更高 updated_at live 永胜 tombstone」的
+LWW 修补叙述作为目标架构。
+
+## 历史决策（0.3.10–0.3.12 已交付）
+
+> 以下各节为 **已交付** 架构叙述，现在时仅描述 0.3.10–0.3.12 运行时。
+> **0.3.13 目标合同** 见 ADR-0021 与 [`causal-sync-wire.md`](../prd/causal-sync-wire.md)；
+> 勿将本节服务器近邻 tombstone / `neighbor_loser` 读成新能力代要求。
 
 ### 1. 记录墓碑永胜（问题 B）
 

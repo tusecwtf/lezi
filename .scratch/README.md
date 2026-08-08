@@ -7,6 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
+| [`lossless-family-causal-sync`](./lossless-family-causal-sync/) | **ready-for-agent** — 通用家庭事实因果版本、三方合并/持久分支、WakeObservation、非破坏性疑似重复与安全 LocalWrite；票 01 complete（合同冻结），frontier = **02 ∥ 04** |
 | [`continuous-timeline-navigation-0.3.12`](./continuous-timeline-navigation-0.3.12/) | **in-progress** — **0.3.12**：票 01–04 complete；签名升级安装矩阵已跑，票 05 等待携带完整家庭会话的 TLS/sync 夹具，票 06 仍需其通过及新的 CD 批准 |
 | [`family-sleep-wake-acl`](./family-sleep-wake-acl/) | **ready-for-agent** — **0.3.11**：跨成员家庭 wake 可发布 + 本机 B1 受限纠错 + 发版联调；票 01 complete → frontier = **02** |
 | [`neighbor-dedup-tombstone-0.3.10`](./neighbor-dedup-tombstone-0.3.10/) | **implementation-complete + released** — 0.3.10 近邻落选 + 墓碑永胜 + 同步 chrome（历史索引） |

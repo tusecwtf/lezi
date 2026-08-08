@@ -1,7 +1,9 @@
 # 乐记 — 产品 PRD
 
 > **个人/家庭使用** · Android · 无商业化
-> 决策日：2026-07-25 · 当前发布：**0.3.11**
+> 决策日：2026-07-25 · 当前发布线以 `config/android-release-compatibility.json` 为准
+> （撰写时 **0.3.12** / versionCode 19）。**0.3.13 规划**（versionCode 20 / Room 27 /
+> server schema 12 / 因果 wire）见 [`causal-sync-wire.md`](./causal-sync-wire.md)，未交付。
 
 | 项 | 内容 |
 |----|------|
@@ -29,10 +31,11 @@
 | 文件 | 内容 |
 |------|------|
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
-| [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
-| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
+| [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约；0.3.13 规划 SleepStart/WakeObservation 与疑似重复汇总 |
+| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前已交付合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
+| [causal-sync-wire.md](./causal-sync-wire.md) | **0.3.13 规划冻结**：因果 reconcile/commit/pull/resolution wire 与合并例子（未交付） |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
-| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
+| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收；0.3.13 版本/schema 规划目标 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 
 ---
@@ -222,6 +225,9 @@
 
 - 「睡下」「醒来」；自动算时长。
 - 连续两次睡下等异常：仍写入，列表标 `!`。
+- **0.3.13 规划（未交付）：** 睡下为 SleepStart 记录；醒来为独立 WakeObservation（可多条、
+  暂定最早合法观察、作者/Owner 确认有效观察）；重叠开放睡眠不自动改写。详见
+  [`data-model.md`](./data-model.md) §3.5.1 与 ADR-0021。
 
 ### 4.4 体温
 
@@ -237,6 +243,9 @@
 - 聚合时钟：点事实仅 `timestamp ≤ now` 计入累计；睡眠按
   `[start, min(end, now)]` 裁剪。履行允许的「已确认但时刻未到」记录可在时间轴
   展示，但暂不进汇总，到点后自然计入（见 [data-model.md](./data-model.md) §5.1）。
+- **0.3.13 规划（未交付）：** 疑似重复组在时间轴 **展开全部来源**；未确认时汇总显示
+  指标 **上下界**；确认后按选定展示版单值聚合，其它来源/照片以 **来源关系** 永久保留
+  （见 [data-model.md](./data-model.md) §5.2、ADR-0021）。同 UUID 冲突徽章不阻断录入。
 
 ### 4.6 成长
 
@@ -358,3 +367,4 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 | 2026-07-22 | 排泄增强：便便分档 + **图标化**；尿尿增加 **大/中/小** 量档 |
 | 2026-07-22 | 配方奶 **默认 5ml 一档**；滚轮/加减/芯片与设置同步 |
 | 2026-07-23 | 所有记录改为用途专属二级确认面板；统一备注与圆盘时间；新增睡下/醒来状态确认及睡眠中头像反馈 |
+| 2026-08-08 | 冻结 0.3.13 因果领域/wire/ADR（规划）：CONTEXT 术语、ADR-0019/0020/0021、causal-sync-wire；标明对 ADR-0017/0018 与近邻/LWW/整行 sleep 的 supersession 范围 |

@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.11：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push，并要求服务端完成启动 authority graph 校验；见 ADR-0017 |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前交付**：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push，启动 authority graph 校验（ADR-0017）。**0.3.13 规划**：因果 reconcile/commit、版本/分支、WakeObservation；见 ADR-0019/0020/0021 与 [`causal-sync-wire.md`](./causal-sync-wire.md) |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,9 +32,10 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.11` |
-| versionCode | `18`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
-| 本地数据契约 | 当前 `v3` / Room v26（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（撰写时 0.3.12 / 19）；下文规划值不得冒充已发布 |
+| versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
+| 本地数据契约 | 当前交付 `v3` / Room **v26**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| **0.3.13 规划目标（未交付；发版前重核）** | versionName `0.3.13`、versionCode **20**、Room **27**、server schema **12**、因果 wire（[`causal-sync-wire.md`](./causal-sync-wire.md)）；minSupported 抬到 20 前须已验证签名 APK 更新通道 |
 | 应用名 | 乐记 |
 
 ---
@@ -307,13 +308,18 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 18,
-  "version_name": "0.3.11",
+  "version_code": 19,
+  "version_name": "0.3.12",
   "min_supported_version_code": 16,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
 }
 ```
+
+示例数字随发布清单变化；**0.3.13 规划** 将 `version_code`/`version_name` 推进到 20 /
+`0.3.13`，并在因果 wire 入站前把 `min_supported_version_code` 抬到 **20**（须先有可安装
+通道）。实现与发版开始时必须重新对照 `config/android-release-compatibility.json`、
+`app-update.json` 与 Cargo/Gradle 真值。
 
 触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查；② 菜单关于区点击检查。
 可选更新：确认层 → 下载 → sha256 → **归档身份校验**（包名 / versionCode / 签名）→
@@ -333,7 +339,11 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 2. **先抬 floor：** 在 `app-update.json` 将 `min_supported_version_code` 提到**能解析新 shape 的最低官方 versionCode**；同时准备该 versionCode（或更高）的 **已签名 release APK**，`sha256` 与包一致。
 3. **先发布可安装通道：** CD 原子对发布（APK 再 metadata），确认 `load_verified` 成功；旧客户端随后在权威 sync / restore 写路径收到 `client_update_required` 并能装包。
 4. **再启用新写入：** 仅当通道已验证后，再让新客户端/服务端发布破坏性 shape。
-5. **支持范围内 wire 冻结：** 当前 floor（`min_supported=16`）到最新 versionCode 之间，wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
+5. **支持范围内 wire 冻结：** 当前 floor（撰写时 `min_supported=16`）到最新 versionCode 之间，wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
+6. **0.3.13 因果切割（规划）：** 新实体 `wake_observation`、因果字段
+   `base_version`/`mutation_id`/`version_id`、verdict 枚举与移除服务器近邻落选均属破坏性
+   wire；必须先完成步骤 2–4 且 minSupported=20，再部署 server schema 12 与新客户端。
+   权威 shape 见 [`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 完整运维条目见 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)「Wire-break checklist」。
 
@@ -374,7 +384,10 @@ APK。该端口不完成家庭登录，也不放宽同步门禁。首次安装�
 | `lezi-sync` NAS | API/镜像/自动化；物理 NAS 生产部署待目标环境 |
 
 **NAS schema / offline-migrate 边界：** 日常启动只接受精确 current schema（fail closed；
-见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。历史 v3
+见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。**当前 tree**
+server `DATABASE_SCHEMA_VERSION` 以 `tools/lezi-sync` 源码为准（撰写时 **11**）。
+**0.3.13 规划** 为 schema **12**（版本/冲突/分支/resolution/来源关系等），仅经审计
+offline-migrate 自 v11 复制迁移；旧二进制不得打开 v12。历史 v3
 数据根**不得**在 server startup 自动迁移；唯一出路是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)
 的两阶段路径：维护窗前在备份上用显式 `lezi-sync offline-migrate`（固定源→current、
 独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。发布二进制
