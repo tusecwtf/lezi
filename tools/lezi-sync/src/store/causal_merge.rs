@@ -487,6 +487,33 @@ mod tests {
     }
 
     #[test]
+    fn mutation_content_hash_golden_matches_client_canonical() {
+        // Shared with Android causalMutationContentHash JVM golden (correctness-02).
+        let root = map(json!({
+            "baby_client_uuid": "22222222-2222-2222-2222-222222222222",
+            "custom_item_client_uuid": null,
+            "note": null,
+            "payload_json": {"amount_ml": 90},
+            "schema_version": 2,
+            "timestamp": 100,
+            "type": "formula",
+            "updated_at": 100
+        }));
+        let digest = mutation_content_hash(
+            "record",
+            "11111111-1111-1111-1111-111111111111",
+            Some("v-r0"),
+            false,
+            &root,
+            &[],
+        );
+        assert_eq!(
+            digest,
+            "ff2cec4612265f208e3c3a06029fdd1e24c0d75a2081c89e8468812720e9a83a"
+        );
+    }
+
+    #[test]
     fn disjoint_fields_auto_merge_even_when_updated_at_differs() {
         // wire 例 A
         let base = map(json!({

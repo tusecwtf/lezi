@@ -36,6 +36,9 @@ import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_VERSIONS
+import com.lezi.babylog.sync.session.CAPABILITY_SOURCE_RELATIONS
+import com.lezi.babylog.sync.session.CAPABILITY_WAKE_OBSERVATION
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
@@ -62,6 +65,13 @@ private const val MILLIS_PER_SECOND = 1_000L
 private const val DEFAULT_UPLOAD_WRITE_STALL_TIMEOUT_MILLIS = 30_000L
 /** Attached on authenticated family requests so the server can gate minSupported later. */
 internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"
+
+/** Wire §1 causal capability keys required for [HttpSyncBackend.supportsCausalWire]. */
+internal val REQUIRED_CAUSAL_WIRE_CAPABILITIES = setOf(
+    CAPABILITY_CAUSAL_VERSIONS,
+    CAPABILITY_WAKE_OBSERVATION,
+    CAPABILITY_SOURCE_RELATIONS,
+)
 
 internal fun interface SyncHttpConnectionFactory {
     fun open(url: URL): HttpURLConnection
@@ -112,6 +122,7 @@ class HttpSyncBackend internal constructor(
             (value as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
                 ?: throw IllegalArgumentException("health.capabilities[$index] 无效")
         }.toSet()
+        lastAdvertisedCapabilities = capabilities
         return AnonymousHealth(
             version = json.requiredNonBlankString("version", "health"),
             capabilities = capabilities,
@@ -788,7 +799,17 @@ class HttpSyncBackend internal constructor(
         }
     }
 
-    override fun supportsCausalWire(): Boolean = true
+    /**
+     * Last health/setup capabilities observed by this backend. Null until the first
+     * successful probe — fail closed (no causal publish) rather than assume the wire.
+     */
+    @Volatile
+    private var lastAdvertisedCapabilities: Set<String>? = null
+
+    override fun supportsCausalWire(): Boolean {
+        val caps = lastAdvertisedCapabilities ?: return false
+        return caps.containsAll(REQUIRED_CAUSAL_WIRE_CAPABILITIES)
+    }
 
     override suspend fun causalReconcile(
         session: SyncSession,
@@ -799,6 +820,28 @@ class HttpSyncBackend internal constructor(
         session: SyncSession,
         units: List<CausalMutationUnit>,
     ): CausalBatchResult = postCausalBatch(session, "/v1/causal/commit", units)
+
+    override suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ) {
+        session.requireCurrentReplicaTransport()
+        require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "因果媒体 sha256 无效"
+        }
+        requestJsonStream(
+            base = session.baseUrl,
+            path = "/v1/causal/media/$mediaUuid",
+            method = "PUT",
+            token = session.accessToken,
+            source = source,
+            extraHeaders = mapOf(
+                "X-Lezi-Media-Sha256" to sha256,
+            ),
+        )
+    }
 
     private suspend fun postCausalBatch(
         session: SyncSession,
@@ -1281,7 +1324,7 @@ class HttpSyncBackend internal constructor(
         }
     }
 
-    /** PUT binary body, parse JSON success response (bundle stage status). */
+    /** PUT binary body, parse JSON success response (bundle stage / causal preimage). */
     private suspend fun requestJsonStream(
         base: String,
         path: String,
@@ -1289,13 +1332,21 @@ class HttpSyncBackend internal constructor(
         token: String,
         source: SyncMediaUploadSource,
         trustedEndpoint: TrustedEndpointProfile? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
     ): JsonObject {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
             require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
                 "待上传媒体大小超出支持范围"
             }
-            val connection = open(base, path, method, token, trustedEndpoint = resolvedEndpoint)
+            val connection = open(
+                base,
+                path,
+                method,
+                token,
+                extraHeaders = extraHeaders,
+                trustedEndpoint = resolvedEndpoint,
+            )
             try {
                 connection.doOutput = true
                 connection.setRequestProperty(

@@ -43,6 +43,7 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
                     "validated_deferred_fulfillment_v1",
                     "causal_versions",
                     "wake_observation",
+                    "source_relations",
                 ],
                 "family_state": "empty",
             })

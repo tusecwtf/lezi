@@ -534,8 +534,9 @@ interface SyncBackend {
 
     /**
      * When false, [ReplicaSyncEngine] keeps the legacy authority reconcile path and
-     * does not freeze causal mutation epochs. Http backends that speak the causal
-     * reconcile/commit routes return true.
+     * does not freeze causal mutation epochs. Production [HttpSyncBackend] returns true
+     * only when the last health probe advertised the frozen causal capability set;
+     * recording/test backends opt in explicitly.
      */
     fun supportsCausalWire(): Boolean = false
 
@@ -556,6 +557,18 @@ interface SyncBackend {
         session: SyncSession,
         units: List<CausalMutationUnit>,
     ): CausalBatchResult = throw UnsupportedOperationException("Causal commit is not implemented")
+
+    /**
+     * Stage media bytes into the family authority media store before causal commit.
+     * Mutation envelopes carry only the manifest; bytes must already be present for
+     * accept/branch. Idempotent when the same sha256/size is already stored.
+     */
+    suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ): Unit = throw UnsupportedOperationException("Causal media preimage upload is not implemented")
 
     suspend fun members(session: SyncSession): List<FamilyMember>
     /** Owner updates immediately; ordinary Member receives a pending approval request. */

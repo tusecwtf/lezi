@@ -329,6 +329,9 @@ internal class RecordingSyncBackend : SyncBackend {
             "device_disaster_restore_v1",
             "authoritative_reconcile_v1",
             "validated_deferred_fulfillment_v1",
+            "causal_versions",
+            "wake_observation",
+            "source_relations",
         ),
     )
     var anonymousReadyResult = AnonymousReadiness(version = "0.3.3")
@@ -727,6 +730,25 @@ internal class RecordingSyncBackend : SyncBackend {
     override fun supportsCausalWire(): Boolean =
         enableCausal || onCausalReconcile != null || nextCausalReconcile != null ||
             onCausalCommit != null || nextCausalCommit != null
+
+    override suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ) {
+        // Recording backend accepts preimages as no-ops; production Http stages bytes.
+        syncOrder += "causal_media_preimage:$mediaUuid"
+        source.openStream().use { stream ->
+            var remaining = source.contentLength
+            val buf = ByteArray(8_192)
+            while (remaining > 0) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                remaining -= n
+            }
+        }
+    }
 
     override suspend fun causalReconcile(
         session: SyncSession,

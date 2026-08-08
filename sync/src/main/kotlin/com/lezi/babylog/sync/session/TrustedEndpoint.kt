@@ -35,6 +35,12 @@ const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
 const val CAPABILITY_DISASTER_RESTORE = "device_disaster_restore_v1"
 const val CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT =
     "validated_deferred_fulfillment_v1"
+/** Causal version graph + three-way merge (wire §1). */
+const val CAPABILITY_CAUSAL_VERSIONS = "causal_versions"
+/** WakeObservation atomic root (wire §1 / §4.5). */
+const val CAPABILITY_WAKE_OBSERVATION = "wake_observation"
+/** Non-destructive source relations (wire §1 / §12). */
+const val CAPABILITY_SOURCE_RELATIONS = "source_relations"
 
 enum class EndpointTrustMode {
     SystemPki,

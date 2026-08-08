@@ -20,7 +20,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::StreamExt;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -37,6 +37,72 @@ pub(crate) async fn retired_ordinary_media_upload() -> Result<Json<Value>, ApiEr
     Err(ApiError::unprocessable(
         "ordinary media upload is retired; upload media through an atomic bundle",
     ))
+}
+
+/// Stage media bytes into the family authority media store for causal commit.
+/// Mutation JSON carries only the manifest; accept/branch requires the file present
+/// under `media/{family}/{uuid}`. Idempotent when the same length+sha already exists.
+pub(crate) async fn put_causal_media_preimage(
+    State(state): State<Arc<AppState>>,
+    AxumPath(client_uuid): AxumPath<Uuid>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let expected_sha = headers
+        .get("x-lezi-media-sha256")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')))
+        .ok_or_else(|| {
+            ApiError::unprocessable("X-Lezi-Media-Sha256 required (64 lowercase hex)")
+        })?;
+    let content = axum::body::to_bytes(body, state.max_media_bytes)
+        .await
+        .map_err(|_| ApiError::unprocessable("media body too large or unreadable"))?
+        .to_vec();
+    if content.is_empty() {
+        return Err(ApiError::unprocessable("media body must be non-empty"));
+    }
+    let digest = hex::encode(Sha256::digest(&content));
+    if digest != expected_sha {
+        return Err(ApiError::unprocessable(
+            "media body sha256 does not match X-Lezi-Media-Sha256",
+        ));
+    }
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let path = state.media_path(&principal.family_id, client_uuid)?;
+    let byte_size = content.len() as i64;
+    let digest_for_write = digest.clone();
+    run_blocking(move || {
+        if path.is_file() {
+            let existing = fs::read(&path)?;
+            if existing.len() == content.len() {
+                let existing_digest = hex::encode(Sha256::digest(&existing));
+                if existing_digest == digest_for_write {
+                    return Ok(());
+                }
+            }
+            return Err(ApiError::conflict(
+                "authority media bytes already exist with different content",
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+            secure_directory(parent)?;
+        }
+        write_private_file(&path, &content)?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({
+        "media_uuid": client_uuid.to_string(),
+        "status": "staged",
+        "byte_size": byte_size,
+        "sha256": digest,
+    })))
 }
 
 pub(crate) async fn get_media(

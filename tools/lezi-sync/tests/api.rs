@@ -555,7 +555,8 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
             "authoritative_reconcile_v1",
             "validated_deferred_fulfillment_v1",
             "causal_versions",
-            "wake_observation"
+            "wake_observation",
+            "source_relations"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -982,6 +983,7 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "validated_deferred_fulfillment_v1",
                 "causal_versions",
                 "wake_observation",
+                "source_relations",
             ],
             "family_state": "empty",
         })
@@ -1017,6 +1019,7 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "validated_deferred_fulfillment_v1",
                 "causal_versions",
                 "wake_observation",
+                "source_relations",
             ],
             "family_state": "configured",
         })

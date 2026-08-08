@@ -531,10 +531,39 @@ internal class ReplicaSyncEngine(
             isNextFeedPlanNote(wire.note) &&
             existing.createdByMembershipId.isNotBlank() &&
             existing.createdByMembershipId != wire.createdByMembershipId
+        val causalVersionAdvance = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId != existing.baseVersion
+        val causalSameVersion = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId == existing.baseVersion
+        if (causalSameVersion && !concurrentNextFeedCreate) {
+            acknowledgedEqualRevisionCreator(
+                session = session,
+                existingCreator = existing.createdByMembershipId,
+                payloadJson = entity.payloadJson,
+            )?.let { creator ->
+                carePlanDao.update(existing.copy(createdByMembershipId = creator))
+            }
+            carePlanDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "care_plan",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
+        }
         // A deterministic next-feed UUID lets the NAS choose one creator when two
         // members schedule offline. The losing local create must accept that winner;
         // Standard dirty CarePlan edits keep the creator ACL/LWW behavior.
-        if (!concurrentNextFeedCreate && !forceAuthority) {
+        if (!concurrentNextFeedCreate && !forceAuthority && !causalVersionAdvance) {
             // Match server LWW for business fields. Equal revisions may still carry
             // the NAS-owned immutable creator acknowledgement after a push.
             if (existing != null && existing.updatedAt > entity.updatedAt) {
@@ -884,7 +913,30 @@ internal class ReplicaSyncEngine(
             }
             return true
         }
-        if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) {
+        val causalVersionAdvance = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId != existing.baseVersion
+        val causalSameVersion = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId == existing.baseVersion
+        if (causalSameVersion) {
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "wake_observation",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
+        }
+        if (!forceAuthority && !causalVersionAdvance && existing != null &&
+            existing.updatedAt > entity.updatedAt
+        ) {
             return true
         }
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
@@ -973,9 +1025,33 @@ internal class ReplicaSyncEngine(
             }
             return true
         }
-        // Match server LWW for business fields. Equal revisions may still carry
-        // the NAS-owned immutable creator acknowledgement after a push.
-        if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) return true
+        val causalVersionAdvance = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId != existing.baseVersion
+        val causalSameVersion = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId == existing.baseVersion
+        if (causalSameVersion) {
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "custom_item",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
+            }
+            return true
+        }
+        // Pre-causal residual LWW only when version_id is absent or unchanged.
+        if (!forceAuthority && !causalVersionAdvance && existing != null &&
+            existing.updatedAt > entity.updatedAt
+        ) {
+            return true
+        }
         val creator = resolvedImmutableCreator(
             session = session,
             existingCreator = existing?.createdByMembershipId,
@@ -1081,27 +1157,48 @@ internal class ReplicaSyncEngine(
                 }
                 return true
             }
-            if (existing.updatedAt > entity.updatedAt) return true
-            val exactRevision = existing.updatedAt == entity.updatedAt &&
-                existing.nickname == wire.nickname &&
-                existing.sex == wire.sex &&
-                existing.birthdayEpochDay == wire.birthdayEpochDay &&
-                existing.birthWeightGrams == wire.birthWeightGrams &&
-                existing.avatarMediaUuid == wire.avatarMediaUuid &&
-                existing.deletedAt == entity.deletedAt
-            if (exactRevision) {
-                if (existing.syncDirty) {
-                    babyDao.markSynced(entity.clientUuid, entity.updatedAt)
-                }
-                if (entity.versionId != null && existing.baseVersion != entity.versionId) {
-                    babyDao.update(existing.copy(baseVersion = entity.versionId, syncDirty = false))
+            val causalVersionAdvance = backend.supportsCausalWire() &&
+                entity.versionId != null &&
+                entity.versionId != existing.baseVersion
+            val causalSameVersion = backend.supportsCausalWire() &&
+                entity.versionId != null &&
+                entity.versionId == existing.baseVersion
+            if (causalSameVersion) {
+                entity.conflictSummary?.let {
+                    causalSettlement.applyPullConflictSummary(
+                        "baby",
+                        entity.clientUuid,
+                        it,
+                        entity.updatedAt,
+                    )
                 }
                 return true
             }
-            if (existing.updatedAt == entity.updatedAt) {
-                return !existing.syncDirty
+            if (!causalVersionAdvance) {
+                if (existing.updatedAt > entity.updatedAt) return true
+                val exactRevision = existing.updatedAt == entity.updatedAt &&
+                    existing.nickname == wire.nickname &&
+                    existing.sex == wire.sex &&
+                    existing.birthdayEpochDay == wire.birthdayEpochDay &&
+                    existing.birthWeightGrams == wire.birthWeightGrams &&
+                    existing.avatarMediaUuid == wire.avatarMediaUuid &&
+                    existing.deletedAt == entity.deletedAt
+                if (exactRevision) {
+                    if (existing.syncDirty) {
+                        babyDao.markSynced(entity.clientUuid, entity.updatedAt)
+                    }
+                    if (entity.versionId != null && existing.baseVersion != entity.versionId) {
+                        babyDao.update(
+                            existing.copy(baseVersion = entity.versionId, syncDirty = false),
+                        )
+                    }
+                    return true
+                }
+                if (existing.updatedAt == entity.updatedAt) {
+                    return !existing.syncDirty
+                }
+                if (existing.syncDirty) return false
             }
-            if (existing.syncDirty) return false
         }
         val familyId = existing?.familyId ?: familyDao.listAll().firstOrNull()?.id ?: return false
         babyDao.upsert(
@@ -1172,23 +1269,55 @@ internal class ReplicaSyncEngine(
             }
             return true
         }
-        // Match server LWW for business fields. Equal revisions may still carry
-        // a server-owned author metadata acknowledgement from the current server.
-        if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) {
-            recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
-            return true
-        }
-        if (!forceAuthority && existing != null && existing.updatedAt == entity.updatedAt) {
+        // Causal stable projection is version_id-addressed. When version_id advanced,
+        // apply content even if updated_at is equal/lower (server max() may equalize stamps).
+        // Residual updatedAt LWW remains only for pre-causal rows (no version_id).
+        val causalVersionAdvance = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId != existing.baseVersion
+        val causalSameVersion = !forceAuthority &&
+            backend.supportsCausalWire() &&
+            existing != null &&
+            entity.versionId != null &&
+            entity.versionId == existing.baseVersion
+        if (causalSameVersion) {
             recordDao.mergeCanonicalAuthor(
                 clientUuid = entity.clientUuid,
-                expectedUpdatedAt = entity.updatedAt,
+                expectedUpdatedAt = existing.updatedAt,
                 membershipId = wire.createdByMembershipId,
             )
             recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
-            if (entity.versionId != null && existing.baseVersion != entity.versionId) {
-                recordDao.update(existing.copy(baseVersion = entity.versionId, syncDirty = false))
+            entity.conflictSummary?.let {
+                causalSettlement.applyPullConflictSummary(
+                    "record",
+                    entity.clientUuid,
+                    it,
+                    entity.updatedAt,
+                )
             }
             return true
+        }
+        if (!causalVersionAdvance) {
+            // Match server LWW for business fields. Equal revisions may still carry
+            // a server-owned author metadata acknowledgement from the current server.
+            if (!forceAuthority && existing != null && existing.updatedAt > entity.updatedAt) {
+                recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
+                return true
+            }
+            if (!forceAuthority && existing != null && existing.updatedAt == entity.updatedAt) {
+                recordDao.mergeCanonicalAuthor(
+                    clientUuid = entity.clientUuid,
+                    expectedUpdatedAt = entity.updatedAt,
+                    membershipId = wire.createdByMembershipId,
+                )
+                recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
+                if (entity.versionId != null && existing.baseVersion != entity.versionId) {
+                    recordDao.update(existing.copy(baseVersion = entity.versionId, syncDirty = false))
+                }
+                return true
+            }
         }
         val baby = babyDao.getByClientUuid(wire.babyClientUuid) ?: return false
         recordDao.upsert(

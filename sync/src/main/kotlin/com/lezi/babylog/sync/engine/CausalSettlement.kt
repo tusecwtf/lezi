@@ -126,6 +126,11 @@ internal class CausalSettlement(
             }
         }
         if (publishable.isEmpty()) return
+        // Wire forbids media bytes in mutation JSON; stage preimages into the authority
+        // media store before commit so require_media_bytes_present can pass.
+        for (unit in publishable) {
+            stageCausalMediaPreimages(session, unit)
+        }
         requireRemoteAllowed(session)
         val commit = backend.causalCommit(session, publishable.map(FrozenCausalUnit::mutation))
         validateCausalProof(session, publishable, commit, forCommit = true)
@@ -353,8 +358,13 @@ internal class CausalSettlement(
                     }.getOrNull()
                 }
                 val wire = SyncWireMapper.record(record, baby.clientUuid, customUuid)
+                // Wire §4.2: sleep closed key set omits end_timestamp entirely and always
+                // includes effective_wake_observation_client_uuid (nullable).
                 val withSleep = if (record.type == "sleep") {
-                    injectEffectiveWake(wire.payloadJson, record.effectiveWakeObservationClientUuid)
+                    injectEffectiveWake(
+                        omitJsonKey(wire.payloadJson, "end_timestamp"),
+                        record.effectiveWakeObservationClientUuid,
+                    )
                 } else {
                     wire.payloadJson
                 }
@@ -453,16 +463,64 @@ internal class CausalSettlement(
         }
     }
 
+    /**
+     * Stage local media bytes into the authority media store before causal commit.
+     * Mutation JSON carries only the manifest; server require_media_bytes_present
+     * rejects accept/branch when files are absent.
+     */
+    private suspend fun stageCausalMediaPreimages(
+        session: SyncSession,
+        unit: FrozenCausalUnit,
+    ) {
+        if (unit.mutation.media.isEmpty()) return
+        requireRemoteAllowed(session)
+        for (item in unit.mutation.media) {
+            val asset = mediaDao.getByClientUuid(item.mediaUuid)
+                ?: throw AuthorityProofException(
+                    session.pullGeneration,
+                    IllegalArgumentException("因果媒体本地元数据缺失: ${item.mediaUuid}"),
+                )
+            if (asset.localUri.isBlank()) {
+                throw AuthorityProofException(
+                    session.pullGeneration,
+                    IllegalArgumentException("因果媒体本地字节缺失: ${item.mediaUuid}"),
+                )
+            }
+            val prepared = runCatching { mediaFiles.prepareUpload(asset.localUri) }.getOrNull()
+                ?: throw AuthorityProofException(
+                    session.pullGeneration,
+                    IllegalArgumentException("因果媒体无法准备上传: ${item.mediaUuid}"),
+                )
+            prepared.use { media ->
+                require(media.contentLength == item.byteSize) {
+                    "因果媒体字节长度与冻结清单不一致"
+                }
+                val digest = sha256Hex(media.file.readBytes())
+                require(digest == item.sha256) {
+                    "因果媒体 sha256 与冻结清单不一致"
+                }
+                backend.putCausalMediaPreimage(
+                    session = session,
+                    mediaUuid = item.mediaUuid,
+                    source = media,
+                    sha256 = item.sha256,
+                )
+            }
+        }
+    }
+
     private suspend fun applyConfirmed(unit: FrozenCausalUnit, result: CausalUnitResult) {
         val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() }
             ?: throw AuthorityProofException(
                 result.generation,
                 IllegalArgumentException("confirmed 缺少 stable_version_id"),
             )
+        // CAS on frozen contentEpoch first — never rewrite updatedAt before ack.
+        val acked = acknowledgeAccepted(unit, stableVersion)
+        if (!acked) return
         if (result.stableRootJson.isNotBlank() && result.stableRootJson != "{}") {
-            applyStableProjection(unit, result, asVisibleRoot = true)
+            applyStableProjectionAfterAck(unit, result)
         }
-        acknowledgeAccepted(unit, stableVersion)
         unit.candidates.filter { it.entityType == "media" }.forEach { media ->
             mediaDao.markSynced(media.clientUuid, media.updatedAt)
         }
@@ -474,8 +532,10 @@ internal class CausalSettlement(
                 result.generation,
                 IllegalArgumentException("accepted/merged 缺少 stable_version_id"),
             )
-        applyStableProjection(unit, result, asVisibleRoot = true)
-        acknowledgeAccepted(unit, stableVersion)
+        // CAS clears mutation on frozen contentEpoch, then project stable business fields.
+        val acked = acknowledgeAccepted(unit, stableVersion)
+        if (!acked) return
+        applyStableProjectionAfterAck(unit, result)
         unit.candidates.filter { it.entityType == "media" }.forEach { media ->
             mediaDao.markSynced(media.clientUuid, media.updatedAt)
         }
@@ -497,8 +557,7 @@ internal class CausalSettlement(
                 result.generation,
                 IllegalArgumentException("branched 缺少 stable_version_id"),
             )
-        // Visible row becomes server stable projection; local branch lives in receipt/detail.
-        applyStableProjection(unit, result, asVisibleRoot = true)
+        // CAS first on frozen epoch so openConflictId sticks; then project prior stable root.
         val acked = when (unit.mutation.entityType) {
             "baby" -> babyDao.acknowledgeCausalBranched(
                 clientUuid = unit.mutation.clientUuid,
@@ -543,6 +602,7 @@ internal class CausalSettlement(
             else -> false
         }
         if (!acked) return
+        applyStableProjectionAfterAck(unit, result)
         conflictSummaryDao.upsert(
             ConflictSummaryEntity(
                 conflictId = conflictId,
@@ -594,7 +654,7 @@ internal class CausalSettlement(
         )
     }
 
-    private suspend fun acknowledgeAccepted(unit: FrozenCausalUnit, stableVersion: String) {
+    private suspend fun acknowledgeAccepted(unit: FrozenCausalUnit, stableVersion: String): Boolean =
         when (unit.mutation.entityType) {
             "baby" -> babyDao.acknowledgeCausalAcceptedOrMerged(
                 clientUuid = unit.mutation.clientUuid,
@@ -626,32 +686,27 @@ internal class CausalSettlement(
                 expectedContentEpoch = unit.contentEpoch,
                 newBaseVersion = stableVersion,
             )
+            else -> false
         }
-    }
 
     /**
-     * Apply full stable root content from the server response when the frozen
-     * mutation epoch still matches. [asVisibleRoot]=true rewrites ordinary row fields.
+     * After successful mutation CAS, apply full stable root business fields + server
+     * [updated_at]. Must not run before ack: rewriting contentEpoch would fail the CAS.
      */
-    private suspend fun applyStableProjection(
+    private suspend fun applyStableProjectionAfterAck(
         unit: FrozenCausalUnit,
         result: CausalUnitResult,
-        asVisibleRoot: Boolean,
     ) {
-        val local = loadCausalLocal(unit.mutation.entityType, unit.mutation.clientUuid) ?: return
-        if (local.mutationId != result.mutationId) return
-        if (local.contentEpoch != unit.contentEpoch) return
         val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() } ?: return
-        if (!asVisibleRoot) return
         val root = runCatching {
             Json.parseToJsonElement(result.stableRootJson).jsonObject
         }.getOrNull() ?: return
         when (unit.mutation.entityType) {
-            "record" -> applyStableRecord(unit.mutation.clientUuid, root, stableVersion, result)
-            "baby" -> applyStableBaby(unit.mutation.clientUuid, root, stableVersion, result)
-            "care_plan" -> applyStableCarePlan(unit.mutation.clientUuid, root, stableVersion, result)
-            "custom_item" -> applyStableCustomItem(unit.mutation.clientUuid, root, stableVersion, result)
-            "wake_observation" -> applyStableWake(unit.mutation.clientUuid, root, stableVersion, result)
+            "record" -> applyStableRecord(unit.mutation.clientUuid, root, stableVersion)
+            "baby" -> applyStableBaby(unit.mutation.clientUuid, root, stableVersion)
+            "care_plan" -> applyStableCarePlan(unit.mutation.clientUuid, root, stableVersion)
+            "custom_item" -> applyStableCustomItem(unit.mutation.clientUuid, root, stableVersion)
+            "wake_observation" -> applyStableWake(unit.mutation.clientUuid, root, stableVersion)
         }
     }
 
@@ -659,7 +714,6 @@ internal class CausalSettlement(
         clientUuid: String,
         root: JsonObject,
         stableVersion: String,
-        result: CausalUnitResult,
     ) {
         val existing = recordDao.getByClientUuid(clientUuid) ?: return
         val note = root.stringOrNull("note")
@@ -670,15 +724,6 @@ internal class CausalSettlement(
         val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
         val payload = root["payload_json"] as? JsonObject
         val payloadJson = payload?.toString() ?: existing.payloadJson
-        val deletedAt = if (result.status == CausalCommitStatus.ACCEPTED ||
-            result.status == CausalCommitStatus.MERGED ||
-            result.status == CausalReconcileStatus.CONFIRMED
-        ) {
-            // Preserve tombstone only when stable root lacks live type fields and existing deleted.
-            existing.deletedAt
-        } else {
-            existing.deletedAt
-        }
         recordDao.update(
             existing.copy(
                 note = note,
@@ -686,8 +731,12 @@ internal class CausalSettlement(
                 endTimestamp = endTimestamp,
                 payloadJson = payloadJson,
                 updatedAt = updatedAt,
-                deletedAt = deletedAt,
                 baseVersion = stableVersion,
+                // Ack already cleared mutation/dirty/conflict; keep those columns.
+                mutationId = existing.mutationId,
+                syncDirty = existing.syncDirty,
+                openConflictId = existing.openConflictId,
+                localBranchVersionId = existing.localBranchVersionId,
                 effectiveWakeObservationClientUuid =
                     root.stringOrNull("effective_wake_observation_client_uuid")
                         ?: existing.effectiveWakeObservationClientUuid,
@@ -699,7 +748,6 @@ internal class CausalSettlement(
         clientUuid: String,
         root: JsonObject,
         stableVersion: String,
-        result: CausalUnitResult,
     ) {
         val existing = babyDao.getByClientUuid(clientUuid) ?: return
         val nickname = root.stringOrNull("nickname") ?: existing.nickname
@@ -713,6 +761,10 @@ internal class CausalSettlement(
                 avatarMediaUuid = avatar,
                 updatedAt = updatedAt,
                 baseVersion = stableVersion,
+                mutationId = existing.mutationId,
+                syncDirty = existing.syncDirty,
+                openConflictId = existing.openConflictId,
+                localBranchVersionId = existing.localBranchVersionId,
             ),
         )
     }
@@ -721,7 +773,6 @@ internal class CausalSettlement(
         clientUuid: String,
         root: JsonObject,
         stableVersion: String,
-        result: CausalUnitResult,
     ) {
         val existing = carePlanDao.getByClientUuid(clientUuid) ?: return
         val note = root.stringOrNull("note")
@@ -735,6 +786,10 @@ internal class CausalSettlement(
                 payloadJson = payload?.toString() ?: existing.payloadJson,
                 updatedAt = updatedAt,
                 baseVersion = stableVersion,
+                mutationId = existing.mutationId,
+                syncDirty = existing.syncDirty,
+                openConflictId = existing.openConflictId,
+                localBranchVersionId = existing.localBranchVersionId,
             ),
         )
     }
@@ -743,7 +798,6 @@ internal class CausalSettlement(
         clientUuid: String,
         root: JsonObject,
         stableVersion: String,
-        result: CausalUnitResult,
     ) {
         val existing = customItemDao.getByClientUuid(clientUuid) ?: return
         val name = root.stringOrNull("name") ?: existing.name
@@ -755,6 +809,10 @@ internal class CausalSettlement(
                 iconSlot = iconSlot,
                 updatedAt = updatedAt,
                 baseVersion = stableVersion,
+                mutationId = existing.mutationId,
+                syncDirty = existing.syncDirty,
+                openConflictId = existing.openConflictId,
+                localBranchVersionId = existing.localBranchVersionId,
             ),
         )
     }
@@ -763,7 +821,6 @@ internal class CausalSettlement(
         clientUuid: String,
         root: JsonObject,
         stableVersion: String,
-        result: CausalUnitResult,
     ) {
         val existing = wakeObservationDao.getByClientUuid(clientUuid) ?: return
         val wakeTs = root["wake_timestamp"]?.jsonPrimitive?.longOrNull ?: existing.wakeTimestamp
@@ -778,6 +835,10 @@ internal class CausalSettlement(
                 withdrawn = withdrawn,
                 updatedAt = updatedAt,
                 baseVersion = stableVersion,
+                mutationId = existing.mutationId,
+                syncDirty = existing.syncDirty,
+                openConflictId = existing.openConflictId,
+                localBranchVersionId = existing.localBranchVersionId,
             ),
         )
     }
@@ -1005,6 +1066,17 @@ private fun injectEffectiveWake(payloadJson: String, effectiveWake: String?): St
     }.toString()
 }
 
+/** Drop a key entirely (wire closed sets treat absence ≠ null for forbidden fields). */
+private fun omitJsonKey(payloadJson: String, key: String): String {
+    val obj = Json.parseToJsonElement(payloadJson).jsonObject
+    if (key !in obj) return payloadJson
+    return buildJsonObject {
+        obj.forEach { (k, v) ->
+            if (k != key) put(k, v)
+        }
+    }.toString()
+}
+
 private fun JsonObject.stringOrNull(key: String): String? =
     when (val value = this[key]) {
         null, JsonNull -> null
@@ -1012,23 +1084,65 @@ private fun JsonObject.stringOrNull(key: String): String? =
         else -> null
     }
 
+/**
+ * Server-parity request content hash (Rust `mutation_content_hash` / wire request_hash).
+ * Canonical JSON of sorted `{entity_type,client_uuid,base_version,deleted,root,media}`.
+ */
 internal fun causalMutationContentHash(unit: CausalMutationUnit): String {
-    val source = buildString {
-        append(unit.entityType).append('\u0000')
-        append(unit.clientUuid).append('\u0000')
-        append(unit.baseVersion ?: "").append('\u0000')
-        append(unit.deleted).append('\u0000')
-        append(Json.parseToJsonElement(unit.rootJson).toString()).append('\u0000')
+    val root = Json.parseToJsonElement(unit.rootJson)
+    val mediaArray = buildJsonArray {
         unit.media.sortedBy(CausalMediaItem::mediaUuid).forEach { media ->
-            append(media.mediaUuid).append('\u0000')
-            append(media.role).append('\u0000')
-            append(media.sha256).append('\u0000')
-            append(media.byteSize).append('\u0000')
-            append(media.mime).append('\u0000')
+            add(
+                buildJsonObject {
+                    put("byte_size", media.byteSize)
+                    put("media_uuid", media.mediaUuid)
+                    put("mime", media.mime)
+                    put("role", media.role)
+                    put("sha256", media.sha256)
+                    // Match serde skip_serializing_if=None: omit absent optional dims.
+                    media.height?.let { put("height", it) }
+                    media.width?.let { put("width", it) }
+                },
+            )
         }
     }
-    return sha256Hex(source.toByteArray(Charsets.UTF_8))
+    val payload = buildJsonObject {
+        if (unit.baseVersion == null) {
+            put("base_version", JsonNull)
+        } else {
+            put("base_version", unit.baseVersion)
+        }
+        put("client_uuid", unit.clientUuid)
+        put("deleted", unit.deleted)
+        put("entity_type", unit.entityType)
+        put("media", mediaArray)
+        put("root", root)
+    }
+    return sha256Hex(canonicalJson(payload).toByteArray(Charsets.UTF_8))
 }
+
+/**
+ * Sorted-key canonical form matching Rust `canonical_json` in causal_merge.rs.
+ * Objects: `{` + sorted `"k":v` pairs + `}`; arrays preserve order; primitives via JSON.
+ */
+internal fun canonicalJson(element: kotlinx.serialization.json.JsonElement): String =
+    when (element) {
+        is JsonObject -> {
+            val keys = element.keys.sorted()
+            keys.joinToString(separator = ",", prefix = "{", postfix = "}") { key ->
+                val keyLiteral = JsonPrimitive(key).toString()
+                "$keyLiteral:${canonicalJson(element.getValue(key))}"
+            }
+        }
+        is JsonArray -> {
+            element.joinToString(separator = ",", prefix = "[", postfix = "]") { item ->
+                canonicalJson(item)
+            }
+        }
+        JsonNull -> "null"
+        is JsonPrimitive -> element.toString()
+        else -> "null"
+    }
 
 private fun encodeBranchVersionIdsJson(ids: List<String>): String =
     buildJsonArray { ids.sorted().forEach { add(JsonPrimitive(it)) } }.toString()

@@ -471,6 +471,267 @@ class ReplicaSyncEngineCausalSettlementTest {
         // After recovery the engine re-settles; accepted commit may clear dirty.
         assertThat(rig.backend.causalReconciledUnits.size).isAtLeast(2)
     }
+
+    @Test
+    fun acceptedWithStableRootUpdatedAtDifferentFromFrozenEpochClearsMutation() = runTest {
+        // correctness-01: projection must not rewrite contentEpoch before CAS ack.
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true, baseVersion = "v-b"),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-epoch-cas",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "local",
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-r0",
+            ),
+        )
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            // Server max(updated_at) often differs from frozen local epoch.
+            val stableRoot = """
+                {
+                  "baby_client_uuid":"baby-local",
+                  "type":"formula",
+                  "custom_item_client_uuid":null,
+                  "timestamp":100,
+                  "note":"accepted-stable",
+                  "payload_json":{"amount_ml":60},
+                  "schema_version":2,
+                  "updated_at":999
+                }
+            """.trimIndent()
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.ACCEPTED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-r1",
+                        stableRootJson = stableRoot,
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val row = requireNotNull(rig.records.getByClientUuid("record-epoch-cas"))
+        assertThat(row.syncDirty).isFalse()
+        assertThat(row.mutationId).isNull()
+        assertThat(row.baseVersion).isEqualTo("v-r1")
+        assertThat(row.note).isEqualTo("accepted-stable")
+        assertThat(row.updatedAt).isEqualTo(999)
+        assertThat(row.openConflictId).isNull()
+    }
+
+    @Test
+    fun branchedWithStableRootUpdatedAtDifferentSetsOpenConflict() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-branch-epoch",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "local note",
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 200,
+                syncDirty = true,
+                baseVersion = "v-base",
+            ),
+        )
+        rig.backend.onCausalReconcile = { units ->
+            val unit = units.single()
+            rig.backend.nextCausalReconcile = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalReconcileStatus.CONFLICT_PREVIEW,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-base",
+                        stableRootJson = """{"note":"remote","updated_at":50}""",
+                    ),
+                ),
+            )
+        }
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-base",
+                        stableRootJson = """{"note":"remote","updated_at":50}""",
+                        branchVersionId = "branch-v9",
+                        conflictId = "conflict-epoch",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val branched = requireNotNull(rig.records.getByClientUuid("record-branch-epoch"))
+        assertThat(branched.syncDirty).isFalse()
+        assertThat(branched.openConflictId).isEqualTo("conflict-epoch")
+        assertThat(branched.localBranchVersionId).isEqualTo("branch-v9")
+        assertThat(branched.baseVersion).isEqualTo("v-base")
+        assertThat(branched.note).isEqualTo("remote")
+        // No infinite dirty resend.
+        val commitsBefore = rig.backend.causalCommittedUnits.size
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        assertThat(rig.backend.causalCommittedUnits).hasSize(commitsBefore)
+    }
+
+    @Test
+    fun sleepCausalRootOmitsEndTimestampAndIncludesEffectiveWake() = runTest {
+        // correctness-03: closed sleep key set for causal freeze.
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "sleep-causal",
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 100,
+                endTimestamp = 200, // local legacy column must not appear on causal wire
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 50,
+                syncDirty = true,
+                effectiveWakeObservationClientUuid = null,
+            ),
+        )
+        var frozenRoot: String? = null
+        rig.backend.onCausalReconcile = { units ->
+            frozenRoot = units.single().rootJson
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val root = requireNotNull(frozenRoot)
+        assertThat(root).doesNotContain("end_timestamp")
+        assertThat(root).contains("effective_wake_observation_client_uuid")
+        val settled = requireNotNull(rig.records.getByClientUuid("sleep-causal"))
+        assertThat(settled.syncDirty).isFalse()
+    }
+
+    @Test
+    fun pullAppliesVersionIdAdvanceEvenWhenUpdatedAtEqual() = runTest {
+        // correctness-05: residual LWW must not drop peer content on equal updated_at.
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true, baseVersion = "v-b"),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-vid-pull",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "local-v1",
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = false,
+                baseVersion = "v1",
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteReplicaRecord("record-vid-pull").copy(
+                    updatedAt = 100, // same stamp; version advanced
+                    versionId = "v2",
+                    conflictSummary = PullConflictSummary(
+                        conflictId = "c-eq",
+                        entityType = "record",
+                        clientUuid = "record-vid-pull",
+                        stableVersionId = "v2",
+                        branchVersionIds = listOf("b-eq"),
+                    ),
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-local",
+                          "created_by_membership_id":"membership-b",
+                          "type":"formula",
+                          "custom_item_client_uuid":null,
+                          "timestamp":210,
+                          "end_timestamp":null,
+                          "note":"peer-v2",
+                          "payload_json":{"amount_ml":90},
+                          "schema_version":2
+                        }
+                    """.trimIndent(),
+                ),
+            ),
+            cursor = 3,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        val row = requireNotNull(rig.records.getByClientUuid("record-vid-pull"))
+        assertThat(row.note).isEqualTo("peer-v2")
+        assertThat(row.baseVersion).isEqualTo("v2")
+        assertThat(row.openConflictId).isEqualTo("c-eq")
+    }
+
+    @Test
+    fun causalMutationContentHashMatchesServerCanonicalGolden() {
+        // correctness-02: parity with Rust mutation_content_hash golden.
+        val unit = com.lezi.babylog.sync.backend.CausalMutationUnit(
+            mutationId = "mut-unused-in-hash",
+            baseVersion = "v-r0",
+            entityType = "record",
+            clientUuid = "11111111-1111-1111-1111-111111111111",
+            rootJson = """
+                {
+                  "baby_client_uuid":"22222222-2222-2222-2222-222222222222",
+                  "custom_item_client_uuid":null,
+                  "note":null,
+                  "payload_json":{"amount_ml":90},
+                  "schema_version":2,
+                  "timestamp":100,
+                  "type":"formula",
+                  "updated_at":100
+                }
+            """.trimIndent(),
+            media = emptyList(),
+            deleted = false,
+        )
+        assertThat(causalMutationContentHash(unit))
+            .isEqualTo("ff2cec4612265f208e3c3a06029fdd1e24c0d75a2081c89e8468812720e9a83a")
+    }
 }
 
 @RunWith(Parameterized::class)

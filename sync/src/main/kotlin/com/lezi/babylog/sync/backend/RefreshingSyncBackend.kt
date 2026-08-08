@@ -159,6 +159,27 @@ internal class RefreshingSyncBackend(
         bundleId: String,
     ): BundleCommitResult = authenticated(session) { delegate.commitBundle(it, bundleId) }
 
+    override fun supportsCausalWire(): Boolean = delegate.supportsCausalWire()
+
+    override suspend fun causalReconcile(
+        session: SyncSession,
+        units: List<com.lezi.babylog.sync.backend.CausalMutationUnit>,
+    ) = authenticated(session) { delegate.causalReconcile(it, units) }
+
+    override suspend fun causalCommit(
+        session: SyncSession,
+        units: List<com.lezi.babylog.sync.backend.CausalMutationUnit>,
+    ) = authenticated(session) { delegate.causalCommit(it, units) }
+
+    override suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ) = authenticated(session) {
+        delegate.putCausalMediaPreimage(it, mediaUuid, source, sha256)
+    }
+
     private suspend fun <T> authenticated(
         requested: SyncSession,
         operation: suspend (SyncSession) -> T,
