@@ -64,6 +64,28 @@ data class BabyEntity(
     /** Local-only: this Baby identity was applied from the joined family authority. */
     @ColumnInfo(defaultValue = "0")
     val familyAuthority: Boolean = false,
+    /**
+     * Last acknowledged server stable `version_id` (opaque). Distinct from local
+     * [updatedAt] content revision. Null until a causal ack or pull provides one.
+     */
+    @ColumnInfo(defaultValue = "NULL")
+    val baseVersion: String? = null,
+    /**
+     * Stable mutation id for the current dirty content epoch. Reused on retries;
+     * regenerated only when local content epoch changes.
+     */
+    @ColumnInfo(defaultValue = "NULL")
+    val mutationId: String? = null,
+    /**
+     * Unresolved conflict retained on the server for the current mutation.
+     * When set, ordinary sync must not treat the row as fully consistent or
+     * infinitely re-push the same mutation ([syncDirty] is false after branch).
+     */
+    @ColumnInfo(defaultValue = "NULL")
+    val openConflictId: String? = null,
+    /** Server branch version for the local mutation after a `branched` receipt. */
+    @ColumnInfo(defaultValue = "NULL")
+    val localBranchVersionId: String? = null,
 )
 
 @Entity(
@@ -95,6 +117,25 @@ data class RecordEntity(
     /** Last root revision atomically committed by the family server; never a media receipt. */
     @ColumnInfo(defaultValue = "NULL")
     val familyPublishedUpdatedAt: Long? = null,
+    /**
+     * Last acknowledged server stable `version_id` (opaque). Distinct from local
+     * [updatedAt] content revision.
+     */
+    @ColumnInfo(defaultValue = "NULL")
+    val baseVersion: String? = null,
+    /** Stable mutation id for the current dirty content epoch. */
+    @ColumnInfo(defaultValue = "NULL")
+    val mutationId: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val openConflictId: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val localBranchVersionId: String? = null,
+    /**
+     * Effective WakeObservation for sleep records (causal projection). Null for
+     * non-sleep types and open SleepStart rows without a chosen observation.
+     */
+    @ColumnInfo(defaultValue = "NULL")
+    val effectiveWakeObservationClientUuid: String? = null,
 )
 
 /**
@@ -155,6 +196,14 @@ data class CarePlanEntity(
     /** Last root revision atomically committed by the family server; never a media receipt. */
     @ColumnInfo(defaultValue = "NULL")
     val familyPublishedUpdatedAt: Long? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val baseVersion: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val mutationId: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val openConflictId: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val localBranchVersionId: String? = null,
 )
 
 /**
@@ -237,6 +286,9 @@ data class MediaAssetEntity(
     val recordId: Long? = null,
     /** Owner care plan when this is a plan photo (mutually exclusive with log [recordId]). */
     val carePlanId: Long? = null,
+    /** Owner wake observation when this is a wake photo (kind=wake). */
+    @ColumnInfo(defaultValue = "NULL")
+    val wakeObservationId: Long? = null,
     @ColumnInfo(defaultValue = "''")
     val clientUuid: String = "",
     @ColumnInfo(defaultValue = "'log'")
@@ -255,6 +307,20 @@ data class MediaAssetEntity(
     val deletedAt: Long? = null,
     @ColumnInfo(defaultValue = "1")
     val syncDirty: Boolean = true,
+    /**
+     * Non-authoritative local bookkeeping only. Wire/ADR treat media as the parent
+     * atomic root's manifest (Record / CarePlan / Baby / WakeObservation); causal
+     * reconcile/commit is driven by the parent root's [baseVersion]/[mutationId]
+     * and [media_references], never by these columns alone.
+     */
+    @ColumnInfo(defaultValue = "NULL")
+    val baseVersion: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val mutationId: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val openConflictId: String? = null,
+    @ColumnInfo(defaultValue = "NULL")
+    val localBranchVersionId: String? = null,
 ) {
     init {
         when (kind) {
@@ -263,11 +329,20 @@ data class MediaAssetEntity(
                     "log media must belong to exactly one record or care plan"
                 }
                 require(babyId == null) { "log media must not belong directly to a baby" }
+                require(wakeObservationId == null) { "log media must not belong to a wake observation" }
             }
             "avatar" -> {
                 require(babyId != null) { "avatar media must belong to a baby" }
-                require(recordId == null && carePlanId == null) {
-                    "avatar media must not belong to a record or care plan"
+                require(recordId == null && carePlanId == null && wakeObservationId == null) {
+                    "avatar media must not belong to a record, care plan, or wake observation"
+                }
+            }
+            "wake" -> {
+                require(wakeObservationId != null) {
+                    "wake media must belong to a wake observation"
+                }
+                require(recordId == null && carePlanId == null && babyId == null) {
+                    "wake media must not belong to a record, care plan, or baby"
                 }
             }
             else -> throw IllegalArgumentException("unsupported media kind: $kind")

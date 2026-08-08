@@ -201,18 +201,19 @@ class LocalDataContractMigrationDeviceTest {
             storage = storage,
         )
         val gate = DefaultLocalDataGate(
-            currentContractVersion = 3,
+            currentContractVersion = 4,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 customItemStep,
                 OutboxRetirementUpgradeStep(storage.database),
+                CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir),
             ),
             environment = environment,
         )
 
         val ready = gate.ensureReady()
         assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
-        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(3))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(4))
 
         val room = Room.databaseBuilder(
             context,
@@ -239,8 +240,13 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(settings.nursingTimerJson.first()).isEqualTo(timerJson)
         assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.endTimestamp).isNull()
         assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.type).isEqualTo("sleep")
+        // Open sleep: no WakeObservation auto-close.
+        assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.effectiveWakeObservationClientUuid)
+            .isNull()
+        assertThat(room.wakeObservationDao().listForSleep(RECORD_UUID)).isEmpty()
         assertThat(room.mediaAssetDao().getByClientUuid(MEDIA_UUID)?.localUri)
             .isEqualTo("retained-contract-one.jpg")
+        assertThat(room.mediaReferenceDao().listForMedia(MEDIA_UUID)).isNotEmpty()
         assertThat(retainedMedia.readBytes().toList())
             .containsExactlyElementsIn(byteArrayOf(1, 2, 3, 4).toList())
             .inOrder()
@@ -263,11 +269,12 @@ class LocalDataContractMigrationDeviceTest {
         val versionCodes = mutableListOf<Int>()
         val observedBoundaries = mutableSetOf<Pair<Int, Int>>()
         val planner = LocalDataUpgradePlanner(
-            currentContractVersion = 3,
+            currentContractVersion = 4,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 CatalogMigrationStep(1, 2),
                 CatalogMigrationStep(2, 3),
+                CatalogMigrationStep(3, 4),
             ),
         )
 
@@ -282,20 +289,24 @@ class LocalDataContractMigrationDeviceTest {
             val inspection = detectLocalDataInspection(
                 markerVersion = contract,
                 roomSchema = roomSchema,
-                currentContractVersion = 3,
-                roomSchemasByContract = mapOf(1 to 24, 2 to 25, 3 to 26),
+                currentContractVersion = 4,
+                roomSchemasByContract = mapOf(1 to 24, 2 to 25, 3 to 26, 4 to 27),
             )
             val plan = planner.planFrom(inspection.contractVersion)
-            if (contract == 3) {
+            if (contract == 4) {
                 assertThat(plan).isEqualTo(LocalDataUpgradePlan.Ready)
             } else {
                 assertThat((plan as LocalDataUpgradePlan.Upgrade).steps.last().toContractVersion)
-                    .isEqualTo(3)
+                    .isEqualTo(4)
             }
         }
 
-        assertThat(versionCodes).containsExactlyElementsIn(6..18).inOrder()
+        assertThat(versionCodes).containsExactlyElementsIn(6..19).inOrder()
         assertThat(observedBoundaries).containsExactly(1 to 24, 2 to 25, 3 to 26)
+        val target = catalog.getJSONObject("upgrade_target")
+        assertThat(target.getInt("version_code")).isEqualTo(20)
+        assertThat(target.getInt("room_schema")).isEqualTo(27)
+        assertThat(target.getInt("local_data_contract")).isEqualTo(4)
     }
 
     @Test
@@ -344,7 +355,7 @@ class LocalDataContractMigrationDeviceTest {
             storage = storage,
         )
         val gate = DefaultLocalDataGate(
-            currentContractVersion = 3,
+            currentContractVersion = 4,
             minimumMigratableContractVersion = 1,
             steps = setOf(
                 CustomItemClientUuidIndexUpgradeStep(
@@ -352,6 +363,7 @@ class LocalDataContractMigrationDeviceTest {
                     SettingsDataSource(dataStore),
                 ),
                 OutboxRetirementUpgradeStep(storage.database),
+                CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir),
             ),
             environment = environment,
         )
@@ -359,7 +371,7 @@ class LocalDataContractMigrationDeviceTest {
         val ready = gate.ensureReady()
 
         assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
-        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(3))
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(4))
         val room = Room.databaseBuilder(
             context,
             LeziDatabase::class.java,
@@ -376,6 +388,7 @@ class LocalDataContractMigrationDeviceTest {
             }
         }
         assertThat(tables).doesNotContain("outbox")
+        assertThat(tables).contains("wake_observations")
         assertThat(retainedMedia.readBytes().toList())
             .containsExactlyElementsIn(byteArrayOf(1, 2, 3, 4).toList())
             .inOrder()
@@ -383,14 +396,31 @@ class LocalDataContractMigrationDeviceTest {
         // Simulate process death after migrate/verify but before the contract marker commit.
         openedDatabase?.close()
         openedDatabase = null
-        val retry = OutboxRetirementUpgradeStep(storage.database)
+        val retry = CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir)
         retry.migrate()
         retry.verify()
     }
 
     @Test
-    fun released036Room26DirtyShapeOpensIn037WithoutWipingCareOrMedia() = runBlocking {
+    fun room26FixtureMigratesTo27PreservingDirtyCareMediaAndClosedSleepWake() = runBlocking {
         migrationHelper.createDatabase(DATABASE_NAME, 26).apply {
+            execSQL(
+                """
+                INSERT INTO local_users(id, displayName, deviceId, createdAt)
+                VALUES(1, '家长', 'device-fixture', 1)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO families(id, ownerUserId, createdAt) VALUES(1, 1, 1)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO memberships(familyId, userId, role, status, joinedAt)
+                VALUES(1, 1, 'owner', 'active', 1)
+                """.trimIndent(),
+            )
             execSQL(
                 """
                 INSERT INTO babies(
@@ -398,16 +428,72 @@ class LocalDataContractMigrationDeviceTest {
                     clientUuid, updatedAt, syncDirty, familyAuthority
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf<Any>(1L, 7L, "本机宝宝", 20_000L, 0L, 0L, BABY_UUID, 100L, 1, 0),
+                arrayOf<Any>(1L, 1L, "本机宝宝", 20_000L, 0L, 0L, BABY_UUID, 100L, 1, 0),
+            )
+            execSQL(
+                """
+                INSERT INTO records(
+                    id, clientUuid, babyId, type, timestamp, endTimestamp, note, payloadJson,
+                    schemaVersion, updatedAt, syncDirty, createdByMembershipId,
+                    familyPublishedUpdatedAt
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(
+                    1L,
+                    CLOSED_SLEEP_UUID,
+                    1L,
+                    "sleep",
+                    1_000L,
+                    2_000L,
+                    "slept well",
+                    "{\"is_nap\":false}",
+                    2,
+                    1_700_000_000_000L,
+                    1,
+                    "membership-a",
+                    1_700_000_000_000L,
+                ),
+            )
+            execSQL(
+                """
+                INSERT INTO records(
+                    id, clientUuid, babyId, type, timestamp, endTimestamp, payloadJson,
+                    schemaVersion, updatedAt, syncDirty, createdByMembershipId
+                ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(
+                    2L,
+                    OPEN_SLEEP_UUID,
+                    1L,
+                    "sleep",
+                    3_000L,
+                    "{\"is_nap\":true}",
+                    2,
+                    130L,
+                    0,
+                    "membership-a",
+                ),
             )
             execSQL(
                 """
                 INSERT INTO records(
                     id, clientUuid, babyId, type, timestamp, payloadJson, schemaVersion,
-                    updatedAt, syncDirty, createdByMembershipId
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    updatedAt, deletedAt, syncDirty, createdByMembershipId
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf<Any>(1L, RECORD_UUID, 1L, "formula", 100L, "{\"amount_ml\":80}", 2, 120L, 1, ""),
+                arrayOf<Any>(
+                    3L,
+                    TOMBSTONE_UUID,
+                    1L,
+                    "formula",
+                    50L,
+                    "{}",
+                    2,
+                    90L,
+                    90L,
+                    0,
+                    "membership-b",
+                ),
             )
             execSQL(
                 """
@@ -416,14 +502,44 @@ class LocalDataContractMigrationDeviceTest {
                     createdAt, updatedAt, syncDirty
                 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """.trimIndent(),
-                arrayOf<Any>(1L, 1L, MEDIA_UUID, "log", "retained-036.jpg", 4L, 120L, 120L, 1),
+                arrayOf<Any>(
+                    1L,
+                    1L,
+                    MEDIA_UUID,
+                    "log",
+                    "retained-closed-sleep.jpg",
+                    4L,
+                    120L,
+                    120L,
+                    1,
+                ),
             )
             close()
         }
-        val retainedMedia = File(storage.recordMedia, "retained-036.jpg").apply {
+        val retainedMedia = File(storage.recordMedia, "retained-closed-sleep.jpg").apply {
             parentFile?.mkdirs()
             writeBytes(byteArrayOf(1, 2, 3, 4))
         }
+        val dataStore = PreferenceDataStoreFactory.create(
+            scope = storeScope,
+            produceFile = { settingsFile },
+        )
+        val environment = AndroidLocalDataUpgradeEnvironment(
+            context = context,
+            settings = Lazy { dataStore },
+            credentials = Lazy { InMemorySecureRefreshTokenStore() },
+            storage = storage,
+        )
+        val gate = DefaultLocalDataGate(
+            currentContractVersion = 4,
+            minimumMigratableContractVersion = 1,
+            steps = setOf(CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir)),
+            environment = environment,
+        )
+
+        val ready = gate.ensureReady()
+        assertWithMessage(gate.diagnosticReport()).that(ready).isTrue()
+        assertThat(gate.state.value).isEqualTo(LocalDataUpgradeState.Ready(4))
 
         val room = Room.databaseBuilder(
             context,
@@ -434,14 +550,60 @@ class LocalDataContractMigrationDeviceTest {
 
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.familyAuthority).isFalse()
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.syncDirty).isTrue()
-        assertThat(room.recordDao().getByClientUuid(RECORD_UUID)?.payloadJson)
-            .isEqualTo("{\"amount_ml\":80}")
-        assertThat(room.mediaAssetDao().getByClientUuid(MEDIA_UUID)?.localUri)
-            .isEqualTo("retained-036.jpg")
-        assertThat(room.pendingPublishDao().observeCount().first()).isEqualTo(2)
+        assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.baseVersion).isNull()
+        // Closed sleep becomes SleepStart-only: endTimestamp cleared after WakeObservation transfer.
+        assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.endTimestamp).isNull()
+        assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.syncDirty).isTrue()
+        assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.note)
+            .isEqualTo("slept well")
+        val expectedWake = com.lezi.babylog.core.common.wakeObservationClientUuid(
+            CLOSED_SLEEP_UUID,
+            1_700_000_000_000L,
+        )
+        assertThat(
+            room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)
+                ?.effectiveWakeObservationClientUuid,
+        ).isEqualTo(expectedWake)
+        val wake = room.wakeObservationDao().getByClientUuid(expectedWake)
+        assertThat(wake).isNotNull()
+        assertThat(wake!!.wakeTimestamp).isEqualTo(2_000L)
+        assertThat(wake.note).isEqualTo("slept well")
+        assertThat(wake.observerMembershipId).isEqualTo("membership-a")
+        assertThat(wake.syncDirty).isTrue()
+        assertThat(wake.sleepRecordClientUuid).isEqualTo(CLOSED_SLEEP_UUID)
+
+        // Open sleep stays open — no wake, no auto-close.
+        assertThat(room.recordDao().getByClientUuid(OPEN_SLEEP_UUID)?.endTimestamp).isNull()
+        assertThat(
+            room.recordDao().getByClientUuid(OPEN_SLEEP_UUID)
+                ?.effectiveWakeObservationClientUuid,
+        ).isNull()
+        assertThat(room.wakeObservationDao().listForSleep(OPEN_SLEEP_UUID)).isEmpty()
+
+        // Historical tombstone stays hidden (deletedAt set, no recovery surface).
+        assertThat(room.recordDao().getByClientUuid(TOMBSTONE_UUID)?.deletedAt).isEqualTo(90L)
+
+        assertThat(room.mediaAssetDao().getByClientUuid(MEDIA_UUID)?.deletedAt).isNotNull()
+        val fixtureBytes = byteArrayOf(1, 2, 3, 4)
+        val expectedSha256 = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(fixtureBytes)
+            .joinToString("") { b -> "%02x".format(b) }
+        val expectedWakeMediaUuid = com.lezi.babylog.core.common.wakeMediaUuid(
+            CLOSED_SLEEP_UUID,
+            MEDIA_UUID,
+            expectedSha256,
+        )
+        val wakeMedia = room.mediaAssetDao().listAllIncludingDeleted()
+            .filter { it.kind == "wake" }
+        assertThat(wakeMedia).isNotEmpty()
+        assertThat(wakeMedia.first().clientUuid).isEqualTo(expectedWakeMediaUuid)
+        assertThat(wakeMedia.first().localUri).isEqualTo("retained-closed-sleep.jpg")
+        assertThat(room.mediaReferenceDao().listForMedia(expectedWakeMediaUuid)).isNotEmpty()
         assertThat(retainedMedia.readBytes().toList())
-            .containsExactlyElementsIn(byteArrayOf(1, 2, 3, 4).toList())
+            .containsExactlyElementsIn(fixtureBytes.toList())
             .inOrder()
+        assertThat(room.localUserDao().get()?.deviceId).isEqualTo("device-fixture")
+        assertThat(room.membershipDao().listForFamily(1L)).hasSize(1)
     }
 
     private companion object {
@@ -451,6 +613,9 @@ class LocalDataContractMigrationDeviceTest {
         const val BABY_UUID = "22222222-2222-4222-8222-222222222222"
         const val RECORD_UUID = "33333333-3333-4333-8333-333333333333"
         const val MEDIA_UUID = "44444444-4444-4444-8444-444444444444"
+        const val CLOSED_SLEEP_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        const val OPEN_SLEEP_UUID = "55555555-5555-4555-8555-555555555555"
+        const val TOMBSTONE_UUID = "66666666-6666-4666-8666-666666666666"
     }
 
     private class CatalogMigrationStep(

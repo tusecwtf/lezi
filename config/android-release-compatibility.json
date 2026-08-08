@@ -3,10 +3,10 @@
   "permanent_upgrade_baseline_version_code": 6,
   "minimum_sync_version_code": 16,
   "upgrade_target": {
-    "version_code": 19,
-    "version_name": "0.3.12",
-    "room_schema": 26,
-    "local_data_contract": 3
+    "version_code": 20,
+    "version_name": "0.3.13",
+    "room_schema": 27,
+    "local_data_contract": 4
   },
   "released_versions": [
     {
@@ -84,6 +84,12 @@
     {
       "version_code": 18,
       "version_name": "0.3.11",
+      "room_schema": 26,
+      "local_data_contract": 3
+    },
+    {
+      "version_code": 19,
+      "version_name": "0.3.12",
       "room_schema": 26,
       "local_data_contract": 3
     }

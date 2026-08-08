@@ -38,6 +38,13 @@ interface PendingPublishDao {
             SELECT 'fulfillment_candidate:' || f.clientUuid
             FROM fulfillment_candidates f
             WHERE f.syncDirty = 1
+            UNION ALL
+            SELECT 'wake_observation:' || w.clientUuid
+            FROM wake_observations w
+            WHERE w.syncDirty = 1 OR EXISTS (
+                SELECT 1 FROM media_assets m
+                WHERE m.wakeObservationId = w.id AND m.kind = 'wake' AND m.syncDirty = 1
+            )
         )
         """,
     )

@@ -25,6 +25,7 @@ import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.MemoryMediaReferenceDao
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
@@ -58,6 +59,7 @@ internal class ReplicaEngineRig(
     val transactions = RecordingTransactionRunner()
     val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
         mediaDao = media,
+        mediaReferenceDao = MemoryMediaReferenceDao(),
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
         pathGate = MediaLocalPathGate(),

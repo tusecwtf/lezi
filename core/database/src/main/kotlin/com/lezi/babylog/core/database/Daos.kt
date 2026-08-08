@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import com.lezi.babylog.core.database.causal.toAppliedColumns
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -212,6 +213,93 @@ interface BabyDao {
 
     @Query("DELETE FROM babies")
     suspend fun deleteAll()
+
+    /**
+     * Freeze a dirty content epoch for causal reconcile/commit. Same local revision
+     * reuses [BabyEntity.mutationId]; a newer edit mints [newMutationId].
+     */
+    @Transaction
+    suspend fun freezeDirtyEpoch(
+        clientUuid: String,
+        contentEpoch: Long,
+        newMutationId: String,
+    ): BabyEntity? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        val next = com.lezi.babylog.core.database.causal.freezeDirtyEpoch(
+            current = current.toCausalMutationState(),
+            contentEpoch = contentEpoch,
+            newMutationId = newMutationId,
+        )
+        val cols = next.toAppliedColumns()
+        val written = current.copy(
+            updatedAt = contentEpoch,
+            baseVersion = cols.baseVersion,
+            mutationId = cols.mutationId,
+            syncDirty = cols.syncDirty,
+            openConflictId = cols.openConflictId,
+            localBranchVersionId = cols.localBranchVersionId,
+        )
+        update(written)
+        return written
+    }
+
+    @Transaction
+    suspend fun acknowledgeCausalAcceptedOrMerged(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        newBaseVersion: String,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        val next = com.lezi.babylog.core.database.causal.acknowledgeAcceptedOrMerged(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            newBaseVersion = newBaseVersion,
+        ) ?: return false
+        val cols = next.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+            ),
+        )
+        return true
+    }
+
+    @Transaction
+    suspend fun acknowledgeCausalBranched(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        conflictId: String,
+        branchVersionId: String,
+        stableBaseVersion: String,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        val next = com.lezi.babylog.core.database.causal.acknowledgeBranched(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            conflictId = conflictId,
+            branchVersionId = branchVersionId,
+            stableBaseVersion = stableBaseVersion,
+        ) ?: return false
+        val cols = next.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+            ),
+        )
+        return true
+    }
 }
 
 @Dao
@@ -549,9 +637,133 @@ interface RecordDao {
     )
     suspend fun softDelete(id: Long, deletedAt: Long)
 
+    /**
+     * Freeze a dirty content epoch for causal reconcile/commit. Same local revision
+     * reuses [RecordEntity.mutationId]; a newer edit mints [newMutationId] while
+     * keeping the last acknowledged [RecordEntity.baseVersion].
+     */
+    @Transaction
+    suspend fun freezeDirtyEpoch(
+        clientUuid: String,
+        contentEpoch: Long,
+        newMutationId: String,
+    ): RecordEntity? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        val next = com.lezi.babylog.core.database.causal.freezeDirtyEpoch(
+            current = current.toCausalMutationState(),
+            contentEpoch = contentEpoch,
+            newMutationId = newMutationId,
+        )
+        val cols = next.toAppliedColumns()
+        val written = current.copy(
+            updatedAt = contentEpoch,
+            baseVersion = cols.baseVersion,
+            mutationId = cols.mutationId,
+            syncDirty = cols.syncDirty,
+            openConflictId = cols.openConflictId,
+            localBranchVersionId = cols.localBranchVersionId,
+        )
+        update(written)
+        return written
+    }
+
+    /** Exact CAS accepted/merged ack for the frozen mutation epoch. */
+    @Transaction
+    suspend fun acknowledgeCausalAcceptedOrMerged(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        newBaseVersion: String,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        val next = com.lezi.babylog.core.database.causal.acknowledgeAcceptedOrMerged(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            newBaseVersion = newBaseVersion,
+        ) ?: return false
+        val cols = next.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+                familyPublishedUpdatedAt = expectedContentEpoch,
+            ),
+        )
+        return true
+    }
+
+    /**
+     * Atomic `branched` receipt: convert pending mutation to unresolved conflict
+     * without infinite resend or false fully-synced state.
+     */
+    @Transaction
+    suspend fun acknowledgeCausalBranched(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        conflictId: String,
+        branchVersionId: String,
+        stableBaseVersion: String,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        val next = com.lezi.babylog.core.database.causal.acknowledgeBranched(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            conflictId = conflictId,
+            branchVersionId = branchVersionId,
+            stableBaseVersion = stableBaseVersion,
+        ) ?: return false
+        val cols = next.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+            ),
+        )
+        return true
+    }
+
     @Query("DELETE FROM records")
     suspend fun deleteAll()
 }
+
+private fun RecordEntity.toCausalMutationState() =
+    com.lezi.babylog.core.database.causal.CausalRootMutationState(
+        baseVersion = baseVersion,
+        mutationId = mutationId,
+        contentEpoch = updatedAt,
+        syncDirty = syncDirty,
+        openConflictId = openConflictId,
+        localBranchVersionId = localBranchVersionId,
+    )
+
+private fun BabyEntity.toCausalMutationState() =
+    com.lezi.babylog.core.database.causal.CausalRootMutationState(
+        baseVersion = baseVersion,
+        mutationId = mutationId,
+        contentEpoch = updatedAt,
+        syncDirty = syncDirty,
+        openConflictId = openConflictId,
+        localBranchVersionId = localBranchVersionId,
+    )
+
+private fun CarePlanEntity.toCausalMutationState() =
+    com.lezi.babylog.core.database.causal.CausalRootMutationState(
+        baseVersion = baseVersion,
+        mutationId = mutationId,
+        contentEpoch = updatedAt,
+        syncDirty = syncDirty,
+        openConflictId = openConflictId,
+        localBranchVersionId = localBranchVersionId,
+    )
 
 @Dao
 interface CarePlanDao {
@@ -770,6 +982,90 @@ interface CarePlanDao {
 
     @Query("DELETE FROM care_plans")
     suspend fun deleteAll()
+
+    @Transaction
+    suspend fun freezeDirtyEpoch(
+        clientUuid: String,
+        contentEpoch: Long,
+        newMutationId: String,
+    ): CarePlanEntity? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        val next = com.lezi.babylog.core.database.causal.freezeDirtyEpoch(
+            current = current.toCausalMutationState(),
+            contentEpoch = contentEpoch,
+            newMutationId = newMutationId,
+        )
+        val cols = next.toAppliedColumns()
+        val written = current.copy(
+            updatedAt = contentEpoch,
+            baseVersion = cols.baseVersion,
+            mutationId = cols.mutationId,
+            syncDirty = cols.syncDirty,
+            openConflictId = cols.openConflictId,
+            localBranchVersionId = cols.localBranchVersionId,
+        )
+        update(written)
+        return written
+    }
+
+    @Transaction
+    suspend fun acknowledgeCausalAcceptedOrMerged(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        newBaseVersion: String,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        val next = com.lezi.babylog.core.database.causal.acknowledgeAcceptedOrMerged(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            newBaseVersion = newBaseVersion,
+        ) ?: return false
+        val cols = next.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+                familyPublishedUpdatedAt = expectedContentEpoch,
+            ),
+        )
+        return true
+    }
+
+    @Transaction
+    suspend fun acknowledgeCausalBranched(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        conflictId: String,
+        branchVersionId: String,
+        stableBaseVersion: String,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        val next = com.lezi.babylog.core.database.causal.acknowledgeBranched(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            conflictId = conflictId,
+            branchVersionId = branchVersionId,
+            stableBaseVersion = stableBaseVersion,
+        ) ?: return false
+        val cols = next.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+            ),
+        )
+        return true
+    }
 }
 
 @Dao
@@ -907,6 +1203,15 @@ interface MediaAssetDao {
         """,
     )
     suspend fun listActiveForCarePlan(carePlanId: Long): List<MediaAssetEntity>
+
+    @Query(
+        """
+        SELECT * FROM media_assets
+        WHERE wakeObservationId = :wakeObservationId AND deletedAt IS NULL
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listActiveForWakeObservation(wakeObservationId: Long): List<MediaAssetEntity>
 
     @Query(
         """

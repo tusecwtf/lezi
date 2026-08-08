@@ -72,6 +72,13 @@ internal class FakeMediaAssetDao : MediaAssetDao {
     override suspend fun listActiveForCarePlan(carePlanId: Long): List<MediaAssetEntity> =
         items.filter { it.carePlanId == carePlanId && it.deletedAt == null }.sortedBy { it.id }
 
+    override suspend fun listActiveForWakeObservation(
+        wakeObservationId: Long,
+    ): List<MediaAssetEntity> =
+        items.filter {
+            it.wakeObservationId == wakeObservationId && it.deletedAt == null
+        }.sortedBy { it.id }
+
     override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
         items.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
             .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })

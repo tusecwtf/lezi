@@ -64,8 +64,8 @@ android {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.3.12"
+        versionCode = 20
+        versionName = "0.3.13"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         manifestPlaceholders["localDataContractVersion"] = currentLocalDataContract

@@ -1464,6 +1464,7 @@ internal class SyncRig(
     val transactions = RecordingTransactionRunner()
     val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
         mediaDao = media,
+        mediaReferenceDao = MemoryMediaReferenceDao(),
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
         pathGate = MediaLocalPathGate(),
@@ -2286,6 +2287,13 @@ internal class MemoryMediaDao : MediaAssetDao {
     override suspend fun listActiveForCarePlan(carePlanId: Long): List<MediaAssetEntity> =
         rows.filter { it.carePlanId == carePlanId && it.deletedAt == null }.sortedBy(MediaAssetEntity::id)
 
+    override suspend fun listActiveForWakeObservation(
+        wakeObservationId: Long,
+    ): List<MediaAssetEntity> =
+        rows.filter {
+            it.wakeObservationId == wakeObservationId && it.deletedAt == null
+        }.sortedBy(MediaAssetEntity::id)
+
     override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
         rows.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
             .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })
@@ -2433,6 +2441,49 @@ internal class MemoryMediaDao : MediaAssetDao {
 
     override suspend fun deleteAll() {
         rows.clear()
+    }
+}
+
+internal class MemoryMediaReferenceDao : com.lezi.babylog.core.database.causal.MediaReferenceDao {
+    private val items =
+        mutableListOf<com.lezi.babylog.core.database.causal.MediaReferenceEntity>()
+
+    override suspend fun upsert(ref: com.lezi.babylog.core.database.causal.MediaReferenceEntity) {
+        items.removeAll {
+            it.mediaUuid == ref.mediaUuid &&
+                it.holderKind == ref.holderKind &&
+                it.holderId == ref.holderId
+        }
+        items += ref
+    }
+
+    override suspend fun remove(mediaUuid: String, holderKind: String, holderId: String) {
+        items.removeAll {
+            it.mediaUuid == mediaUuid && it.holderKind == holderKind && it.holderId == holderId
+        }
+    }
+
+    override suspend fun listForMedia(
+        mediaUuid: String,
+    ): List<com.lezi.babylog.core.database.causal.MediaReferenceEntity> =
+        items.filter { it.mediaUuid == mediaUuid }
+
+    override suspend fun countHoldersForLocalUri(localUri: String): Int =
+        items.count { it.localUri == localUri }
+
+    override suspend fun countHoldersForMedia(mediaUuid: String): Int =
+        items.count { it.mediaUuid == mediaUuid }
+
+    override suspend fun deleteForMedia(mediaUuid: String) {
+        items.removeAll { it.mediaUuid == mediaUuid }
+    }
+
+    override suspend fun deleteForLogAndWakeMedia() {
+        items.clear()
+    }
+
+    override suspend fun deleteAll() {
+        items.clear()
     }
 }
 

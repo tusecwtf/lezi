@@ -69,7 +69,13 @@ import com.lezi.babylog.domain.calendar.SystemCalendarUpsertResult
 import com.lezi.babylog.domain.calendar.encodeSystemCalendarEventMap
 import com.lezi.babylog.domain.calendar.parseSystemCalendarEventMap
 import com.lezi.babylog.domain.carelog.CareAggregation
+import com.lezi.babylog.domain.carelog.FakeConflictDetailCacheDao
+import com.lezi.babylog.domain.carelog.FakeConflictSummaryDao
 import com.lezi.babylog.domain.carelog.FakeMediaAssetDao
+import com.lezi.babylog.domain.carelog.FakeMediaReferenceDao
+import com.lezi.babylog.domain.carelog.FakeSourceRelationDao
+import com.lezi.babylog.domain.carelog.FakeSuspectedDuplicateGroupDao
+import com.lezi.babylog.domain.carelog.FakeWakeObservationDao
 import com.lezi.babylog.domain.carelog.matchesSqlLike
 import com.lezi.babylog.domain.carelog.weekStartFor
 import com.lezi.babylog.domain.careplan.CarePlanReminderProjection
@@ -271,6 +277,12 @@ internal class Fakes(
     val carePlans = FakeCarePlanDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
+    val wakeObservations = FakeWakeObservationDao()
+    val conflictSummaries = FakeConflictSummaryDao()
+    val conflictDetailCache = FakeConflictDetailCacheDao()
+    val suspectedDuplicates = FakeSuspectedDuplicateGroupDao()
+    val sourceRelations = FakeSourceRelationDao()
+    val mediaReferences = FakeMediaReferenceDao()
     val pendingReminderCleanup = FakePendingReminderCleanupStore()
     val settings = FakeSettingsStore()
     val reminders = FakeReminderCleanupPort()
@@ -315,6 +327,12 @@ internal class Fakes(
             familyDao = families,
             membershipDao = memberships,
             fulfillmentCandidateDao = fulfillmentCandidates,
+            wakeObservationDao = wakeObservations,
+            conflictSummaryDao = conflictSummaries,
+            conflictDetailCacheDao = conflictDetailCache,
+            suspectedDuplicateGroupDao = suspectedDuplicates,
+            sourceRelationDao = sourceRelations,
+            mediaReferenceDao = mediaReferences,
             pendingReminderCleanupStore = pendingReminderCleanup,
             transactionRunner = transactions,
         ),
