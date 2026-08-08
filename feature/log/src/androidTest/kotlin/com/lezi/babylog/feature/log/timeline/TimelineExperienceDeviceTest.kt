@@ -24,6 +24,9 @@ import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelineRailCard
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
@@ -165,6 +168,97 @@ class TimelineExperienceDeviceTest {
         assertNotEquals(0f, reportedDelta.get())
         assertEquals(0, panEnds.get())
         assertEquals(1, panCancels.get())
+    }
+
+    @Test
+    fun futureClampAndFilterNavigationMatchAcrossWarmAndJournalTemplates() {
+        val day = LocalDate.of(2026, 8, 8)
+        val zone = ZoneId.of("Asia/Shanghai")
+        val nowMs = Instant.parse("2026-08-08T10:00:00Z").toEpochMilli()
+        val initial = TimelineInteraction.reduce(
+            null,
+            TimelineInteractionEvent.Initialize(day, 7L, nowMs, zone),
+        ).state
+        val stateSnapshot = AtomicReference(initial)
+        val selectedCategory = AtomicReference<String?>(null)
+        lateinit var resetTemplate: (String) -> Unit
+        compose.setContent {
+            var style by remember { mutableStateOf("warm") }
+            var interaction by remember { mutableStateOf(initial) }
+            stateSnapshot.set(interaction)
+            resetTemplate = { nextStyle ->
+                style = nextStyle
+                interaction = initial
+                selectedCategory.set(null)
+            }
+            val presentation = interaction.toTimelinePresentation(nowMs)
+            LeziTheme(visualStyle = style) {
+                TimelineRailCard(
+                    sleep = emptyList(),
+                    feed = emptyList(),
+                    care = listOf(
+                        TimelineLaneSegment(
+                            startMinOfDay = 2_160,
+                            endMinOfDay = 2_160,
+                            colorRole = LeziRecordColorRole.Pee,
+                            isEvent = true,
+                            dayChartCategoryKey = "PEE",
+                        ),
+                    ),
+                    recordCount = 1,
+                    nowContentMinute = presentation.nowContentMinute,
+                    viewportStartMinutes = presentation.viewportStartMinutes,
+                    viewportDurationMinutes = presentation.viewportDurationMinutes,
+                    windowGeometry = presentation.axis.windowGeometry,
+                    onCategorySelect = selectedCategory::set,
+                    onHorizontalPan = { pan ->
+                        if (interaction.drag == null) {
+                            interaction = TimelineInteraction.reduce(
+                                interaction,
+                                TimelineInteractionEvent.DragStarted,
+                            ).state
+                        }
+                        interaction = TimelineInteraction.reduce(
+                            interaction,
+                            TimelineInteractionEvent.DragChanged(
+                                cumulativeDeltaPx = pan.cumulativeDeltaPx.toDouble(),
+                                effectiveWidthPx = pan.axisLengthPx.toDouble(),
+                                nowMs = nowMs,
+                            ),
+                        ).state
+                    },
+                    onPanEnd = {
+                        interaction = TimelineInteraction.reduce(
+                            interaction,
+                            TimelineInteractionEvent.DragEnded(nowMs),
+                        ).state
+                    },
+                )
+            }
+        }
+
+        val outcomes = listOf("warm", "journal").map { style ->
+            compose.runOnIdle { resetTemplate(style) }
+            val careLane = compose.onNodeWithTag("timeline_lane_护理", useUnmergedTree = true)
+            careLane.performTouchInput {
+                down(center)
+                moveBy(Offset(-width * 0.6f, 0f))
+                up()
+            }
+            careLane.performTouchInput {
+                click(Offset(width * 0.75f, height * 0.32f))
+            }
+            compose.waitForIdle()
+            stateSnapshot.get() to selectedCategory.get()
+        }
+
+        outcomes.forEach { (state, category) ->
+            assertEquals(day, state.selectedDay)
+            assertEquals(nowMs, state.viewport.endInstantMs)
+            assertNull(state.drag)
+            assertEquals("PEE", category)
+        }
+        assertEquals(outcomes.first(), outcomes.last())
     }
 
     @Test

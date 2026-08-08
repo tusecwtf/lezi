@@ -287,6 +287,34 @@ data class RootUi(
     val composerRequest: RecordComposerRequest? = null,
 )
 
+/** Root-owned selected-day state shared by timeline effects and external date controls. */
+internal class RootSelectedDateOwner(
+    initialSelectedDate: LocalDate,
+    initialToday: LocalDate,
+    private val persist: (LocalDate) -> Unit = {},
+) {
+    private val mutableSelectedDate = MutableStateFlow(
+        clampSelectedDate(initialSelectedDate, initialToday),
+    )
+    val selectedDate: StateFlow<LocalDate> = mutableSelectedDate.asStateFlow()
+
+    init {
+        persist(mutableSelectedDate.value)
+    }
+
+    /** Returns false for a repeated value, preventing the Root → Log feedback path from looping. */
+    fun select(requested: LocalDate, today: LocalDate): Boolean {
+        val selected = clampSelectedDate(requested, today)
+        if (selected == mutableSelectedDate.value) return false
+        mutableSelectedDate.value = selected
+        persist(selected)
+        return true
+    }
+
+    fun shift(deltaDays: Long, today: LocalDate): Boolean =
+        select(mutableSelectedDate.value.plusDays(deltaDays), today)
+}
+
 @HiltViewModel
 class RootViewModel @Inject constructor(
     private val careLog: CareLog,
@@ -296,23 +324,21 @@ class RootViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     private val widgetRefreshController: CareWidgetRefreshController,
 ) : ViewModel() {
-    private val dayFlow = MutableStateFlow(
-        clampSelectedDate(
-            savedStateHandle.get<Long>(SELECTED_DATE_KEY)?.let(LocalDate::ofEpochDay)
-                ?: LocalDate.now(),
-        ),
-    )
-    private val calendarMonthFlow = MutableStateFlow(YearMonth.from(dayFlow.value))
     private val zone = ZoneId.systemDefault()
     private val todayFlow = MutableStateFlow(LocalDate.now(zone))
+    private val selectedDateOwner = RootSelectedDateOwner(
+        initialSelectedDate = savedStateHandle.get<Long>(SELECTED_DATE_KEY)
+            ?.let(LocalDate::ofEpochDay)
+            ?: todayFlow.value,
+        initialToday = todayFlow.value,
+        persist = { selected -> savedStateHandle[SELECTED_DATE_KEY] = selected.toEpochDay() },
+    )
+    private val dayFlow = selectedDateOwner.selectedDate
+    private val calendarMonthFlow = MutableStateFlow(YearMonth.from(dayFlow.value))
     private val composerRequestFlow = savedStateHandle.getStateFlow<RecordComposerRequest?>(
         COMPOSER_REQUEST_KEY,
         null,
     )
-
-    init {
-        savedStateHandle[SELECTED_DATE_KEY] = dayFlow.value.toEpochDay()
-    }
 
     private val localBaseUi = combine(
         careLog.observeHasBaby(),
@@ -624,7 +650,7 @@ class RootViewModel @Inject constructor(
     }
 
     fun shiftDay(delta: Long) {
-        updateSelectedDate(dayFlow.value.plusDays(delta))
+        selectedDateOwner.shift(delta, todayFlow.value)
     }
 
     fun setDay(day: LocalDate) {
@@ -683,9 +709,7 @@ class RootViewModel @Inject constructor(
     }
 
     private fun updateSelectedDate(day: LocalDate) {
-        val selected = clampSelectedDate(day, todayFlow.value)
-        dayFlow.value = selected
-        savedStateHandle[SELECTED_DATE_KEY] = selected.toEpochDay()
+        selectedDateOwner.select(day, todayFlow.value)
     }
 
     private companion object {
@@ -747,23 +771,6 @@ internal data class RootChromeVisibility(
     val showTopBar: Boolean,
     val showBottomBar: Boolean,
     val preserveBottomBarExtent: Boolean,
-)
-
-/** One root-owned selected day projected to every date-consuming product surface. */
-internal data class RootDateExperience(
-    val topBarDate: LocalDate,
-    val logExternalDay: LocalDate,
-    val summaryAnchorDate: LocalDate,
-    val growthInitialDate: LocalDate,
-    val calendarInitialDate: LocalDate,
-)
-
-internal fun rootDateExperience(selectedDate: LocalDate) = RootDateExperience(
-    topBarDate = selectedDate,
-    logExternalDay = selectedDate,
-    summaryAnchorDate = selectedDate,
-    growthInitialDate = selectedDate,
-    calendarInitialDate = selectedDate,
 )
 
 /** Root top bar variants swapped via AnimatedContent (date header ↔ brand bar). */
@@ -911,7 +918,6 @@ private fun LeziMainScaffold(
     val backStack by nav.currentBackStackEntryAsState()
     val current = backStack?.destination?.route
     val today = ui.today
-    val dateExperience = rootDateExperience(ui.selectedDate)
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val shallowSyncLine by vm.shallowSyncLine.collectAsStateWithLifecycle()
@@ -925,7 +931,7 @@ private fun LeziMainScaffold(
     val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()
     var showHeaderCalendar by remember { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
-    var displayedMonth by remember { mutableStateOf(YearMonth.from(dateExperience.topBarDate)) }
+    var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
     // Shell chrome / nav transitions — capture outside non-@Composable transitionSpec.
     val shellBaseMs = leziMotionMillis(LeziMotion.Base)
@@ -1047,17 +1053,17 @@ private fun LeziMainScaffold(
                                 babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
                                 avatarPath = ui.baby?.avatarPath,
                                 sleeping = ui.sleeping,
-                                selectedDate = dateExperience.topBarDate,
+                                selectedDate = ui.selectedDate,
                                 today = today,
                                 canCycleBaby = ui.babies.size > 1,
-                                canGoNext = dateExperience.topBarDate.isBefore(today),
+                                canGoNext = ui.selectedDate.isBefore(today),
                                 dark = dark,
                                 onCycleBaby = { vm.cycleBaby() },
                                 onJumpSiblingSameDayAge = { vm.jumpSiblingSameDayAge() },
                                 onPreviousDate = { vm.shiftDay(-1) },
                                 onNextDate = { vm.shiftDay(1) },
                                 onOpenDatePicker = {
-                                    displayedMonth = YearMonth.from(dateExperience.topBarDate)
+                                    displayedMonth = YearMonth.from(ui.selectedDate)
                                     vm.setCalendarMonth(displayedMonth)
                                     showHeaderCalendar = true
                                 },
@@ -1209,7 +1215,7 @@ private fun LeziMainScaffold(
         ) {
             composable(TopDest.Log.route) {
                 LogRoute(
-                    externalDay = dateExperience.logExternalDay,
+                    externalDay = ui.selectedDate,
                     onOpenComposer = vm::openComposer,
                     onGoToday = { vm.setDay(today) },
                     onSelectedDayChange = vm::setDay,
@@ -1221,12 +1227,8 @@ private fun LeziMainScaffold(
                     },
                 )
             }
-            composable(TopDest.Summary.route) {
-                SummaryRoute(anchorDate = dateExperience.summaryAnchorDate)
-            }
-            composable(TopDest.Growth.route) {
-                GrowthRoute(initialDate = dateExperience.growthInitialDate)
-            }
+            composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
+            composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
             composable(TopDest.Family.route) {
                 FamilyRoute()
             }
@@ -1251,7 +1253,7 @@ private fun LeziMainScaffold(
             composable("calendar") {
                 CalendarRoute(
                     onBack = { nav.popBackStack() },
-                    initialDate = dateExperience.calendarInitialDate,
+                    initialDate = ui.selectedDate,
                     onScheduleCare = { type, scheduledAt, customItemId ->
                         val babyId = ui.baby?.id ?: return@CalendarRoute
                         vm.openComposer(
@@ -1383,7 +1385,7 @@ private fun LeziMainScaffold(
 
     if (showHeaderCalendar) {
         HeaderCalendarDialog(
-            selectedDate = dateExperience.topBarDate,
+            selectedDate = ui.selectedDate,
             displayedMonth = displayedMonth,
             today = today,
             recordDays = ui.calendarRecordDays,

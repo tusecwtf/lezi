@@ -11,19 +11,20 @@ import java.time.LocalDate
 
 class RootRoutingPolicyTest {
     @Test
-    fun selectedDateProjectsToEveryDateOwnedSurface() {
-        val selectedDate = LocalDate.of(2026, 8, 6)
+    fun timelineCommitAndExternalSelectionShareOneDeduplicatedRootOwner() {
+        val today = LocalDate.of(2026, 8, 8)
+        val persisted = mutableListOf<LocalDate>()
+        val owner = RootSelectedDateOwner(today, today, persisted::add)
 
-        assertEquals(
-            RootDateExperience(
-                topBarDate = selectedDate,
-                logExternalDay = selectedDate,
-                summaryAnchorDate = selectedDate,
-                growthInitialDate = selectedDate,
-                calendarInitialDate = selectedDate,
-            ),
-            rootDateExperience(selectedDate),
-        )
+        val timelineDay = today.minusDays(2)
+        assertTrue(owner.select(timelineDay, today))
+        assertEquals(timelineDay, owner.selectedDate.value)
+        assertFalse(owner.select(timelineDay, today))
+
+        val topBarDay = today.minusDays(1)
+        assertTrue(owner.select(topBarDay, today))
+        assertEquals(topBarDay, owner.selectedDate.value)
+        assertEquals(listOf(today, timelineDay, topBarDay), persisted)
     }
 
     @Test
