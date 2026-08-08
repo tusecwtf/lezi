@@ -432,11 +432,16 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 
 ### 原子同步包（`atomic_bundle`）
 
-`GET /health` 广告
-`capabilities` 包含 `atomic_bundle`、`record_membership_author`、
-`authoritative_reconcile_v1` 与 `validated_deferred_fulfillment_v1`。当前客户端要求 health
-为 `ok` 且具备完整协议能力；生产进程只在启动语义校验完成且 versionCode 16 强制升级包与
-最低版本门均验证后暴露最后一项，否则拒绝启动。`version` 仅展示、不参与门闩。
+`GET /health` 广告 `capabilities`（与 `handlers/health.rs` 一致）包含：
+`atomic_bundle`、`record_membership_author`、`device_disaster_restore_v1`、
+`authoritative_reconcile_v1`、`validated_deferred_fulfillment_v1`、
+`causal_versions`、`wake_observation`、`source_relations`。
+当前 Android 客户端 `REQUIRED_HEALTH_CAPABILITIES` 要求 health 为 `ok` 且具备上述完整协议能力
+（含三项因果键）；生产进程（`require_protocol_cutover_release` / `from_env`）只在启动语义校验完成、
+且已验证强制升级通道的 `version_code` **与** `min_supported_version_code` 均 ≥ **20**
+（0.3.13 因果切割 floor）后才可就绪，否则拒绝启动。`version` 仅展示、不参与门闩。
+运维真值见 `config/android-release-compatibility.json`（`minimum_sync_version_code`）与
+`deploy/app-update.json`；**不要**再按 0.3.9 时代的 versionCode 16 示例规划生产切割。
 公网 `8765` 只提供 HTTPS；容器健康检查使用仅绑定 `127.0.0.1:8766` 的明文
 `/health`、`/ready` 路由，该内部 listener 不挂载任何 `/v1/*` 业务接口。
 所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。

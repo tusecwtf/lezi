@@ -187,9 +187,12 @@ Metadata contract (`app-update.json`, snake_case):
 - On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. When an old container is running, CD snapshots the prior pair and restores it if the live 8767 hash proof fails, before any stop/rm. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
 - Older server generations enforce `min_supported_version_code` on authoritative sync and
   disaster-restore writes **only** when the on-disk channel is verified (metadata + APK sha256),
-  so metadata-only or integrity-failing packages fail open. The 0.3.9 production process is the
-  cutover boundary: it fails startup unless the verified channel already carries versionCode/min
-  16, preventing the new capability from becoming ready without an installable forced update.
+  so metadata-only or integrity-failing packages fail open. **0.3.13 (causal) production** is the
+  current cutover boundary: `from_env` fails startup unless the verified channel already carries
+  `version_code` **and** `min_supported_version_code` ≥ **20** (`PROTOCOL_CUTOVER_CLIENT_VERSION_CODE`),
+  so the causal generation cannot become ready without an installable forced update. Historical
+  note only: 0.3.9 used the same fail-closed pattern with floor **16**; do **not** reuse 16 as the
+  production floor while this tree publishes minSupported=20.
 - Joined clients use authenticated `GET /v1/app-update` (JSON) and
   `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
   server-side). Separately, the LAN-only invite-install listener anonymously serves the same
@@ -216,11 +219,13 @@ home LAN safety is entirely the min floor + installable package:
    skipping unknown keys. Next break → repeat 2–4.
 
 The permanent lossless APK baseline is versionCode `6`; it is not the current sync floor.
-The current floor is `16`, so versionCodes 16 through the latest release share one frozen wire.
-Versions 6 through 15 remain sync-blocked but must still reach the same verified APK through the
-authenticated update route when available or LAN recovery on 8767. Raising the floor is how a home
-LAN forces upgrades before silent pull stalls. Product narrative:
-[`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
+The current floor is **`20`** (catalog `minimum_sync_version_code` and deploy
+`app-update.json` `min_supported_version_code`), so versionCodes **20 through the latest
+release** share one frozen wire. After a verified minSupported=20 publish, versions **6 through
+19** are sync-blocked (same role as 6–15 after the historical floor-16 cutover) but must still
+reach the same verified APK through the authenticated update route when available or LAN recovery
+on 8767. Raising the floor is how a home LAN forces upgrades before silent pull stalls. Product
+narrative: [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
 
 Invite-install smoke after deploy is separate from readiness: `curl -fsS
 http://<LEZI_TLS_HOST>:8767/join` must return the branded page, and
