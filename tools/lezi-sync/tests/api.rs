@@ -2967,6 +2967,81 @@ async fn current_refresh_token_with_uncleared_request_id_does_not_rotate_twice()
 }
 
 #[tokio::test]
+async fn uncleared_request_id_after_access_expiry_extends_handoff_instead_of_500() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "refresh-expired-handoff-phone",
+        "refresh-expired-handoff-request-0001",
+    )
+    .await;
+    let old_refresh = owner["refresh_token"].as_str().unwrap();
+    let rotation_id = "refresh-expired-handoff-rotation-00001";
+    let first = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    let persisted_refresh = first.1["refresh_token"].as_str().unwrap();
+    let first_access = first.1["access_token"].as_str().unwrap();
+
+    // Past the 15-minute access TTL while the client still holds the rotated
+    // refresh token and the uncleared durable rotation id (crash after keystore
+    // write / before request-id retirement, or a long offline window).
+    rig.now.fetch_add(901, Ordering::SeqCst);
+    let replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": persisted_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
+    assert_eq!(replay.1["access_token"], first_access);
+    assert_eq!(replay.1["refresh_token"], persisted_refresh);
+    assert_eq!(
+        replay.1["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900,
+    );
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            replay.1["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    // Crash-window retry of the pre-rotation refresh token after the same TTL
+    // must also reconstruct the handoff with a usable access expiry.
+    let history_replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(history_replay.0, StatusCode::OK, "{}", history_replay.1);
+    assert_eq!(history_replay.1["access_token"], first_access);
+    assert_eq!(history_replay.1["refresh_token"], persisted_refresh);
+    assert_eq!(
+        history_replay.1["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900,
+    );
+}
+
+#[tokio::test]
 async fn concurrent_refreshes_with_the_same_request_id_return_one_rotation() {
     let rig = Rig::new();
     let owner = create_family(

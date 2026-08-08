@@ -602,12 +602,35 @@ impl Store {
             // state it presents the current token with the same id. Exact
             // derived-hash equality proves this is the already completed
             // handoff, so return it without a second history row, generation
-            // increment, expiry extension, or replay revocation.
+            // increment, or replay revocation. If access has since expired
+            // (common after a long crash window or stuck request id past the
+            // 15-minute TTL), extend expiry in place: reusing the same
+            // deterministic tokens is still the one accepted handoff, and
+            // returning an already-expired access token makes the post-refresh
+            // authenticate step fail closed with HTTP 500.
             if refresh_request_id.is_some()
                 && presented_hash == new_refresh_hash
                 && current_access_hash == new_access_hash
                 && current_refresh_hash == new_refresh_hash
             {
+                let access_expires_at = if current_access_expires_at > now {
+                    current_access_expires_at
+                } else {
+                    let extended = now + ACCESS_TOKEN_TTL_SECONDS;
+                    transaction.execute(
+                        "
+                    UPDATE device_sessions
+                    SET access_expires_at = ?1
+                    WHERE session_id = ?2
+                    ",
+                        params![extended, session_id],
+                    )?;
+                    transaction.execute(
+                        "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
+                        params![now, device_id],
+                    )?;
+                    extended
+                };
                 transaction.commit()?;
                 return Ok(CreatedDeviceSession {
                     family_id,
@@ -615,7 +638,7 @@ impl Store {
                     device_id,
                     session_id,
                     access_token: new_access_token,
-                    access_expires_at: current_access_expires_at,
+                    access_expires_at,
                     refresh_token: new_refresh_token,
                     family_name,
                 });
@@ -741,7 +764,7 @@ impl Store {
                 membership_id,
                 device_id,
                 session_id,
-                access_expires_at,
+                current_access_expires_at,
                 current_access_hash,
                 current_refresh_hash,
             )) = replay
@@ -750,6 +773,25 @@ impl Store {
                 if crate::hash_secret(&access_token) == current_access_hash
                     && crate::hash_secret(&refresh_token) == current_refresh_hash
                 {
+                    let access_expires_at = if current_access_expires_at > now {
+                        current_access_expires_at
+                    } else {
+                        let extended = now + ACCESS_TOKEN_TTL_SECONDS;
+                        transaction.execute(
+                            "
+                        UPDATE device_sessions
+                        SET access_expires_at = ?1
+                        WHERE session_id = ?2
+                        ",
+                            params![extended, session_id],
+                        )?;
+                        transaction.execute(
+                            "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
+                            params![now, device_id],
+                        )?;
+                        extended
+                    };
+                    transaction.commit()?;
                     return Ok(CreatedDeviceSession {
                         family_id,
                         membership_id,
