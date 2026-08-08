@@ -213,10 +213,7 @@ if ! command -v docker >/dev/null 2>&1 \
   echo "error: the package's image must be locally inspectable before push, including LEZI_SKIP_PACKAGE reuse" >&2
   exit 1
 fi
-local_image_id="$(
-  docker image inspect "${manifest_image}" \
-    --format '{{index .Descriptor.Annotations "config.digest"}}'
-)"
+local_image_id="$("${SCRIPT_DIR}/image-config-digest.sh" "${manifest_image}")"
 local_image_os="$(docker image inspect "${manifest_image}" --format '{{.Os}}')"
 local_image_architecture="$(docker image inspect "${manifest_image}" --format '{{.Architecture}}')"
 if [[ "${local_image_id}" != "${manifest_image_id}" \

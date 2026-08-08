@@ -459,14 +459,7 @@ if ! docker image inspect "${image}" >/dev/null 2>&1; then
   fi
 fi
 
-image_id="$(
-  docker image inspect "${image}" \
-    --format '{{index .Descriptor.Annotations "config.digest"}}'
-)"
-if [[ ! "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "error: docker returned an invalid or incomplete config digest for ${image}" >&2
-  exit 1
-fi
+image_id="$("${SCRIPT_DIR}/image-config-digest.sh" "${image}")"
 image_os="$(docker image inspect "${image}" --format '{{.Os}}')"
 image_architecture="$(docker image inspect "${image}" --format '{{.Architecture}}')"
 if [[ "${image_os}" != "linux" || "${image_architecture}" != "amd64" ]]; then

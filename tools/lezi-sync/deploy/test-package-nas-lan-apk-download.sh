@@ -27,6 +27,7 @@ PY
 )"
 current_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '1p')"
 minimum_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '2p')"
+expected_signer_sha256="$(tr -d '\r\n' <"${REPO_ROOT}/config/release-apk-signer-sha256.txt")"
 
 mkdir -p "${test_root}/bin"
 apk_path="${test_root}/app-release.apk"
@@ -66,8 +67,10 @@ apk_signer="${test_root}/apksigner"
 cat >"${apk_signer}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "${1:-}" == "verify" && "${2:-}" == "--verbose" && "$#" -eq 3 ]]
+[[ "${1:-}" == "verify" && "${2:-}" == "--verbose" \
+    && "${3:-}" == "--print-certs" && "$#" -eq 4 ]]
 echo "Verifies"
+echo "Signer #1 certificate SHA-256 digest: ${LEZI_TEST_EXPECTED_SIGNER_SHA256:?}"
 EOF
 chmod +x "${apk_signer}"
 
@@ -77,7 +80,16 @@ set -euo pipefail
 case "${1:-} ${2:-}" in
   "image inspect")
     if [[ " $* " == *" --format "* ]]; then
-      printf 'sha256:fake-image-id\n'
+      if [[ "$*" == *'{{.Os}}'* ]]; then
+        printf 'linux\n'
+      elif [[ "$*" == *'{{.Architecture}}'* ]]; then
+        printf 'amd64\n'
+      else
+        echo "unexpected docker inspect format: $*" >&2
+        exit 1
+      fi
+    else
+      printf '[{"Id":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]\n'
     fi
     ;;
   "save lezi-sync:9.9.9")
@@ -111,10 +123,11 @@ common_env=(
   "LEZI_APP_UPDATE_JSON=${app_update_json}"
   "LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT=${current_local_data_contract}"
   "LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT=${minimum_local_data_contract}"
+  "LEZI_TEST_EXPECTED_SIGNER_SHA256=${expected_signer_sha256}"
   "LEZI_TLS_HOST=192.168.50.4"
 )
 
-package_dir="${test_root}/package"
+package_dir="${test_root}/lezi-sync-9.9.9-nas"
 if ! "${common_env[@]}" \
     "LEZI_NAS_PACKAGE_DIR=${package_dir}" \
     "${SCRIPT_DIR}/package-nas.sh" >"${test_root}/package.log" 2>&1; then
@@ -131,7 +144,7 @@ with open(sys.argv[1], encoding="utf-8") as source:
 assert manifest["lan_apk_download_origin"] == "http://192.168.50.4:8767"
 PY
 
-grep -Fq 'LEZI_LAN_APK_DOWNLOAD_ORIGIN: "http://192.168.50.4:8767"' \
+grep -Fq -- '- LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://192.168.50.4:8767' \
   "${package_dir}/docker-compose.yml" \
   || fail "NAS compose missing the LAN APK download origin"
 grep -Fq '"0.0.0.0:8767:8767"' "${package_dir}/docker-compose.yml" \
@@ -173,6 +186,7 @@ if env \
     "LEZI_APK_SIGNER=${apk_signer}" \
     "LEZI_RELEASE_APK=${apk_path}" \
     "LEZI_APP_UPDATE_JSON=${app_update_json}" \
+    "LEZI_TEST_EXPECTED_SIGNER_SHA256=${expected_signer_sha256}" \
     LEZI_TLS_HOST=2001:db8::1 \
     'LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://[2001:db8::1]:8767' \
     LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
