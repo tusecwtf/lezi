@@ -2341,15 +2341,10 @@ impl Store {
             "fulfillment_candidate" => 2,
             _ => 3,
         });
-        // Neighbor adjudication (ADR-0018): same transaction as this commit's
-        // LWW write. Uses pre-write `persisted` + this package's effective winners.
-        let neighbor_losers = crate::store::neighbor::adjudicate_neighbor_losers(
-            &transaction,
-            family_id,
-            &effective,
-            &persisted,
-            now,
-        )?;
+        // Schema 12 / causal generation (ADR-0019/0021): never mint neighbor-loser
+        // tombstones. Legacy LWW bundle path may still accept pre-causal roots that
+        // lack a stable head, but must not reintroduce server near-neighbor truth.
+        let neighbor_losers: Vec<Entity> = Vec::new();
         let mut entity_count = effective.len();
         for entity in effective.iter().chain(neighbor_losers.iter()) {
             cursor += 1;

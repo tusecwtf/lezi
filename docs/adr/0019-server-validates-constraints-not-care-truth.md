@@ -1,5 +1,5 @@
 ---
-status: accepted (0.3.13 planning freeze; not runtime-delivered)
+status: accepted (0.3.13; runtime landed via lossless-family-causal-sync tickets 02–08; production cutover residual ticket 09)
 ---
 
 # 服务器验证约束，不裁决护理真相
@@ -66,10 +66,11 @@ status: accepted (0.3.13 planning freeze; not runtime-delivered)
   （见该 ADR 的 superseded 范围）。
 - ADR-0018 的服务器近邻采纳与 `neighbor_losers` 信号在新能力代移除；历史 Record
   tombstone 不批量复活（ADR-0021）。
-- 产品文档必须把「当前已交付 LWW/近邻」与「0.3.13 规划因果合同」分开书写，禁止混写为
-  已上线无损同步。
+- 产品文档必须把「0.3.10–0.3.12 已交付 LWW/近邻」与「0.3.13 tree 因果合同」分开书写；
+  在维护窗 CD 完成前不得把 tree 因果写成家庭 NAS 已上线无损同步。
 
 ## 实现状态
 
-本 ADR 冻结架构边界。运行时 schema/wire 以 0.3.13 / versionCode 20 / Room 27 /
-server schema 12 为 **规划目标**；落地前须按发版清单重核。本文件本身不含代码变更。
+本 ADR 冻结架构边界。**tree 运行时已落地**（schema v12、因果 API、Room 27、Replica 引擎，
+tickets 02–08）。**家庭 NAS 强制切割**（minSupported=20 生产生效、v11→v12 offline migrate、
+joined-client 实机 smoke）由 ticket 09 维护窗证据拥有，不得仅凭本 ADR 宣称生产已切换。

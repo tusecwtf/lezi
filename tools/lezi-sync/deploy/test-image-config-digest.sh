@@ -24,7 +24,7 @@ other_digest="sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234
 run_helper() {
   LEZI_TEST_IMAGE_INSPECT_JSON="${LEZI_TEST_IMAGE_INSPECT_JSON:?}" \
     PATH="${mock_bin}:${PATH}" \
-    "${SCRIPT_DIR}/image-config-digest.sh" lezi-sync:0.3.12
+    "${SCRIPT_DIR}/image-config-digest.sh" lezi-sync:0.3.13
 }
 
 LEZI_TEST_IMAGE_INSPECT_JSON="[{\"Id\":\"${config_digest}\",\"Descriptor\":{\"Annotations\":{\"config.digest\":\"${config_digest}\"}}}]"

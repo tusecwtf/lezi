@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 19,
-  "version_name": "0.3.12",
-  "min_supported_version_code": 16,
-  "sha256": "a3e5ad1a3fcf5e2570a65509799076cc886c779bc9cecdd898e2a5d616b88637",
-  "release_notes": "0.3.12 时间轴默认展示最近 24 小时并实时吸附，可连续拖动换日；全局日期与跨日类型筛选保持一致；提供覆盖历史正式版本的同签名原地升级路径"
+  "version_code": 20,
+  "version_name": "0.3.13",
+  "min_supported_version_code": 20,
+  "sha256": "c2470dc4267e700374fc5c61e4fdb91b62b9935c5c22591ee132722cbca36b80",
+  "release_notes": "0.3.13 家庭事实无损因果同步：base_version/mutation_id 三方合并与持久冲突分支；WakeObservation 独立醒来；近邻仅疑似重复组不再服务器落选；LocalWrite 无 pull 快速路径；Room 27 / server schema 12；强制 minSupported=20"
 }

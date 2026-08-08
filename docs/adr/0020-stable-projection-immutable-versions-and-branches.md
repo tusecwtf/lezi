@@ -1,5 +1,5 @@
 ---
-status: accepted (0.3.13 planning freeze; not runtime-delivered)
+status: accepted (0.3.13; runtime landed via lossless-family-causal-sync tickets 02–08; production cutover residual ticket 09)
 ---
 
 # 稳定投影 + 不可变版本/分支，三方合并与显式 resolution

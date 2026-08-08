@@ -80,7 +80,9 @@ pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
 pub const CAPABILITY_WAKE_OBSERVATION: &str = "wake_observation";
 /// Non-destructive source relations API surface (wire §1 / §12).
 pub const CAPABILITY_SOURCE_RELATIONS: &str = "source_relations";
-const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 16;
+/// 0.3.13 causal generation: production requires verified app-update with
+/// version_code and min_supported_version_code at least this floor (versionCode 20).
+const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 20;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
@@ -602,7 +604,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
                 "protocol cutover refused before the forced-update floor"
             );
             return Err(ApiError::internal(
-                "protocol cutover release channel does not enforce version code 16",
+                "protocol cutover release channel does not enforce version code 20",
             ));
         }
     } else if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {

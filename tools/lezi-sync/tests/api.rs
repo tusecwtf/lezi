@@ -8888,19 +8888,19 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     missing_config.require_protocol_cutover_release = true;
     assert!(
         build_app(missing_config).is_err(),
-        "0.3.9 production startup accepted a missing forced-update channel",
+        "0.3.13 production startup accepted a missing forced-update channel",
     );
 
     let valid = TempDir::new().unwrap();
-    let apk_bytes = b"verified-0.3.9-release-channel";
+    let apk_bytes = b"verified-0.3.13-release-channel";
     fs::write(valid.path().join("app-release.apk"), apk_bytes).unwrap();
     fs::write(
         valid.path().join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 16,
-            "version_name": "0.3.9",
-            "min_supported_version_code": 16,
+            "version_code": 20,
+            "version_name": "0.3.13",
+            "min_supported_version_code": 20,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),
@@ -8909,6 +8909,29 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     let mut valid_config = ServerConfig::new(valid.path());
     valid_config.require_protocol_cutover_release = true;
     assert!(build_app(valid_config).is_ok());
+
+    // Floor 16 is not a valid 0.3.13 production cutover channel.
+    let too_low = TempDir::new().unwrap();
+    let low_apk = b"stale-0.3.9-floor-must-fail";
+    fs::write(too_low.path().join("app-release.apk"), low_apk).unwrap();
+    fs::write(
+        too_low.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 16,
+            "version_name": "0.3.9",
+            "min_supported_version_code": 16,
+            "sha256": hex::encode(Sha256::digest(low_apk)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut low_config = ServerConfig::new(too_low.path());
+    low_config.require_protocol_cutover_release = true;
+    assert!(
+        build_app(low_config).is_err(),
+        "0.3.13 production must reject min_supported/version_code below 20"
+    );
 }
 
 #[tokio::test]
@@ -14979,4 +15002,1110 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     assert_eq!(status, StatusCode::OK, "{resolved}");
     assert_eq!(resolved["status"], "resolved");
     assert_eq!(resolved["stable_root"]["note"], "c");
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Ticket 09 — two joined clients on isolated real lezi-sync (causal cutover)
+// Public seams: /v1/causal/commit, /v1/pull, /v1/conflicts/*, PUT causal media,
+// verified min_supported floor from android-release-compatibility.json.
+// ---------------------------------------------------------------------------
+
+fn release_catalog() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../config/android-release-compatibility.json"
+    ))
+    .expect("android-release-compatibility.json")
+}
+
+fn causal_formula_root_at(
+    baby_id: Uuid,
+    note: &str,
+    amount_ml: i64,
+    timestamp: i64,
+    updated_at: i64,
+) -> Value {
+    json!({
+        "baby_client_uuid": baby_id,
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "timestamp": timestamp,
+        "end_timestamp": null,
+        "note": note,
+        "payload_json": {"amount_ml": amount_ml},
+        "schema_version": 2,
+        "updated_at": updated_at
+    })
+}
+
+fn causal_formula_root(baby_id: Uuid, note: &str, amount_ml: i64, updated_at: i64) -> Value {
+    causal_formula_root_at(baby_id, note, amount_ml, 1_700_000_100, updated_at)
+}
+
+fn causal_sleep_root(baby_id: Uuid, start: i64, updated_at: i64) -> Value {
+    json!({
+        "baby_client_uuid": baby_id,
+        "type": "sleep",
+        "custom_item_client_uuid": null,
+        "timestamp": start,
+        "note": null,
+        "payload_json": {"anomaly_flag": false, "is_nap": false},
+        "schema_version": 2,
+        "updated_at": updated_at,
+        "effective_wake_observation_client_uuid": null
+    })
+}
+
+fn causal_media_item(media_uuid: Uuid, role: &str, sha256: &str, byte_size: usize) -> Value {
+    json!({
+        "media_uuid": media_uuid,
+        "role": role,
+        "sha256": sha256,
+        "byte_size": byte_size,
+        "mime": "image/jpeg",
+        "width": 1,
+        "height": 1
+    })
+}
+
+fn causal_unit(
+    mutation_id: Uuid,
+    base: Option<&str>,
+    entity_type: &str,
+    client_uuid: Uuid,
+    root: Value,
+    media: Vec<Value>,
+    deleted: bool,
+) -> Value {
+    json!({
+        "mutation_id": mutation_id,
+        "base_version": base,
+        "entity_type": entity_type,
+        "client_uuid": client_uuid,
+        "root": root,
+        "media": media,
+        "deleted": deleted
+    })
+}
+
+async fn causal_commit_units(app: &Router, token: &str, units: Vec<Value>) -> (StatusCode, Value) {
+    json_request(
+        app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({ "units": units }),
+    )
+    .await
+}
+
+async fn put_causal_media_bytes(
+    app: &Router,
+    token: &str,
+    media_uuid: Uuid,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    let sha = hex::encode(Sha256::digest(bytes));
+    let response = request_with_headers(
+        app,
+        Method::PUT,
+        &format!("/v1/causal/media/{media_uuid}"),
+        Some(token),
+        Body::from(bytes.to_vec()),
+        Some("application/octet-stream"),
+        &[("x-lezi-media-sha256", sha.as_str())],
+    )
+    .await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    (status, value)
+}
+
+async fn seed_causal_baby(app: &Router, token: &str) -> Uuid {
+    let baby_id = Uuid::new_v4();
+    let (status, body) = causal_commit_units(
+        app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            baby_id,
+            json!({
+                "nickname": "年年",
+                "sex": "female",
+                "birthday": "2025-01-02",
+                "avatar_media_uuid": null,
+                "updated_at": 10
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["status"], "accepted", "{body}");
+    baby_id
+}
+
+async fn two_joined_clients(
+    app: &Router,
+    owner_device: &str,
+    member_device: &str,
+) -> (Value, Value) {
+    let owner = create_family(
+        app,
+        owner_device,
+        &format!("{owner_device}-create-request-000000000001"),
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(app, owner_token, member_device).await;
+    (owner, member)
+}
+
+async fn pull_entities(app: &Router, token: &str, generation: &str) -> Value {
+    let (status, body) = get_json(
+        app,
+        &format!("/v1/pull?cursor=0&generation={generation}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+fn find_entity(pull: &Value, client_uuid: Uuid) -> &Value {
+    pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == client_uuid.to_string())
+        .unwrap_or_else(|| panic!("entity {client_uuid} missing from pull: {pull}"))
+}
+
+fn conflict_summary_is_closed(row: &Value) {
+    // Wire: after resolution, ordinary pull must not surface an open conflict_summary.
+    match row.get("conflict_summary") {
+        None => {}
+        Some(Value::Null) => {}
+        Some(other) => panic!("open conflict_summary after resolve: {other}"),
+    }
+}
+
+/// Owner + member: disjoint field auto-merge; same-field branch; peer summary; CAS resolve.
+#[tokio::test]
+async fn causal_two_client_disjoint_merge_and_same_field_branch() {
+    let rig = Rig::new();
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "two-client-merge-owner",
+        "two-client-merge-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    // Member authors so both owner and author may edit.
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "base", 100, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["results"][0]["status"], "accepted");
+    let v1 = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, left) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "owner-note", 100, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{left}");
+    assert_eq!(left["results"][0]["status"], "accepted", "{left}");
+
+    let (status, right) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "base", 180, 40),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{right}");
+    assert_eq!(right["results"][0]["status"], "merged", "{right}");
+    assert_eq!(right["results"][0]["stable_root"]["note"], "owner-note");
+    assert_eq!(
+        right["results"][0]["stable_root"]["payload_json"]["amount_ml"],
+        180
+    );
+    let v_merged = right["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, owner_note) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v_merged),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "owner-wins-candidate", 180, 50),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_note}");
+    assert_eq!(owner_note["results"][0]["status"], "accepted");
+    let v_owner = owner_note["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, member_branch) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v_merged),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "member-branch-note", 180, 60),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{member_branch}");
+    assert_eq!(member_branch["results"][0]["status"], "branched");
+    let conflict_id = member_branch["results"][0]["conflict_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let branch_id = member_branch["results"][0]["branch_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        member_branch["results"][0]["stable_version_id"].as_str(),
+        Some(v_owner.as_str())
+    );
+
+    let owner_pull = pull_entities(&rig.app, owner_token, generation).await;
+    let row = find_entity(&owner_pull, record_id);
+    assert_eq!(row["version_id"], v_owner);
+    assert_eq!(row["payload"]["note"], "owner-wins-candidate");
+    let summary = row
+        .get("conflict_summary")
+        .expect("owner must see peer branch summary object");
+    assert!(
+        !summary.is_null(),
+        "conflict_summary must be non-null: {row}"
+    );
+    assert_eq!(summary["conflict_id"], conflict_id);
+
+    // Stale resolve (wrong expected stable) fails closed; then good CAS wins.
+    let (status, stale_resolve) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(owner_token),
+        json!({
+            "expected_stable_version": v_merged,
+            "expected_branch_versions": [branch_id],
+            "resolved_root": causal_formula_root(baby_id, "member-branch-note", 180, 70),
+            "resolved_media": [],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "conflict_choices": {"/note": "member-branch-note"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stale_resolve}");
+    assert_eq!(stale_resolve["status"], "cas_mismatch", "{stale_resolve}");
+
+    let (status, resolved) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(owner_token),
+        json!({
+            "expected_stable_version": v_owner,
+            "expected_branch_versions": [branch_id],
+            "resolved_root": causal_formula_root(baby_id, "member-branch-note", 180, 70),
+            "resolved_media": [],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "conflict_choices": {"/note": "member-branch-note"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["status"], "resolved");
+    assert_eq!(resolved["stable_root"]["note"], "member-branch-note");
+
+    // Second resolve with pre-success expectations must fail closed (CAS or gone).
+    let (status, race) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        json!({
+            "expected_stable_version": v_owner,
+            "expected_branch_versions": [branch_id],
+            "resolved_root": causal_formula_root(baby_id, "owner-wins-candidate", 180, 71),
+            "resolved_media": [],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "conflict_choices": {"/note": "owner-wins-candidate"}
+        }),
+    )
+    .await;
+    assert!(
+        status == StatusCode::NOT_FOUND
+            || (status == StatusCode::OK
+                && matches!(
+                    race["status"].as_str(),
+                    Some("cas_mismatch") | Some("rejected")
+                )),
+        "second resolve after race must fail closed: {status} {race}"
+    );
+
+    let member_pull = pull_entities(&rig.app, member_token, generation).await;
+    let settled = find_entity(&member_pull, record_id);
+    assert_eq!(settled["payload"]["note"], "member-branch-note");
+    conflict_summary_is_closed(settled);
+}
+
+/// Delete-then-edit and edit-then-delete arrival orders + idempotent replay + stale reject.
+#[tokio::test]
+async fn causal_two_client_delete_edit_both_arrival_orders() {
+    let rig = Rig::new();
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "two-client-delete-owner",
+        "two-client-delete-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+
+    // --- Order A: delete first, concurrent edit from common base → branched tombstone stable.
+    let record_a = Uuid::new_v4();
+    let create_mut = Uuid::new_v4();
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            create_mut,
+            None,
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "live", 90, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let v1 = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, replay) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            create_mut,
+            None,
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "live", 90, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["stable_version_id"], v1);
+
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "live", 90, 30),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted");
+    let tombstone_v = deleted["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, concurrent_edit) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "offline-edit", 90, 40),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{concurrent_edit}");
+    assert_eq!(concurrent_edit["results"][0]["status"], "branched");
+    assert_eq!(
+        concurrent_edit["results"][0]["stable_version_id"].as_str(),
+        Some(tombstone_v.as_str())
+    );
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let row = find_entity(&pull, record_a);
+    assert!(!row["deleted_at"].is_null(), "{row}");
+    assert!(
+        row.get("conflict_summary").is_some() && !row["conflict_summary"].is_null(),
+        "{row}"
+    );
+
+    let (status, stale) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&Uuid::new_v4().to_string()),
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "stale-resurrect", 90, 99),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(stale["results"][0]["status"], "rejected");
+    assert_eq!(
+        stale["results"][0]["code"].as_str(),
+        Some("stale_live_over_tombstone")
+    );
+
+    // --- Order B: edit first, then delete from common base → branched; stable is live edit.
+    let record_b = Uuid::new_v4();
+    let (status, created_b) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_b,
+            causal_formula_root(baby_id, "live-b", 50, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created_b}");
+    let vb1 = created_b["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, edited) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&vb1),
+            "record",
+            record_b,
+            causal_formula_root(baby_id, "member-edit-first", 50, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["results"][0]["status"], "accepted");
+    let vb2 = edited["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, delete_late) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&vb1),
+            "record",
+            record_b,
+            causal_formula_root(baby_id, "live-b", 50, 40),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{delete_late}");
+    assert_eq!(
+        delete_late["results"][0]["status"], "branched",
+        "{delete_late}"
+    );
+    assert_eq!(
+        delete_late["results"][0]["stable_version_id"].as_str(),
+        Some(vb2.as_str())
+    );
+    let pull_b = pull_entities(&rig.app, member_token, generation).await;
+    let row_b = find_entity(&pull_b, record_b);
+    assert!(
+        row_b["deleted_at"].is_null(),
+        "stable remains live edit: {row_b}"
+    );
+    assert_eq!(row_b["payload"]["note"], "member-edit-first");
+    assert!(
+        row_b.get("conflict_summary").is_some() && !row_b["conflict_summary"].is_null(),
+        "delete branch must surface conflict_summary: {row_b}"
+    );
+}
+
+/// Independent media additions merge; same-media delete/edit branches; bytes retained.
+#[tokio::test]
+async fn causal_two_client_media_merge_and_delete_edit_branch() {
+    // Default Rig max_media_bytes is tiny (8); media E2E needs room for preimages.
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "two-client-media-owner",
+        "two-client-media-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+
+    let record_id = Uuid::new_v4();
+    let m1 = Uuid::new_v4();
+    let bytes1 = b"photo-one-bytes";
+    let sha1 = hex::encode(Sha256::digest(bytes1));
+    let (status, put1) = put_causal_media_bytes(&rig.app, member_token, m1, bytes1).await;
+    assert_eq!(status, StatusCode::OK, "{put1}");
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "with-photo", 80, 20),
+            vec![causal_media_item(m1, "log", &sha1, bytes1.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["results"][0]["status"], "accepted");
+    let v1 = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Owner removes m1; member independently adds m2 from v1 → merge keeps m2 only.
+    let (status, left) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "with-photo", 80, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{left}");
+    assert_eq!(left["results"][0]["status"], "accepted", "{left}");
+
+    let m2 = Uuid::new_v4();
+    let bytes2 = b"photo-two-bytes-longer";
+    let sha2 = hex::encode(Sha256::digest(bytes2));
+    let (status, _) = put_causal_media_bytes(&rig.app, member_token, m2, bytes2).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, right) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "with-photo", 80, 40),
+            vec![
+                causal_media_item(m1, "log", &sha1, bytes1.len()),
+                causal_media_item(m2, "log", &sha2, bytes2.len()),
+            ],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{right}");
+    assert_eq!(right["results"][0]["status"], "merged", "{right}");
+    let media = right["results"][0]["stable_media"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(media.len(), 1, "{media:?}");
+    assert_eq!(media[0]["media_uuid"], m2.to_string());
+
+    // Bytes for m2 remain downloadable after independent-media merge.
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{m2}"),
+        Some(member_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let got = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(got.as_ref(), bytes2.as_slice());
+
+    // Same-media delete vs edit branches.
+    let record2 = Uuid::new_v4();
+    let m3 = Uuid::new_v4();
+    let bytes3 = b"shared-photo";
+    let sha3 = hex::encode(Sha256::digest(bytes3));
+    let (status, _) = put_causal_media_bytes(&rig.app, member_token, m3, bytes3).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, c2) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record2,
+            causal_formula_root(baby_id, "media-conflict", 10, 50),
+            vec![causal_media_item(m3, "log", &sha3, bytes3.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{c2}");
+    let base = c2["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, del_media) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base),
+            "record",
+            record2,
+            causal_formula_root(baby_id, "media-conflict", 10, 51),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{del_media}");
+    assert_eq!(del_media["results"][0]["status"], "accepted");
+
+    let bytes3_edit = b"shared-photo-edited";
+    let sha3_edit = hex::encode(Sha256::digest(bytes3_edit));
+    // Same media_uuid with different bytes cannot PUT-overwrite authority media (409).
+    // Write the competing preimage under the data-dir media path so commit can see hash drift.
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(m3.to_string());
+    fs::write(&media_path, bytes3_edit).unwrap();
+    let (status, edit_media) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base),
+            "record",
+            record2,
+            causal_formula_root(baby_id, "media-conflict", 10, 52),
+            vec![causal_media_item(m3, "log", &sha3_edit, bytes3_edit.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edit_media}");
+    assert_eq!(
+        edit_media["results"][0]["status"], "branched",
+        "{edit_media}"
+    );
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let row = find_entity(&pull, record2);
+    assert!(
+        row.get("conflict_summary").is_some() && !row["conflict_summary"].is_null(),
+        "media delete/edit must open conflict_summary: {row}"
+    );
+}
+
+#[tokio::test]
+async fn causal_two_client_wake_observations_and_near_duplicates_retained() {
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "two-client-wake-owner", "two-client-wake-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let sleep_id = Uuid::new_v4();
+    let sleep_start = 1_700_100_000_i64;
+    let (status, sleep_body) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            sleep_id,
+            causal_sleep_root(baby_id, sleep_start, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sleep_body}");
+    assert_eq!(sleep_body["results"][0]["status"], "accepted");
+
+    let wake_owner = Uuid::new_v4();
+    let wake_member = Uuid::new_v4();
+    let (status, w1) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "wake_observation",
+            wake_owner,
+            json!({
+                "sleep_record_client_uuid": sleep_id,
+                "wake_timestamp": sleep_start + 3_600_000,
+                "note": "owner saw wake",
+                "withdrawn": false,
+                "updated_at": 30
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{w1}");
+    assert_eq!(w1["results"][0]["status"], "accepted", "{w1}");
+    let (status, w2) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "wake_observation",
+            wake_member,
+            json!({
+                "sleep_record_client_uuid": sleep_id,
+                "wake_timestamp": sleep_start + 3_900_000,
+                "note": "member saw later",
+                "withdrawn": false,
+                "updated_at": 40
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{w2}");
+    assert_eq!(w2["results"][0]["status"], "accepted", "{w2}");
+
+    let pull = pull_entities(&rig.app, member_token, generation).await;
+    let wakes: Vec<_> = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["type"] == "wake_observation"
+                && (e["client_uuid"] == wake_owner.to_string()
+                    || e["client_uuid"] == wake_member.to_string())
+                && e["deleted_at"].is_null()
+        })
+        .collect();
+    assert_eq!(wakes.len(), 2, "both wake observations must remain: {pull}");
+
+    let r1 = Uuid::new_v4();
+    let r2 = Uuid::new_v4();
+    let ts = 1_700_200_000_i64;
+    let (status, a) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            r1,
+            causal_formula_root_at(baby_id, "a", 100, ts, 50),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{a}");
+    let (status, b) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            r2,
+            causal_formula_root_at(baby_id, "b", 110, ts + 10 * 60 * 1000, 51),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(b["results"][0]["status"], "accepted", "{b}");
+    let pull2 = pull_entities(&rig.app, owner_token, generation).await;
+    let live: Vec<_> = pull2["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["type"] == "record"
+                && (e["client_uuid"] == r1.to_string() || e["client_uuid"] == r2.to_string())
+                && e["deleted_at"].is_null()
+        })
+        .collect();
+    assert_eq!(
+        live.len(),
+        2,
+        "near-duplicate records must stay live: {pull2}"
+    );
+    assert!(
+        pull2
+            .get("neighbor_losers")
+            .map(|v| v.is_null() || v.as_array().map(|a| a.is_empty()).unwrap_or(false))
+            .unwrap_or(true),
+        "must not emit neighbor_losers: {pull2}"
+    );
+}
+
+/// Server-only shape: two independent creates without prior pull; peer visible on full pull.
+/// Does **not** prove Android LocalWrite no-pull cursor semantics (engine/unit residual).
+#[tokio::test]
+async fn causal_two_client_independent_creates_visible_on_peer_full_pull() {
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "two-client-lw-owner", "two-client-lw-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+
+    let peer_record = Uuid::new_v4();
+    let (status, peer) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            peer_record,
+            causal_formula_root(baby_id, "peer-only", 70, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{peer}");
+    assert_eq!(peer["results"][0]["status"], "accepted");
+
+    let owner_record = Uuid::new_v4();
+    let (status, mine) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            owner_record,
+            causal_formula_root(baby_id, "owner-localwrite", 80, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["results"][0]["status"], "accepted");
+
+    let full = pull_entities(&rig.app, owner_token, generation).await;
+    find_entity(&full, owner_record);
+    assert_eq!(
+        find_entity(&full, peer_record)["payload"]["note"],
+        "peer-only"
+    );
+}
+
+/// Verified app-update floor from shared catalog blocks clients below minimum_sync_version_code.
+#[tokio::test]
+async fn causal_forced_min_supported_from_catalog_blocks_legacy_client() {
+    let catalog = release_catalog();
+    let min_supported = catalog["minimum_sync_version_code"].as_u64().unwrap();
+    let target_code = catalog["upgrade_target"]["version_code"].as_u64().unwrap();
+    let target_name = catalog["upgrade_target"]["version_name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let package_name = catalog["application_id"].as_str().unwrap().to_owned();
+    assert!(
+        min_supported >= 20 && target_code >= min_supported,
+        "catalog floor/target must be causal cutover: min={min_supported} target={target_code}"
+    );
+    let legacy_code = min_supported.saturating_sub(1);
+    assert!(legacy_code < min_supported);
+
+    let apk_bytes = b"lezi-catalog-forced-cutover-release-apk-bytes";
+    let sha = hex::encode(Sha256::digest(apk_bytes));
+    let rig = Rig::new();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        json!({
+            "package_name": package_name,
+            "version_code": target_code,
+            "version_name": target_name,
+            "min_supported_version_code": min_supported,
+            "sha256": sha,
+            "release_notes": "catalog-driven forced cutover"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let app = rig.restart("generation-a");
+
+    let owner = create_family(
+        &app,
+        "min-supported-owner",
+        "min-supported-request-000000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let unit = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        baby_id,
+        json!({
+            "nickname": "年年",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "avatar_media_uuid": null,
+            "updated_at": 10
+        }),
+        vec![],
+        false,
+    );
+
+    let legacy_header = legacy_code.to_string();
+    let legacy = [("x-lezi-client-version-code", legacy_header.as_str())];
+    let (status, body) = json_request_with_headers(
+        &app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({ "units": [unit.clone()] }),
+        &legacy,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], json!("client_update_required"), "{body}");
+
+    let (pull_status, pull_body) = raw_json_request_with_headers(
+        &app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &legacy,
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::FORBIDDEN, "{pull_body}");
+    assert_eq!(
+        pull_body["code"],
+        json!("client_update_required"),
+        "{pull_body}"
+    );
+
+    let modern_header = target_code.to_string();
+    let modern = [("x-lezi-client-version-code", modern_header.as_str())];
+    let (status, ok) = json_request_with_headers(
+        &app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({ "units": [unit] }),
+        &modern,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ok}");
+    assert_eq!(ok["results"][0]["status"], "accepted", "{ok}");
 }

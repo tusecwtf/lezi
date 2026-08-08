@@ -12,7 +12,7 @@
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
 > membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 >
-> **0.3.13 规划（未交付）：** 因果版本 / WakeObservation / 非破坏性疑似重复 wire 冻结见
+> **0.3.13 tree 已落地（NAS 切割待维护窗）：** 因果版本 / WakeObservation / 非破坏性疑似重复 wire 见
 > [`causal-sync-wire.md`](./causal-sync-wire.md) 与 ADR-0019/0020/0021。下文凡标
 > 「0.3.13 规划」的不得读成当前运行时行为；0.3.10–0.3.12 已交付的 LWW、近邻落选与
 > 整行 sleep end 仍以标注「已交付」的段落为准，直至能力切割上线。
@@ -197,7 +197,7 @@ pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语�
    同一 wake，标记 anomaly 并以更高修订发布；时钟偏斜导致开始晚于 wake 的开放行保留为唯一
    residual，禁止生成负区间。并发多次闭合走普通 LWW（`updated_at`）。
 
-#### 3.5.1 SleepStart + WakeObservation（0.3.13 规划，未交付）
+#### 3.5.1 SleepStart + WakeObservation（0.3.13 tree 已落地；NAS 切割待维护窗）
 
 权威 closed keys、verdict、迁移 UUIDv5 与 API 见
 [`causal-sync-wire.md`](./causal-sync-wire.md) §4–§11。产品摘要：
@@ -563,7 +563,7 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 
 > **0.3.9–0.3.12 已交付：** ADR-0017；Room-first、先 pull、临时计划、atomic bundle 与修订
 > CAS；批量 head-by-UUID + LWW。
-> **0.3.13 规划（未交付）：** ADR-0019/0020 与 [`causal-sync-wire.md`](./causal-sync-wire.md)；
+> **0.3.13 tree：** ADR-0019/0020 与 [`causal-sync-wire.md`](./causal-sync-wire.md)；
 > 因果 `base_version`/`mutation_id`、三方合并/分支；FulfillmentCandidate **仍不** 三方编辑。
 
 #### 3.12.1 已交付（head-by-UUID + LWW）
@@ -583,7 +583,7 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
 并发新编辑进入下一周期。完整静止周期结束时冻结集必须全部终态，浅层 pending 按未终态原子
 单元计数。contract 2→3 的旧 outbox identity 仍只用于把相应 Room 行转成待对账，然后删除旧表。
 
-#### 3.12.2 0.3.13 规划（因果版本，未交付）
+#### 3.12.2 0.3.13 因果版本（tree 已落地；NAS 切割待维护窗）
 
 - 可变原子根：Baby+avatar、Record+record media、CarePlan+plan media、CustomItem、
   **WakeObservation+wake media**。FulfillmentCandidate 仍为不可变证据，只引用不三方合并。
@@ -639,7 +639,7 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
   **无需改库**。
 - 不取消履行侧的 5 分钟 skew；只在聚合侧按时钟延迟可见累计。
 
-### 5.2 疑似重复组与汇总上下界（0.3.13 规划，未交付）
+### 5.2 疑似重复组与汇总上下界（0.3.13 tree 已落地；NAS 切割待维护窗）
 
 - 时间轴默认 **展开** 疑似重复组内全部来源记录，不隐藏、不自动 tombstone。
 - 未确认组：对每项受影响的次数/奶量等指标，在「只计展示候选」到「组成员彼此独立」的
@@ -831,7 +831,7 @@ LocalUser、Family、Membership、Baby、Record、MediaAsset、SettingsLocal、S
 CustomItemDef、CarePlan 与 FulfillmentCandidate，并使用真实 `SyncPort` 和 Record/计划媒体
 原子包。
 
-**0.3.13 规划（未交付，发版前重核）：** versionName `0.3.13` / versionCode **20** /
+**0.3.13 tree 目标（NAS 切割前重核）：** versionName `0.3.13` / versionCode **20** /
 Room **27**（本地契约版本号以实现票追加清单为准）/ server schema **12**。Room 27 须原地
 迁移保留全部业务行、dirty、媒体、会话与 endpoint 信任，并容纳 `baseVersion`、冻结
 `mutation_id`、WakeObservation、冲突摘要/详情、疑似重复与来源关系。后续本地数据契约必须

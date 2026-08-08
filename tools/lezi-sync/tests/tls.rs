@@ -64,9 +64,9 @@ fn write_protocol_cutover_release(data_root: &Path) {
         data_root.join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 16,
-            "version_name": "0.3.9",
-            "min_supported_version_code": 16,
+            "version_code": 20,
+            "version_name": "0.3.13",
+            "min_supported_version_code": 20,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),

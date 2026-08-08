@@ -1,7 +1,7 @@
 {
   "application_id": "com.lezi.babylog",
   "permanent_upgrade_baseline_version_code": 6,
-  "minimum_sync_version_code": 16,
+  "minimum_sync_version_code": 20,
   "upgrade_target": {
     "version_code": 20,
     "version_name": "0.3.13",

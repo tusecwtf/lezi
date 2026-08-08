@@ -1,9 +1,9 @@
-//! Family neighbor adjudication for whitelist care records (ADR-0018 / 0.3.10).
+//! Historical family neighbor adjudication (ADR-0018 / 0.3.10).
 //!
-//! Runs only inside the atomic commit transaction on shards touched by this
-//! commit's whitelist record live mutations. Writes neighbor-loser tombstones in
-//! the same transaction so the public authority graph never exposes dual live
-//! neighbors after a successful commit.
+//! **Schema 12 / causal generation does not call this path.** Server near-neighbor
+//! tombstones are forbidden (ADR-0019/0021). Algorithm kept for audit/reference only.
+
+#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -131,6 +131,9 @@ pub(crate) fn touched_whitelist_shards(
 
 /// Adjudicate neighbor groups for touched shards; return loser root entities
 /// ready to persist (soft-delete tombstones with raised `updated_at`).
+/// Historical ADR-0018 algorithm retained for audit/reference. Schema-12 bundle
+/// commit never invokes this (causal generation forbids neighbor tombstones).
+#[allow(dead_code)]
 pub(crate) fn adjudicate_neighbor_losers(
     transaction: &Transaction<'_>,
     family_id: &str,

@@ -1,6 +1,6 @@
 # 家庭事实无损因果同步
 
-Status: ready-for-agent
+Status: local-partial — tree runtime landed; release acceptance residual on 09
 
 Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 

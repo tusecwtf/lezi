@@ -1,3 +1,6 @@
+//! Schema 12 / causal generation disables server neighbor adjudication
+//! (ADR-0019/0021). These tests pin residual no-op / exemption behaviour and
+//! prove near-duplicates stay live without neighbor_losers.
 //! Record tombstone-wins and family neighbor adjudication (0.3.10 / ADR-0018).
 
 use super::super::*;
@@ -173,19 +176,17 @@ fn cross_membership_whitelist_neighbors_collapse_to_one_live() {
     )
     .unwrap();
 
-    assert_eq!(
-        result.neighbor_losers,
-        vec![member_record.to_string()],
-        "member loses to owner authorship (same family fake ids: owner principal is m-owner; \
-         real DB owner may differ — without real owner match earliest-ts/uuid still collapses)"
+    // Schema 12: server never collapses cross-membership near-duplicates.
+    assert!(
+        result.neighbor_losers.is_empty(),
+        "neighbor_losers must stay empty on causal generation: {:?}",
+        result.neighbor_losers
     );
-    // With hardcoded m-owner vs m-member: Owner priority only if m-owner is the
-    // DB owner. create_family mints a UUID owner, so Owner priority does not apply
-    // here; earliest timestamp wins → owner_record at t0.
     let live = live_record_uuids(&store, &family_id);
-    assert_eq!(live, vec![owner_record.to_string()]);
-    let deleted = deleted_record_uuids(&store, &family_id);
-    assert!(deleted.contains(&member_record.to_string()));
+    assert_eq!(live.len(), 2, "live={live:?}");
+    assert!(live.contains(&owner_record.to_string()));
+    assert!(live.contains(&member_record.to_string()));
+    assert!(deleted_record_uuids(&store, &family_id).is_empty());
 }
 
 #[test]
@@ -323,7 +324,8 @@ fn thirty_minute_boundary_is_inclusive_plus_one_ms_is_not() {
         100,
     )
     .unwrap();
-    assert_eq!(r1.neighbor_losers, vec![b.to_string()]);
+    // Causal generation: no neighbor losers; both remain live.
+    assert!(r1.neighbor_losers.is_empty(), "{:?}", r1.neighbor_losers);
 
     // 30 min + 1 ms after winner — not a neighbor of a.
     let r2 = publish_root(
@@ -341,7 +343,8 @@ fn thirty_minute_boundary_is_inclusive_plus_one_ms_is_not() {
     assert!(r2.neighbor_losers.is_empty());
     let mut live = live_record_uuids(&store, &family_id);
     live.sort();
-    assert_eq!(live, vec![a.to_string(), c.to_string()]);
+    // Inclusive 30-minute edge and +1ms row all remain live (no server collapse).
+    assert_eq!(live, vec![a.to_string(), b.to_string(), c.to_string()]);
 }
 
 #[test]
@@ -399,13 +402,13 @@ fn three_author_chain_collapses_to_single_live() {
     )
     .unwrap();
     let live = live_record_uuids(&store, &family_id);
-    assert_eq!(
-        live,
-        vec![a.to_string()],
-        "live={live:?} losers={:?}",
+    // Causal generation: all three near-duplicate UUIDs stay live; no losers.
+    assert!(
+        result.neighbor_losers.is_empty(),
+        "{:?}",
         result.neighbor_losers
     );
-    assert!(result.neighbor_losers.contains(&c.to_string()));
+    assert_eq!(live.len(), 3, "live={live:?}");
 }
 
 #[test]
@@ -478,11 +481,16 @@ fn owner_priority_beats_earlier_member_timestamp() {
         100,
     )
     .unwrap();
-    assert_eq!(result.neighbor_losers, vec![member_record.to_string()]);
-    assert_eq!(
-        live_record_uuids(&store, &family_id),
-        vec![owner_record.to_string()]
+    // Causal generation: Owner near-duplicate does not tombstone the member row.
+    assert!(
+        result.neighbor_losers.is_empty(),
+        "{:?}",
+        result.neighbor_losers
     );
+    let live = live_record_uuids(&store, &family_id);
+    assert_eq!(live.len(), 2, "live={live:?}");
+    assert!(live.contains(&owner_record.to_string()));
+    assert!(live.contains(&member_record.to_string()));
 }
 
 #[test]
@@ -516,16 +524,20 @@ fn winner_later_deleted_does_not_resurrect_loser() {
         100,
     )
     .unwrap();
-    assert_eq!(live_record_uuids(&store, &family_id), vec![a.to_string()]);
+    // Both near-duplicate rows stay live until an explicit per-UUID delete.
+    let mut live = live_record_uuids(&store, &family_id);
+    live.sort();
+    assert_eq!(live, vec![a.to_string(), b.to_string()]);
 
-    let mut delete_winner = entity("record", a, 10, record_payload(baby_id, "drink", t0));
-    delete_winner.deleted_at = Some(10);
-    let result = publish_root(&store, &owner, delete_winner, 100).unwrap();
+    let mut delete_a = entity("record", a, 10, record_payload(baby_id, "drink", t0));
+    delete_a.deleted_at = Some(10);
+    let result = publish_root(&store, &owner, delete_a, 100).unwrap();
     assert!(result.neighbor_losers.is_empty());
-    assert!(live_record_uuids(&store, &family_id).is_empty());
+    // Deleting one UUID must not tombstone the independent near-duplicate.
+    assert_eq!(live_record_uuids(&store, &family_id), vec![b.to_string()]);
     let deleted = deleted_record_uuids(&store, &family_id);
     assert!(deleted.contains(&a.to_string()));
-    assert!(deleted.contains(&b.to_string()));
+    assert!(!deleted.contains(&b.to_string()));
 }
 
 #[test]

@@ -1,15 +1,15 @@
 # 乐记 — 0.3.13 因果同步 Wire 合同（规划冻结）
 
-> **状态：** 规划目标，**不是** 当前运行时已交付行为。
-> 当前交付仍见 [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 与
-> [`data-model.md`](./data-model.md) 的 0.3.9–0.3.12 叙述。
+> **状态：** **tree 运行时已落地**（tickets 02–08）；**家庭 NAS 强制切割与 minSupported=20 生产生效**
+> 仍须 ticket 09 维护窗 CD 与双机冒烟证据。历史 0.3.9–0.3.12 叙述见
+> [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 与 [`data-model.md`](./data-model.md)。
 > 架构决策（不含 wire 字段权威）：[ADR-0019](../adr/0019-server-validates-constraints-not-care-truth.md)、
 > [ADR-0020](../adr/0020-stable-projection-immutable-versions-and-branches.md)、
 > [ADR-0021](../adr/0021-wake-observation-and-nondestructive-duplicate-groups.md)。
 > 术语（不含字段/枚举权威）：根 [`CONTEXT.md`](../../CONTEXT.md)。
 > **字段名、枚举、closed key set、合并路径与例子：本文是唯一权威。**
 > 版本目标：Android/server **0.3.13**、versionCode **20**、Room **27**、server schema
-> **12**（发版前须从实时清单重核）。
+> **12**（切割前须从实时清单与 live health 重核）。
 
 实现票不得发明竞争 shape、第二套 verdict 名或第二套删除/媒体编码。
 

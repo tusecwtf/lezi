@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前交付**：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push，启动 authority graph 校验（ADR-0017）。**0.3.13 规划**：因果 reconcile/commit、版本/分支、WakeObservation；见 ADR-0019/0020/0021 与 [`causal-sync-wire.md`](./causal-sync-wire.md) |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 tree**：可信 HTTPS、每设备会话、仅前台同步；**0.3.13 因果 wire 已在 tree 落地**（reconcile/commit、版本/分支、WakeObservation、LocalWrite 无 pull）。家庭 NAS 强制切割与 minSupported=20 仍须维护窗 CD（见 ticket 09）。合同：ADR-0019/0020/0021 与 [`causal-sync-wire.md`](./causal-sync-wire.md) |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,10 +32,10 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（撰写时 0.3.12 / 19）；下文规划值不得冒充已发布 |
+| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.3.13 / versionCode **20**）；家庭 NAS 是否已切到该代以 live health 为准 |
 | versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
-| 本地数据契约 | 当前交付 `v3` / Room **v26**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
-| **0.3.13 规划目标（未交付；发版前重核）** | versionName `0.3.13`、versionCode **20**、Room **27**、server schema **12**、因果 wire（[`causal-sync-wire.md`](./causal-sync-wire.md)）；minSupported 抬到 20 前须已验证签名 APK 更新通道 |
+| 本地数据契约 | 当前 tree `v4` / Room **v27**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| **0.3.13 发版目标（tree 就绪；生产切割待维护窗）** | versionName `0.3.13`、versionCode **20**、Room **27**、server schema **12**、因果 wire（[`causal-sync-wire.md`](./causal-sync-wire.md)）；`app-update.json` minSupported=**20** 且已与签名 release APK 对齐；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
 | 应用名 | 乐记 |
 
 ---
@@ -315,18 +315,18 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 19,
-  "version_name": "0.3.12",
-  "min_supported_version_code": 16,
+  "version_code": 20,
+  "version_name": "0.3.13",
+  "min_supported_version_code": 20,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
 }
 ```
 
-示例数字随发布清单变化；**0.3.13 规划** 将 `version_code`/`version_name` 推进到 20 /
-`0.3.13`，并在因果 wire 入站前把 `min_supported_version_code` 抬到 **20**（须先有可安装
-通道）。实现与发版开始时必须重新对照 `config/android-release-compatibility.json`、
-`app-update.json` 与 Cargo/Gradle 真值。
+**当前 floor** 以 `config/android-release-compatibility.json` 的
+`minimum_sync_version_code` 与部署 `app-update.json` 的 `min_supported_version_code`
+为唯一真值（tree 目标 **20** / 0.3.13）。发版与 CD 前必须重核 catalog、`app-update.json`、
+Cargo/Gradle 与签名 APK sha256 一致；不得沿用历史 16/0.3.9 或 16/0.3.12 示例当生产 floor。
 
 触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查；② 菜单关于区点击检查。
 可选更新：确认层 → 下载 → sha256 → **归档身份校验**（包名 / versionCode / 签名）→
@@ -346,10 +346,10 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 2. **先抬 floor：** 在 `app-update.json` 将 `min_supported_version_code` 提到**能解析新 shape 的最低官方 versionCode**；同时准备该 versionCode（或更高）的 **已签名 release APK**，`sha256` 与包一致。
 3. **先发布可安装通道：** CD 原子对发布（APK 再 metadata），确认 `load_verified` 成功；旧客户端随后在权威 sync / restore 写路径收到 `client_update_required` 并能装包。
 4. **再启用新写入：** 仅当通道已验证后，再让新客户端/服务端发布破坏性 shape。
-5. **支持范围内 wire 冻结：** 当前 floor（撰写时 `min_supported=16`）到最新 versionCode 之间，wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
-6. **0.3.13 因果切割（规划）：** 新实体 `wake_observation`、因果字段
+5. **支持范围内 wire 冻结：** 当前 floor 以 catalog `minimum_sync_version_code`（tree **20**）为准，到最新 versionCode 之间 wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
+6. **0.3.13 因果切割（tree 已落地；NAS 生产切割待维护窗）：** 新实体 `wake_observation`、因果字段
    `base_version`/`mutation_id`/`version_id`、verdict 枚举与移除服务器近邻落选均属破坏性
-   wire；必须先完成步骤 2–4 且 minSupported=20，再部署 server schema 12 与新客户端。
+   wire；打包须 minSupported=20 且 verified 通道可装，再在维护窗部署 server schema 12 与新客户端。
    权威 shape 见 [`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 完整运维条目见 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)「Wire-break checklist」。

@@ -12,7 +12,7 @@
 > atomic pending 投影上增加启动 authority graph 校验及延迟履约能力门闩；发布验收证据
 > 由本地 tracker 固定到实际构建与联调结果。
 >
-> **0.3.13 规划 wire（未交付）** 冻结于
+> **0.3.13 因果 wire（tree 已落地；NAS 生产切割待维护窗）** 冻结于
 > [`causal-sync-wire.md`](./causal-sync-wire.md)：版本化原子根、`base_version` /
 > `mutation_id`、reconcile/commit/pull/resolution CAS、WakeObservation、非破坏性疑似重复。
 > 在能力切割上线前，本文 §1–11 的已交付 HTTPS/身份/前台同步合同仍有效；不得把规划
