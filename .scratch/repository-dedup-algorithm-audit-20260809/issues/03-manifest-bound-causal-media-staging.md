@@ -1,6 +1,6 @@
 # 03 — 为 causal media preimage 建立 manifest-bound 有界生命周期
 
-Status: ready-for-agent
+Status: implemented — validation passed; pending ticket commit
 
 Priority: P1
 
@@ -24,15 +24,38 @@ commit consumption、replay 和 crash-safe GC；最终媒体路径不得同时�
 
 ## Acceptance
 
-- [ ] staging 持久绑定 family、membership、media UUID、SHA-256、byte size、created/expiry 和状态
-- [ ] commit 同时精确匹配 UUID/SHA/size；同长度不同 SHA 在写 version/rev/publication 前拒绝
-- [ ] 同 UUID 同 bytes replay 幂等；同 UUID 不同 bytes 稳定冲突，不覆盖已有字节
-- [ ] 单文件、单 membership/family count、aggregate bytes 与 TTL 都有明确上限和稳定错误
-- [ ] restart 后过期 orphan 的 metadata/字节都被删除并 fsync 目录；accepted/branched 引用不被 GC
-- [ ] commit 的 DB 状态与 staging consume 可从任意 crash point 重试收敛，不出现 manifest/bytes 分叉
+- [x] staging 持久绑定 family、membership、media UUID、SHA-256、byte size、created/expiry 和状态
+- [x] commit 同时精确匹配 UUID/SHA/size；同长度不同 SHA 在写 version/rev/publication 前拒绝
+- [x] 同 UUID 同 bytes replay 幂等；同 UUID 不同 bytes 稳定冲突，不覆盖已有字节
+- [x] 单文件、单 membership/family count、aggregate bytes 与 TTL 都有明确上限和稳定错误
+- [x] restart 后过期 orphan 的 metadata/字节都被删除并 fsync 目录；accepted/branched 引用不被 GC
+- [x] commit 的 DB 状态与 staging consume 可从任意 crash point 重试收敛，不出现 manifest/bytes 分叉
 
 ## Validation
 
-- [ ] Store/API mismatch、quota、replay、crash/restart/GC tests 通过
-- [ ] Rust fmt/test/Clippy 通过
-- [ ] 只用开发者 `mktemp` data root；不把 hostile 媒体测试指向家庭 NAS
+- [x] Store/API mismatch、quota、replay、crash/restart/GC tests 通过
+- [x] Rust fmt/test/Clippy 通过
+- [x] 只用开发者 `mktemp` data root；不把 hostile 媒体测试指向家庭 NAS
+
+## Implementation evidence
+
+Implemented against `65be39ae70c767315bff9995d8d462fc535f6980`; the ticket commit is intentionally
+left to the serial orchestrator.
+
+`Store` now owns one durable `causal_media_staging` lifecycle with a closed status enum and explicit
+single-file, membership-count, family-count, family-byte and TTL bounds. Uploads remain under
+`media/.causal-stage/`; UUID/SHA/size, membership and existing published-path identity are checked
+before causal version/revision mutation. Exact upload and mutation replay converge, while content or
+published-path drift returns stable conflict without replacing bytes.
+
+Accepted/merged/branched manifests are consumed in their causal SQLite transaction. Post-commit
+no-replace promotion is family-scoped; publication finalization advances the media/owner revisions so
+pull cannot strand an incomplete group behind a cursor. Startup completes consumed promotion before
+opening routes. Expiry uses durable `gc_pending`, fsyncs deleted staging directories, and removes
+untracked crash files; request-time scans remain inside the caller's family lock.
+
+Validation receipts (2026-08-09): full Rust lib `210 passed`, API `170 passed`, isolated loopback TLS
+`2 passed`; `cargo fmt --all -- --check`, Clippy all-targets/all-features with `-D warnings`, and
+`git diff --check` passed. All data fixtures used `tempfile::TempDir`/developer-owned temporary paths.
+No image build, packaging, deploy, family NAS access, or live frontend/backend smoke was run, as
+explicitly excluded from this ticket.

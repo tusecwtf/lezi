@@ -1,6 +1,7 @@
 //! Store unit tests partitioned by domain.
 
 mod bundles_tests;
+mod causal_media_staging_tests;
 mod causal_tests;
 mod identity_login_tests;
 mod pull_tests;

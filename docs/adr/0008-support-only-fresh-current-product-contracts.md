@@ -42,6 +42,10 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   publication、bundle manifest、大小、摘要与落盘字节，才在同一事务公开完整关系。客户端不向旧 NAS 降级，服务端也不
   接受为旧客户端保留的字段、别名或 ordinary 发布旁路。启动校验的延后/fatal 结构化日志须带
   reason code、opaque entity id 与权威 revision，不记录完整 payload 或家庭内容。
+- Causal media preimage 是 manifest-bound staging resource，不是已发布媒体：durable staging
+  持有 family/membership/UUID/SHA/size/time/status、quota 与 TTL；causal transaction 精确消费
+  manifest 后才 no-replace promotion 到最终媒体路径。启动须先恢复已消费 promotion，再以
+  crash-safe GC 清理未消费 orphan；不得让未证明 bytes 占用最终 published path。
 - Android 为 Record/CarePlan 持久化独立于媒体的本机根发布回执。它只在 atomic commit
   成功或 pull/apply 已提交根后前进；媒体上传 URI 不证明根已发布，过期回执也不能确认
   较新的本地修订。跨家庭边界必须清空该回执。

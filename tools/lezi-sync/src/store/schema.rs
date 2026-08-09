@@ -251,6 +251,26 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
         PRIMARY KEY (family_id, media_uuid)
     );
 
+    -- Causal media bytes are durable preimages until a successful causal
+    -- transaction consumes their exact manifest. They never use the published
+    -- media path while status is writing/staged/gc_pending.
+    CREATE TABLE causal_media_staging (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        membership_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+            'writing', 'staged', 'consumed', 'gc_pending'
+        )),
+        consumed_at INTEGER,
+        PRIMARY KEY (family_id, media_uuid)
+    );
+    CREATE INDEX causal_media_staging_quota
+        ON causal_media_staging(family_id, membership_id, status, expires_at);
+
     -- Causal: immutable root versions (stable projection remains `entities`).
     CREATE TABLE entity_versions (
         family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,

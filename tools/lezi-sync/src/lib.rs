@@ -531,6 +531,11 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     let restore_family_ids = disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
     media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
     media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
+    // Complete any causal DB-accepted publication before the authority graph is
+    // validated or public routes can observe it, then durably collect expired
+    // unconsumed preimages.
+    store.promote_consumed_causal_media()?;
+    store.gc_expired_causal_media_preimages((config.clock)())?;
     let validation_media_root = media_root.clone();
     let validation = store
         .validate_authority_graph(

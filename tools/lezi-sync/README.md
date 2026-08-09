@@ -50,10 +50,12 @@ $LEZI_DATA_DIR/
 │   ├── server.crt
 │   └── server.key
 └── media/
+    ├── .causal-stage/{family_uuid}/{media_uuid}
     └── {family_uuid}/{media_uuid}
 ```
 
-启动时服务只清理 `media/` 下名称为 UUID、且 SQLite 已无对应家庭的孤儿目录。
+启动时服务先恢复 SQLite 已接受的 causal media promotion，再清理过期/无 metadata 的
+`.causal-stage` preimage；普通 `media/` 下名称为 UUID、且 SQLite 已无对应家庭的孤儿目录也会清理。
 非 UUID 运维目录、仍存在的家庭目录和符号链接不会被启动清理触碰。
 
 ## NAS / Docker Compose
@@ -429,6 +431,20 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
   并清理损坏项，非普通文件同样拒绝，下一次正确 PUT 会重新发布该 media。
 - PUT 以临时文件写入并同步文件，原子替换后再同步父目录，确保成功响应前 rename
   已进入文件系统持久化边界。
+
+### Causal media preimage
+
+`PUT /v1/causal/media/{uuid}` 只写入 `media/.causal-stage/`，并在 SQLite 持久绑定
+family、staging membership、UUID、SHA-256、byte size、created/expiry 与状态；不会把未被
+causal transaction 接受的字节写进最终下载路径。同 UUID/同 bytes replay 幂等，同 UUID/不同
+bytes 返回稳定冲突。单文件服从 `LEZI_MAX_MEDIA_BYTES`；每 membership 最多 64 个、每 family
+最多 256 个未消费 preimage，family staging 总字节最多 512 MiB，TTL 为 24 小时。
+
+`causal commit` 在同一 SQLite transaction 内精确匹配 UUID/SHA/size 并把成功的
+accepted/merged/branched manifest 标记为 `consumed`；commit 后才 no-replace promotion 到
+`media/{family}/{uuid}`。若在任一 crash point 中断，启动会先重试 consumed promotion，再以
+`gc_pending` journal 删除过期/无 metadata staging 字节并 fsync 目录；被稳定版本或 branch
+引用的 consumed 字节不参与 TTL GC。
 
 ### 原子同步包（`atomic_bundle`）
 

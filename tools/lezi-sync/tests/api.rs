@@ -15116,6 +15116,335 @@ async fn causal_ingress_api_uses_the_canonical_store_validation_codes() {
     }));
 }
 
+#[tokio::test]
+async fn causal_media_commit_rejects_same_size_different_digest_before_publication() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-manifest-owner",
+        "causal-media-manifest-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let uploaded = b"digest-a";
+    let declared = b"digest-b";
+    assert_eq!(uploaded.len(), declared.len());
+
+    let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, uploaded).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+
+    let declared_sha = hex::encode(Sha256::digest(declared));
+    let (status, rejected) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "wrong-digest", 80, 20),
+            vec![causal_media_item(
+                media_id,
+                "log",
+                &declared_sha,
+                declared.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "media_sha256_mismatch");
+
+    let pull = pull_entities(&rig.app, token, generation).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != record_id.to_string() && row["client_uuid"] != media_id.to_string()
+    }));
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn causal_media_preimage_replay_conflict_and_restart_publication_are_stable() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-lifecycle-owner",
+        "causal-media-lifecycle-request-0000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"durable-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+
+    for _ in 0..2 {
+        let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+        assert_eq!(status, StatusCode::OK, "{staged}");
+        assert_eq!(staged["status"], "staged");
+        assert_eq!(staged["sha256"], sha);
+    }
+    let final_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    assert!(
+        !final_path.exists(),
+        "unaccepted bytes reached published path"
+    );
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+
+    let different = b"durable-preimagf";
+    assert_eq!(different.len(), bytes.len());
+    let (status, conflict) = put_causal_media_bytes(&rig.app, token, media_id, different).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+
+    let (status, committed) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "published", 80, 20),
+            vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["results"][0]["status"], "accepted");
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    assert!(
+        !staged_path.exists(),
+        "consumed staging bytes were not removed"
+    );
+
+    // Crash fixture: the DB consume is durable, while filesystem promotion did
+    // not finish. Startup must converge before exposing public routes.
+    fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
+    fs::rename(&final_path, &staged_path).unwrap();
+    assert!(!final_path.exists());
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    assert!(!staged_path.exists());
+    let response = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn causal_media_published_path_conflict_rejects_before_projection_and_retry_converges() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-promotion-owner",
+        "causal-media-promotion-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"promotion-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+
+    let final_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(media_id.to_string());
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    fs::create_dir_all(&final_path).unwrap();
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "promotion-pending", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+
+    let (status, failed) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{failed}");
+    assert_eq!(failed["results"][0]["status"], "rejected");
+    assert_eq!(failed["results"][0]["code"], "media_uuid_conflict");
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let pending_pull = pull_entities(&rig.app, token, generation).await;
+    assert!(pending_pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| {
+            row["client_uuid"] != record_id.to_string()
+                && row["client_uuid"] != media_id.to_string()
+        }));
+
+    fs::remove_dir(&final_path).unwrap();
+    let (status, committed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["results"][0]["status"], "accepted");
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    assert!(!staged_path.exists());
+    let converged_pull = pull_entities(&rig.app, token, generation).await;
+    let converged_ids = converged_pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["client_uuid"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(converged_ids.contains(record_id.to_string().as_str()));
+    assert!(converged_ids.contains(media_id.to_string().as_str()));
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn expired_causal_media_preimage_is_rejected_and_collected_on_restart() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-expiry-owner",
+        "causal-media-expiry-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let media_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let bytes = b"expiring-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    assert!(staged_path.exists());
+
+    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
+    let (refresh_status, refreshed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(refresh_status, StatusCode::OK, "{refreshed}");
+    let token = refreshed["access_token"].as_str().unwrap();
+    let (status, rejected) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "expired", 80, 20),
+            vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "media_preimage_expired");
+
+    let _restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    assert!(!staged_path.exists());
+    assert!(!rig
+        .directory
+        .path()
+        .join("media")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string())
+        .exists());
+}
+
 async fn two_joined_clients(
     app: &Router,
     owner_device: &str,
@@ -15728,18 +16057,10 @@ async fn causal_two_client_media_merge_and_delete_edit_branch() {
     assert_eq!(status, StatusCode::OK, "{del_media}");
     assert_eq!(del_media["results"][0]["status"], "accepted");
 
-    let bytes3_edit = b"shared-photo-edited";
-    let sha3_edit = hex::encode(Sha256::digest(bytes3_edit));
-    // Same media_uuid with different bytes cannot PUT-overwrite authority media (409).
-    // Write the competing preimage under the data-dir media path so commit can see hash drift.
-    let family_id = owner["family_id"].as_str().unwrap();
-    let media_path = rig
-        .directory
-        .path()
-        .join("media")
-        .join(family_id)
-        .join(m3.to_string());
-    fs::write(&media_path, bytes3_edit).unwrap();
+    // Same UUID cannot claim different bytes; exercise the legitimate
+    // delete-vs-descriptive-manifest-edit conflict with the original preimage.
+    let mut edited_manifest = causal_media_item(m3, "log", &sha3, bytes3.len());
+    edited_manifest["width"] = json!(2);
     let (status, edit_media) = causal_commit_units(
         &rig.app,
         member_token,
@@ -15749,7 +16070,7 @@ async fn causal_two_client_media_merge_and_delete_edit_branch() {
             "record",
             record2,
             causal_formula_root(baby_id, "media-conflict", 10, 52),
-            vec![causal_media_item(m3, "log", &sha3_edit, bytes3_edit.len())],
+            vec![edited_manifest],
             false,
         )],
     )

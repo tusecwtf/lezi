@@ -3,6 +3,7 @@
 use super::super::*;
 use super::test_support::*;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -68,7 +69,7 @@ fn mut_unit(
 
 struct CausalFx {
     store: Store,
-    dir: TempDir,
+    _dir: TempDir,
     family_id: String,
     owner: Principal,
     baby_id: Uuid,
@@ -88,23 +89,26 @@ impl CausalFx {
         assert_eq!(result.results[0].status, "accepted");
         Self {
             store,
-            dir,
+            _dir: dir,
             family_id,
             owner,
             baby_id,
         }
     }
 
-    /// Write authority media bytes under data_dir/media/{family}/{uuid}.
-    fn stage_media_bytes(&self, item: &CausalMediaItem) {
-        let path = self
-            .dir
-            .path()
-            .join("media")
-            .join(&self.family_id)
-            .join(&item.media_uuid);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, vec![0u8; item.byte_size as usize]).unwrap();
+    fn stage_media_bytes(&self, item: &mut CausalMediaItem) {
+        let bytes = vec![0u8; item.byte_size as usize];
+        item.sha256 = hex::encode(Sha256::digest(&bytes));
+        self.store
+            .stage_causal_media_preimage(
+                &self.owner,
+                &item.media_uuid,
+                &bytes,
+                &item.sha256,
+                1_700_000_000,
+                DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+            )
+            .unwrap();
     }
 }
 
@@ -572,7 +576,7 @@ fn causal_explicit_tombstone_restore_via_resolution() {
 fn causal_independent_media_merge_and_delete_edit_branch() {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();
-    let m1 = CausalMediaItem {
+    let mut m1 = CausalMediaItem {
         media_uuid: Uuid::new_v4().to_string(),
         role: "log".into(),
         sha256: "a".repeat(64),
@@ -581,6 +585,7 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         width: Some(1),
         height: Some(1),
     };
+    fx.stage_media_bytes(&mut m1);
     let mut create = mut_unit(
         "record",
         record_id,
@@ -589,7 +594,6 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         false,
     );
     create.media = vec![m1.clone()];
-    fx.stage_media_bytes(&m1);
     let v1 = fx
         .store
         .causal_commit(&fx.owner, vec![create], 1_700_000_000)
@@ -599,7 +603,7 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         .clone()
         .unwrap();
 
-    let m2 = CausalMediaItem {
+    let mut m2 = CausalMediaItem {
         media_uuid: Uuid::new_v4().to_string(),
         role: "log".into(),
         sha256: "b".repeat(64),
@@ -608,7 +612,7 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         width: None,
         height: None,
     };
-    fx.stage_media_bytes(&m2);
+    fx.stage_media_bytes(&mut m2);
     // Side A: remove m1
     let mut left = mut_unit(
         "record",
@@ -649,7 +653,7 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
 
     // Fresh root for delete/edit same media conflict.
     let record2 = Uuid::new_v4();
-    let m3 = CausalMediaItem {
+    let mut m3 = CausalMediaItem {
         media_uuid: Uuid::new_v4().to_string(),
         role: "log".into(),
         sha256: "d".repeat(64),
@@ -658,7 +662,7 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         width: None,
         height: None,
     };
-    fx.stage_media_bytes(&m3);
+    fx.stage_media_bytes(&mut m3);
     let mut create2 = mut_unit(
         "record",
         record2,
@@ -694,7 +698,9 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         false,
     );
     let mut m3_edit = m3;
-    m3_edit.sha256 = "c".repeat(64);
+    // Same UUID may edit descriptive manifest fields, but never claim different
+    // bytes: the durable preimage contract makes UUID+SHA immutable.
+    m3_edit.width = Some(2);
     edit_media.media = vec![m3_edit];
     let branch = fx
         .store
@@ -1425,7 +1431,7 @@ fn causal_missing_media_bytes_rejected() {
 fn causal_commit_projects_stable_media_into_pull_entities() {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();
-    let m1 = CausalMediaItem {
+    let mut m1 = CausalMediaItem {
         media_uuid: Uuid::new_v4().to_string(),
         role: "log".into(),
         sha256: "a".repeat(64),
@@ -1434,6 +1440,7 @@ fn causal_commit_projects_stable_media_into_pull_entities() {
         width: Some(2),
         height: Some(3),
     };
+    fx.stage_media_bytes(&mut m1);
     let mut create = mut_unit(
         "record",
         record_id,
@@ -1442,7 +1449,6 @@ fn causal_commit_projects_stable_media_into_pull_entities() {
         false,
     );
     create.media = vec![m1.clone()];
-    fx.stage_media_bytes(&m1);
     let committed = fx
         .store
         .causal_commit(&fx.owner, vec![create], 1_700_000_000)

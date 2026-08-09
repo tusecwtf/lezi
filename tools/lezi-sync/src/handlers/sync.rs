@@ -14,8 +14,8 @@ use crate::model::{
     MAX_BUNDLE_MEDIA_ENTITIES,
 };
 use crate::store::{
-    CausalMediaItem, CausalMutation, ReconcileResult, ReconcileUnit, ResolveConflictInput,
-    StoreError, MAX_CAUSAL_UNITS,
+    CausalMediaItem, CausalMutation, PulledEntity, ReconcileResult, ReconcileUnit,
+    ResolveConflictInput, StoreError, MAX_CAUSAL_UNITS,
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
@@ -574,6 +574,15 @@ pub(crate) struct PullQuery {
     generation: String,
 }
 
+fn media_owner_key(entity: &PulledEntity) -> Option<(&'static str, &str)> {
+    if entity.entity_type != "media" || entity.deleted_at.is_some() {
+        return None;
+    }
+    crate::store::media_association_owner(&entity.payload)
+        .ok()
+        .flatten()
+}
+
 /// HTTP route entrypoint — see module visibility rule on `handlers`.
 pub(crate) async fn pull_entities(
     State(state): State<Arc<AppState>>,
@@ -614,8 +623,10 @@ pub(crate) async fn pull_entities(
             }
             Err(error) => return Err(error.into()),
         };
-        // Incomplete media (metadata without bytes) is omitted so clients can advance
-        // the pull cursor without GET /media 404 loops. Successful PUT republishes.
+        // An owner root and its media are one publication group. Until every live media
+        // member has durable public bytes, omit both the incomplete member and its owner.
+        // Finalization advances their revisions so a later pull cannot strand the group
+        // behind a cursor observed while filesystem promotion was pending.
         let media_ids = page
             .entities
             .iter()
@@ -625,13 +636,36 @@ pub(crate) async fn pull_entities(
         let published_media = blocking_state
             .store
             .published_media(&family_id, &media_ids)?;
+        let pullable_media = page
+            .entities
+            .iter()
+            .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+            .filter(|entity| {
+                media_entity_is_pullable(
+                    blocking_state.as_ref(),
+                    &family_id,
+                    entity,
+                    &published_media,
+                )
+            })
+            .map(|entity| entity.client_uuid.clone())
+            .collect::<BTreeSet<_>>();
+        let blocked_owners = page
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.entity_type == "media"
+                    && entity.deleted_at.is_none()
+                    && !pullable_media.contains(&entity.client_uuid)
+            })
+            .filter_map(media_owner_key)
+            .map(|(entity_type, client_uuid)| (entity_type.to_owned(), client_uuid.to_owned()))
+            .collect::<BTreeSet<_>>();
         page.entities.retain(|entity| {
-            media_entity_is_pullable(
-                blocking_state.as_ref(),
-                &family_id,
-                entity,
-                &published_media,
-            )
+            if entity.entity_type == "media" && entity.deleted_at.is_none() {
+                return pullable_media.contains(&entity.client_uuid);
+            }
+            !blocked_owners.contains(&(entity.entity_type.clone(), entity.client_uuid.clone()))
         });
         Ok(page)
     })

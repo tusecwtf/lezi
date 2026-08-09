@@ -20,12 +20,15 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::model::{BundleCommitRequest, BundleStageRequest};
-use crate::store::{CommittedPendingBundleMedia, Store, StoreError};
+use crate::store::{
+    CausalMediaStagingLimits, CommittedPendingBundleMedia, Store, StoreError,
+    DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+};
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, secure_directory, secure_file,
     sync_directory, write_private_file, ApiError, AppState, MAX_ENTITY_FUTURE_SKEW_MILLIS,
@@ -39,15 +42,15 @@ pub(crate) async fn retired_ordinary_media_upload() -> Result<Json<Value>, ApiEr
     ))
 }
 
-/// Stage media bytes into the family authority media store for causal commit.
-/// Mutation JSON carries only the manifest; accept/branch requires the file present
-/// under `media/{family}/{uuid}`. Idempotent when the same length+sha already exists.
+/// Stage manifest-bound bytes outside the published media path for causal commit.
+/// The Store owns durable identity/quota/TTL/replay state; accepted/branched bytes
+/// are promoted only after their causal SQLite transaction commits.
 pub(crate) async fn put_causal_media_preimage(
     State(state): State<Arc<AppState>>,
     AxumPath(client_uuid): AxumPath<Uuid>,
     headers: HeaderMap,
     body: Body,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<crate::store::CausalMediaStageStatus>, ApiError> {
     let principal = authenticate(&state, &headers).await?;
     require_supported_client(&state, &headers).await?;
     let expected_sha = headers
@@ -55,9 +58,8 @@ pub(crate) async fn put_causal_media_preimage(
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')))
-        .ok_or_else(|| {
-            ApiError::unprocessable("X-Lezi-Media-Sha256 required (64 lowercase hex)")
-        })?;
+        .ok_or_else(|| ApiError::unprocessable("X-Lezi-Media-Sha256 required (64 lowercase hex)"))?
+        .to_owned();
     let content = axum::body::to_bytes(body, state.max_media_bytes)
         .await
         .map_err(|_| ApiError::unprocessable("media body too large or unreadable"))?
@@ -73,36 +75,27 @@ pub(crate) async fn put_causal_media_preimage(
     }
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let path = state.media_path(&principal.family_id, client_uuid)?;
-    let byte_size = content.len() as i64;
-    let digest_for_write = digest.clone();
-    run_blocking(move || {
-        if path.is_file() {
-            let existing = fs::read(&path)?;
-            if existing.len() == content.len() {
-                let existing_digest = hex::encode(Sha256::digest(&existing));
-                if existing_digest == digest_for_write {
-                    return Ok(());
-                }
-            }
-            return Err(ApiError::conflict(
-                "authority media bytes already exist with different content",
-            ));
-        }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-            secure_directory(parent)?;
-        }
-        write_private_file(&path, &content)?;
-        Ok(())
+    let store = state.store.clone();
+    let now = state.now();
+    let limits = CausalMediaStagingLimits {
+        max_file_bytes: state.max_media_bytes,
+        ..DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS
+    };
+    let status = run_blocking(move || {
+        store.gc_expired_causal_media_preimages_for_family(&principal.family_id, now)?;
+        store
+            .stage_causal_media_preimage(
+                &principal,
+                &client_uuid.to_string(),
+                &content,
+                &expected_sha,
+                now,
+                limits,
+            )
+            .map_err(map_causal_media_staging_error)
     })
     .await?;
-    Ok(Json(json!({
-        "media_uuid": client_uuid.to_string(),
-        "status": "staged",
-        "byte_size": byte_size,
-        "sha256": digest,
-    })))
+    Ok(Json(status))
 }
 
 pub(crate) async fn get_media(
@@ -1033,6 +1026,24 @@ fn map_stage_bundle_store_error(error: StoreError) -> ApiError {
             ApiError::unprocessable("too many open staging bundles; commit or wait for cleanup")
         }
         Ok(other) => other.into(),
+    }
+}
+
+fn map_causal_media_staging_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::CausalMediaPreimageConflict => {
+            ApiError::conflict("causal media uuid already has different durable bytes")
+        }
+        StoreError::CausalMediaMembershipMismatch => {
+            ApiError::conflict("causal media preimage belongs to another family membership")
+        }
+        StoreError::CausalMediaStagingQuota(kind) => {
+            ApiError::unprocessable(format!("causal media staging quota exceeded: {kind}",))
+        }
+        StoreError::InvalidCausalMediaStaging => {
+            ApiError::unprocessable("causal media preimage is invalid")
+        }
+        other => other.into(),
     }
 }
 

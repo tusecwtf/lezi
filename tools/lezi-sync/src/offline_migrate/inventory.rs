@@ -983,6 +983,12 @@ pub(crate) fn table_dispositions() -> &'static [TableDisposition] {
             note: "Keep ordinary + source=bundle for retained committed; cascade drops staging pubs and committed bundle_pending cleanup",
         },
         TableDisposition {
+            source_or_target_name: "causal_media_staging",
+            kind: TableDispositionKind::TargetOnlyEmpty,
+            row_filter: RowFilter::NotApplicable,
+            note: "Runtime-only unconsumed preimages are never copied into a migrated authority",
+        },
+        TableDisposition {
             source_or_target_name: "devices",
             kind: TableDispositionKind::TargetOnlyEmpty,
             row_filter: RowFilter::NotApplicable,

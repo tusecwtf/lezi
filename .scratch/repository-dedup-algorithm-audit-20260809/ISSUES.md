@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–02 implemented
+Status: in-progress — tickets 01–03 implemented
 
 Spec: [`spec.md`](./spec.md)
 
@@ -31,7 +31,7 @@ post-0.3.13/01 implementation stabilizes
 |---|--------|----------|--------|------------|
 | 01 | [Harden causal settlement as one bounded proof transaction](./issues/01-harden-causal-settlement-transaction.md) | P1 | implemented | post-0.3.13/01 implementation stabilization |
 | 02 | [Unify canonical causal ingress validation and replay ordering](./issues/02-unify-canonical-causal-ingress.md) | P1 | implemented | — |
-| 03 | [Give causal media preimages a manifest-bound lifecycle](./issues/03-manifest-bound-causal-media-staging.md) | P1 | ready-for-agent | 02 |
+| 03 | [Give causal media preimages a manifest-bound lifecycle](./issues/03-manifest-bound-causal-media-staging.md) | P1 | implemented | 02 |
 | 04 | [Paginate complete pull sidecars without cursor loss](./issues/04-lossless-batched-pull-sidecars.md) | P1 | ready-for-agent | — |
 | 05 | [Make source relations one bounded canonical graph](./issues/05-bounded-canonical-source-relations.md) | P1 | ready-for-agent | 04 + post-0.3.13/01 implementation stabilization |
 | 06 | [Replace Cartesian duplicate bounds with one global bounded interpretation](./issues/06-bounded-global-duplicate-bounds.md) | P1 | ready-for-agent | post-0.3.13/01 implementation stabilization |

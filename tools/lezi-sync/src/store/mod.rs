@@ -10,6 +10,7 @@
 //! - [`identity`] — family/membership/device/session (submodules) and anonymization
 //! - [`pull`] — revision pull pages and dependency co-grouping
 //! - [`media`] — published media metadata and committed-pending cleanup
+//! - [`causal_media_staging`] — bounded preimages, manifest consume, promotion, and GC
 //! - [`bundles`] — atomic bundle stage/commit, LWW loaders, and bundle-row helpers
 //! - package root — façade types/errors, `Store::{connect,secure_*,health_check,family_ids}`,
 //!   shared `parse_payload` / `EntityKey`, and crate re-exports
@@ -19,6 +20,7 @@
 mod authority_graph;
 mod bundles;
 mod causal;
+mod causal_media_staging;
 mod causal_merge;
 mod identity;
 mod media;
@@ -47,7 +49,11 @@ pub use causal::{
     CausalBatchResult, CausalMutation, CausalUnitResult, ConflictDetail, ConflictSummary,
     ResolveConflictInput, ResolveConflictResult, MAX_CAUSAL_UNITS,
 };
+pub use causal_media_staging::{
+    CausalMediaStageStatus, CausalMediaStagingLimits, DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+};
 pub use causal_merge::CausalMediaItem;
+pub(crate) use media::media_association_owner;
 pub use source_relations::{
     DeclareSourceRelationInput, ResolveSourceRelationGroupInput, SourceRelationReceipt,
     SourceRelationSummary,
@@ -357,6 +363,14 @@ pub enum StoreError {
     BundleMediaIncomplete,
     #[error("bundle root is not newer than the published version")]
     BundleRootNotNewer,
+    #[error("causal media preimage conflicts with durable bytes")]
+    CausalMediaPreimageConflict,
+    #[error("causal media preimage belongs to a different membership")]
+    CausalMediaMembershipMismatch,
+    #[error("causal media staging quota exceeded: {0}")]
+    CausalMediaStagingQuota(&'static str),
+    #[error("causal media staging metadata is invalid")]
+    InvalidCausalMediaStaging,
     /// A legacy timestamp-LWW bundle may never advance a root after causal cutover.
     #[error("legacy bundle cannot advance causal root type {0}")]
     LegacyBundleCausalRootUnsupported(String),

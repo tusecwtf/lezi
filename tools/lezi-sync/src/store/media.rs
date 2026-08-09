@@ -4,13 +4,43 @@ use std::collections::BTreeSet;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::bundles::load_open_staging_bundle_for_membership;
 use super::{
     parse_payload, CommittedPendingBundleMedia, MediaMetadata, Principal, Store, StoreError,
     ENTITY_QUERY_CHUNK_SIZE,
 };
+
+pub(crate) fn media_association_owner(
+    payload: &Map<String, Value>,
+) -> Result<Option<(&'static str, &str)>, StoreError> {
+    let kind = payload
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    Ok(match kind {
+        "avatar" => payload
+            .get("baby_client_uuid")
+            .and_then(Value::as_str)
+            .map(|id| ("baby", id)),
+        "log" => payload
+            .get("record_client_uuid")
+            .and_then(Value::as_str)
+            .map(|id| ("record", id))
+            .or_else(|| {
+                payload
+                    .get("care_plan_client_uuid")
+                    .and_then(Value::as_str)
+                    .map(|id| ("care_plan", id))
+            }),
+        "wake" => payload
+            .get("record_client_uuid")
+            .and_then(Value::as_str)
+            .map(|id| ("wake_observation", id)),
+        _ => None,
+    })
+}
 
 fn committed_pending_bundle_media_query(
     connection: &Connection,

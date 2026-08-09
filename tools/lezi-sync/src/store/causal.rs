@@ -12,11 +12,12 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::model::{validate_causal_root, validate_causal_root_shape, Entity};
 
 use super::bundles::validate_canonical_package_ingress;
+use super::causal_media_staging::{consume_manifest, verify_manifest};
 use super::causal_merge::{
     leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
 };
@@ -329,6 +330,11 @@ fn upsert_entity_projection(
     root: &Map<String, Value>,
     rev: i64,
 ) -> Result<(), StoreError> {
+    // `updated_at` is part of the causal root/version hash but the ordinary
+    // entity projection owns it as a column. Keeping a duplicate payload key
+    // violates the shared canonical entity validator on restart.
+    let mut payload = root.clone();
+    payload.remove("updated_at");
     tx.execute(
         "INSERT INTO entities(
             family_id, entity_type, client_uuid, updated_at,
@@ -345,7 +351,7 @@ fn upsert_entity_projection(
             client_uuid,
             updated_at,
             deleted_at,
-            serde_json::to_string(root)?,
+            serde_json::to_string(&payload)?,
             rev
         ],
     )?;
@@ -466,8 +472,8 @@ fn project_stable_media(
                 if existing.kind.as_str() != expected_media_kind(entity_type, &item.role)? {
                     return Err(StoreError::ImmutableMediaAssociation);
                 }
-                if media_association_owner(&existing.payload)?
-                    != Some((entity_type.to_owned(), client_uuid.to_owned()))
+                if super::media_association_owner(&existing.payload)?
+                    != Some((entity_type, client_uuid))
                 {
                     return Err(StoreError::ImmutableMediaAssociation);
                 }
@@ -482,14 +488,6 @@ fn project_stable_media(
                 None,
                 &payload,
                 rev,
-            )?;
-            tx.execute(
-                "INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
-                 VALUES (?1, ?2, 'ordinary', NULL)
-                 ON CONFLICT(family_id, media_uuid) DO UPDATE SET
-                    source = 'ordinary',
-                    bundle_id = NULL",
-                params![family_id, item.media_uuid],
             )?;
         }
     }
@@ -574,36 +572,6 @@ fn media_entity_payload(
     );
     payload.insert("byte_size".to_owned(), Value::Number(item.byte_size.into()));
     Ok(payload)
-}
-
-fn media_association_owner(
-    payload: &Map<String, Value>,
-) -> Result<Option<(String, String)>, StoreError> {
-    let kind = payload
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or(StoreError::InvalidStoredPayload)?;
-    Ok(match kind {
-        "avatar" => payload
-            .get("baby_client_uuid")
-            .and_then(Value::as_str)
-            .map(|id| ("baby".to_owned(), id.to_owned())),
-        "log" => payload
-            .get("record_client_uuid")
-            .and_then(Value::as_str)
-            .map(|id| ("record".to_owned(), id.to_owned()))
-            .or_else(|| {
-                payload
-                    .get("care_plan_client_uuid")
-                    .and_then(Value::as_str)
-                    .map(|id| ("care_plan".to_owned(), id.to_owned()))
-            }),
-        "wake" => payload
-            .get("record_client_uuid")
-            .and_then(Value::as_str)
-            .map(|id| ("wake_observation".to_owned(), id.to_owned())),
-        _ => None,
-    })
 }
 
 struct LiveMediaRow {
@@ -1108,28 +1076,15 @@ fn validate_mutation_content(
     Ok(canonical_root)
 }
 
-fn authority_media_path(database_path: &Path, family_id: &str, media_uuid: &str) -> PathBuf {
-    let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
-    parent.join("media").join(family_id).join(media_uuid)
-}
-
 /// Wire §9.3: referenced media bytes must exist before branch/accept ack.
 fn require_media_bytes_present(
+    tx: &Transaction<'_>,
     database_path: &Path,
-    family_id: &str,
+    principal: &Principal,
     media: &[CausalMediaItem],
+    now: i64,
 ) -> Result<(), &'static str> {
-    for item in media {
-        let path = authority_media_path(database_path, family_id, &item.media_uuid);
-        if !path.is_file() {
-            return Err("missing_media_bytes");
-        }
-        let meta = std::fs::metadata(&path).map_err(|_| "missing_media_bytes")?;
-        if meta.len() as i64 != item.byte_size {
-            return Err("media_byte_size_mismatch");
-        }
-    }
-    Ok(())
+    verify_manifest(tx, database_path, principal, media, now)
 }
 
 fn root_content_hash(
@@ -1656,7 +1611,7 @@ fn commit_accepted_new(
 ) -> Result<CausalUnitResult, StoreError> {
     if !mutation.deleted {
         if let Err(code) =
-            require_media_bytes_present(ctx.database_path, &ctx.principal.family_id, media)
+            require_media_bytes_present(ctx.tx, ctx.database_path, ctx.principal, media, ctx.now)
         {
             return Ok(rejected(
                 &mutation.mutation_id,
@@ -1775,7 +1730,7 @@ fn commit_accepted_update(
 ) -> Result<CausalUnitResult, StoreError> {
     if !mutation.deleted {
         if let Err(code) =
-            require_media_bytes_present(ctx.database_path, &ctx.principal.family_id, media)
+            require_media_bytes_present(ctx.tx, ctx.database_path, ctx.principal, media, ctx.now)
         {
             return Ok(rejected(
                 &mutation.mutation_id,
@@ -1911,9 +1866,13 @@ fn commit_merged(
     request_hash: &str,
 ) -> Result<CausalUnitResult, StoreError> {
     if !merged_deleted {
-        if let Err(code) =
-            require_media_bytes_present(ctx.database_path, &ctx.principal.family_id, &merged_media)
-        {
+        if let Err(code) = require_media_bytes_present(
+            ctx.tx,
+            ctx.database_path,
+            ctx.principal,
+            &merged_media,
+            ctx.now,
+        ) {
             return Ok(rejected(
                 &mutation.mutation_id,
                 request_hash,
@@ -2053,9 +2012,13 @@ fn branch_unit(
     conflicting_paths: Vec<String>,
 ) -> Result<CausalUnitResult, StoreError> {
     if !mutation.deleted {
-        if let Err(code) =
-            require_media_bytes_present(ctx.database_path, &ctx.principal.family_id, incoming_media)
-        {
+        if let Err(code) = require_media_bytes_present(
+            ctx.tx,
+            ctx.database_path,
+            ctx.principal,
+            incoming_media,
+            ctx.now,
+        ) {
             return Ok(rejected(
                 &mutation.mutation_id,
                 request_hash,
@@ -2240,6 +2203,9 @@ impl Store {
             }
             // Clear internal reason for successful wire statuses (optional).
             if matches!(result.status.as_str(), "accepted" | "merged" | "branched") {
+                if !unit.deleted {
+                    consume_manifest(&tx, principal, &unit.media, now)?;
+                }
                 result.reason = None;
             }
             results.push(result);
@@ -2250,6 +2216,8 @@ impl Store {
             |row| row.get(0),
         )?;
         tx.commit()?;
+        self.promote_consumed_causal_media_for_family(&principal.family_id)?;
+        let cursor = self.current_revision(&principal.family_id)?.max(cursor);
         Ok(CausalBatchResult { cursor, results })
     }
 
@@ -2566,9 +2534,11 @@ impl Store {
 
         if !resolved_deleted {
             if let Err(code) = require_media_bytes_present(
+                &tx,
                 &self.database_path,
-                &principal.family_id,
+                principal,
                 &resolved_media,
+                now,
             ) {
                 return Ok(ResolveConflictResult {
                     status: "rejected".to_owned(),
@@ -2672,8 +2642,11 @@ impl Store {
                 &version_id,
                 now,
             )?;
+        } else {
+            consume_manifest(&tx, principal, &resolved_media, now)?;
         }
         tx.commit()?;
+        self.promote_consumed_causal_media_for_family(&principal.family_id)?;
         Ok(ResolveConflictResult {
             status: "resolved".to_owned(),
             stable_version_id: Some(version_id),

@@ -194,6 +194,7 @@ fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
         "conflicts",
         "conflict_branches",
         "conflict_resolutions",
+        "causal_media_staging",
         "source_relations",
         "source_relation_members",
         "source_relation_declarations",

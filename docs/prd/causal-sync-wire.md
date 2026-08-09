@@ -199,6 +199,20 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 稳定投影与成功响应中的 `media` / `stable_media` **必须** 按 `media_uuid` 字典序升序输出。
 仅顺序不同的 mutation 与稳定内容在 media 集合意义上相同 → `confirmed` / 幂等，不创建新版本。
 
+#### 4.6.1 Preimage lifecycle
+
+`PUT /v1/causal/media/{media_uuid}` 携带 `X-Lezi-Media-Sha256` 与原始 bytes，只创建未发布
+preimage。服务端必须持久绑定 family、staging membership、UUID、SHA-256、byte size、
+created/expiry 与状态；同 UUID/同 bytes replay 幂等，同 UUID/不同 bytes 冲突且不得覆盖。
+单文件上限服从服务器媒体上限；未消费资源固定为每 membership 64 个、每 family 256 个、
+family aggregate 512 MiB、TTL 24 小时。
+
+`commit` 必须在写 version/rev/publication 前精确匹配 UUID/SHA/size，并在同一数据库事务把
+accepted/merged/branched 引用标记为 consumed。最终 `media/{family}/{uuid}` 只接收数据库已
+消费的 bytes；commit/restart retry 必须从任意 DB/filesystem crash point 收敛。启动在开放业务
+路由前恢复 consumed promotion，并以 durable GC journal 删除过期/无 metadata preimage、同步
+目录；稳定版本或 branch 引用的 consumed bytes 不受 TTL GC。
+
 ---
 
 ## 5. Reconcile（dry-run）
