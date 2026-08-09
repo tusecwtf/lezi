@@ -108,7 +108,7 @@ class RecordComposerPhotoImportRunnerTest {
         val deleted = mutableListOf<String>()
         var draftPhotos = emptyList<String>()
 
-        runComposerPhotoImport(
+        val attached = runComposerPhotoImport(
             importSave = gate,
             epoch = begin.epoch,
             import = { onPathCommitted ->
@@ -124,8 +124,30 @@ class RecordComposerPhotoImportRunnerTest {
         )
 
         assertEquals(listOf("/cache/kept.jpg"), draftPhotos)
+        assertTrue(attached)
         assertTrue(deleted.isEmpty())
         assertTrue(gate.drainUnattached().isEmpty())
+    }
+
+    @Test
+    fun rejectedAttachReportsFailureAfterReclaimingTheDurableCopy() = runBlocking {
+        val gate = RecordComposerImportSaveSerialization()
+        val begin = requireNotNull(gate.beginImport())
+        val deleted = mutableListOf<String>()
+
+        val attached = runComposerPhotoImport(
+            importSave = gate,
+            epoch = begin.epoch,
+            import = { onPath ->
+                onPath("/cache/rejected.jpg")
+                listOf("/cache/rejected.jpg")
+            },
+            delete = { deleted += it },
+            attach = { false },
+        )
+
+        assertFalse(attached)
+        assertEquals(listOf("/cache/rejected.jpg"), deleted)
     }
 
     @Test

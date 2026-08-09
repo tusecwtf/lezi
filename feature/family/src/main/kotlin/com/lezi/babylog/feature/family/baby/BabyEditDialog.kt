@@ -24,6 +24,7 @@ import com.lezi.babylog.designsystem.LeziAlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -34,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
@@ -44,7 +44,10 @@ import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeEditPreview
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
-import com.lezi.babylog.core.ui.CameraCapture
+import com.lezi.babylog.core.ui.CameraCaptureOutcome
+import com.lezi.babylog.core.ui.CameraCaptureLauncher
+import com.lezi.babylog.core.ui.OwnedCameraCapture
+import com.lezi.babylog.core.ui.rememberCameraCaptureLauncher
 import com.lezi.babylog.designsystem.LeziBabyTheme
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -82,6 +85,12 @@ internal fun BabyEditDialog(
     onLocalTheme: (argb: Int, onDone: (String?) -> Unit) -> Unit,
     onMoveLocal: (delta: Int, onDone: (String?) -> Unit) -> Unit,
     onSetCurrent: () -> Unit,
+    cameraCaptureLauncherFactory: @Composable (
+        ownershipKey: Any?,
+        onOutcome: (CameraCaptureOutcome) -> Unit,
+    ) -> CameraCaptureLauncher = { key, onOutcome ->
+        rememberCameraCaptureLauncher(key, onOutcome)
+    },
 ) {
     var nickname by remember(baby.id) { mutableStateOf(baby.nickname) }
     // Persist Home-LAN wire values (female/male/null), not Kotlin enum names.
@@ -105,52 +114,41 @@ internal fun BabyEditDialog(
         mutableStateOf(normalizeBabyThemeArgb(baby.themeColorArgb))
     }
     var pickedAvatarUri by remember(baby.id) { mutableStateOf<Uri?>(null) }
+    var ownedAvatarCapture by remember(baby.id) { mutableStateOf<OwnedCameraCapture?>(null) }
     var croppedAvatar by remember(baby.id) { mutableStateOf<CroppedAvatar?>(null) }
     var removeAvatar by remember(baby.id) { mutableStateOf(false) }
     var saving by remember(baby.id) { mutableStateOf(false) }
     var avatarError by remember(baby.id) { mutableStateOf<String?>(null) }
-    var pendingAvatarCameraUri by remember(baby.id) { mutableStateOf<Uri?>(null) }
-    val avatarContext = LocalContext.current
+    fun releaseOwnedAvatarCapture() {
+        ownedAvatarCapture?.release()
+        ownedAvatarCapture = null
+    }
+    val avatarCamera = cameraCaptureLauncherFactory("baby-edit-${baby.id}") { outcome ->
+        when (outcome) {
+            is CameraCaptureOutcome.Captured -> {
+                releaseOwnedAvatarCapture()
+                ownedAvatarCapture = outcome.capture
+                removeAvatar = false
+                pickedAvatarUri = outcome.capture.uri
+            }
+            CameraCaptureOutcome.Cancelled -> Unit
+            CameraCaptureOutcome.PermissionDenied -> avatarError = "需要相机权限才能拍照"
+            CameraCaptureOutcome.NoCamera -> avatarError = "此设备没有可用相机"
+            CameraCaptureOutcome.LaunchFailed -> avatarError = "无法打开相机，请稍后重试"
+        }
+    }
     val avatarPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
         if (uri != null) {
+            releaseOwnedAvatarCapture()
+            avatarCamera.dispose()
             removeAvatar = false
             pickedAvatarUri = uri
         }
     }
-    val avatarTakePicture = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicture(),
-    ) { success ->
-        val uri = pendingAvatarCameraUri
-        pendingAvatarCameraUri = null
-        if (success && uri != null) {
-            removeAvatar = false
-            pickedAvatarUri = uri
-        }
-    }
-    fun launchAvatarCamera() {
-        avatarError = null
-        if (!CameraCapture.hasCameraHardware(avatarContext)) {
-            avatarError = "此设备没有可用相机"
-            return
-        }
-        runCatching {
-            val uri = CameraCapture.createOutputUri(avatarContext)
-            pendingAvatarCameraUri = uri
-            avatarTakePicture.launch(uri)
-        }.onFailure {
-            avatarError = "无法打开相机，请稍后重试"
-        }
-    }
-    val avatarCameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            launchAvatarCamera()
-        } else {
-            avatarError = "需要相机权限才能拍照"
-        }
+    DisposableEffect(baby.id) {
+        onDispose { releaseOwnedAvatarCapture() }
     }
     val previewBitmap = remember(croppedAvatar) {
         croppedAvatar?.bitmap?.asImageBitmap()
@@ -159,7 +157,11 @@ internal fun BabyEditDialog(
 
     LeziAlertDialog(
         onDismissRequest = {
-            if (!saving) onDismiss()
+            if (!saving) {
+                releaseOwnedAvatarCapture()
+                avatarCamera.dispose()
+                onDismiss()
+            }
         },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
@@ -214,11 +216,8 @@ internal fun BabyEditDialog(
                                 LeziSecondaryButton(
                                     label = "拍照",
                                     onClick = {
-                                        if (CameraCapture.hasPermission(avatarContext)) {
-                                            launchAvatarCamera()
-                                        } else {
-                                            avatarCameraPermission.launch(CameraCapture.PERMISSION)
-                                        }
+                                        avatarError = null
+                                        avatarCamera.launch()
                                     },
                                     enabled = !saving,
                                     modifier = Modifier.fillMaxWidth(),
@@ -402,7 +401,11 @@ internal fun BabyEditDialog(
         dismissButton = {
             LeziTextButton(
                 label = if (canEditProfile) "取消" else "关闭",
-                onClick = onDismiss,
+                onClick = {
+                    releaseOwnedAvatarCapture()
+                    avatarCamera.dispose()
+                    onDismiss()
+                },
                 enabled = !saving,
             )
         },
@@ -419,10 +422,16 @@ internal fun BabyEditDialog(
     pickedAvatarUri?.let { sourceUri ->
         AvatarCropDialog(
             sourceUri = sourceUri,
-            onDismiss = { pickedAvatarUri = null },
+            onDismiss = {
+                releaseOwnedAvatarCapture()
+                avatarCamera.dispose()
+                pickedAvatarUri = null
+            },
             onConfirm = { result ->
                 croppedAvatar = result
                 removeAvatar = false
+                releaseOwnedAvatarCapture()
+                avatarCamera.dispose()
                 pickedAvatarUri = null
             },
         )
