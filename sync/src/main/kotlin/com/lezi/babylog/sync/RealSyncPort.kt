@@ -1,4 +1,6 @@
 package com.lezi.babylog.sync
+
+import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
@@ -2300,18 +2302,9 @@ internal suspend fun runProcessStartupRecovery(
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (failure: Exception) {
-        failure.startupCancellationCauseOrNull()?.let { throw it }
+        failure.cancellationCauseOrNull()?.let { throw it }
         reportFailure(failure)
     }
-}
-
-private fun Throwable.startupCancellationCauseOrNull(): CancellationException? {
-    var current: Throwable? = this
-    while (current != null) {
-        if (current is CancellationException) return current
-        current = current.cause
-    }
-    return null
 }
 
 /**

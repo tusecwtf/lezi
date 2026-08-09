@@ -191,13 +191,14 @@ class RealSyncPortSessionLifecycleTest {
     }
 
     @Test
-    fun startupRecoveryPropagatesCancellation() = runTest {
+    fun startupRecoveryPropagatesTheOriginalNestedCancellation() = runTest {
         val cancellation = CancellationException("process stopping")
+        val wrapper = IllegalStateException("startup recovery failed", cancellation)
 
         val thrown = runCatching {
             runProcessStartupRecovery(
                 reportFailure = { error("must not report cancellation") },
-                recover = { throw cancellation },
+                recover = { throw wrapper },
             )
         }.exceptionOrNull()
 

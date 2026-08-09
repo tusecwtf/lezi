@@ -1,4 +1,6 @@
 package com.lezi.babylog.domain.localdata
+
+import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
@@ -367,14 +369,6 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
         throw failure
     }
 
-    private fun Throwable.cancellationCauseOrNull(): CancellationException? {
-        var current: Throwable? = this
-        while (current != null) {
-            if (current is CancellationException) return current
-            current = current.cause
-        }
-        return null
-    }
 }
 
 private data class PendingLocalClearFinish(

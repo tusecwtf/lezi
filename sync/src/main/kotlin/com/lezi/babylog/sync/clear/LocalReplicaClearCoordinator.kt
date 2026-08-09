@@ -1,4 +1,6 @@
 package com.lezi.babylog.sync.clear
+
+import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.LocalDataClearScope
@@ -6,8 +8,8 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.PendingReplicaCleanup
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
@@ -200,12 +202,3 @@ internal class LocalReplicaClearCoordinator(
 }
 
 private const val MEDIA_DELETE_CHUNK_SIZE = 400
-
-private fun Throwable.cancellationCauseOrNull(): CancellationException? {
-    var current: Throwable? = this
-    while (current != null) {
-        if (current is CancellationException) return current
-        current = current.cause
-    }
-    return null
-}

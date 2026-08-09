@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.settings.calendar
 
+import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -22,13 +23,4 @@ internal suspend fun runBroadcastWork(
     } finally {
         finish()
     }
-}
-
-private fun Throwable.cancellationCauseOrNull(): CancellationException? {
-    var current: Throwable? = this
-    while (current != null) {
-        if (current is CancellationException) return current
-        current = current.cause
-    }
-    return null
 }
