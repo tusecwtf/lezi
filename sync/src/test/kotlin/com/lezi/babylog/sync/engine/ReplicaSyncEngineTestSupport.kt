@@ -62,6 +62,12 @@ internal class ReplicaEngineRig(
     val customItems = MemoryCustomItemDao()
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
+    val fulfillmentAuthoritySettlement =
+        com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement(
+            carePlanDao = carePlans,
+            fulfillmentCandidateDao = fulfillmentCandidates,
+            transactionRunner = transactions,
+        )
     val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
         mediaDao = media,
         mediaReferenceDao = MemoryMediaReferenceDao(),
@@ -102,6 +108,7 @@ internal class ReplicaEngineRig(
             authorityVisibleAtCallback = babies.listFamilyAuthority().isNotEmpty()
         },
         fulfillmentCandidateDao = fulfillmentCandidates,
+        fulfillmentAuthoritySettlement = fulfillmentAuthoritySettlement,
         requireRemoteAllowed = {},
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,

@@ -299,6 +299,12 @@ internal class Fakes(
     val reminders = FakeReminderCleanupPort()
     val systemCalendar = FakeSystemCalendarPort()
     val transactions = RecordingTransactionRunner()
+    val fulfillmentAuthoritySettlement =
+        com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement(
+            carePlanDao = carePlans,
+            fulfillmentCandidateDao = fulfillmentCandidates,
+            transactionRunner = transactions,
+        )
     val calendarReminderMutationGuard = CalendarReminderMutationGuard()
     val clock = FakePolicyClock()
 
@@ -384,6 +390,7 @@ internal class Fakes(
         transactions,
         systemCalendar,
         fulfillmentCandidates,
+        fulfillmentAuthoritySettlement,
         calendarReminderMutationGuard,
         clock,
         mediaPathGate = com.lezi.babylog.core.database.MediaLocalPathGate(),

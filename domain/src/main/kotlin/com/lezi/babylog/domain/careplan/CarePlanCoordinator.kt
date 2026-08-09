@@ -7,6 +7,7 @@ import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
+import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordDao
@@ -17,9 +18,7 @@ import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.ConflictNotAdoptedAudit
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.FulfillmentAdoptionStatus
-import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidate
-import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.NursingPayload
@@ -92,6 +91,7 @@ internal class CarePlanCoordinator(
     private val customItemDao: CustomItemDao,
     private val mediaAssetDao: MediaAssetDao,
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val fulfillmentAuthoritySettlement: FulfillmentAuthoritySettlement,
     private val transactionRunner: DatabaseTransactionRunner,
     private val photoAttachmentReconciler: PhotoAttachmentReconciler,
     private val reminderProjection: CarePlanReminderProjection,
@@ -484,7 +484,7 @@ internal class CarePlanCoordinator(
                 )
                 // Manager (creator/owner) may LWW-push completed plan status. Non-managers
                 // complete only locally — server forbids care_plan rewrites for them;
-                // peers re-link via fulfillment_candidate + resolveFulfillmentAuthority.
+                // peers re-link via fulfillment_candidate + FulfillmentAuthoritySettlement.
                 val publishPlanCompletion = actorCanManageCarePlan(plan)
                 carePlanDao.update(
                     plan.copy(
@@ -502,7 +502,7 @@ internal class CarePlanCoordinator(
                     confirmedAt = confirmedAt,
                 )
                 // Local multi-candidate sets (rare) re-link the plan to the authority.
-                resolveFulfillmentAuthorityForPlan(plan.clientUuid)
+                fulfillmentAuthoritySettlement.settle(plan.clientUuid)
                 inserted
             }
             if (planType == RecordType.SLEEP) {
@@ -576,7 +576,7 @@ internal class CarePlanCoordinator(
             actualTimestamp = actualTimestamp,
             confirmedAt = now,
         )
-        resolveFulfillmentAuthorityForPlan(plan.clientUuid)
+        fulfillmentAuthoritySettlement.settle(plan.clientUuid)
     }
 
     /**
@@ -631,66 +631,6 @@ internal class CarePlanCoordinator(
                 submitterRole = localRole,
                 updatedAt = confirmedAt,
                 syncDirty = true,
-            ),
-        )
-    }
-
-    /**
-     * Deterministic multi-candidate authority for one care plan.
-     *
-     * Points [CarePlan.fulfilledRecordClientUuid] at the single winner, marks losers
-     * [FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED], and never deletes Record/photos.
-     * Local-only: does not dirty the plan or candidates for republish (every device
-     * re-derives from frozen submitter/confirmed_at evidence after pull).
-     *
-     * Idempotent; safe to re-run after every apply of candidates for the plan.
-     */
-    suspend fun resolveFulfillmentAuthorityForPlan(carePlanClientUuid: String) {
-        val live = fulfillmentCandidateDao.listForCarePlan(carePlanClientUuid)
-            .filter { it.deletedAt == null }
-        if (live.isEmpty()) return
-        val resolution = FulfillmentAuthority.resolve(
-            live.map {
-                FulfillmentCandidateEvidence(
-                    clientUuid = it.clientUuid,
-                    recordClientUuid = it.recordClientUuid,
-                    confirmedAt = it.confirmedAt,
-                    submitterRole = it.submitterRole,
-                )
-            },
-        ) ?: return
-        // Local marks only — keep updatedAt/syncDirty so we do not republish.
-        val patches = FulfillmentAuthority.adoptionStatusPatches(
-            liveClientUuidToStatus = live.associate { it.clientUuid to it.adoptionStatus },
-            resolution = resolution,
-        )
-        if (patches.isNotEmpty()) {
-            val byUuid = live.associateBy { it.clientUuid }
-            for ((clientUuid, status) in patches) {
-                val candidate = byUuid[clientUuid] ?: continue
-                fulfillmentCandidateDao.update(candidate.copy(adoptionStatus = status))
-            }
-        }
-        val plan = carePlanDao.getByClientUuid(carePlanClientUuid) ?: return
-        if (plan.deletedAt != null) return
-        if (
-            !FulfillmentAuthority.needsPlanRelink(
-                currentStatusStorageKey = plan.status,
-                currentFulfilledRecordClientUuid = plan.fulfilledRecordClientUuid,
-                currentFulfilledAt = plan.fulfilledAt,
-                resolution = resolution,
-            )
-        ) {
-            return
-        }
-        carePlanDao.update(
-            plan.copy(
-                status = CarePlanStatus.COMPLETED.storageKey,
-                fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
-                fulfilledAt = resolution.winnerConfirmedAt,
-                // Local re-link only; LWW plan push order must not fight resolution.
-                updatedAt = plan.updatedAt,
-                syncDirty = plan.syncDirty,
             ),
         )
     }

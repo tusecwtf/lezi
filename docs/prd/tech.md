@@ -101,6 +101,7 @@ sideways seam（非分层违规；完整边表见 §2.2）。feature 之间无 `
 | `:feature:family` | `FamilyScreen` 导航壳 | `overview/`、`members/`、`wizard/`、`baby/`、`components/` |
 | `:feature:onboarding` | 导航壳 | wizard 步态与 QR UI 与 Family 向导逻辑对齐（薄壳 + 步态包） |
 | `:feature:settings` | Settings 入口 | `calendar/`、`record/` |
+| `:core:database` | `LeziDatabase` / DAO / DI 入口 | `causal/`、`fulfillment/`（事务自持的履行权威派生结算） |
 | `:domain` | `CareLog` | `carelog/`、`careplan/`、`family/`、`timeline/`、`catalog/`、`growth/`、`export/`、`localdata/`、`calendar/` |
 | `:sync` | `SyncPort` / `RealSyncPort` / `SyncModule` | `engine/`、`backend/`、`session/`、`media/`、`appupdate/`、`qr/`、`clear/` |
 | `tools/lezi-sync` | crate 根 + 单一 `Store` 事务面 | crate-private `handlers::*`、`store::{schema,identity,bundles,media,…}`；`offline_migrate/` 独立维护窗 CLI |
@@ -168,6 +169,11 @@ causal reconcile/commit（`confirmed|publish|conflict_preview|rejected` /
 因果 capability 下跳过 pull 与 cursor 推进，与完整周期共用同一 settlement seam。
 generation/cursor 证明失效时才走全量实体快照。浅层待同步数量按未终态 atomic units 投影，
 静止且完整落库的周期必须把冻结集收敛到零；健康探测成功本身不能清状态。
+
+履行权威的本机派生结算统一由 `core:database/fulfillment` 的
+`FulfillmentAuthoritySettlement` 自持 Room 事务：domain 本机完成与 sync pull apply 只传
+CarePlan portable identity；Module 在同一事务读取完整候选证据、计算 adoption patches，并重链
+计划。该派生写不改变候选/计划的 `updatedAt`、`syncDirty` 或候选的独立记录转换指针。
 
 `FamilyServerAvailability` 是协调器私有网络门闩和家庭网络设置的结果态，不替代浅层
 `SyncStatus`。匿名客户端在可信 TLS 下并行检查 `/health`、`/ready` 与 setup capability，

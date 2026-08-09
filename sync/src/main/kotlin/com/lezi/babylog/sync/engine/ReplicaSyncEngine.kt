@@ -9,9 +9,8 @@ import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
+import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.model.CarePlanStatus
-import com.lezi.babylog.core.model.FulfillmentAuthority
-import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
@@ -147,6 +146,7 @@ internal class ReplicaSyncEngine(
     private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val fulfillmentAuthoritySettlement: FulfillmentAuthoritySettlement,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
@@ -467,7 +467,7 @@ internal class ReplicaSyncEngine(
                 entities.filter { it.type == "care_plan" }.forEach { add(it.clientUuid) }
             }
             for (planUuid in planUuidsForResolve) {
-                resolveFulfillmentAuthority(planUuid)
+                fulfillmentAuthoritySettlement.settle(planUuid)
             }
             entities.filter { it.type == "care_plan" }
                 .mapNotNull { entity -> carePlanDao.getByClientUuid(entity.clientUuid)?.babyId }
@@ -796,7 +796,7 @@ internal class ReplicaSyncEngine(
     /**
      * Apply a remote fulfillment candidate. Requires plan + record to already be
      * local so the candidate is never the sole visible half of a fulfill result.
-     * Winner selection runs after the full page apply via [resolveFulfillmentAuthority].
+     * Winner selection runs after the full page apply via [FulfillmentAuthoritySettlement].
      */
     private suspend fun applyFulfillmentCandidate(
         entity: SyncEntity,
@@ -857,62 +857,6 @@ internal class ReplicaSyncEngine(
             ),
         )
         return true
-    }
-
-    /**
-     * Re-link [CarePlanEntity.fulfilledRecordClientUuid] to the deterministic winner
-     * among local candidates and mark losers conflict-not-adopted. Does not delete
-     * records or photos. Local-only (no syncDirty) so plan LWW push order cannot
-     * permanently pin a non-winner on any device.
-     */
-    private suspend fun resolveFulfillmentAuthority(carePlanClientUuid: String) {
-        val live = fulfillmentCandidateDao.listForCarePlan(carePlanClientUuid)
-            .filter { it.deletedAt == null }
-        if (live.isEmpty()) return
-        val resolution = FulfillmentAuthority.resolve(
-            live.map {
-                FulfillmentCandidateEvidence(
-                    clientUuid = it.clientUuid,
-                    recordClientUuid = it.recordClientUuid,
-                    confirmedAt = it.confirmedAt,
-                    submitterRole = it.submitterRole,
-                )
-            },
-        ) ?: return
-        // Same pure patches as CareLog.resolveFulfillmentAuthorityForPlan.
-        val patches = FulfillmentAuthority.adoptionStatusPatches(
-            liveClientUuidToStatus = live.associate { it.clientUuid to it.adoptionStatus },
-            resolution = resolution,
-        )
-        if (patches.isNotEmpty()) {
-            val byUuid = live.associateBy { it.clientUuid }
-            for ((clientUuid, status) in patches) {
-                val candidate = byUuid[clientUuid] ?: continue
-                fulfillmentCandidateDao.update(candidate.copy(adoptionStatus = status))
-            }
-        }
-        val plan = carePlanDao.getByClientUuid(carePlanClientUuid) ?: return
-        if (plan.deletedAt != null) return
-        if (
-            !FulfillmentAuthority.needsPlanRelink(
-                currentStatusStorageKey = plan.status,
-                currentFulfilledRecordClientUuid = plan.fulfilledRecordClientUuid,
-                currentFulfilledAt = plan.fulfilledAt,
-                resolution = resolution,
-            )
-        ) {
-            return
-        }
-        carePlanDao.update(
-            plan.copy(
-                status = CarePlanStatus.COMPLETED.storageKey,
-                fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
-                fulfilledAt = resolution.winnerConfirmedAt,
-                // Keep updatedAt/syncDirty — resolution is device-local convergence.
-                updatedAt = plan.updatedAt,
-                syncDirty = plan.syncDirty,
-            ),
-        )
     }
 
     /**

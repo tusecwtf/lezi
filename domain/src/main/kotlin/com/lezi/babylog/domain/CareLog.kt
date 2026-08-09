@@ -10,6 +10,7 @@ import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
@@ -169,6 +170,7 @@ class CareLog @Inject constructor(
     private val transactionRunner: DatabaseTransactionRunner,
     private val systemCalendar: SystemCalendarPort = NoOpSystemCalendarPort(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val fulfillmentAuthoritySettlement: FulfillmentAuthoritySettlement,
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
     private val clock: PolicyClock,
     /** Process-wide path gate shared with reference-aware media reclaim (Hilt singleton). */
@@ -332,6 +334,7 @@ class CareLog @Inject constructor(
             customItemDao = customItemDao,
             mediaAssetDao = mediaAssetDao,
             fulfillmentCandidateDao = fulfillmentCandidateDao,
+            fulfillmentAuthoritySettlement = fulfillmentAuthoritySettlement,
             transactionRunner = transactionRunner,
             photoAttachmentReconciler = photoAttachmentReconciler,
             reminderProjection = reminderProjection,
@@ -1003,7 +1006,7 @@ class CareLog @Inject constructor(
 
     suspend fun resolveFulfillmentAuthorityForPlan(carePlanClientUuid: String) =
         localDataMutationEpoch.withMutation {
-            carePlans.resolveFulfillmentAuthorityForPlan(carePlanClientUuid)
+            fulfillmentAuthoritySettlement.settle(carePlanClientUuid)
         }
 
     suspend fun listFulfillmentCandidatesForPlan(

@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–07 implemented
+Status: in-progress — tickets 01–08 implemented
 
 Spec: [`spec.md`](./spec.md)
 
@@ -36,7 +36,7 @@ post-0.3.13/01 implementation stabilizes
 | 05 | [Make source relations one bounded canonical graph](./issues/05-bounded-canonical-source-relations.md) | P1 | implemented | 04 + post-0.3.13/01 implementation stabilization |
 | 06 | [Replace Cartesian duplicate bounds with one global bounded interpretation](./issues/06-bounded-global-duplicate-bounds.md) | P1 | implemented | post-0.3.13/01 implementation stabilization |
 | 07 | [Batch and reactively observe the Wake read projection](./issues/07-batched-reactive-wake-projection.md) | P1 | implemented | 06 |
-| 08 | [Share one atomic fulfillment-authority settlement](./issues/08-atomic-fulfillment-authority-settlement.md) | P2 | ready-for-agent | 01 |
+| 08 | [Share one atomic fulfillment-authority settlement](./issues/08-atomic-fulfillment-authority-settlement.md) | P2 | implemented | 01 |
 | 09 | [Own and release camera capture temporary files](./issues/09-owned-camera-capture-sessions.md) | P2 | ready-for-agent | — |
 | 10 | [Move babies through one live domain command](./issues/10-atomic-baby-move-command.md) | P2 | ready-for-agent | — |
 | 11 | [Share one untrusted member-login QR policy](./issues/11-shared-member-login-qr-policy.md) | P2 | ready-for-agent | — |

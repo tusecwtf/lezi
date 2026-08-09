@@ -1599,6 +1599,12 @@ internal class SyncRig(
     )
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
+    val fulfillmentAuthoritySettlement =
+        com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement(
+            carePlanDao = carePlans,
+            fulfillmentCandidateDao = fulfillmentCandidates,
+            transactionRunner = transactions,
+        )
     val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
         mediaDao = media,
         mediaReferenceDao = MemoryMediaReferenceDao(),
@@ -1638,6 +1644,7 @@ internal class SyncRig(
         removedDeviceLocalClearGate = removedDeviceLocalClearGate,
         carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
         fulfillmentCandidateDao = fulfillmentCandidates,
+        fulfillmentAuthoritySettlement = fulfillmentAuthoritySettlement,
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
         conflictDetailCacheDao = conflictDetails,

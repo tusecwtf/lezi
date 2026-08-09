@@ -878,6 +878,7 @@ class CareLogCarePlanTest {
             memberFakes.transactions,
             memberFakes.systemCalendar,
             memberFakes.fulfillmentCandidates,
+            memberFakes.fulfillmentAuthoritySettlement,
             memberFakes.calendarReminderMutationGuard,
             memberFakes.clock,
             mediaPathGate = com.lezi.babylog.core.database.MediaLocalPathGate(),

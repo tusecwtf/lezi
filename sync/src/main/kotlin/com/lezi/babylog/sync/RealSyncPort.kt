@@ -5,6 +5,7 @@ import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.PendingPublishDao
@@ -148,6 +149,7 @@ class RealSyncPort @Inject constructor(
     private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val fulfillmentAuthoritySettlement: FulfillmentAuthoritySettlement,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictDetailCacheDao: ConflictDetailCacheDao,
@@ -208,6 +210,7 @@ class RealSyncPort @Inject constructor(
         carePlanAppliedListener = carePlanAppliedListener,
         familyBabyAppliedListener = familyBabyAppliedListener,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
+        fulfillmentAuthoritySettlement = fulfillmentAuthoritySettlement,
         requireRemoteAllowed = { session ->
             val decision = foregroundSyncGate.evaluate(
                 session.endpointConfig,

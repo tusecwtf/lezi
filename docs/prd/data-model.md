@@ -501,7 +501,9 @@ CarePlan → 关联 Record（含 0–3 张照片）→ FulfillmentCandidate，�
 `missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务
 中写入关联 Record 并将计划标为 `completed`。多候选时各设备用盖章证据稳定裁决
 唯一权威记录，并在不置脏、不回写 NAS immutable pair 的前提下本地重链
-`fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
+`fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。本机 completion 与 replica pull
+共用一个事务自持的 fulfillment-authority settlement；候选 adoption patches 与计划重链原子
+提交，调用方不得依赖外层恰好已有事务。
 
 下次喂养 marker 的计划写入回调不是持久化回执。若 callback 丢失、返回失败或 UI 从
 `Scheduling`/持久化查询中恢复，Composer 与 Nursing Timer 必须经同一 domain seam 读取当前
