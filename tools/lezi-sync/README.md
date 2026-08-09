@@ -206,6 +206,11 @@ docker buildx build \
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
 
+Causal commit 另有固定、非环境可调的 fail-closed admission：60 秒内每个
+`(family_id, membership_id)` 120 次、每 family 1,200 次，并限制每个 causal root 最多 64 个
+durable open branches。精确 receipt replay 不重复计费；饱和统一返回不含家庭内容的 typed 429。
+这些进程内 rate 窗口在服务重启时清空，branch 上限则由 SQLite durable branch 计数继续执行。
+
 8765 只监听 HTTPS。容器内另有仅 loopback 可见的 readiness HTTP 8766
 供 `HEALTHCHECK` 使用，不映射到宿主。可选 LAN HTTP 8767 只提供 `/join` 和
 `/download/lezi.apk`，不提供 `/v1`、health 或 ready。NAS 打包默认按

@@ -51,7 +51,7 @@ use readiness::{readiness, CachedReadiness};
 use restore_locks::RestoreLockPool;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use store::{Principal, Store, StoreError};
+use store::{CausalCommitSaturation, Principal, Store, StoreError};
 use tokio::sync::Mutex;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -1298,6 +1298,23 @@ impl ApiError {
 
     fn too_many_requests(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::TOO_MANY_REQUESTS, detail)
+    }
+
+    fn causal_commit_saturated(saturation: CausalCommitSaturation) -> Self {
+        tracing::warn!(
+            reason_code = saturation.code(),
+            scope = saturation.scope(),
+            "causal commit admission saturated"
+        );
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            detail: json!({
+                "scope": saturation.scope(),
+                "retryable": true,
+            }),
+            authenticate: false,
+            code: Some(saturation.code()),
+        }
     }
 
     fn not_found(detail: impl Into<Value>) -> Self {

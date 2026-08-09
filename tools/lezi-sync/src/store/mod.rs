@@ -20,6 +20,7 @@
 mod authority_graph;
 mod bundles;
 mod causal;
+mod causal_admission;
 mod causal_media_staging;
 mod causal_merge;
 mod identity;
@@ -33,6 +34,7 @@ mod suspected_duplicates;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -47,8 +49,10 @@ use self::SourceRelationReceipt as _;
 pub(crate) use bundles::bundle_content_hash;
 pub use causal::{
     CausalBatchResult, CausalMutation, CausalUnitResult, ConflictDetail, ConflictSummary,
-    ResolveConflictInput, ResolveConflictResult, MAX_CAUSAL_UNITS,
+    ResolveConflictInput, ResolveConflictResult,
 };
+pub(crate) use causal_admission::CausalAdmissionConfig;
+pub use causal_admission::CausalCommitSaturation;
 pub use causal_media_staging::{
     CausalMediaStageStatus, CausalMediaStagingLimits, DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
 };
@@ -377,6 +381,12 @@ pub enum StoreError {
     LegacyBundleCausalRootUnsupported(String),
     #[error("authoritative reconcile batch is invalid")]
     InvalidReconcileBatch,
+    #[error("causal commit admission saturated: {0:?}")]
+    CausalCommitSaturated(CausalCommitSaturation),
+    #[error("causal commit admission is unavailable")]
+    CausalAdmissionUnavailable,
+    #[error("causal commit admission config is invalid")]
+    InvalidCausalAdmissionConfig,
     #[error("conflict not found")]
     ConflictNotFound,
     #[error("source relation request invalid: {0}")]
@@ -435,6 +445,8 @@ pub struct CommittedPendingBundleMedia {
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
+    causal_commit_limiter: Arc<crate::rate_limit::RateLimiter>,
+    max_open_causal_branches_per_root: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -79,7 +79,15 @@ struct Fx {
 impl Fx {
     fn new() -> Self {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path().join("lezi.db")).unwrap();
+        let store = Store::open_with_causal_admission(
+            dir.path().join("lezi.db"),
+            CausalAdmissionConfig {
+                principal_commit_limit: u32::MAX,
+                family_commit_limit: u32::MAX,
+                ..CausalAdmissionConfig::default()
+            },
+        )
+        .unwrap();
         let family_id = family(&store);
         let owner = owner_principal(&family_id);
         let baby_id = Uuid::new_v4();

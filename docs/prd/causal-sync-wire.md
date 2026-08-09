@@ -271,6 +271,30 @@ durable preimage receipt，然后**只调用一次** `POST …/commit`。安全�
 响应保留原 `accepted|merged|branched` 并设置 `replay=true`；`replayed` 禁止成为第四种 status。
 同一 `mutation_id` + 不同内容：`rejected` `content_drift`。
 
+### 6.1 Commit admission（R12）
+
+一次含任何非精确 receipt replay 的 authenticated commit batch 计一次 admission attempt；全 batch
+精确 replay 免计，混合 replay/new batch 计一次。principal key 是
+`(family_id, membership_id)`（不含 device），family key 是 `family_id`；60 秒半开滑动窗口内分别
+最多 120/1,200 次。窗口是进程内资源保护，restart 后重新开始；durable correctness 由 receipt 与
+branch 表承担。
+
+每个 `(family_id, entity_type, client_uuid)` 在所有 open conflict 下最多保留 64 条 durable
+`conflict_branches`；tombstone restore 的空 branch set 不占名额，resolved branch 不占名额。第 65 条
+在 branch/version/rev/receipt 任一写入前原子拒绝，既有 branch 必须继续能被 pull/detail/resolution
+发现，不得覆盖、删除或从摘要隐藏。
+
+Admission saturation 是 HTTP 429，不进入 §9.5 的 terminal `retryable=false` envelope：
+
+| code | detail.scope | 解除条件 |
+|------|--------------|----------|
+| `causal_commit_principal_rate_limited` | `principal` | 60 秒窗口释放 |
+| `causal_commit_family_rate_limited` | `family` | 60 秒窗口释放 |
+| `causal_open_branch_limit_reached` | `root` | 既有 conflict resolution 关闭 branch |
+
+body 沿用 `{ "code": code, "detail": { "scope": scope, "retryable": true } }`；不得含家庭事实、
+root UUID 或成员显示信息。Retry-After 与客户端 full-jitter 消费由 H15 实现，本票不提前接线。
+
 ---
 
 ## 7. Pull

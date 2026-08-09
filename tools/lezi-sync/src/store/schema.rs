@@ -7,11 +7,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-use super::{Store, StoreError};
+use super::{CausalAdmissionConfig, Store, StoreError};
+use crate::rate_limit::{RateLimitConfig, RateLimiter};
 
 /// Current SQLite `PRAGMA user_version` / schema contract version.
 /// Offline migration inventory couples to this constant (must not drift).
@@ -537,8 +539,32 @@ impl Store {
     }
 
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_configured(database_path, CausalAdmissionConfig::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_causal_admission(
+        database_path: impl Into<PathBuf>,
+        admission: CausalAdmissionConfig,
+    ) -> Result<Self, StoreError> {
+        Self::open_configured(database_path, admission)
+    }
+
+    fn open_configured(
+        database_path: impl Into<PathBuf>,
+        admission: CausalAdmissionConfig,
+    ) -> Result<Self, StoreError> {
+        let admission = admission.validate()?;
         let store = Self {
             database_path: database_path.into(),
+            causal_commit_limiter: Arc::new(RateLimiter::new_with_group_limit(
+                RateLimitConfig {
+                    max_attempts: admission.principal_commit_limit,
+                    window_seconds: admission.window_seconds,
+                },
+                admission.family_commit_limit,
+            )),
+            max_open_causal_branches_per_root: admission.max_open_branches_per_root,
         };
         Self::preflight_existing_schema(&store.database_path)?;
         if let Some(parent) = store.database_path.parent() {

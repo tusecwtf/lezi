@@ -1,9 +1,14 @@
 //! Causal reconcile / commit / pull summary / resolution — Store façade seams.
 
+use super::super::causal::MAX_CAUSAL_UNITS;
+use super::super::causal_admission::MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT;
 use super::super::*;
 use super::test_support::*;
+use rusqlite::params;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, Barrier};
+use std::thread;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -78,8 +83,17 @@ struct CausalFx {
 
 impl CausalFx {
     fn new() -> Self {
+        Self::with_admission(admission(
+            u32::MAX,
+            u32::MAX,
+            MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT,
+        ))
+    }
+
+    fn with_admission(admission: CausalAdmissionConfig) -> Self {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(dir.path().join("lezi.db")).unwrap();
+        let store =
+            Store::open_with_causal_admission(dir.path().join("lezi.db"), admission).unwrap();
         let family_id = family(&store);
         let owner = owner_principal(&family_id);
         let baby_id = Uuid::new_v4();
@@ -118,6 +132,260 @@ impl CausalFx {
             )
             .unwrap();
     }
+
+    fn record_mutation(&self, record_id: Uuid, base: Option<&str>, note: &str) -> CausalMutation {
+        mut_unit(
+            "record",
+            record_id,
+            base,
+            record_root(self.baby_id, note, 100, 40),
+            false,
+        )
+    }
+
+    fn commit(
+        &self,
+        principal: &Principal,
+        mutation: CausalMutation,
+        now: i64,
+    ) -> Result<CausalBatchResult, StoreError> {
+        self.store.causal_commit(principal, vec![mutation], now)
+    }
+
+    fn seed_concurrent_record(&self) -> (Uuid, String) {
+        let record_id = Uuid::new_v4();
+        let created = self
+            .commit(
+                &self.owner,
+                self.record_mutation(record_id, None, "base"),
+                1_700_000_000,
+            )
+            .unwrap();
+        let base = created.results[0]
+            .stable_version_id
+            .clone()
+            .expect("create has stable version");
+        let accepted = self
+            .commit(
+                &self.owner,
+                self.record_mutation(record_id, Some(&base), "stable"),
+                1_700_000_001,
+            )
+            .unwrap();
+        assert_eq!(accepted.results[0].status, "accepted");
+        (record_id, base)
+    }
+}
+
+fn admission(principal: u32, family: u32, branches: usize) -> CausalAdmissionConfig {
+    CausalAdmissionConfig {
+        principal_commit_limit: principal,
+        family_commit_limit: family,
+        window_seconds: 60,
+        max_open_branches_per_root: branches,
+    }
+}
+
+fn assert_principal_saturated(fx: &CausalFx, now: i64) {
+    let error = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(Uuid::new_v4(), None, "over-budget"),
+            now,
+        )
+        .expect_err("the preceding admission attempt must exhaust the principal budget");
+    assert!(matches!(
+        error,
+        StoreError::CausalCommitSaturated(CausalCommitSaturation::Principal)
+    ));
+}
+
+#[test]
+fn causal_commit_principal_budget_exempts_exact_replay_and_resets_at_boundary() {
+    let fx = CausalFx::with_admission(admission(2, 10, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    let record_id = Uuid::new_v4();
+    let mutation = fx.record_mutation(record_id, None, "within-budget");
+    let first = fx
+        .commit(&fx.owner, mutation.clone(), 1_700_000_000)
+        .unwrap();
+    assert_eq!(first.results[0].status, "accepted");
+
+    let rotated_device = Principal {
+        device_id: "another-owner-device".to_owned(),
+        ..fx.owner.clone()
+    };
+    let saturated = fx
+        .commit(
+            &rotated_device,
+            fx.record_mutation(Uuid::new_v4(), None, "over-budget"),
+            1_700_000_000,
+        )
+        .expect_err("device rotation must not bypass the principal budget");
+    assert!(matches!(
+        saturated,
+        StoreError::CausalCommitSaturated(CausalCommitSaturation::Principal)
+    ));
+
+    let replay = fx.commit(&fx.owner, mutation, 1_700_000_000).unwrap();
+    assert_eq!(replay.results, first.results);
+
+    let restarted = Store::open_with_causal_admission(
+        fx._dir.path().join("lezi.db"),
+        admission(2, 10, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT),
+    )
+    .unwrap();
+    restarted
+        .causal_commit(
+            &fx.owner,
+            vec![fx.record_mutation(Uuid::new_v4(), None, "after-restart")],
+            1_700_000_000,
+        )
+        .expect("the process-local budget resets on restart");
+
+    let after_window = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(Uuid::new_v4(), None, "next-window"),
+            1_700_000_060,
+        )
+        .unwrap();
+    assert_eq!(after_window.results[0].status, "accepted");
+}
+
+#[test]
+fn causal_commit_family_budget_is_shared_by_principals_and_root_types() {
+    let fx = CausalFx::with_admission(admission(10, 3, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(Uuid::new_v4(), None, "owner"),
+        1_700_000_000,
+    )
+    .unwrap();
+    let member_mutation = fx.record_mutation(Uuid::new_v4(), None, "member");
+    let member_result = fx
+        .commit(&fx.member, member_mutation.clone(), 1_700_000_000)
+        .unwrap();
+
+    let saturated = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "custom_item",
+                Uuid::new_v4(),
+                None,
+                map(json!({"name":"家庭事件", "icon_slot":1, "updated_at":20})),
+                false,
+            )],
+            1_700_000_000,
+        )
+        .expect_err("all principals and root types share the family budget");
+    assert!(matches!(
+        saturated,
+        StoreError::CausalCommitSaturated(CausalCommitSaturation::Family)
+    ));
+
+    let replay = fx
+        .commit(&fx.member, member_mutation, 1_700_000_000)
+        .unwrap();
+    assert_eq!(replay.results, member_result.results);
+
+    let after_window = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "custom_item",
+                Uuid::new_v4(),
+                None,
+                map(json!({"name":"下一窗口", "icon_slot":1, "updated_at":20})),
+                false,
+            )],
+            1_700_000_060,
+        )
+        .unwrap();
+    assert_eq!(after_window.results[0].status, "accepted");
+}
+
+#[test]
+fn causal_commit_clock_rollback_discards_every_future_sample() {
+    let fx = CausalFx::with_admission(admission(2, 10, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(Uuid::new_v4(), None, "future"),
+        1_700_000_010,
+    )
+    .unwrap();
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(Uuid::new_v4(), None, "after-rollback"),
+        1_700_000_005,
+    )
+    .expect("the t+10 sample must not consume budget after rollback to t+5");
+    assert_principal_saturated(&fx, 1_700_000_005);
+}
+
+#[test]
+fn causal_commit_charges_oversize_and_content_rejections_and_mixed_batches() {
+    let oversize = CausalFx::with_admission(admission(2, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    let units = (0..=MAX_CAUSAL_UNITS)
+        .map(|index| oversize.record_mutation(Uuid::new_v4(), None, &format!("oversize-{index}")))
+        .collect();
+    assert!(matches!(
+        oversize
+            .store
+            .causal_commit(&oversize.owner, units, 1_700_000_001),
+        Err(StoreError::InvalidReconcileBatch)
+    ));
+    assert_principal_saturated(&oversize, 1_700_000_001);
+
+    let invalid = CausalFx::with_admission(admission(2, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    let rejected = invalid
+        .store
+        .causal_commit(
+            &invalid.owner,
+            vec![mut_unit(
+                "unknown",
+                Uuid::new_v4(),
+                None,
+                map(json!({"updated_at": 20})),
+                false,
+            )],
+            1_700_000_001,
+        )
+        .unwrap();
+    assert_eq!(rejected.results[0].status, "rejected");
+    assert_principal_saturated(&invalid, 1_700_000_001);
+
+    let drift = CausalFx::with_admission(admission(3, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    let original = drift.record_mutation(Uuid::new_v4(), None, "original");
+    drift
+        .commit(&drift.owner, original.clone(), 1_700_000_001)
+        .unwrap();
+    let mut changed = original;
+    changed.root.insert("note".to_owned(), json!("changed"));
+    let rejected = drift.commit(&drift.owner, changed, 1_700_000_001).unwrap();
+    assert_eq!(rejected.results[0].code.as_deref(), Some("content_drift"));
+    assert_principal_saturated(&drift, 1_700_000_001);
+
+    let mixed = CausalFx::with_admission(admission(3, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
+    let replay = mixed.record_mutation(Uuid::new_v4(), None, "replay");
+    mixed
+        .commit(&mixed.owner, replay.clone(), 1_700_000_001)
+        .unwrap();
+    let result = mixed
+        .store
+        .causal_commit(
+            &mixed.owner,
+            vec![
+                replay,
+                mixed.record_mutation(Uuid::new_v4(), None, "new-in-mixed"),
+            ],
+            1_700_000_001,
+        )
+        .unwrap();
+    assert_eq!(result.results.len(), 2);
+    assert_principal_saturated(&mixed, 1_700_000_001);
 }
 
 #[test]
@@ -863,6 +1131,302 @@ fn create_open_record_conflict(fx: &CausalFx, creator: &Principal, index: usize)
         .clone()
         .expect("accepted edit has stable version");
     (record_id, stable_version)
+}
+
+#[test]
+fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let first_branch = fx.record_mutation(record_id, Some(&base), "branch-0");
+    let first = fx
+        .commit(&fx.owner, first_branch.clone(), 1_700_000_002)
+        .unwrap();
+    assert_eq!(first.results[0].status, "branched");
+    let conflict_id = first.results[0]
+        .conflict_id
+        .as_deref()
+        .expect("first branch has conflict id")
+        .to_owned();
+
+    for index in 1..MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT {
+        let result = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, Some(&base), &format!("branch-{index}")),
+                1_700_000_002,
+            )
+            .unwrap();
+        assert_eq!(result.results[0].status, "branched", "branch {index}");
+        if index + 1 == MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT - 1 {
+            assert_eq!(
+                fx.store
+                    .conflict_detail(&fx.owner, &conflict_id)
+                    .unwrap()
+                    .branches
+                    .len(),
+                MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT - 1,
+            );
+        }
+    }
+
+    let replay = fx.commit(&fx.owner, first_branch, 1_700_000_002).unwrap();
+    assert_eq!(replay.results, first.results, "exact replay must be stable");
+
+    let overflow = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-overflow"),
+            1_700_000_002,
+        )
+        .expect_err("the first branch above the cap must be rejected");
+    assert!(matches!(
+        overflow,
+        StoreError::CausalCommitSaturated(CausalCommitSaturation::OpenBranch)
+    ));
+
+    let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    assert_eq!(detail.branches.len(), MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT);
+
+    let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
+    assert_eq!(
+        restarted
+            .conflict_detail(&fx.owner, &conflict_id)
+            .unwrap()
+            .branches
+            .len(),
+        MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT,
+    );
+    let restart_overflow = restarted
+        .causal_commit(
+            &fx.owner,
+            vec![fx.record_mutation(record_id, Some(&base), "restart-overflow")],
+            1_700_000_003,
+        )
+        .expect_err("durable branch capacity must survive restart");
+    assert!(matches!(
+        restart_overflow,
+        StoreError::CausalCommitSaturated(CausalCommitSaturation::OpenBranch)
+    ));
+
+    let detail = restarted.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    let branch_ids = detail
+        .branches
+        .iter()
+        .map(|branch| branch.branch_version_id.clone())
+        .collect::<Vec<_>>();
+    let resolved = restarted
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                expected_stable_version: detail.stable_version_id,
+                expected_branch_versions: branch_ids,
+                resolved_root: record_root(fx.baby_id, "branch-0", 100, 50),
+                resolved_media: vec![],
+                resolution_mutation_id: Uuid::new_v4().to_string(),
+                conflict_choices: map(json!({"/note": "branch-0"})),
+            },
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(resolved.status, "resolved");
+    let durable_count: usize = restarted
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM conflict_branches
+             WHERE family_id = ?1 AND conflict_id = ?2",
+            params![fx.family_id, conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(durable_count, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT);
+    let after_resolution = restarted
+        .causal_commit(
+            &fx.owner,
+            vec![fx.record_mutation(record_id, Some(&base), "after-resolution")],
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(after_resolution.results[0].status, "branched");
+}
+
+#[test]
+fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles() {
+    let fx = CausalFx::with_admission(admission(20, 20, 4));
+    let (record_id, base) = fx.seed_concurrent_record();
+    let mut first_conflict = String::new();
+    for index in 0..3 {
+        let result = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, Some(&base), &format!("branch-{index}")),
+                1_700_000_002,
+            )
+            .unwrap();
+        first_conflict = result.results[0].conflict_id.clone().unwrap();
+    }
+    let first_detail = fx
+        .store
+        .conflict_detail(&fx.owner, &first_conflict)
+        .unwrap();
+    let moved_branch = first_detail.branches[0].branch_version_id.clone();
+    let second_conflict = Uuid::new_v4().to_string();
+    let empty_conflict = Uuid::new_v4().to_string();
+    let connection = fx.store.connect().unwrap();
+    for (conflict_id, kind, created_at) in [
+        (&second_conflict, "concurrent", 1_700_000_003),
+        (&empty_conflict, "tombstone_restore", 1_700_000_004),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO conflicts(
+                    family_id, conflict_id, entity_type, client_uuid, base_version_id,
+                    stable_version_id, status, kind, created_at, resolved_at
+                 ) VALUES (?1, ?2, 'record', ?3, NULL, ?4, 'open', ?5, ?6, NULL)",
+                params![
+                    fx.family_id,
+                    conflict_id,
+                    record_id.to_string(),
+                    first_detail.stable_version_id,
+                    kind,
+                    created_at,
+                ],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "UPDATE conflict_branches SET conflict_id = ?1
+             WHERE family_id = ?2 AND conflict_id = ?3 AND branch_version_id = ?4",
+            params![second_conflict, fx.family_id, first_conflict, moved_branch,],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert_eq!(
+        fx.store
+            .conflict_detail(&fx.owner, &first_conflict)
+            .unwrap()
+            .branches
+            .len(),
+        2,
+    );
+    assert_eq!(
+        fx.store
+            .conflict_detail(&fx.owner, &second_conflict)
+            .unwrap()
+            .branches
+            .len(),
+        1,
+    );
+    assert!(fx
+        .store
+        .conflict_detail(&fx.owner, &empty_conflict)
+        .unwrap()
+        .branches
+        .is_empty());
+
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(record_id, Some(&base), "branch-at-cap"),
+        1_700_000_005,
+    )
+    .unwrap();
+    assert!(matches!(
+        fx.commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-over-cap"),
+            1_700_000_005,
+        ),
+        Err(StoreError::CausalCommitSaturated(
+            CausalCommitSaturation::OpenBranch
+        ))
+    ));
+
+    fx.store
+        .connect()
+        .unwrap()
+        .execute(
+            "UPDATE conflicts SET status = 'resolved', resolved_at = ?1
+             WHERE family_id = ?2 AND conflict_id = ?3",
+            params![1_700_000_006, fx.family_id, second_conflict],
+        )
+        .unwrap();
+    let admitted = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "after-resolved"),
+            1_700_000_006,
+        )
+        .unwrap();
+    assert_eq!(admitted.results[0].status, "branched");
+    assert_eq!(
+        fx.store
+            .conflict_detail(&fx.owner, &first_conflict)
+            .unwrap()
+            .branches
+            .len(),
+        4,
+    );
+}
+
+#[test]
+fn concurrent_causal_commits_cannot_overallocate_branch_capacity() {
+    let fx = CausalFx::with_admission(admission(10, 10, 2));
+    let (record_id, base) = fx.seed_concurrent_record();
+    let first = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-0"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = first.results[0].conflict_id.clone().unwrap();
+
+    let barrier = Arc::new(Barrier::new(3));
+    let handles = ["branch-a", "branch-b"].map(|note| {
+        let store = fx.store.clone();
+        let principal = fx.owner.clone();
+        let barrier = barrier.clone();
+        let base = base.clone();
+        let mutation = fx.record_mutation(record_id, Some(&base), note);
+        thread::spawn(move || {
+            barrier.wait();
+            store.causal_commit(&principal, vec![mutation], 1_700_000_002)
+        })
+    });
+    barrier.wait();
+    let outcomes = handles.map(|handle| handle.join().unwrap());
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| result
+                .as_ref()
+                .is_ok_and(|batch| { batch.results[0].status == "branched" }))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| matches!(
+                result,
+                Err(StoreError::CausalCommitSaturated(
+                    CausalCommitSaturation::OpenBranch
+                ))
+            ))
+            .count(),
+        1,
+    );
+    assert_eq!(
+        fx.store
+            .conflict_detail(&fx.owner, &conflict_id)
+            .unwrap()
+            .branches
+            .len(),
+        2,
+    );
 }
 
 #[test]

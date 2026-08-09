@@ -17,11 +17,12 @@ use std::path::Path;
 use crate::model::{validate_causal_root, validate_causal_root_shape, Entity};
 
 use super::bundles::validate_canonical_package_ingress;
+use super::causal_admission::admit_new_branch;
 use super::causal_media_staging::{consume_manifest, verify_manifest};
 use super::causal_merge::{
     leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
 };
-use super::{Principal, Store, StoreError};
+use super::{CausalCommitSaturation, Principal, Store, StoreError};
 
 /// Wire §7: at most 32 conflict_summary entries per ordinary pull page.
 pub(crate) const MAX_CONFLICT_SUMMARIES_PER_PAGE: usize = 32;
@@ -1158,6 +1159,39 @@ struct EvalContext<'a> {
     now: i64,
     dry_run: bool,
     database_path: &'a Path,
+    max_open_branches_per_root: usize,
+}
+
+fn batch_is_exact_replay(
+    transaction: &Transaction<'_>,
+    principal: &Principal,
+    units: &[CausalMutation],
+) -> Result<bool, StoreError> {
+    for mutation in units {
+        let request_hash = mutation_content_hash(
+            &mutation.entity_type,
+            &mutation.client_uuid,
+            mutation.base_version.as_deref(),
+            mutation.deleted,
+            &mutation.root,
+            &mutation.media,
+        );
+        let Some((stored_hash, _)) = load_receipt(
+            transaction,
+            &principal.family_id,
+            &principal.membership_id,
+            &mutation.entity_type,
+            &mutation.client_uuid,
+            &mutation.mutation_id,
+        )?
+        else {
+            return Ok(false);
+        };
+        if stored_hash != request_hash {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn evaluate_unit(
@@ -2019,6 +2053,13 @@ fn branch_unit(
     base_version: &str,
     conflicting_paths: Vec<String>,
 ) -> Result<CausalUnitResult, StoreError> {
+    admit_new_branch(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &mutation.client_uuid,
+        ctx.max_open_branches_per_root,
+    )?;
     if !mutation.deleted {
         if let Err(code) = require_media_bytes_present(
             ctx.tx,
@@ -2139,6 +2180,7 @@ impl Store {
             now,
             dry_run: true,
             database_path: &self.database_path,
+            max_open_branches_per_root: self.max_open_causal_branches_per_root,
         };
         let mut results = Vec::with_capacity(units.len());
         for unit in &units {
@@ -2162,17 +2204,45 @@ impl Store {
         units: Vec<CausalMutation>,
         now: i64,
     ) -> Result<CausalBatchResult, StoreError> {
-        if units.is_empty() || units.len() > MAX_CAUSAL_UNITS {
+        if units.is_empty() {
             return Err(StoreError::InvalidReconcileBatch);
         }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exact_replay = batch_is_exact_replay(&tx, principal, &units)?;
+        if !exact_replay {
+            let admission = self.causal_commit_limiter.check_and_record_in(
+                &principal.membership_id,
+                &principal.family_id,
+                now,
+            );
+            match admission {
+                Ok(()) => {}
+                Err(crate::rate_limit::RateLimitRejection::Scoped) => {
+                    return Err(StoreError::CausalCommitSaturated(
+                        CausalCommitSaturation::Principal,
+                    ));
+                }
+                Err(crate::rate_limit::RateLimitRejection::Group) => {
+                    return Err(StoreError::CausalCommitSaturated(
+                        CausalCommitSaturation::Family,
+                    ));
+                }
+                Err(crate::rate_limit::RateLimitRejection::Unavailable) => {
+                    return Err(StoreError::CausalAdmissionUnavailable);
+                }
+            }
+        }
+        if units.len() > MAX_CAUSAL_UNITS {
+            return Err(StoreError::InvalidReconcileBatch);
+        }
         let ctx = EvalContext {
             tx: &tx,
             principal,
             now,
             dry_run: false,
             database_path: &self.database_path,
+            max_open_branches_per_root: self.max_open_causal_branches_per_root,
         };
         let mut results = Vec::with_capacity(units.len());
         for unit in &units {

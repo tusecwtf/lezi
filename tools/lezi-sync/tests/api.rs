@@ -15529,6 +15529,157 @@ async fn seed_causal_baby(app: &Router, token: &str) -> Uuid {
     baby_id
 }
 
+async fn commit_causal_record(
+    app: &Router,
+    token: &str,
+    baby_id: Uuid,
+    record_id: Uuid,
+    base: Option<&str>,
+    note: &str,
+) -> (StatusCode, Value, Value) {
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        base,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, note, 100, 20),
+        vec![],
+        false,
+    );
+    let (status, body) = causal_commit_units(app, token, vec![mutation.clone()]).await;
+    (status, body, mutation)
+}
+
+#[tokio::test]
+async fn causal_commit_http_returns_typed_saturation_and_allows_exact_replay() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-admission-owner",
+        "causal-admission-create-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let (status, first, mutation) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, None, "within-budget").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["results"][0]["status"], "accepted");
+
+    for index in 2..119 {
+        let (status, body, _) = commit_causal_record(
+            &rig.app,
+            token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            &format!("within-budget-{index}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "attempt {index}: {body}");
+    }
+
+    let oversized = (0..65)
+        .map(|index| {
+            causal_unit(
+                Uuid::new_v4(),
+                None,
+                "record",
+                Uuid::new_v4(),
+                causal_formula_root(baby_id, &format!("oversized-{index}"), 100, 20),
+                vec![],
+                false,
+            )
+        })
+        .collect();
+    let (oversized_status, oversized_body) = causal_commit_units(&rig.app, token, oversized).await;
+    assert_eq!(
+        oversized_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{oversized_body}"
+    );
+
+    let (status, saturated, _) = commit_causal_record(
+        &rig.app,
+        token,
+        baby_id,
+        Uuid::new_v4(),
+        None,
+        "over-budget",
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{saturated}");
+    assert_eq!(saturated["code"], "causal_commit_principal_rate_limited");
+    assert_eq!(saturated["detail"]["scope"], "principal");
+    assert_eq!(saturated["detail"]["retryable"], true);
+
+    let (status, replay) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"], first["results"]);
+}
+
+#[tokio::test]
+async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-branch-cap-owner",
+        "causal-branch-cap-create-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let (status, created, _) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, None, "base").await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let (status, accepted, _) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, Some(base), "stable").await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let mut first_branch = None;
+    let mut branched = Value::Null;
+    for index in 1..=64 {
+        let (status, body, mutation) = commit_causal_record(
+            &rig.app,
+            token,
+            baby_id,
+            record_id,
+            Some(base),
+            &format!("branch-{index}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "branch {index}: {body}");
+        assert_eq!(body["results"][0]["status"], "branched");
+        if index == 1 {
+            first_branch = Some(mutation);
+            branched = body;
+        }
+    }
+
+    let (status, saturated, _) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, Some(base), "branch-65").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{saturated}");
+    assert_eq!(saturated["code"], "causal_open_branch_limit_reached");
+    assert_eq!(saturated["detail"]["scope"], "root");
+
+    let conflict_id = branched["results"][0]["conflict_id"].as_str().unwrap();
+    let (detail_status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(detail_status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["branches"].as_array().unwrap().len(), 64);
+
+    let (replay_status, replay) =
+        causal_commit_units(&rig.app, token, vec![first_branch.unwrap()]).await;
+    assert_eq!(replay_status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"], branched["results"]);
+}
+
 #[tokio::test]
 async fn causal_ingress_api_uses_the_canonical_store_validation_codes() {
     let rig = Rig::new();

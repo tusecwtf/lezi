@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::store::{
     CausalMediaItem, CausalMutation, PullPage, PulledEntity, ReconcileResult, ReconcileUnit,
-    ResolveConflictInput, StoreError, MAX_CAUSAL_UNITS,
+    ResolveConflictInput, StoreError,
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
@@ -254,11 +254,6 @@ pub(crate) struct ResolveRequest {
 }
 
 fn parse_causal_units(request: CausalBatchRequest) -> Result<Vec<CausalMutation>, ApiError> {
-    if request.units.is_empty() || request.units.len() > MAX_CAUSAL_UNITS {
-        return Err(ApiError::unprocessable(format!(
-            "causal units must contain 1..={MAX_CAUSAL_UNITS} items"
-        )));
-    }
     let mut units = Vec::with_capacity(request.units.len());
     for raw in request.units {
         units.push(CausalMutation {
@@ -371,6 +366,9 @@ pub(crate) async fn causal_commit(
             .map_err(|error| match error {
                 StoreError::InvalidReconcileBatch => {
                     ApiError::unprocessable("causal commit batch is invalid")
+                }
+                StoreError::CausalCommitSaturated(saturation) => {
+                    ApiError::causal_commit_saturated(saturation)
                 }
                 StoreError::ForbiddenBaby
                 | StoreError::ForbiddenRecord
