@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–10 implemented; tickets 11–19 remain
+Status: in-progress — tickets 01–11 implemented; tickets 12–19 remain
 
 Spec: [`spec.md`](./spec.md)
 
@@ -41,7 +41,7 @@ post-0.3.13/01 implementation stabilizes
 | 08 | [Share one atomic fulfillment-authority settlement](./issues/08-atomic-fulfillment-authority-settlement.md) | P2 | implemented | 01 |
 | 09 | [Own and release camera capture temporary files](./issues/09-owned-camera-capture-sessions.md) | P2 | implemented | — |
 | 10 | [Move babies through one live domain command](./issues/10-atomic-baby-move-command.md) | P2 | implemented | — |
-| 11 | [Share one untrusted member-login QR policy](./issues/11-shared-member-login-qr-policy.md) | P2 | ready-for-agent | — |
+| 11 | [Share one untrusted member-login QR policy](./issues/11-shared-member-login-qr-policy.md) | P2 | implemented | — |
 | 12 | [Bound causal commit and open-branch admission](./issues/12-bounded-conflict-resources.md) | P2 | ready-for-agent | 04 + causal hardening 01 |
 | 13 | [Bound disaster-restore keyed locks](./issues/13-bounded-disaster-restore-locks.md) | P2 | ready-for-agent | — |
 | 14 | [Make TLS inspect-only genuinely read-only](./issues/14-read-only-tls-inspection.md) | P2 | ready-for-agent | — |
@@ -53,7 +53,7 @@ post-0.3.13/01 implementation stabilizes
 
 ## Frontier
 
-当前未完成且无活动 blocker 的独立票是 `11 ∥ 13 ∥ 14 ∥ 16`。`15` 等 11 与 post cleanup；
+当前未完成且无活动 blocker 的独立票是 `13 ∥ 14 ∥ 16`。`15` 等 post cleanup；
 `12 → 17 → 18` 等 causal hardening 01，`19` 再等 hardening 04。一个 agent 不应并行领取图中共享
 同一箭头端点的票；已标 implemented 的 02/04/09 不是 frontier。
 

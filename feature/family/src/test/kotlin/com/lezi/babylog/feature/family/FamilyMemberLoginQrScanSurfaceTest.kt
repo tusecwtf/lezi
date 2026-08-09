@@ -1,54 +1,53 @@
-package com.lezi.babylog.feature.onboarding
+package com.lezi.babylog.feature.family
 
+import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.ui.memberloginqr.MemberLoginQrScannerOutcome
-import com.lezi.babylog.feature.onboarding.qr.applyOnboardingMemberLoginQrScannerOutcome
+import com.lezi.babylog.feature.family.wizard.applyFamilyMemberLoginQrScannerOutcome
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrScanPolicy
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
-class OnboardingMemberLoginQrScanTest {
+class FamilyMemberLoginQrScanSurfaceTest {
     @Test
-    fun onboardingShellConsumesTheSharedRawAndClockOutcome() {
+    fun familyShellConsumesTheSharedRawAndClockOutcome() {
         val scan = MemberLoginQrScanPolicy(FIXED_CLOCK).evaluate(VALID_RAW)
         var ready: MemberLoginQrPayload? = null
         var message: String? = null
 
-        applyOnboardingMemberLoginQrScannerOutcome(
+        applyFamilyMemberLoginQrScannerOutcome(
             outcome = MemberLoginQrScannerOutcome.Scanned(scan),
             onReady = { ready = it },
             onMessage = { message = it },
         )
 
-        assertEquals("妈妈", ready?.memberDisplayName)
-        assertEquals(GRANT, ready?.grant)
-        assertNull(message)
+        assertThat(ready?.memberDisplayName).isEqualTo("妈妈")
+        assertThat(ready?.grant).isEqualTo(GRANT)
+        assertThat(message).isNull()
     }
 
     @Test
-    fun onboardingSurfaceKeepsLocalCopyAndCancelIsSilent() {
+    fun familySurfaceKeepsLocalCopyAndCancelIsSilent() {
         val messages = mutableListOf<String>()
         val ready = mutableListOf<MemberLoginQrPayload>()
 
-        applyOnboardingMemberLoginQrScannerOutcome(
+        applyFamilyMemberLoginQrScannerOutcome(
             outcome = MemberLoginQrScannerOutcome.Scanned(
                 MemberLoginQrScanPolicy(FIXED_CLOCK).evaluate(EXPIRED_RAW),
             ),
             onReady = ready::add,
             onMessage = messages::add,
         )
-        applyOnboardingMemberLoginQrScannerOutcome(
+        applyFamilyMemberLoginQrScannerOutcome(
             outcome = MemberLoginQrScannerOutcome.Cancelled,
             onReady = ready::add,
             onMessage = messages::add,
         )
 
-        assertEquals(emptyList<MemberLoginQrPayload>(), ready)
-        assertEquals(listOf("这个二维码已失效，请让管理员重新生成"), messages)
+        assertThat(ready).isEmpty()
+        assertThat(messages).containsExactly("这个二维码已失效，请让管理员重新生成")
     }
 
     private companion object {

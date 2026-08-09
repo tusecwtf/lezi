@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.onboarding.qr
+package com.lezi.babylog.feature.family.wizard
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -6,15 +6,13 @@ import com.lezi.babylog.core.ui.memberloginqr.MemberLoginQrScanner
 import com.lezi.babylog.core.ui.memberloginqr.MemberLoginQrScannerOutcome
 import com.lezi.babylog.core.ui.memberloginqr.MemberLoginQrScannerFailure
 import com.lezi.babylog.core.ui.memberloginqr.rememberMemberLoginQrScanner
-import com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface
-import com.lezi.babylog.domain.family.MemberLoginQrDialogModel
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrRejection
 import com.lezi.babylog.sync.qr.MemberLoginQrScanOutcome
 
 /** Production-used scanner binding; tests may substitute only the hardware Adapter. */
 @Composable
-internal fun rememberOnboardingMemberLoginQrScanAction(
+internal fun rememberFamilyMemberLoginQrScanAction(
     onReady: (MemberLoginQrPayload) -> Unit,
     onMessage: (String) -> Unit,
     scannerFactory: @Composable (
@@ -24,13 +22,13 @@ internal fun rememberOnboardingMemberLoginQrScanAction(
     },
 ): () -> Unit {
     val scanner = scannerFactory { outcome ->
-        applyOnboardingMemberLoginQrScannerOutcome(outcome, onReady, onMessage)
+        applyFamilyMemberLoginQrScannerOutcome(outcome, onReady, onMessage)
     }
     return remember(scanner) { scanner::launch }
 }
 
-/** Onboarding shell policy: typed scanner decisions become local navigation or form copy. */
-internal fun applyOnboardingMemberLoginQrScannerOutcome(
+/** Family shell policy: typed scanner decisions become local navigation or product copy. */
+internal fun applyFamilyMemberLoginQrScannerOutcome(
     outcome: MemberLoginQrScannerOutcome,
     onReady: (MemberLoginQrPayload) -> Unit,
     onMessage: (String) -> Unit,
@@ -52,47 +50,14 @@ internal fun applyOnboardingMemberLoginQrScannerOutcome(
         is MemberLoginQrScannerOutcome.Failed -> onMessage(
             when (outcome.reason) {
                 MemberLoginQrScannerFailure.NoCamera ->
-                    "这台设备没有可用相机，也可以输入家庭服务器地址继续"
+                    "此设备没有可用相机，请使用家庭服务器地址手动申请加入"
                 MemberLoginQrScannerFailure.PermissionDenied ->
-                    "未获得相机权限，也可以输入家庭服务器地址继续"
+                    "未获得相机权限，可继续使用家庭服务器地址手动申请加入"
                 MemberLoginQrScannerFailure.PermissionPermanentlyDenied ->
-                    "相机权限已关闭，请在系统设置中开启，或输入地址继续"
+                    "相机权限已关闭，请在系统设置中开启，或手动申请加入"
                 MemberLoginQrScannerFailure.LaunchFailed ->
-                    "无法打开扫码，请稍后重试或输入家庭服务器地址继续"
+                    "无法打开扫码，请稍后重试或手动申请加入"
             },
         )
     }
-}
-
-@Composable
-internal fun OnboardingMemberLoginQrConfirm(
-    model: MemberLoginQrDialogModel,
-    deviceName: String,
-    onDeviceNameChange: (String) -> Unit,
-    onConfirm: () -> Unit,
-    onManualJoin: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    if (model.payload == null) return
-    MemberLoginQrConfirmSurface(
-        familyName = model.display.familyName,
-        memberDisplayName = model.display.memberDisplayName,
-        deviceName = deviceName,
-        onDeviceNameChange = {
-            if (model.deviceNameEditable) onDeviceNameChange(it)
-        },
-        feedback = model.feedback,
-        submitting = model.submitting,
-        verificationInProgress = model.verificationInProgress,
-        verificationRetryRequired = model.verificationRetryRequired,
-        recoveryRetryRequired = model.recoveryRetryRequired,
-        deviceNameEditable = model.deviceNameEditable,
-        showConfirm = model.showConfirm,
-        confirmLabel = model.confirmLabel,
-        title = model.title,
-        onConfirm = onConfirm,
-        onManualJoin = onManualJoin,
-        onDismiss = onDismiss,
-        showManualJoin = !model.submitting,
-    )
 }
