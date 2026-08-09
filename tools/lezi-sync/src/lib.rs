@@ -5,6 +5,7 @@ mod model;
 pub(crate) mod offline_migrate;
 mod rate_limit;
 mod readiness;
+mod restore_locks;
 mod store;
 
 /// Ops entry for `lezi-sync offline-migrate …` (ticket 05).
@@ -47,6 +48,7 @@ use rand::RngCore;
 pub use rate_limit::RateLimitConfig;
 use rate_limit::RateLimiter;
 use readiness::{readiness, CachedReadiness};
+use restore_locks::RestoreLockPool;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use store::{Principal, Store, StoreError};
@@ -308,6 +310,7 @@ struct AppState {
     generation: String,
     clock: Clock,
     family_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    restore_locks: RestoreLockPool,
     bootstrap_secret: Option<Arc<str>>,
     owner_root_fingerprint: Option<Arc<str>>,
     create_limiter: Arc<RateLimiter>,
@@ -636,6 +639,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         generation: config.generation.unwrap_or_else(secure_generation),
         clock: config.clock,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
+        restore_locks: RestoreLockPool::default(),
         bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
         owner_root_fingerprint: owner_root_fingerprint
             .map(|value| Arc::from(value.into_boxed_str())),

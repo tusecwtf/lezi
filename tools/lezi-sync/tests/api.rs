@@ -1264,6 +1264,83 @@ async fn family_create_and_disaster_restore_have_exactly_one_provisioning_winner
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_disaster_restore_starts_leave_one_complete_batch() {
+    let root = "concurrent-restore-start-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let in_progress_sentinel = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(Uuid::new_v4().to_string());
+    fs::create_dir_all(in_progress_sentinel.join("media")).unwrap();
+    let in_progress_marker = in_progress_sentinel.join("media").join("partial-upload");
+    fs::write(&in_progress_marker, b"still being written").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut tasks = Vec::new();
+    for index in 0..2 {
+        let app = rig.app.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            json_request_with_headers(
+                &app,
+                Method::POST,
+                "/v1/disaster-restore/batches",
+                None,
+                json!({
+                    "request_id": format!("concurrent-restore-start-request-{index:08}"),
+                    "family_id": Uuid::new_v4(),
+                    "family_name": format!("恢复家庭{index}"),
+                    "owner_display_name": "妈妈",
+                    "device_name": format!("恢复手机{index}"),
+                }),
+                &[("x-lezi-bootstrap-secret", root)],
+            )
+            .await
+        }));
+    }
+    let responses = [
+        tasks.remove(0).await.unwrap(),
+        tasks.remove(0).await.unwrap(),
+    ];
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|(status, _)| matches!(*status, StatusCode::OK | StatusCode::CREATED))
+            .count(),
+        1,
+        "exactly one restore start should win: {responses:?}",
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|(status, _)| *status == StatusCode::CONFLICT)
+            .count(),
+        1,
+        "the losing start should fail closed: {responses:?}",
+    );
+    let winner = responses
+        .iter()
+        .find(|(status, _)| matches!(*status, StatusCode::OK | StatusCode::CREATED))
+        .unwrap();
+    let batch_dir = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(winner.1["batch_id"].as_str().unwrap());
+    assert!(batch_dir.join("journal.json").is_file());
+    assert!(batch_dir.join("credential.sha256").is_file());
+    assert!(
+        in_progress_sentinel.is_dir(),
+        "runtime start cleanup deleted a no-journal batch under construction",
+    );
+    assert_eq!(
+        fs::read(in_progress_marker).unwrap(),
+        b"still being written"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_restore_manifest_replay_serializes_conflicting_content() {
     let root = "concurrent-restore-manifest-root";
     let family_id = Uuid::new_v4().to_string();
@@ -1338,6 +1415,375 @@ async fn concurrent_restore_manifest_replay_serializes_conflicting_content() {
         1,
         "conflicting replay must fail closed: {statuses:?}",
     );
+}
+
+#[tokio::test]
+async fn disaster_restore_invalid_credentials_do_not_reveal_batch_existence() {
+    let root = "restore-auth-oracle-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-auth-oracle-start-request-00001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let existing_batch = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    fs::remove_file(
+        rig.directory
+            .path()
+            .join("disaster-restore")
+            .join(existing_batch)
+            .join("credential.sha256"),
+    )
+    .unwrap();
+    let absent_batch = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let cases = [
+        (Method::GET, "status".to_owned()),
+        (Method::PUT, "manifest".to_owned()),
+        (Method::PUT, format!("media/{media_id}")),
+        (Method::POST, "cancel".to_owned()),
+        (Method::POST, "commit".to_owned()),
+    ];
+
+    for (method, suffix) in cases {
+        let (existing_status, existing_body) = json_request(
+            &rig.app,
+            method.clone(),
+            &format!("/v1/disaster-restore/batches/{existing_batch}/{suffix}"),
+            Some("invalid-recovery-token"),
+            json!({}),
+        )
+        .await;
+        let (absent_status, absent_body) = json_request(
+            &rig.app,
+            method,
+            &format!("/v1/disaster-restore/batches/{absent_batch}/{suffix}"),
+            Some("invalid-recovery-token"),
+            json!({}),
+        )
+        .await;
+
+        assert_eq!(
+            existing_status,
+            StatusCode::UNAUTHORIZED,
+            "{suffix}: {existing_body}",
+        );
+        assert_eq!(absent_status, existing_status, "{suffix}: {absent_body}");
+        assert_eq!(absent_body, existing_body, "{suffix}");
+    }
+
+    let (legacy_status, _) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{existing_batch}/status"),
+        Some(recovery_token),
+    )
+    .await;
+    assert_eq!(legacy_status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_hundred_thousand_valid_absent_restore_requests_leave_service_usable() {
+    let root = "restore-cardinality-stress-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+
+    for index in 1..=100_000 {
+        let batch_id = Uuid::from_u128(index);
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/disaster-restore/batches/{batch_id}/status"),
+            Some("invalid-recovery-token"),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{batch_id}");
+    }
+
+    let (start_status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-after-cardinality-stress-request-01",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::CREATED, "{started}");
+    let (status, _) = get_json(
+        &rig.app,
+        &format!(
+            "/v1/disaster-restore/batches/{}/status",
+            started["batch_id"].as_str().unwrap(),
+        ),
+        started["recovery_token"].as_str(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_hides_damaged_journals_from_invalid_credentials() {
+    let root = "restore-damaged-journal-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-damaged-journal-start-request-01",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    fs::write(&journal_path, b"{").unwrap();
+
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+    let (invalid_status, invalid_body) =
+        get_json(&rig.app, &path, Some("invalid-recovery-token")).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some("invalid-recovery-token"),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED, "{invalid_body}");
+    assert_eq!((invalid_status, invalid_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_hides_incompatible_journals_from_invalid_credentials() {
+    let root = "restore-incompatible-journal-root";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-incompatible-start-request-000001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    journal["protocol_version"] = json!(999);
+    fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+    let (invalid_status, invalid_body) =
+        get_json(&rig.app, &path, Some("invalid-recovery-token")).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some("invalid-recovery-token"),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED, "{invalid_body}");
+    assert_eq!((invalid_status, invalid_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_hides_journal_io_failures_from_invalid_credentials() {
+    let root = "restore-unreadable-journal-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-unreadable-journal-start-request-01",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    fs::remove_file(&journal_path).unwrap();
+    fs::create_dir(&journal_path).unwrap();
+
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+    let (invalid_status, invalid_body) =
+        get_json(&rig.app, &path, Some("invalid-recovery-token")).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some("invalid-recovery-token"),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED, "{invalid_body}");
+    assert_eq!((invalid_status, invalid_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_rejects_valid_shape_envelope_drift_without_an_oracle() {
+    let root = "restore-envelope-drift-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-envelope-drift-start-request-0001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let attacker_token = "attacker-controlled-recovery-token";
+    fs::write(
+        rig.directory
+            .path()
+            .join("disaster-restore")
+            .join(batch_id)
+            .join("credential.sha256"),
+        hex::encode(Sha256::digest(attacker_token.as_bytes())),
+    )
+    .unwrap();
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+
+    let (drift_status, drift_body) = get_json(&rig.app, &path, Some(attacker_token)).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some(attacker_token),
+    )
+    .await;
+    assert_eq!(drift_status, StatusCode::UNAUTHORIZED, "{drift_body}");
+    assert_eq!((drift_status, drift_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn disaster_restore_start_retry_repairs_the_journal_first_crash_window() {
+    let root = "restore-journal-first-retry-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let start = json!({
+        "request_id": "restore-journal-first-retry-request-0001",
+        "family_id": Uuid::new_v4(),
+        "family_name": "恢复家庭",
+        "owner_display_name": "妈妈",
+        "device_name": "恢复手机",
+    });
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start.clone(),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let envelope = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("credential.sha256");
+    fs::remove_file(&envelope).unwrap();
+
+    let restarted = rig.restart_with_config("generation-journal-first-retry", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
+    let (retry_status, retry) = json_request_with_headers(
+        &restarted,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["batch_id"], started["batch_id"]);
+    assert!(envelope.is_file());
+}
+
+#[test]
+fn disaster_restore_startup_removes_credential_only_orphans() {
+    let rig = Rig::new();
+    let orphan = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(Uuid::new_v4().to_string());
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("credential.sha256"), "0".repeat(64)).unwrap();
+
+    let _restarted = rig.restart("generation-after-credential-orphan");
+
+    assert!(!orphan.exists());
 }
 
 #[tokio::test]
@@ -1563,6 +2009,52 @@ async fn disaster_restore_expires_after_twenty_four_hours_and_startup_cleans_sta
         config.bootstrap_secret = Some(root.to_owned());
     });
     assert!(!batch_path.exists());
+}
+
+#[tokio::test]
+async fn runtime_restore_start_collects_an_uncontended_expired_batch() {
+    let root = "expired-runtime-cleanup-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, first) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "expired-runtime-first-start-request-0001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "旧恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "旧恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let first_batch_id = first["batch_id"].as_str().unwrap();
+    let first_batch_dir = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(first_batch_id);
+    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
+
+    let (second_status, second) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "expired-runtime-second-start-request-0001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "新恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "新恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::CREATED, "{second}");
+    assert!(!first_batch_dir.exists());
 }
 
 #[tokio::test]

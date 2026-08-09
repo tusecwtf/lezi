@@ -404,6 +404,15 @@ Room dirty/发布回执或 media。
 - 服务端提供版本化 start/manifest/media/status/commit/cancel API。根密码只在 start/commit 验证
   且不落盘；中段用高熵、限时、可撤销恢复凭证。`/data` staging/journal 校验引用、大小与
   SHA-256 后一次激活，24 小时过期；request ID 幂等，重启与 commit 回包丢失后可查询续传。
+- batch UUID 只在请求持有或等待 journal 临界区期间占用恢复专用 keyed lock；最后一个
+  holder/waiter 离开即回收，不能由随机 UUID 变成进程级持久状态。lease 与 owned guard 由实际
+  blocking journal task 持有到 I/O 完成，请求 future 取消不能提前释放。每个新 batch 另存只含
+  恢复 token 哈希的私有 auth envelope，journal existence、凭证校验与
+  manifest/media/status/cancel/commit 读写仍在同一 lease 内完成；合法但不存在的 UUID、已存在
+  batch 的错误凭证以及未授权探测到的损坏 journal 返回相同未授权响应，不提供 existence oracle。
+  正确凭证仍获得真实 protocol/storage 错误。普通 family 同步锁与 provisioning 锁维持原有独立语义。
+  运行时过期回收只在锁外枚举 canonical batch ID，随后逐 batch 取得同一 lease、重读 journal 后
+  决定删除；缺 journal 的创建中目录留给启动期单线程清理，不能与请求 I/O 并发误删。
 - staging 提交前不能加入或普通同步。commit 成功后客户端在 sync mutex 内切换 endpoint/session、
   替换成员目录并按精确 Room 修订退休发布回执。现有 configured 数据根升级 0.3.5 不进入恢复路径。
 - 普通 NAS CD、回滚与容器重启必须保留已有 TLS 证书/私钥并在部署前后得到相同 SPKI；证书

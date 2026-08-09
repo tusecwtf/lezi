@@ -314,6 +314,14 @@ secret 的 request/status/cancel/claim 外，接口都要求
 | POST | `/v1/bundles/{id}/commit` | 单事务发布完整包（幂等） |
 | GET | `/v1/bundles/{id}` | 查询 staging/committed 与 missing_media |
 
+灾难恢复的 manifest/media/status/cancel/commit 共享恢复专用的 batch-keyed lease。该 lease
+只在请求持有或等待 journal 临界区时保留强引用，最后一个 holder/waiter 离开即回收；随机合法
+UUID 请求不会扩大普通 family lock 表或留下 durable process key。owned guard 随实际 blocking
+task 活到 I/O 完成，HTTP future 取消不能提前解锁。新 batch 在 journal 旁保存只含 token hash 的
+私有 auth envelope；错误凭证访问已有、损坏或合法但不存在的 batch 均返回相同 `401`，正确凭证
+仍看到真实 protocol/storage 错误。运行时只在锁外枚举过期候选，删除前逐 batch 取得同一 lease
+并重读 journal；缺 journal 的目录只在 Router 开放前清理。普通 family/provisioning 互斥继续使用原锁。
+
 服务每次启动生成新的 `generation`。客户端在发现 generation 变化或 cursor
 领先时执行既有 `full_resync` 契约。Record 使用 `baby_client_uuid` 跨设备关联；
 Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，但头像 metadata
