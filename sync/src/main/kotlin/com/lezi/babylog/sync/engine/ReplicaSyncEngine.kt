@@ -1381,8 +1381,12 @@ internal class ReplicaSyncEngine(
                 } else {
                     existing?.localBranchVersionId
                 },
-                effectiveWakeObservationClientUuid = wire.effectiveWakeObservationClientUuid
-                    ?: existing?.effectiveWakeObservationClientUuid,
+                effectiveWakeObservationClientUuid =
+                    if (wire.effectiveWakeObservationPresent) {
+                        wire.effectiveWakeObservationClientUuid
+                    } else {
+                        existing?.effectiveWakeObservationClientUuid
+                    },
             ),
         )
         entity.conflictSummary?.let {
@@ -2949,6 +2953,7 @@ private data class RecordWire(
     val payload: JsonObject,
     val schemaVersion: Int,
     val effectiveWakeObservationClientUuid: String? = null,
+    val effectiveWakeObservationPresent: Boolean = false,
 )
 
 private data class CarePlanWire(
@@ -3100,6 +3105,8 @@ private fun parseRecordWire(payload: JsonObject): RecordWire {
         payload = nested,
         schemaVersion = SyncWireMapper.recordSchemaVersion(payload),
         effectiveWakeObservationClientUuid = effectiveWake,
+        effectiveWakeObservationPresent =
+            "effective_wake_observation_client_uuid" in payload,
     )
 }
 

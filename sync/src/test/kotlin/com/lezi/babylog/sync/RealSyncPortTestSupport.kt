@@ -109,6 +109,7 @@ import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
 import com.lezi.babylog.sync.media.LocalMediaInfo
+import com.lezi.babylog.sync.media.PreparedMedia
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
@@ -1439,6 +1440,7 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     val sweepCalls = mutableListOf<Pair<LocalDataClearScope, Set<String>>>()
     val deleteFailures = ArrayDeque<Throwable>()
     var afterInspect: (suspend () -> Unit)? = null
+    var afterPrepareUpload: (suspend () -> Unit)? = null
     var afterSaveDownloaded: (suspend () -> Unit)? = null
 
     override suspend fun inspect(localUri: String): LocalMediaInfo? {
@@ -1447,8 +1449,10 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
         return LocalMediaInfo(byteSize = 12, mime = "image/jpeg", width = 10, height = 10)
     }
 
-    override suspend fun prepareUpload(localUri: String) =
-        testPreparedMedia(byteArrayOf(1))
+    override suspend fun prepareUpload(localUri: String): PreparedMedia {
+        afterPrepareUpload?.also { afterPrepareUpload = null }?.invoke()
+        return testPreparedMedia(byteArrayOf(1))
+    }
 
     override suspend fun saveDownloaded(
         clientUuid: String,

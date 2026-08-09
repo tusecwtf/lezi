@@ -18,11 +18,11 @@ class CausalMutationStateTest {
             openConflictId = null,
             localBranchVersionId = null,
         )
-        val next = freezeDirtyEpoch(
+        val next = requireNotNull(freezeDirtyEpoch(
             current = existing,
             contentEpoch = 100L,
             newMutationId = "mut-should-not-use",
-        )
+        ))
         assertThat(next.mutationId).isEqualTo("mut-existing")
         assertThat(next.baseVersion).isEqualTo("v-base-1")
         assertThat(next.syncDirty).isTrue()
@@ -33,23 +33,43 @@ class CausalMutationStateTest {
     fun freezeDirtyEpochMintsNewMutationIdOnUserEditAndKeepsAcknowledgedBase() {
         val existing = CausalRootMutationState(
             baseVersion = "v-base-1",
-            mutationId = "mut-old",
-            contentEpoch = 100L,
+            mutationId = null,
+            contentEpoch = 200L,
             syncDirty = true,
             openConflictId = null,
             localBranchVersionId = null,
         )
-        val next = freezeDirtyEpoch(
+        val next = requireNotNull(freezeDirtyEpoch(
             current = existing,
             contentEpoch = 200L,
             newMutationId = "mut-new",
-        )
+        ))
         assertThat(next.mutationId).isEqualTo("mut-new")
         assertThat(next.baseVersion).isEqualTo("v-base-1")
         assertThat(next.contentEpoch).isEqualTo(200L)
         assertThat(next.syncDirty).isTrue()
         assertThat(next.openConflictId).isNull()
         assertThat(next.localBranchVersionId).isNull()
+    }
+
+    @Test
+    fun freezeDirtyEpochRejectsStaleCapturedEpoch() {
+        val concurrentlyEdited = CausalRootMutationState(
+            baseVersion = "v-base-1",
+            mutationId = null,
+            contentEpoch = 200L,
+            syncDirty = true,
+            openConflictId = null,
+            localBranchVersionId = null,
+        )
+
+        val next = freezeDirtyEpoch(
+            current = concurrentlyEdited,
+            contentEpoch = 100L,
+            newMutationId = "mut-stale",
+        )
+
+        assertThat(next).isNull()
     }
 
     @Test
@@ -142,11 +162,11 @@ class CausalMutationStateTest {
             openConflictId = "conflict-9",
             localBranchVersionId = "branch-v3",
         )
-        val next = freezeDirtyEpoch(
+        val next = requireNotNull(freezeDirtyEpoch(
             current = branched,
             contentEpoch = 50L,
             newMutationId = "mut-should-not-mint",
-        )
+        ))
         assertThat(next).isEqualTo(branched)
         assertThat(next.syncDirty).isFalse()
         assertThat(next.mutationId).isEqualTo("mut-1")
@@ -158,17 +178,17 @@ class CausalMutationStateTest {
     fun freezeAfterBranchedOnNewEditMintsMutationButPreservesConflictLinkage() {
         val branched = CausalRootMutationState(
             baseVersion = "v-base-1",
-            mutationId = "mut-1",
-            contentEpoch = 50L,
-            syncDirty = false,
+            mutationId = null,
+            contentEpoch = 80L,
+            syncDirty = true,
             openConflictId = "conflict-9",
             localBranchVersionId = "branch-v3",
         )
-        val next = freezeDirtyEpoch(
+        val next = requireNotNull(freezeDirtyEpoch(
             current = branched,
             contentEpoch = 80L,
             newMutationId = "mut-reedit",
-        )
+        ))
         assertThat(next.mutationId).isEqualTo("mut-reedit")
         assertThat(next.contentEpoch).isEqualTo(80L)
         assertThat(next.syncDirty).isTrue()

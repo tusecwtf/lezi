@@ -178,7 +178,10 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                                 "v-${case.name}"
                             },
                             stableRootJson = if (case.expectConflict) {
-                                """{"note":"remote"}"""
+                                unit.rootJson.replace(
+                                    "\"note\":\"local-${case.name}\"",
+                                    "\"note\":\"remote\"",
+                                )
                             } else {
                                 unit.rootJson
                             },

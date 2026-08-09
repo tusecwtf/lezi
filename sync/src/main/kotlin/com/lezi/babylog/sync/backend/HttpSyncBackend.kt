@@ -1865,6 +1865,9 @@ private fun parseCausalBatchResult(
     require(byMutation.keys == expectedByMutation.keys && byMutation.values.all { it.size == 1 }) {
         "家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key"
     }
+    require(results.map(CausalUnitResult::mutationId) == expectedByMutation.keys.toList()) {
+        "家庭服务器因果响应顺序与请求不一致"
+    }
     val byKey = results.groupBy { result ->
         val unit = expectedByMutation.getValue(result.mutationId)
         unit.entityType to unit.clientUuid
@@ -1927,11 +1930,13 @@ private fun JsonObject.toCausalUnitResult(
 ): CausalUnitResult {
     val status = requiredNonBlankString("status", context)
     val generation = optionalNonBlankString("generation", context) ?: fallbackGeneration
+    val stableRootPresent = get("stable_root") is JsonObject
     val stableRoot = when (val root = get("stable_root")) {
         null, JsonNull -> "{}"
         is JsonObject -> root.toString()
         else -> throw IllegalArgumentException("$context.stable_root 无效")
     }
+    val stableMediaPresent = get("stable_media") is JsonArray
     val media = when (val raw = get("stable_media")) {
         null, JsonNull -> emptyList()
         is JsonArray -> raw.mapIndexed { index, element ->
@@ -1956,6 +1961,8 @@ private fun JsonObject.toCausalUnitResult(
         stableVersionId = optionalNonBlankString("stable_version_id", context),
         stableRootJson = stableRoot,
         stableMedia = media,
+        stableRootPresent = stableRootPresent,
+        stableMediaPresent = stableMediaPresent,
         branchVersionId = optionalNonBlankString("branch_version_id", context),
         conflictId = optionalNonBlankString("conflict_id", context),
         code = optionalNonBlankString("code", context),

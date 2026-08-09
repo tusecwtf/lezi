@@ -8,7 +8,9 @@ import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.LeziDatabase
+import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.RoomDatabaseTransactionRunner
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
@@ -90,6 +92,133 @@ class CausalRoomTransactionTest {
                 newBaseVersion = "v-should-not-apply",
             ),
         ).isFalse()
+    }
+
+    @Test
+    fun allCausalRootDaosRejectStaleCapturedEpochWithoutDowngrade() = runBlocking {
+        database.babyDao().upsert(
+            BabyEntity(
+                familyId = 1,
+                nickname = "new",
+                birthdayEpochDay = 1,
+                themeColorArgb = 0,
+                clientUuid = "baby-stale-freeze",
+                updatedAt = 200,
+            ),
+        )
+        database.recordDao().upsert(
+            RecordEntity(
+                clientUuid = "record-stale-freeze",
+                babyId = 1,
+                type = "nursing",
+                timestamp = 1,
+                updatedAt = 200,
+            ),
+        )
+        database.carePlanDao().upsert(
+            CarePlanEntity(
+                clientUuid = "plan-stale-freeze",
+                babyId = 1,
+                type = "nursing",
+                scheduledAt = 1,
+                scheduledZoneId = "UTC",
+                updatedAt = 200,
+            ),
+        )
+        database.customItemDao().upsert(
+            CustomItemEntity(
+                clientUuid = "custom-stale-freeze",
+                familyId = 1,
+                name = "new",
+                iconSlot = 0,
+                updatedAt = 200,
+            ),
+        )
+        database.wakeObservationDao().upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-stale-freeze",
+                sleepRecordClientUuid = "sleep-1",
+                wakeTimestamp = 200,
+                updatedAt = 200,
+            ),
+        )
+
+        assertThat(database.babyDao().freezeDirtyEpoch("baby-stale-freeze", 100, "old")).isNull()
+        assertThat(database.recordDao().freezeDirtyEpoch("record-stale-freeze", 100, "old")).isNull()
+        assertThat(database.carePlanDao().freezeDirtyEpoch("plan-stale-freeze", 100, "old")).isNull()
+        assertThat(database.customItemDao().freezeDirtyEpoch("custom-stale-freeze", 100, "old")).isNull()
+        assertThat(
+            database.wakeObservationDao().freezeDirtyEpoch("wake-stale-freeze", 100, "old"),
+        ).isNull()
+        assertThat(database.babyDao().getByClientUuid("baby-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(database.recordDao().getByClientUuid("record-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(database.carePlanDao().getByClientUuid("plan-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(database.customItemDao().getByClientUuid("custom-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(
+            database.wakeObservationDao().getByClientUuid("wake-stale-freeze")!!.updatedAt,
+        ).isEqualTo(200)
+    }
+
+    @Test
+    fun settlementReceiptRootMediaAndConflictEvidenceRollbackTogether() = runBlocking {
+        val records = database.recordDao()
+        val recordId = records.upsert(
+            RecordEntity(
+                clientUuid = "record-rollback",
+                babyId = 1,
+                type = "formula",
+                timestamp = 1,
+                updatedAt = 100,
+                syncDirty = true,
+                mutationId = "mut-rollback",
+                baseVersion = "v0",
+            ),
+        )
+        database.mediaAssetDao().upsert(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-rollback",
+                localUri = "media/rollback.jpg",
+                createdAt = 1,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(
+            runCatching {
+                RoomDatabaseTransactionRunner(database).run {
+                    check(
+                        records.acknowledgeCausalAcceptedOrMerged(
+                            clientUuid = "record-rollback",
+                            expectedMutationId = "mut-rollback",
+                            expectedContentEpoch = 100,
+                            newBaseVersion = "v1",
+                        ),
+                    )
+                    database.mediaAssetDao().markSynced("media-rollback", 100)
+                    database.conflictSummaryDao().upsert(
+                        ConflictSummaryEntity(
+                            conflictId = "conflict-rollback",
+                            entityType = "record",
+                            clientUuid = "record-rollback",
+                            stableVersionId = "v1",
+                            status = "open",
+                            kind = "concurrent",
+                            updatedAt = 100,
+                        ),
+                    )
+                    error("projection failed")
+                }
+            }.exceptionOrNull(),
+        ).isNotNull()
+
+        val record = requireNotNull(records.getByClientUuid("record-rollback"))
+        assertThat(record.syncDirty).isTrue()
+        assertThat(record.mutationId).isEqualTo("mut-rollback")
+        assertThat(record.baseVersion).isEqualTo("v0")
+        assertThat(database.mediaAssetDao().getByClientUuid("media-rollback")!!.syncDirty).isTrue()
+        assertThat(database.conflictSummaryDao().get("conflict-rollback")).isNull()
     }
 
     @Test

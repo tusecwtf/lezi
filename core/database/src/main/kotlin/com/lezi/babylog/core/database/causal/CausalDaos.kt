@@ -74,7 +74,7 @@ interface WakeObservationDao {
             current = current.toCausalMutationState(),
             contentEpoch = contentEpoch,
             newMutationId = newMutationId,
-        )
+        ) ?: return null
         val cols = next.toAppliedColumns()
         val written = current.copy(
             updatedAt = contentEpoch,

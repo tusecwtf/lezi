@@ -113,6 +113,9 @@ data class CausalUnitResult(
     val stableVersionId: String? = null,
     val stableRootJson: String = "{}",
     val stableMedia: List<CausalMediaItem> = emptyList(),
+    /** Adapter evidence: required stable projection members were present on the wire. */
+    val stableRootPresent: Boolean = true,
+    val stableMediaPresent: Boolean = true,
     val branchVersionId: String? = null,
     val conflictId: String? = null,
     val code: String? = null,

@@ -54,13 +54,27 @@ internal val CAUSAL_ROOT_TYPES = setOf(
  * One frozen causal atomic unit for reconcile/commit. The [mutation] envelope is
  * immutable for the cycle; Room re-reads are not used to rebuild it.
  */
-internal data class FrozenCausalUnit(
+private data class FrozenCausalUnit(
     val mutation: CausalMutationUnit,
     val contentEpoch: Long,
     /** Deterministic hash of the frozen mutation envelope (local proof identity). */
     val contentHash: String,
     /** Root + attached media candidates captured with the freeze. */
     val candidates: List<PublishCandidate>,
+    /** Active attachment revisions materialized into [mutation]. */
+    val mediaSnapshot: List<CausalMediaRevision>,
+)
+
+private data class CausalMediaRevision(
+    val id: Long,
+    val clientUuid: String,
+    val localUri: String,
+    val recordId: Long?,
+    val carePlanId: Long?,
+    val wakeObservationId: Long?,
+    val babyId: Long?,
+    val kind: String,
+    val updatedAt: Long,
 )
 
 /**
@@ -90,12 +104,23 @@ internal class CausalSettlement(
         if (causalCandidates.isEmpty()) return
         val frozen = freezeCausalUnits(session, causalCandidates)
         if (frozen.isEmpty()) return
+        frozen.chunked(MAX_CAUSAL_SETTLEMENT_UNITS).forEach { batch ->
+            settleBatch(session, batch)
+        }
+    }
+
+    /**
+     * One proof transaction. Reconcile and commit never cross the wire's 64-root
+     * bound, and a commit can contain only roots proven by this exact reconcile.
+     */
+    private suspend fun settleBatch(
+        session: SyncSession,
+        frozen: List<FrozenCausalUnit>,
+    ) {
         requireRemoteAllowed(session)
         val reconcile = backend.causalReconcile(session, frozen.map(FrozenCausalUnit::mutation))
         validateCausalProof(session, frozen, reconcile, forCommit = false)
-        val stillCurrent = frozen.filter { unit ->
-            unit.candidates.all { candidateStillCurrent(it) }
-        }
+        val stillCurrent = frozen.filter { unitStillCurrent(it) }
         val byMutation = reconcile.results.associateBy(CausalUnitResult::mutationId)
         val publishable = mutableListOf<FrozenCausalUnit>()
         transactionRunner.run {
@@ -138,7 +163,7 @@ internal class CausalSettlement(
         val commitByMutation = commit.results.associateBy(CausalUnitResult::mutationId)
         transactionRunner.run {
             for (unit in publishable) {
-                if (!unit.candidates.all { candidateStillCurrent(it) }) {
+                if (!unitStillCurrent(unit)) {
                     // Concurrent user edit: leave stable/conflict evidence for the next cycle.
                     continue
                 }
@@ -377,14 +402,14 @@ internal class CausalSettlement(
         if (state.openConflictId != null && !state.syncDirty) return null
 
         val rootJson = buildCausalRootJson(entityType, clientUuid) ?: return null
-        val mediaItems = buildCausalMedia(entityType, clientUuid) ?: return null
+        val frozenMedia = freezeCausalMedia(entityType, clientUuid) ?: return null
         val mutation = CausalMutationUnit(
             mutationId = effectiveMutationId,
             baseVersion = state.baseVersion,
             entityType = entityType,
             clientUuid = clientUuid,
             rootJson = rootJson,
-            media = mediaItems,
+            media = frozenMedia.items,
             deleted = state.deleted,
         )
         return FrozenCausalUnit(
@@ -392,6 +417,7 @@ internal class CausalSettlement(
             contentEpoch = contentEpoch,
             contentHash = causalMutationContentHash(mutation),
             candidates = candidates,
+            mediaSnapshot = frozenMedia.revisions,
         )
     }
 
@@ -470,38 +496,77 @@ internal class CausalSettlement(
     /**
      * @return null when attached live media cannot be hashed (fail closed freeze).
      */
-    private suspend fun buildCausalMedia(
+    private data class FrozenCausalMedia(
+        val items: List<CausalMediaItem>,
+        val revisions: List<CausalMediaRevision>,
+    )
+
+    private suspend fun freezeCausalMedia(
         entityType: String,
         clientUuid: String,
-    ): List<CausalMediaItem>? {
-        val assets: List<MediaAssetEntity> = when (entityType) {
-            "baby" -> {
-                val baby = babyDao.getByClientUuid(clientUuid) ?: return emptyList()
-                if (baby.deletedAt != null) emptyList()
-                else listOfNotNull(mediaDao.activeAvatarForBaby(baby.id))
-            }
-            "record" -> {
-                val record = recordDao.getByClientUuid(clientUuid) ?: return emptyList()
-                mediaDao.listForRecord(record.id).filter { it.deletedAt == null }
-            }
-            "care_plan" -> {
-                val plan = carePlanDao.getByClientUuid(clientUuid) ?: return emptyList()
-                mediaDao.listForCarePlan(plan.id).filter { it.deletedAt == null }
-            }
-            "wake_observation" -> {
-                val wake = wakeObservationDao.getByClientUuid(clientUuid) ?: return emptyList()
-                mediaDao.listActiveForWakeObservation(wake.id)
-            }
-            "custom_item" -> emptyList()
-            else -> emptyList()
-        }
+    ): FrozenCausalMedia? {
+        val assets = loadActiveCausalMedia(entityType, clientUuid)
+        val revisions = assets.toCausalMediaRevisions()
         val items = mutableListOf<CausalMediaItem>()
         for (asset in assets) {
             val item = toCausalMediaItem(asset, entityType) ?: return null
             items += item
         }
-        return items.sortedBy(CausalMediaItem::mediaUuid)
+        if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) {
+            return null
+        }
+        return FrozenCausalMedia(
+            items = items.sortedBy(CausalMediaItem::mediaUuid),
+            revisions = revisions,
+        )
     }
+
+    private suspend fun loadActiveCausalMedia(
+        entityType: String,
+        clientUuid: String,
+    ): List<MediaAssetEntity> = when (entityType) {
+        "baby" -> {
+            val baby = babyDao.getByClientUuid(clientUuid) ?: return emptyList()
+            if (baby.deletedAt != null) emptyList()
+            else listOfNotNull(mediaDao.activeAvatarForBaby(baby.id))
+        }
+        "record" -> {
+            val record = recordDao.getByClientUuid(clientUuid) ?: return emptyList()
+            mediaDao.listForRecord(record.id).filter { it.deletedAt == null }
+        }
+        "care_plan" -> {
+            val plan = carePlanDao.getByClientUuid(clientUuid) ?: return emptyList()
+            mediaDao.listForCarePlan(plan.id).filter { it.deletedAt == null }
+        }
+        "wake_observation" -> {
+            val wake = wakeObservationDao.getByClientUuid(clientUuid) ?: return emptyList()
+            mediaDao.listActiveForWakeObservation(wake.id)
+        }
+        "custom_item" -> emptyList()
+        else -> emptyList()
+    }
+
+    private fun List<MediaAssetEntity>.toCausalMediaRevisions(): List<CausalMediaRevision> =
+        map { asset ->
+            CausalMediaRevision(
+                id = asset.id,
+                clientUuid = asset.clientUuid,
+                localUri = asset.localUri,
+                recordId = asset.recordId,
+                carePlanId = asset.carePlanId,
+                wakeObservationId = asset.wakeObservationId,
+                babyId = asset.babyId,
+                kind = asset.kind,
+                updatedAt = asset.updatedAt,
+            )
+        }.sortedWith(compareBy(CausalMediaRevision::clientUuid).thenBy(CausalMediaRevision::id))
+
+    private suspend fun unitStillCurrent(unit: FrozenCausalUnit): Boolean =
+        unit.candidates.all { candidateStillCurrent(it) } &&
+            loadActiveCausalMedia(
+                unit.mutation.entityType,
+                unit.mutation.clientUuid,
+            ).toCausalMediaRevisions() == unit.mediaSnapshot
 
     private suspend fun toCausalMediaItem(
         asset: MediaAssetEntity,
@@ -786,9 +851,13 @@ internal class CausalSettlement(
         val existing = recordDao.getByClientUuid(clientUuid) ?: return
         val note = root.stringOrNull("note")
         val timestamp = root["timestamp"]?.jsonPrimitive?.longOrNull ?: existing.timestamp
-        val endTimestamp = root["end_timestamp"]?.let {
-            if (it is JsonNull) null else it.jsonPrimitive.longOrNull
-        } ?: existing.endTimestamp
+        val endTimestamp = if ("end_timestamp" in root) {
+            root["end_timestamp"]?.let { value ->
+                if (value is JsonNull) null else value.jsonPrimitive.longOrNull
+            }
+        } else {
+            existing.endTimestamp
+        }
         val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
         val payload = root["payload_json"] as? JsonObject
         val payloadJson = payload?.toString() ?: existing.payloadJson
@@ -806,8 +875,11 @@ internal class CausalSettlement(
                 openConflictId = existing.openConflictId,
                 localBranchVersionId = existing.localBranchVersionId,
                 effectiveWakeObservationClientUuid =
-                    root.stringOrNull("effective_wake_observation_client_uuid")
-                        ?: existing.effectiveWakeObservationClientUuid,
+                    if ("effective_wake_observation_client_uuid" in root) {
+                        root.stringOrNull("effective_wake_observation_client_uuid")
+                    } else {
+                        existing.effectiveWakeObservationClientUuid
+                    },
             ),
         )
     }
@@ -958,10 +1030,14 @@ internal class CausalSettlement(
         if (batch.generation != session.pullGeneration) {
             fail("家庭服务器在因果同步期间变更了同步代际")
         }
-        val expectedMutations = frozen.map { it.mutation.mutationId }.toSet()
+        val expectedMutationOrder = frozen.map { it.mutation.mutationId }
+        val expectedMutations = expectedMutationOrder.toSet()
         val byMutation = batch.results.groupBy(CausalUnitResult::mutationId)
         if (byMutation.keys != expectedMutations || byMutation.values.any { it.size != 1 }) {
             fail("家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key")
+        }
+        if (batch.results.map(CausalUnitResult::mutationId) != expectedMutationOrder) {
+            fail("家庭服务器因果响应顺序与请求不一致")
         }
         val expectedKeys = frozen.map { it.mutation.entityType to it.mutation.clientUuid }.toSet()
         val byKey = batch.results.groupBy { result ->
@@ -995,23 +1071,10 @@ internal class CausalSettlement(
                 fail("家庭服务器返回未知因果 disposition: ${result.status}")
             }
             val unit = frozenByMutation.getValue(result.mutationId)
-            if (result.requestHash.isBlank()) {
-                fail("因果响应缺少 request_hash")
-            }
-            // Local freeze identity must match the server-echoed request hash proof.
-            // Recording backends use a deterministic hash-*; production uses content hash.
-            if (result.requestHash != unit.contentHash &&
-                !result.requestHash.startsWith("hash-")
+            if (!result.requestHash.matches(LOWERCASE_SHA256) ||
+                result.requestHash != unit.contentHash
             ) {
-                // Prefer exact content-hash match; allow test backends with hash- prefix.
-                if (result.requestHash != unit.contentHash) {
-                    // Only fail when both sides use content-hash style (64 hex).
-                    val looksLikeDigest = result.requestHash.matches(Regex("^[0-9a-f]{64}$")) &&
-                        unit.contentHash.matches(Regex("^[0-9a-f]{64}$"))
-                    if (looksLikeDigest && result.requestHash != unit.contentHash) {
-                        fail("因果 request_hash 与冻结内容不一致")
-                    }
-                }
+                fail("因果 request_hash 不是冻结内容的 canonical SHA-256")
             }
             val settleStatuses = setOf(
                 CausalReconcileStatus.CONFIRMED,
@@ -1023,6 +1086,67 @@ internal class CausalSettlement(
                 if (result.stableVersionId.isNullOrBlank()) {
                     fail("因果 ${result.status} 缺少 stable_version_id")
                 }
+                validateStableProjection(unit, result, ::fail)
+            }
+        }
+    }
+
+    private fun validateStableProjection(
+        unit: FrozenCausalUnit,
+        result: CausalUnitResult,
+        fail: (String) -> Nothing,
+    ) {
+        if (!result.stableRootPresent || !result.stableMediaPresent) {
+            fail("因果 ${result.status} 缺少完整 stable_root/stable_media")
+        }
+        val expectedRoot = runCatching {
+            Json.parseToJsonElement(unit.mutation.rootJson).jsonObject
+        }.getOrElse { fail("本机冻结 causal root 无效") }
+        val stableRoot = runCatching {
+            Json.parseToJsonElement(result.stableRootJson).jsonObject
+        }.getOrElse { fail("因果 ${result.status} stable_root 无效") }
+        val serverStampKeys = when (unit.mutation.entityType) {
+            "wake_observation" -> setOf("observer_membership_id")
+            else -> setOf("created_by_membership_id")
+        }
+        if (!stableRoot.keys.containsAll(expectedRoot.keys) ||
+            stableRoot.keys.any { it !in expectedRoot.keys && it !in serverStampKeys }
+        ) {
+            fail("因果 ${result.status} stable_root 不符合冻结 closed schema")
+        }
+
+        val media = result.stableMedia
+        if (media.map(CausalMediaItem::mediaUuid) != media.map(CausalMediaItem::mediaUuid).sorted() ||
+            media.map(CausalMediaItem::mediaUuid).toSet().size != media.size
+        ) {
+            fail("因果 ${result.status} stable_media 必须唯一且 canonical 排序")
+        }
+        val expectedRole = when (unit.mutation.entityType) {
+            "baby" -> "avatar"
+            "record" -> "log"
+            "care_plan" -> "plan"
+            "wake_observation" -> "wake"
+            "custom_item" -> null
+            else -> null
+        }
+        val maxMedia = if (unit.mutation.entityType == "baby") 1 else if (expectedRole == null) 0 else 3
+        if (media.size > maxMedia || media.any {
+                it.role != expectedRole ||
+                    !it.sha256.matches(LOWERCASE_SHA256) ||
+                    it.byteSize <= 0 ||
+                    it.mime.isBlank()
+            }
+        ) {
+            fail("因果 ${result.status} stable_media 不符合 closed manifest")
+        }
+        if (unit.mutation.entityType == "baby") {
+            val avatar = stableRoot["avatar_media_uuid"]
+            val avatarUuid = if (avatar == null || avatar is JsonNull) null else {
+                (avatar as? JsonPrimitive)?.contentOrNull
+                    ?: fail("baby avatar_media_uuid 无效")
+            }
+            if (avatarUuid != null && media.none { it.mediaUuid == avatarUuid }) {
+                fail("baby stable_root 引用了 stable_media 之外的头像")
             }
         }
     }
@@ -1104,6 +1228,10 @@ internal class CausalSettlement(
     }
 
     private companion object {
+        const val MAX_CAUSAL_SETTLEMENT_UNITS = 64
+
+        val LOWERCASE_SHA256 = Regex("^[0-9a-f]{64}$")
+
         val FATAL_REJECT_CODES = setOf(
             "content_drift",
             "unknown_base_version",

@@ -54,9 +54,12 @@ fun freezeDirtyEpoch(
     current: CausalRootMutationState,
     contentEpoch: Long,
     newMutationId: String,
-): CausalRootMutationState {
+): CausalRootMutationState? {
+    // contentEpoch was captured before this transaction. A later local edit
+    // owns the row now; never move its epoch backwards or freeze mixed content.
+    if (current.contentEpoch != contentEpoch) return null
     // Branched / open conflict with unchanged content: durable, no infinite resend.
-    if (current.openConflictId != null && current.contentEpoch == contentEpoch) {
+    if (current.openConflictId != null && !current.syncDirty && current.contentEpoch == contentEpoch) {
         return current
     }
     val reuseOrdinary = current.openConflictId == null &&
