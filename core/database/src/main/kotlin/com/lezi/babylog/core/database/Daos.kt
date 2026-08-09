@@ -162,6 +162,20 @@ interface BabyDao {
     @Query("UPDATE babies SET sortOrder = :sortOrder WHERE id = :id")
     suspend fun updateLocalSortOrder(id: Long, sortOrder: Int)
 
+    /**
+     * Commit one complete role-visible order without exposing per-row intermediate states.
+     * The domain command owns which active rows are visible for the current role.
+     */
+    @Transaction
+    suspend fun writeCompleteLocalOrder(orderedBabyIds: List<Long>) {
+        require(orderedBabyIds.size == orderedBabyIds.toSet().size) {
+            "宝宝顺序不能包含重复档案"
+        }
+        orderedBabyIds.forEachIndexed { index, babyId ->
+            updateLocalSortOrder(babyId, index)
+        }
+    }
+
     @Query(
         """
         UPDATE babies

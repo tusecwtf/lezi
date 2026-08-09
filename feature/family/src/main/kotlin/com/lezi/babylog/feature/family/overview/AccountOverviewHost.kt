@@ -9,6 +9,7 @@ import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.family.BabyLocalMoveResult
 import com.lezi.babylog.feature.family.FamilyIdentityUi
 import com.lezi.babylog.feature.family.baby.BabyAvatarFileStore
 import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
@@ -81,6 +82,13 @@ private data class AccountSyncProjection(
     val pendingMemberLogin: PendingMemberLogin?,
     val shallowSyncLine: ShallowSyncLine,
 )
+
+private fun BabyLocalMoveResult.feedback(): String? = when (this) {
+    BabyLocalMoveResult.Moved -> null
+    BabyLocalMoveResult.Empty -> "暂无可排序的宝宝"
+    BabyLocalMoveResult.Unavailable -> "宝宝已不在当前列表"
+    BabyLocalMoveResult.Boundary -> "宝宝已在该位置"
+}
 
 @HiltViewModel
 class AccountOverviewHost @Inject constructor(
@@ -187,7 +195,7 @@ class AccountOverviewHost @Inject constructor(
     fun setBabyLocalTheme(id: Long, argb: Int, onDone: (String?) -> Unit) {
         viewModelScope.launch {
             val result = runCatching {
-                careLog.updateBabyLocalPreferences(id, themeColorArgb = argb)
+                careLog.updateBabyLocalTheme(id, argb)
             }
             onDone(result.exceptionOrNull()?.let { productUiError(it, "本机主题保存失败") })
         }
@@ -195,16 +203,14 @@ class AccountOverviewHost @Inject constructor(
 
     fun moveBabyLocal(id: Long, delta: Int, onDone: (String?) -> Unit) {
         viewModelScope.launch {
-            val ordered = ui.value.babies.toMutableList()
-            val from = ordered.indexOfFirst { it.id == id }
-            val to = (from + delta).coerceIn(0, ordered.lastIndex)
             val result = runCatching {
-                require(from >= 0 && from != to) { "宝宝已在该位置" }
-                val moved = ordered.removeAt(from)
-                ordered.add(to, moved)
-                careLog.updateBabyLocalOrder(ordered.map(Baby::id))
+                careLog.moveBabyLocal(id, delta).feedback()
             }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机顺序保存失败") })
+            onDone(
+                result.getOrElse { error ->
+                    productUiError(error, "本机顺序保存失败")
+                },
+            )
         }
     }
 

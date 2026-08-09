@@ -1436,7 +1436,9 @@ internal class FakeBabyDao : BabyDao {
     private val items = MutableStateFlow<List<BabyEntity>>(emptyList())
     private val seq = AtomicLong(1)
 
-    private fun active(): List<BabyEntity> = items.value.filter { it.deletedAt == null }
+    private fun active(): List<BabyEntity> = items.value
+        .filter { it.deletedAt == null }
+        .sortedWith(compareBy(BabyEntity::sortOrder, BabyEntity::id))
 
     override fun observeAll(): Flow<List<BabyEntity>> = items.map { list -> list.filter { it.deletedAt == null } }
 

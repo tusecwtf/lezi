@@ -72,6 +72,7 @@ import com.lezi.babylog.domain.careplan.CarePlanReminderProjection
 import com.lezi.babylog.domain.careplan.ReminderCleanupPort
 import com.lezi.babylog.domain.catalog.CustomItemCatalog
 import com.lezi.babylog.domain.family.BabyFamilyProfileCoordinator
+import com.lezi.babylog.domain.family.BabyLocalMoveResult
 import com.lezi.babylog.domain.localdata.CalendarReminderMutationGuard
 import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
 
@@ -402,17 +403,14 @@ class CareLog @Inject constructor(
         babyProfiles.setCurrentBaby(babyId)
     }
 
-    suspend fun updateBabyLocalPreferences(
-        babyId: Long,
-        themeColorArgb: Int? = null,
-        sortOrder: Int? = null,
-    ) = localDataMutationEpoch.withMutation {
-        babyProfiles.updateBabyLocalPreferences(babyId, themeColorArgb, sortOrder)
-    }
-
-    suspend fun updateBabyLocalOrder(orderedBabyIds: List<Long>) =
+    suspend fun updateBabyLocalTheme(babyId: Long, themeColorArgb: Int) =
         localDataMutationEpoch.withMutation {
-            babyProfiles.updateBabyLocalOrder(orderedBabyIds)
+            babyProfiles.updateBabyLocalTheme(babyId, themeColorArgb)
+        }
+
+    suspend fun moveBabyLocal(babyId: Long, delta: Int): BabyLocalMoveResult =
+        localDataMutationEpoch.withMutation {
+            babyProfiles.moveBabyLocal(babyId, delta)
         }
 
     /**

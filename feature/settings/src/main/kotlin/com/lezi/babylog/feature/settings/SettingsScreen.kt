@@ -98,6 +98,7 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.family.BabyLocalMoveResult
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.localdata.LocalRecordsClearCommittedException
 import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
@@ -159,6 +160,13 @@ internal fun settingsAddBabyPrimaryPresentation(
     enabled = !busy,
     dismissible = !busy,
 )
+
+private fun BabyLocalMoveResult.feedback(): String? = when (this) {
+    BabyLocalMoveResult.Moved -> null
+    BabyLocalMoveResult.Empty -> "暂无可排序的宝宝"
+    BabyLocalMoveResult.Unavailable -> "宝宝已不在当前列表"
+    BabyLocalMoveResult.Boundary -> "宝宝已在该位置"
+}
 
 data class SettingsUi(
     val settings: SettingsLocal = SettingsLocal(),
@@ -358,23 +366,21 @@ class SettingsViewModel @Inject constructor(
     fun setBabyLocalTheme(id: Long, argb: Int, onDone: (String?) -> Unit) =
         viewModelScope.launch {
             val result = runCatching {
-                careLog.updateBabyLocalPreferences(id, themeColorArgb = argb)
+                careLog.updateBabyLocalTheme(id, argb)
             }
             onDone(result.exceptionOrNull()?.let { productUiError(it, "本机主题保存失败") })
         }
 
     fun moveBabyLocal(id: Long, delta: Int, onDone: (String?) -> Unit) =
         viewModelScope.launch {
-            val ordered = ui.value.babies.toMutableList()
-            val from = ordered.indexOfFirst { it.id == id }
-            val to = (from + delta).coerceIn(0, ordered.lastIndex)
             val result = runCatching {
-                require(from >= 0 && from != to) { "宝宝已在该位置" }
-                val moved = ordered.removeAt(from)
-                ordered.add(to, moved)
-                careLog.updateBabyLocalOrder(ordered.map(Baby::id))
+                careLog.moveBabyLocal(id, delta).feedback()
             }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机顺序保存失败") })
+            onDone(
+                result.getOrElse { error ->
+                    productUiError(error, "本机顺序保存失败")
+                },
+            )
         }
     fun setVisualStyle(key: String) = viewModelScope.launch { settingsStore.setVisualStyle(key) }
     fun setPreferredHand(hand: String) = viewModelScope.launch { settingsStore.setPreferredHand(hand) }

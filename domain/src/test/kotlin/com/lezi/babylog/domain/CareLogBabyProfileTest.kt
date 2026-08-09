@@ -80,6 +80,7 @@ import com.lezi.babylog.domain.growth.DefaultGrowthMeasurementLifecycle
 import com.lezi.babylog.domain.growth.GrowthMeasurementSaveResult
 import com.lezi.babylog.domain.growth.GrowthReferenceSource
 import com.lezi.babylog.domain.growth.SaveGrowthMeasurement
+import com.lezi.babylog.domain.family.BabyLocalMoveResult
 import com.lezi.babylog.domain.localdata.CalendarReminderMutationGuard
 import com.lezi.babylog.domain.localdata.LocalDataClearInProgressException
 import com.lezi.babylog.domain.localdata.LocalDataMutationEpoch
@@ -95,6 +96,196 @@ import com.lezi.babylog.domain.toModel
 
 // Split from CareLogTest kitchen sink by contract cluster (ticket 06).
 class CareLogBabyProfileTest {
+    @Test
+    fun moveBabyLocalReturnsEmptyWhenThereAreNoVisibleBabies() = runTest {
+        val care = Fakes().careLog()
+
+        val result = care.moveBabyLocal(babyId = 1L, delta = 1)
+
+        assertThat(result).isEqualTo(BabyLocalMoveResult.Empty)
+    }
+
+    @Test
+    fun moveBabyLocalReturnsUnavailableWhenTargetDisappeared() = runTest {
+        val care = Fakes().careLog()
+        care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+
+        val result = care.moveBabyLocal(babyId = 404L, delta = 1)
+
+        assertThat(result).isEqualTo(BabyLocalMoveResult.Unavailable)
+    }
+
+    @Test
+    fun moveBabyLocalReturnsBoundaryWithoutChangingOrder() = runTest {
+        val care = Fakes().careLog()
+        val first = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val second = care.addBaby(CreateBabyInput(nickname = "果果", birthdayEpochDay = 2))
+
+        val result = care.moveBabyLocal(babyId = first, delta = -1)
+
+        assertThat(result).isEqualTo(BabyLocalMoveResult.Boundary)
+        assertThat(care.listBabies().map { it.id }).containsExactly(first, second).inOrder()
+    }
+
+    @Test
+    fun sequentialMoveIntentsEachReadTheLatestCommittedOrder() = runTest {
+        val care = Fakes().careLog()
+        val first = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val second = care.addBaby(CreateBabyInput(nickname = "果果", birthdayEpochDay = 2))
+        val third = care.addBaby(CreateBabyInput(nickname = "苗苗", birthdayEpochDay = 3))
+
+        assertThat(care.moveBabyLocal(first, delta = 1)).isEqualTo(BabyLocalMoveResult.Moved)
+        assertThat(care.moveBabyLocal(first, delta = 1)).isEqualTo(BabyLocalMoveResult.Moved)
+
+        assertThat(care.listBabies().map { it.id })
+            .containsExactly(second, third, first)
+            .inOrder()
+    }
+
+    @Test
+    fun memberMovesOnlyAuthorityBabiesWithoutAdvancingFamilyRevisions() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val local = care.createBaby(CreateBabyInput(nickname = "本机", birthdayEpochDay = 1))
+        val firstAuthority = fakes.babies.upsert(
+            BabyEntity(
+                familyId = 1,
+                clientUuid = "authority-first",
+                nickname = "家庭一",
+                birthdayEpochDay = 2,
+                themeColorArgb = 10,
+                sortOrder = 0,
+                updatedAt = 100,
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        val secondAuthority = fakes.babies.upsert(
+            BabyEntity(
+                familyId = 1,
+                clientUuid = "authority-second",
+                nickname = "家庭二",
+                birthdayEpochDay = 3,
+                themeColorArgb = 20,
+                sortOrder = 1,
+                updatedAt = 200,
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        sync.replaceSession(
+            com.lezi.babylog.sync.session.SyncSession(
+                familyId = "family",
+                deviceId = "member-device",
+                membershipId = "member",
+                role = com.lezi.babylog.sync.session.FamilyRole.Member,
+            ),
+        )
+
+        assertThat(care.moveBabyLocal(local, delta = 1))
+            .isEqualTo(BabyLocalMoveResult.Unavailable)
+        assertThat(care.moveBabyLocal(secondAuthority, delta = -1))
+            .isEqualTo(BabyLocalMoveResult.Moved)
+
+        assertThat(care.listBabies().map { it.id })
+            .containsExactly(secondAuthority, firstAuthority)
+            .inOrder()
+        assertThat(fakes.babies.get(firstAuthority)!!.updatedAt).isEqualTo(100)
+        assertThat(fakes.babies.get(firstAuthority)!!.syncDirty).isFalse()
+        assertThat(fakes.babies.get(secondAuthority)!!.updatedAt).isEqualTo(200)
+        assertThat(fakes.babies.get(secondAuthority)!!.syncDirty).isFalse()
+    }
+
+    @Test
+    fun ownerMovesLocalAndFamilyAuthorityBabiesWithoutPublishingTheOrder() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val local = care.createBaby(CreateBabyInput(nickname = "本机", birthdayEpochDay = 1))
+        val authority = fakes.babies.upsert(
+            BabyEntity(
+                familyId = 1,
+                clientUuid = "owner-authority",
+                nickname = "家庭宝宝",
+                birthdayEpochDay = 2,
+                themeColorArgb = 10,
+                sortOrder = 1,
+                updatedAt = 300,
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        sync.replaceSession(
+            com.lezi.babylog.sync.session.SyncSession(
+                familyId = "family",
+                deviceId = "owner-device",
+                membershipId = "owner",
+                role = com.lezi.babylog.sync.session.FamilyRole.Owner,
+            ),
+        )
+
+        assertThat(care.moveBabyLocal(authority, delta = -1))
+            .isEqualTo(BabyLocalMoveResult.Moved)
+
+        assertThat(care.listBabies().map { it.id }).containsExactly(authority, local).inOrder()
+        assertThat(fakes.babies.get(authority)!!.updatedAt).isEqualTo(300)
+        assertThat(fakes.babies.get(authority)!!.syncDirty).isFalse()
+    }
+
+    @Test
+    fun moveBabyLocalIsRejectedBeforeRoomWhenTheMutationEpochIsClearing() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "本机", birthdayEpochDay = 1))
+        val clearEntered = CompletableDeferred<Unit>()
+        val releaseClear = CompletableDeferred<Unit>()
+        val clear = async {
+            fakes.localDataMutationEpoch.withClearEpoch {
+                clearEntered.complete(Unit)
+                releaseClear.await()
+            }
+        }
+        clearEntered.await()
+        val transactionsBefore = fakes.transactions.runCount
+
+        val failure = runCatching { care.moveBabyLocal(babyId, delta = 1) }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalDataClearInProgressException::class.java)
+        assertThat(fakes.transactions.runCount).isEqualTo(transactionsBefore)
+        releaseClear.complete(Unit)
+        clear.await()
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun concurrentMoveIntentsSerializeOnTheCurrentDatabaseOrder() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val first = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val second = care.addBaby(CreateBabyInput(nickname = "果果", birthdayEpochDay = 2))
+        val third = care.addBaby(CreateBabyInput(nickname = "苗苗", birthdayEpochDay = 3))
+        val firstTransactionEntered = CompletableDeferred<Unit>()
+        val releaseFirstTransaction = CompletableDeferred<Unit>()
+        fakes.transactions.serializeRuns = true
+        fakes.transactions.beforeNextRun = {
+            firstTransactionEntered.complete(Unit)
+            releaseFirstTransaction.await()
+        }
+
+        val firstMove = async { care.moveBabyLocal(first, delta = 1) }
+        firstTransactionEntered.await()
+        val secondMove = async { care.moveBabyLocal(first, delta = 1) }
+        runCurrent()
+        releaseFirstTransaction.complete(Unit)
+
+        assertThat(firstMove.await()).isEqualTo(BabyLocalMoveResult.Moved)
+        assertThat(secondMove.await()).isEqualTo(BabyLocalMoveResult.Moved)
+        assertThat(care.listBabies().map { it.id })
+            .containsExactly(second, third, first)
+            .inOrder()
+    }
+
     @Test
     fun createBaby_setsCurrentAndFields() = runTest {
         val care = Fakes().careLog()
@@ -440,6 +631,7 @@ class CareLogBabyProfileTest {
                 nickname = "家庭宝宝",
                 birthdayEpochDay = 2,
                 themeColorArgb = 10,
+                sortOrder = 3,
                 clientUuid = "authority-baby",
                 updatedAt = 100,
                 syncDirty = false,
@@ -465,16 +657,17 @@ class CareLogBabyProfileTest {
             assertThat(failure).isInstanceOf(BabyProfilePermissionException::class.java)
         }
 
-        care.updateBabyLocalPreferences(authority, themeColorArgb = 20, sortOrder = 3)
+        care.updateBabyLocalTheme(authority, themeColorArgb = 20)
         val updated = fakes.babies.get(authority)!!
         assertThat(updated.themeColorArgb).isEqualTo(20)
         assertThat(updated.sortOrder).isEqualTo(3)
         assertThat(updated.updatedAt).isEqualTo(100)
         assertThat(updated.syncDirty).isFalse()
 
-        care.updateBabyLocalOrder(listOf(authority))
+        assertThat(care.moveBabyLocal(authority, delta = -1))
+            .isEqualTo(BabyLocalMoveResult.Boundary)
         val reordered = fakes.babies.get(authority)!!
-        assertThat(reordered.sortOrder).isEqualTo(0)
+        assertThat(reordered.sortOrder).isEqualTo(3)
         assertThat(reordered.updatedAt).isEqualTo(100)
         assertThat(reordered.syncDirty).isFalse()
     }
