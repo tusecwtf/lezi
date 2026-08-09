@@ -15,6 +15,7 @@ import com.lezi.babylog.core.database.causal.SuspectedDuplicateGroupEntity
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 
 /** Minimal causal DAOs for clear persistence in CareLog unit tests. */
@@ -154,26 +155,32 @@ internal class FakeSuspectedDuplicateGroupDao : SuspectedDuplicateGroupDao {
     }
 }
 
-internal class FakeSourceRelationDao : SourceRelationDao {
+internal class FakeSourceRelationDao : SourceRelationDao() {
     private val relations = mutableListOf<SourceRelationEntity>()
     private val members = mutableListOf<SourceRelationMemberEntity>()
     private val declarations = mutableListOf<SourceRelationDeclarationEntity>()
+    private val memberFlow = MutableStateFlow<List<SourceRelationMemberEntity>>(emptyList())
+
+    private fun publishMembers() {
+        memberFlow.value = members.toList()
+    }
 
     override suspend fun get(relationId: String): SourceRelationEntity? =
         relations.find { it.relationId == relationId }
 
     override suspend fun listAll(): List<SourceRelationEntity> = relations.toList()
 
-    override suspend fun upsert(entity: SourceRelationEntity) {
+    override suspend fun upsertRelationRow(entity: SourceRelationEntity) {
         relations.removeAll { it.relationId == entity.relationId }
         relations += entity
     }
 
-    override suspend fun upsertMember(member: SourceRelationMemberEntity) {
+    override suspend fun upsertMemberRow(member: SourceRelationMemberEntity) {
         members.removeAll {
             it.relationId == member.relationId && it.recordClientUuid == member.recordClientUuid
         }
         members += member
+        publishMembers()
     }
 
     override suspend fun listMembers(relationId: String): List<SourceRelationMemberEntity> =
@@ -181,10 +188,32 @@ internal class FakeSourceRelationDao : SourceRelationDao {
 
     override suspend fun listAllMembers(): List<SourceRelationMemberEntity> = members.toList()
 
+    override fun observeAllMembers(): Flow<List<SourceRelationMemberEntity>> = memberFlow
+
     override suspend fun listMembersForRecord(
         recordClientUuid: String,
     ): List<SourceRelationMemberEntity> =
         members.filter { it.recordClientUuid == recordClientUuid }
+
+    override suspend fun deleteOtherMemberships(
+        relationId: String,
+        recordClientUuids: List<String>,
+    ) {
+        members.removeAll {
+            it.recordClientUuid in recordClientUuids && it.relationId != relationId
+        }
+        publishMembers()
+    }
+
+    override suspend fun deleteMembersOutsideCanonicalSet(
+        relationId: String,
+        recordClientUuids: List<String>,
+    ) {
+        members.removeAll {
+            it.relationId == relationId && it.recordClientUuid !in recordClientUuids
+        }
+        publishMembers()
+    }
 
     override suspend fun upsertDeclaration(declaration: SourceRelationDeclarationEntity) {
         declarations.removeAll { it.mutationId == declaration.mutationId }
@@ -199,6 +228,7 @@ internal class FakeSourceRelationDao : SourceRelationDao {
 
     override suspend fun deleteAllMembers() {
         members.clear()
+        publishMembers()
     }
 
     override suspend fun deleteAllDeclarations() {

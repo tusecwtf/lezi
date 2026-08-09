@@ -196,6 +196,8 @@ fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
         "conflict_resolutions",
         "causal_media_staging",
         "source_relations",
+        "source_relation_mutation_receipts",
+        "source_relation_record_eligibility",
         "source_relation_members",
         "source_relation_declarations",
     ] {
@@ -275,6 +277,43 @@ fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
         err.to_string().to_lowercase().contains("check")
             || err.to_string().to_lowercase().contains("constraint"),
         "expected check failure for media_retained, got {err}"
+    );
+
+    connection
+        .execute_batch(
+            "INSERT INTO source_relations(
+                 family_id, relation_id, display_client_uuid, media_retained,
+                 reason, mutation_id, created_by_membership_id, created_at
+             ) VALUES (
+                 'fam', 'rel-active', 'record-display', 1,
+                 'author_declare', 'mutation-active', 'm1', 1
+             );
+             INSERT INTO source_relation_members(
+                 family_id, relation_id, record_client_uuid, role
+             ) VALUES ('fam', 'rel-active', 'record-display', 'display');
+             INSERT INTO source_relations(
+                 family_id, relation_id, display_client_uuid, media_retained,
+                 reason, mutation_id, created_by_membership_id, created_at
+             ) VALUES (
+                 'fam', 'rel-other', 'record-other', 1,
+                 'owner_group_resolve', 'mutation-other', 'm1', 2
+             );",
+        )
+        .unwrap();
+    let duplicate_membership = connection
+        .execute(
+            "INSERT INTO source_relation_members(
+                 family_id, relation_id, record_client_uuid, role
+             ) VALUES ('fam', 'rel-other', 'record-display', 'source')",
+            [],
+        )
+        .unwrap_err();
+    assert!(
+        duplicate_membership
+            .to_string()
+            .to_lowercase()
+            .contains("unique"),
+        "one live record must have at most one canonical relation role: {duplicate_membership}"
     );
 }
 

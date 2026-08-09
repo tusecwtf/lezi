@@ -54,6 +54,7 @@ pub use causal_media_staging::{
 };
 pub use causal_merge::CausalMediaItem;
 pub(crate) use media::media_association_owner;
+pub(crate) use source_relations::rebuild_record_eligibility;
 pub use source_relations::{
     DeclareSourceRelationInput, ResolveSourceRelationGroupInput, SourceRelationReceipt,
     SourceRelationSummary,

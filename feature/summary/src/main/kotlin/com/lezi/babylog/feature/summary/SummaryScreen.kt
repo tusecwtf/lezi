@@ -263,9 +263,10 @@ class SummaryViewModel @Inject constructor(
                 startDayInclusive = queryStart,
                 endDayExclusive = queryEnd,
                 zone = zone,
-            ).mapLatest { records ->
-                val sourceRoles = careLog.sourceRoleClientUuids()
-                val openGroups = careLog.listOpenSuspectedDuplicateGroups(records)
+            ).combine(careLog.observeSourceRoleClientUuids()) { records, sourceRoles ->
+                records to sourceRoles
+            }.mapLatest { (records, sourceRoles) ->
+                val openGroups = careLog.listOpenSuspectedDuplicateGroups(records, sourceRoles)
                 SummaryAggregationRequest(
                     records = records,
                     range = selectedRange,

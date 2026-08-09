@@ -7,12 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{Principal, Store, StoreError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) const MAX_SOURCE_RELATION_MEMBERS: usize = 64;
+pub(super) const MAX_SOURCE_RELATION_CANDIDATES: usize = 256;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DeclareSourceRelationInput {
     pub mutation_id: String,
     pub record_client_uuid: String,
@@ -21,7 +24,7 @@ pub struct DeclareSourceRelationInput {
     pub expected_other_version: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SourceRelationReceipt {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,7 +42,7 @@ pub struct SourceRelationReceipt {
     pub latest_versions: Option<BTreeMap<String, String>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolveSourceRelationGroupInput {
     pub mutation_id: String,
     pub member_client_uuids: Vec<String>,
@@ -54,6 +57,94 @@ pub struct SourceRelationSummary {
     pub peer_ids: Vec<String>,
 }
 
+fn rejected(code: &'static str) -> SourceRelationReceipt {
+    SourceRelationReceipt {
+        status: "rejected".to_owned(),
+        relation_id: None,
+        display_client_uuid: None,
+        source_client_uuids: None,
+        media_retained: None,
+        code: Some(code.to_owned()),
+        latest_versions: None,
+    }
+}
+
+fn request_fingerprint<T: Serialize>(kind: &str, input: &T) -> Result<String, StoreError> {
+    Ok(format!("{kind}:{}", serde_json::to_string(input)?))
+}
+
+fn replay_mutation_receipt(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    mutation_id: &str,
+    request_fingerprint: &str,
+) -> Result<Option<SourceRelationReceipt>, StoreError> {
+    let stored = tx
+        .query_row(
+            "SELECT request_fingerprint, receipt_json
+             FROM source_relation_mutation_receipts
+             WHERE family_id = ?1 AND mutation_id = ?2",
+            params![family_id, mutation_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let Some((stored_fingerprint, receipt_json)) = stored else {
+        return Ok(None);
+    };
+    if stored_fingerprint != request_fingerprint {
+        return Ok(Some(rejected("content_drift")));
+    }
+    Ok(Some(serde_json::from_str(&receipt_json)?))
+}
+
+fn persist_mutation_receipt(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    mutation_id: &str,
+    request_kind: &str,
+    request_fingerprint: &str,
+    receipt: &SourceRelationReceipt,
+    now: i64,
+) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO source_relation_mutation_receipts(
+             family_id, mutation_id, request_kind, request_fingerprint,
+             receipt_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            family_id,
+            mutation_id,
+            request_kind,
+            request_fingerprint,
+            serde_json::to_string(receipt)?,
+            now,
+        ],
+    )?;
+    Ok(())
+}
+
+fn commit_mutation_receipt(
+    tx: rusqlite::Transaction<'_>,
+    family_id: &str,
+    mutation_id: &str,
+    request_kind: &str,
+    request_fingerprint: &str,
+    receipt: SourceRelationReceipt,
+    now: i64,
+) -> Result<SourceRelationReceipt, StoreError> {
+    persist_mutation_receipt(
+        &tx,
+        family_id,
+        mutation_id,
+        request_kind,
+        request_fingerprint,
+        &receipt,
+        now,
+    )?;
+    tx.commit()?;
+    Ok(receipt)
+}
+
 impl Store {
     /// Author declares their record equivalent to another (wire §12.1).
     /// Author's record becomes `source`; the other becomes `display`.
@@ -64,55 +155,74 @@ impl Store {
         now: i64,
     ) -> Result<SourceRelationReceipt, StoreError> {
         if input.mutation_id.trim().is_empty() || input.mutation_id.len() > 128 {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "mutation_id is invalid",
-            ));
+            return Ok(rejected("invalid_mutation_id"));
         }
-        if input.record_client_uuid == input.equivalent_to_client_uuid {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "record_client_uuid must differ from equivalent_to_client_uuid",
-            ));
-        }
+        let fingerprint = request_fingerprint("author_declare", &input)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        // Idempotent mutation replay.
-        if let Some(existing) =
-            load_relation_by_mutation(&tx, &principal.family_id, &input.mutation_id)?
+        if let Some(receipt) =
+            replay_mutation_receipt(&tx, &principal.family_id, &input.mutation_id, &fingerprint)?
         {
-            return Ok(relation_receipt(&existing));
+            return Ok(receipt);
+        }
+        if input.record_client_uuid == input.equivalent_to_client_uuid {
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "author_declare",
+                &fingerprint,
+                rejected("duplicate_member"),
+                now,
+            );
         }
 
-        let record_author =
-            live_record_author(&tx, &principal.family_id, &input.record_client_uuid)?;
-        let Some(author) = record_author else {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "record_client_uuid is not a live record",
-            ));
+        let named_ids = [
+            input.record_client_uuid.clone(),
+            input.equivalent_to_client_uuid.clone(),
+        ];
+        let named = match load_named_records(&tx, &principal.family_id, &named_ids)? {
+            Ok(records) => records,
+            Err(code) => {
+                return commit_mutation_receipt(
+                    tx,
+                    &principal.family_id,
+                    &input.mutation_id,
+                    "author_declare",
+                    &fingerprint,
+                    rejected(code),
+                    now,
+                );
+            }
         };
-        if author != principal.membership_id {
+        if named[0].author_membership_id != principal.membership_id {
             return Err(StoreError::ForbiddenRecord);
         }
-        let other_live =
-            live_record_author(&tx, &principal.family_id, &input.equivalent_to_client_uuid)?;
-        if other_live.is_none() {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "equivalent_to_client_uuid is not a live record",
-            ));
+        if let Some(code) = validate_declared_pair(&named[0], &named[1]) {
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "author_declare",
+                &fingerprint,
+                rejected(code),
+                now,
+            );
+        }
+        if any_active_relation_member(&tx, &principal.family_id, &named_ids)? {
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "author_declare",
+                &fingerprint,
+                rejected("already_related"),
+                now,
+            );
         }
 
-        let record_version = stable_version(
-            &tx,
-            &principal.family_id,
-            "record",
-            &input.record_client_uuid,
-        )?;
-        let other_version = stable_version(
-            &tx,
-            &principal.family_id,
-            "record",
-            &input.equivalent_to_client_uuid,
-        )?;
+        let record_version = Some(named[0].stable_version_id.clone());
+        let other_version = Some(named[1].stable_version_id.clone());
         let mut latest = BTreeMap::new();
         if let Some(v) = &record_version {
             latest.insert(input.record_client_uuid.clone(), v.clone());
@@ -144,8 +254,7 @@ impl Store {
                     now,
                 ],
             )?;
-            tx.commit()?;
-            return Ok(SourceRelationReceipt {
+            let receipt = SourceRelationReceipt {
                 status: "cas_mismatch".to_owned(),
                 relation_id: None,
                 display_client_uuid: None,
@@ -153,7 +262,16 @@ impl Store {
                 media_retained: None,
                 code: Some("cas_mismatch".to_owned()),
                 latest_versions: Some(latest),
-            });
+            };
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "author_declare",
+                &fingerprint,
+                receipt,
+                now,
+            );
         }
 
         let relation_id = Uuid::new_v4().to_string();
@@ -190,18 +308,12 @@ impl Store {
             ],
         )?;
         // Provenance: entities stay live — no deleted_at writes.
-        assert_records_still_live(
-            &tx,
-            &principal.family_id,
-            &[&input.record_client_uuid, &input.equivalent_to_client_uuid],
-        )?;
         bump_relation_member_revisions(
             &tx,
             &principal.family_id,
             &[&input.record_client_uuid, &input.equivalent_to_client_uuid],
         )?;
-        tx.commit()?;
-        Ok(SourceRelationReceipt {
+        let receipt = SourceRelationReceipt {
             status: "accepted".to_owned(),
             relation_id: Some(relation_id),
             display_client_uuid: Some(input.equivalent_to_client_uuid),
@@ -209,7 +321,16 @@ impl Store {
             media_retained: Some(true),
             code: None,
             latest_versions: None,
-        })
+        };
+        commit_mutation_receipt(
+            tx,
+            &principal.family_id,
+            &input.mutation_id,
+            "author_declare",
+            &fingerprint,
+            receipt,
+            now,
+        )
     }
 
     /// Owner resolves a complete suspected-duplicate group (wire §12.2).
@@ -223,62 +344,91 @@ impl Store {
             return Err(StoreError::ForbiddenRecord);
         }
         if input.mutation_id.trim().is_empty() || input.mutation_id.len() > 128 {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "mutation_id is invalid",
-            ));
+            return Ok(rejected("invalid_mutation_id"));
         }
-        let mut members: Vec<String> = input.member_client_uuids.clone();
+        let mut members = input.member_client_uuids.clone();
         members.sort();
-        members.dedup();
-        if members.len() < 2 {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "member_client_uuids must contain at least two records",
-            ));
+        let fingerprint = request_fingerprint(
+            "owner_group_resolve",
+            &ResolveSourceRelationGroupInput {
+                mutation_id: input.mutation_id.clone(),
+                member_client_uuids: members.clone(),
+                display_client_uuid: input.display_client_uuid.clone(),
+                expected_versions: input.expected_versions.clone(),
+            },
+        )?;
+
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(receipt) =
+            replay_mutation_receipt(&tx, &principal.family_id, &input.mutation_id, &fingerprint)?
+        {
+            return Ok(receipt);
         }
-        if !members.iter().any(|m| m == &input.display_client_uuid) {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "display_client_uuid must be in member_client_uuids",
-            ));
+        let static_rejection = if members.len() > MAX_SOURCE_RELATION_MEMBERS {
+            Some("too_many_members")
+        } else if members.windows(2).any(|pair| pair[0] == pair[1]) {
+            Some("duplicate_member")
+        } else if members.len() < 2 {
+            Some("too_few_members")
+        } else if !members.iter().any(|m| m == &input.display_client_uuid) {
+            Some("display_not_member")
+        } else {
+            None
+        };
+        if let Some(code) = static_rejection {
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "owner_group_resolve",
+                &fingerprint,
+                rejected(code),
+                now,
+            );
         }
         // Complete expected version set (CAS): every member must be named.
         let expected_keys: BTreeSet<_> = input.expected_versions.keys().cloned().collect();
         let member_set: BTreeSet<_> = members.iter().cloned().collect();
         if expected_keys != member_set {
-            return Err(StoreError::InvalidSourceRelationRequest(
-                "expected_versions must cover the complete member set",
-            ));
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "owner_group_resolve",
+                &fingerprint,
+                rejected("incomplete_expected_versions"),
+                now,
+            );
         }
 
-        let mut connection = self.connect()?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        if let Some(existing) =
-            load_relation_by_mutation(&tx, &principal.family_id, &input.mutation_id)?
-        {
-            return Ok(relation_receipt(&existing));
-        }
-
+        let named = match load_named_records(&tx, &principal.family_id, &members)? {
+            Ok(records) => records,
+            Err(code) => {
+                return commit_mutation_receipt(
+                    tx,
+                    &principal.family_id,
+                    &input.mutation_id,
+                    "owner_group_resolve",
+                    &fingerprint,
+                    rejected(code),
+                    now,
+                );
+            }
+        };
         let mut latest = BTreeMap::new();
         let mut cas_ok = true;
-        for uuid in &members {
-            let live = live_record_author(&tx, &principal.family_id, uuid)?;
-            if live.is_none() {
-                return Err(StoreError::InvalidSourceRelationRequest(
-                    "member is not a live record",
-                ));
-            }
-            let version = stable_version(&tx, &principal.family_id, "record", uuid)?;
-            if let Some(v) = &version {
-                latest.insert(uuid.clone(), v.clone());
-            }
+        for record in &named {
+            let uuid = &record.client_uuid;
+            let version = &record.stable_version_id;
+            latest.insert(uuid.clone(), version.clone());
             let expected = input.expected_versions.get(uuid).map(String::as_str);
-            if version.as_deref() != expected {
+            if Some(version.as_str()) != expected {
                 cas_ok = false;
             }
         }
         if !cas_ok {
-            tx.commit()?;
-            return Ok(SourceRelationReceipt {
+            let receipt = SourceRelationReceipt {
                 status: "cas_mismatch".to_owned(),
                 relation_id: None,
                 display_client_uuid: None,
@@ -286,25 +436,51 @@ impl Store {
                 media_retained: None,
                 code: Some("cas_mismatch".to_owned()),
                 latest_versions: Some(latest),
-            });
+            };
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "owner_group_resolve",
+                &fingerprint,
+                receipt,
+                now,
+            );
         }
 
-        // Closed-group check: named members must equal the full soft-group
-        // connected component so a concurrent third neighbor cannot be 漏收.
-        if let Some(missing) =
-            incomplete_component_member(&tx, &principal.family_id, &members, &member_set)?
+        if let Some(code) = validate_complete_group(&tx, &principal.family_id, &named, &member_set)?
         {
-            latest.insert(missing.clone(), String::new());
-            tx.commit()?;
-            return Ok(SourceRelationReceipt {
-                status: "cas_mismatch".to_owned(),
-                relation_id: None,
-                display_client_uuid: None,
-                source_client_uuids: None,
-                media_retained: None,
-                code: Some("incomplete_group".to_owned()),
-                latest_versions: Some(latest),
-            });
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "owner_group_resolve",
+                &fingerprint,
+                rejected(code),
+                now,
+            );
+        }
+        let replaced_relations = related_active_relations(&tx, &principal.family_id, &members)?;
+        if replaced_relations
+            .values()
+            .flatten()
+            .any(|record_uuid| !member_set.contains(record_uuid))
+        {
+            return commit_mutation_receipt(
+                tx,
+                &principal.family_id,
+                &input.mutation_id,
+                "owner_group_resolve",
+                &fingerprint,
+                rejected("incomplete_group"),
+                now,
+            );
+        }
+        for relation_id in replaced_relations.keys() {
+            tx.execute(
+                "DELETE FROM source_relation_members WHERE family_id = ?1 AND relation_id = ?2",
+                params![principal.family_id, relation_id],
+            )?;
         }
 
         let sources: Vec<&str> = members
@@ -327,10 +503,8 @@ impl Store {
             },
         )?;
         let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
-        assert_records_still_live(&tx, &principal.family_id, &member_refs)?;
         bump_relation_member_revisions(&tx, &principal.family_id, &member_refs)?;
-        tx.commit()?;
-        Ok(SourceRelationReceipt {
+        let receipt = SourceRelationReceipt {
             status: "accepted".to_owned(),
             relation_id: Some(relation_id),
             display_client_uuid: Some(input.display_client_uuid),
@@ -338,115 +512,17 @@ impl Store {
             media_retained: Some(true),
             code: None,
             latest_versions: None,
-        })
-    }
-}
-
-struct StoredRelation {
-    relation_id: String,
-    display_client_uuid: String,
-    source_client_uuids: Vec<String>,
-}
-
-fn relation_receipt(rel: &StoredRelation) -> SourceRelationReceipt {
-    SourceRelationReceipt {
-        status: "accepted".to_owned(),
-        relation_id: Some(rel.relation_id.clone()),
-        display_client_uuid: Some(rel.display_client_uuid.clone()),
-        source_client_uuids: Some(rel.source_client_uuids.clone()),
-        media_retained: Some(true),
-        code: None,
-        latest_versions: None,
-    }
-}
-
-fn load_relation_by_mutation(
-    tx: &rusqlite::Transaction<'_>,
-    family_id: &str,
-    mutation_id: &str,
-) -> Result<Option<StoredRelation>, StoreError> {
-    let row = tx
-        .query_row(
-            "
-            SELECT relation_id, display_client_uuid
-            FROM source_relations
-            WHERE family_id = ?1 AND mutation_id = ?2
-            LIMIT 1
-            ",
-            params![family_id, mutation_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        };
+        commit_mutation_receipt(
+            tx,
+            &principal.family_id,
+            &input.mutation_id,
+            "owner_group_resolve",
+            &fingerprint,
+            receipt,
+            now,
         )
-        .optional()?;
-    let Some((relation_id, display)) = row else {
-        return Ok(None);
-    };
-    let mut sources = Vec::new();
-    {
-        let mut stmt = tx.prepare(
-            "
-            SELECT record_client_uuid FROM source_relation_members
-            WHERE family_id = ?1 AND relation_id = ?2 AND role = 'source'
-            ORDER BY record_client_uuid COLLATE BINARY
-            ",
-        )?;
-        let rows = stmt.query_map(params![family_id, relation_id], |row| {
-            row.get::<_, String>(0)
-        })?;
-        for r in rows {
-            sources.push(r?);
-        }
     }
-    Ok(Some(StoredRelation {
-        relation_id,
-        display_client_uuid: display,
-        source_client_uuids: sources,
-    }))
-}
-
-fn live_record_author(
-    tx: &rusqlite::Transaction<'_>,
-    family_id: &str,
-    client_uuid: &str,
-) -> Result<Option<String>, StoreError> {
-    let payload_json: Option<String> = tx
-        .query_row(
-            "
-            SELECT payload_json FROM entities
-            WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
-              AND deleted_at IS NULL
-            ",
-            params![family_id, client_uuid],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(payload_json) = payload_json else {
-        return Ok(None);
-    };
-    let payload: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&payload_json)?;
-    let author = payload
-        .get("created_by_membership_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    Ok(author)
-}
-
-fn stable_version(
-    tx: &rusqlite::Transaction<'_>,
-    family_id: &str,
-    entity_type: &str,
-    client_uuid: &str,
-) -> Result<Option<String>, StoreError> {
-    Ok(tx
-        .query_row(
-            "
-            SELECT version_id FROM entity_stable_heads
-            WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3
-            ",
-            params![family_id, entity_type, client_uuid],
-            |row| row.get(0),
-        )
-        .optional()?)
 }
 
 struct InsertRelationArgs<'a> {
@@ -491,46 +567,19 @@ fn insert_relation(
             now
         ],
     )?;
+    let sources_json = serde_json::to_string(sources)?;
     tx.execute(
-        "
-        INSERT INTO source_relation_members(family_id, relation_id, record_client_uuid, role)
-        VALUES (?1, ?2, ?3, 'display')
-        ",
-        params![family_id, relation_id, display],
+        "WITH members(record_client_uuid, role) AS (
+             SELECT ?3, 'display'
+             UNION ALL
+             SELECT value, 'source' FROM json_each(?4)
+         )
+         INSERT INTO source_relation_members(
+             family_id, relation_id, record_client_uuid, role
+         )
+         SELECT ?1, ?2, record_client_uuid, role FROM members",
+        params![family_id, relation_id, display, sources_json],
     )?;
-    for source in sources {
-        tx.execute(
-            "
-            INSERT INTO source_relation_members(family_id, relation_id, record_client_uuid, role)
-            VALUES (?1, ?2, ?3, 'source')
-            ",
-            params![family_id, relation_id, source],
-        )?;
-    }
-    Ok(())
-}
-
-fn assert_records_still_live(
-    tx: &rusqlite::Transaction<'_>,
-    family_id: &str,
-    uuids: &[&str],
-) -> Result<(), StoreError> {
-    for uuid in uuids {
-        let deleted: Option<i64> = tx
-            .query_row(
-                "
-                SELECT deleted_at FROM entities
-                WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
-                ",
-                params![family_id, uuid],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-        if deleted.is_some() {
-            return Err(StoreError::InvalidStoredPayload);
-        }
-    }
     Ok(())
 }
 
@@ -542,183 +591,410 @@ fn bump_relation_member_revisions(
     let mut members = member_client_uuids.to_vec();
     members.sort_unstable();
     members.dedup();
-    for client_uuid in members {
-        let rev = super::causal::advance_rev(tx, family_id)?;
-        let changed = tx.execute(
-            "UPDATE entities SET rev = ?1
-             WHERE family_id = ?2 AND entity_type = 'record' AND client_uuid = ?3",
-            params![rev, family_id, client_uuid],
-        )?;
-        if changed != 1 {
-            return Err(StoreError::InvalidStoredPayload);
-        }
+    let member_count =
+        i64::try_from(members.len()).map_err(|_| StoreError::InvalidStoredPayload)?;
+    tx.execute(
+        "UPDATE family_meta SET rev = rev + ?1 WHERE family_id = ?2",
+        params![member_count, family_id],
+    )?;
+    let final_rev: i64 = tx.query_row(
+        "SELECT rev FROM family_meta WHERE family_id = ?1",
+        params![family_id],
+        |row| row.get(0),
+    )?;
+    let first_rev = final_rev.saturating_sub(member_count).saturating_add(1);
+    let members_json = serde_json::to_string(&members)?;
+    let changed = tx.execute(
+        "WITH requested AS (
+             SELECT CAST(key AS INTEGER) AS ordinal, value AS client_uuid
+             FROM json_each(?1)
+         )
+         UPDATE entities
+         SET rev = ?2 + (
+             SELECT ordinal FROM requested
+             WHERE requested.client_uuid = entities.client_uuid
+         )
+         WHERE family_id = ?3 AND entity_type = 'record'
+           AND client_uuid IN (SELECT client_uuid FROM requested)",
+        params![members_json, first_rev, family_id],
+    )?;
+    if changed != members.len() {
+        return Err(StoreError::InvalidStoredPayload);
     }
     Ok(())
 }
 
-/// If any live whitelist neighbor within 30min of the named set is missing from
-/// the named set, return that uuid (first missing, sorted). Same baby+type only.
-fn incomplete_component_member(
+pub(super) fn project_record_eligibility(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    entity_type: &str,
+    client_uuid: &str,
+    deleted_at: Option<i64>,
+    root: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), StoreError> {
+    if entity_type != "record" {
+        return Ok(());
+    }
+    if deleted_at.is_some() {
+        tx.execute(
+            "DELETE FROM source_relation_record_eligibility
+             WHERE family_id = ?1 AND record_client_uuid = ?2",
+            params![family_id, client_uuid],
+        )?;
+        return Ok(());
+    }
+    let baby_client_uuid = root
+        .get("baby_client_uuid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let record_type = root
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let timestamp = root
+        .get("timestamp")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let author_membership_id = root
+        .get("created_by_membership_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    tx.execute(
+        "INSERT INTO source_relation_record_eligibility(
+             family_id, record_client_uuid, baby_client_uuid, record_type,
+             record_timestamp, author_membership_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(family_id, record_client_uuid) DO UPDATE SET
+             baby_client_uuid = excluded.baby_client_uuid,
+             record_type = excluded.record_type,
+             record_timestamp = excluded.record_timestamp,
+             author_membership_id = excluded.author_membership_id",
+        params![
+            family_id,
+            client_uuid,
+            baby_client_uuid,
+            record_type,
+            timestamp,
+            author_membership_id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn rebuild_record_eligibility(
+    connection: &rusqlite::Connection,
+) -> rusqlite::Result<()> {
+    connection.execute("DELETE FROM source_relation_record_eligibility", [])?;
+    connection.execute(
+        "INSERT INTO source_relation_record_eligibility(
+             family_id, record_client_uuid, baby_client_uuid, record_type,
+             record_timestamp, author_membership_id
+         )
+         SELECT family_id, client_uuid,
+                json_extract(payload_json, '$.baby_client_uuid'),
+                json_extract(payload_json, '$.type'),
+                CAST(json_extract(payload_json, '$.timestamp') AS INTEGER),
+                json_extract(payload_json, '$.created_by_membership_id')
+         FROM entities
+         WHERE entity_type = 'record' AND deleted_at IS NULL
+           AND json_type(payload_json, '$.baby_client_uuid') = 'text'
+           AND json_extract(payload_json, '$.baby_client_uuid') != ''
+           AND json_type(payload_json, '$.type') = 'text'
+           AND json_extract(payload_json, '$.type') != ''
+           AND json_type(payload_json, '$.timestamp') = 'integer'
+           AND json_type(payload_json, '$.created_by_membership_id') = 'text'
+           AND json_extract(payload_json, '$.created_by_membership_id') != ''",
+        [],
+    )?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct CanonicalRecord {
+    client_uuid: String,
+    baby_client_uuid: String,
+    record_type: String,
+    timestamp: i64,
+    author_membership_id: String,
+    stable_version_id: String,
+}
+
+fn load_named_records(
     tx: &rusqlite::Transaction<'_>,
     family_id: &str,
     members: &[String],
-    member_set: &BTreeSet<String>,
-) -> Result<Option<String>, StoreError> {
+) -> Result<Result<Vec<CanonicalRecord>, &'static str>, StoreError> {
+    let members_json = serde_json::to_string(members)?;
+    let mut statement = tx.prepare(
+        "WITH requested AS (
+             SELECT CAST(key AS INTEGER) AS ordinal, value AS client_uuid
+             FROM json_each(?2)
+         )
+         SELECT requested.client_uuid, eligibility.baby_client_uuid,
+                eligibility.record_type, eligibility.record_timestamp,
+                eligibility.author_membership_id, head.version_id
+         FROM requested
+         LEFT JOIN source_relation_record_eligibility eligibility
+           ON eligibility.family_id = ?1
+          AND eligibility.record_client_uuid = requested.client_uuid
+         LEFT JOIN entity_stable_heads head
+           ON head.family_id = ?1 AND head.entity_type = 'record'
+          AND head.client_uuid = requested.client_uuid
+         ORDER BY requested.ordinal",
+    )?;
+    let rows = statement.query_map(params![family_id, members_json], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut records = Vec::with_capacity(members.len());
+    for row in rows {
+        let (
+            client_uuid,
+            baby_client_uuid,
+            record_type,
+            timestamp,
+            author_membership_id,
+            stable_version_id,
+        ) = row?;
+        let (
+            Some(baby_client_uuid),
+            Some(record_type),
+            Some(timestamp),
+            Some(author_membership_id),
+            Some(stable_version_id),
+        ) = (
+            baby_client_uuid,
+            record_type,
+            timestamp,
+            author_membership_id,
+            stable_version_id,
+        )
+        else {
+            return Ok(Err("not_live_record"));
+        };
+        records.push(CanonicalRecord {
+            client_uuid,
+            baby_client_uuid,
+            record_type,
+            timestamp,
+            author_membership_id,
+            stable_version_id,
+        });
+    }
+    Ok(Ok(records))
+}
+
+fn validate_declared_pair(
+    record: &CanonicalRecord,
+    other: &CanonicalRecord,
+) -> Option<&'static str> {
     use crate::store::suspected_duplicates::{
         is_suspected_duplicate_type, SUSPECTED_DUPLICATE_WINDOW,
     };
+    if !is_suspected_duplicate_type(&record.record_type)
+        || !is_suspected_duplicate_type(&other.record_type)
+    {
+        return Some("unsupported_record_type");
+    }
+    if record.baby_client_uuid != other.baby_client_uuid || record.record_type != other.record_type
+    {
+        return Some("wrong_baby_or_type");
+    }
+    if record.author_membership_id == other.author_membership_id {
+        return Some("same_author_only");
+    }
+    if record.timestamp.abs_diff(other.timestamp) > SUSPECTED_DUPLICATE_WINDOW as u64 {
+        return Some("outside_time_window");
+    }
+    None
+}
 
-    #[derive(Clone)]
-    struct Row {
-        uuid: String,
-        baby: String,
-        record_type: String,
-        ts: i64,
-        author: String,
+fn any_active_relation_member(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    members: &[String],
+) -> Result<bool, StoreError> {
+    let members_json = serde_json::to_string(members)?;
+    let exists: i64 = tx.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM source_relation_members member
+             JOIN json_each(?2) requested ON requested.value = member.record_client_uuid
+             WHERE member.family_id = ?1
+         )",
+        params![family_id, members_json],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn related_active_relations(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    members: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, StoreError> {
+    let members_json = serde_json::to_string(members)?;
+    let mut statement = tx.prepare(
+        "WITH related(relation_id) AS (
+             SELECT DISTINCT member.relation_id
+             FROM source_relation_members member
+             JOIN json_each(?2) requested ON requested.value = member.record_client_uuid
+             WHERE member.family_id = ?1
+         )
+         SELECT member.relation_id, member.record_client_uuid
+         FROM source_relation_members member
+         JOIN related ON related.relation_id = member.relation_id
+         WHERE member.family_id = ?1
+         ORDER BY member.relation_id COLLATE BINARY,
+                  member.record_client_uuid COLLATE BINARY",
+    )?;
+    let rows = statement.query_map(params![family_id, members_json], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut relations = BTreeMap::<String, Vec<String>>::new();
+    for row in rows {
+        let (relation_id, record_uuid) = row?;
+        relations.entry(relation_id).or_default().push(record_uuid);
     }
-    let mut named: Vec<Row> = Vec::new();
-    for uuid in members {
-        let payload_json: String = tx.query_row(
-            "
-            SELECT payload_json FROM entities
-            WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
-              AND deleted_at IS NULL
-            ",
-            params![family_id, uuid],
-            |row| row.get(0),
-        )?;
-        let payload: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&payload_json)?;
-        let record_type = payload
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        if !is_suspected_duplicate_type(&record_type) {
-            continue;
-        }
-        let baby = payload
-            .get("baby_client_uuid")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        let ts = payload
-            .get("timestamp")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-        let author = payload
-            .get("created_by_membership_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        named.push(Row {
-            uuid: uuid.clone(),
-            baby,
-            record_type,
-            ts,
-            author,
-        });
+    Ok(relations)
+}
+
+fn validate_complete_group(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    named: &[CanonicalRecord],
+    member_set: &BTreeSet<String>,
+) -> Result<Option<&'static str>, StoreError> {
+    use crate::store::suspected_duplicates::{
+        is_suspected_duplicate_type, SUSPECTED_DUPLICATE_WINDOW,
+    };
+    let first = &named[0];
+    if named
+        .iter()
+        .any(|record| !is_suspected_duplicate_type(&record.record_type))
+    {
+        return Ok(Some("unsupported_record_type"));
     }
-    if named.is_empty() {
-        return Ok(None);
+    if named.iter().any(|record| {
+        record.baby_client_uuid != first.baby_client_uuid || record.record_type != first.record_type
+    }) {
+        return Ok(Some("wrong_baby_or_type"));
     }
-    // Load neighborhood for each named row's baby+type around its timestamp.
-    let mut candidates: BTreeMap<String, Row> = BTreeMap::new();
-    for row in &named {
-        candidates.insert(row.uuid.clone(), row.clone());
-        let lo = row.ts.saturating_sub(SUSPECTED_DUPLICATE_WINDOW);
-        let hi = row.ts.saturating_add(SUSPECTED_DUPLICATE_WINDOW);
-        let mut stmt = tx.prepare(
-            "
-            SELECT client_uuid, payload_json FROM entities
-            WHERE family_id = ?1
-              AND entity_type = 'record'
-              AND deleted_at IS NULL
-              AND json_extract(payload_json, '$.baby_client_uuid') = ?2
-              AND json_extract(payload_json, '$.type') = ?3
-              AND CAST(json_extract(payload_json, '$.timestamp') AS INTEGER) BETWEEN ?4 AND ?5
-            ",
-        )?;
-        let rows = stmt.query_map(params![family_id, row.baby, row.record_type, lo, hi], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        for item in rows {
-            let (uuid, payload_json) = item?;
-            if candidates.contains_key(&uuid) {
-                continue;
+    if named
+        .iter()
+        .map(|record| &record.author_membership_id)
+        .collect::<BTreeSet<_>>()
+        .len()
+        < 2
+    {
+        return Ok(Some("same_author_only"));
+    }
+
+    let minimum = named.iter().map(|record| record.timestamp).min().unwrap();
+    let maximum = named.iter().map(|record| record.timestamp).max().unwrap();
+    let mut statement = tx.prepare(
+        "SELECT eligibility.record_client_uuid, eligibility.baby_client_uuid,
+                eligibility.record_type, eligibility.record_timestamp,
+                eligibility.author_membership_id, head.version_id
+         FROM source_relation_record_eligibility eligibility
+         JOIN entity_stable_heads head
+           ON head.family_id = eligibility.family_id AND head.entity_type = 'record'
+          AND head.client_uuid = eligibility.record_client_uuid
+         WHERE eligibility.family_id = ?1
+           AND eligibility.baby_client_uuid = ?2
+           AND eligibility.record_type = ?3
+           AND eligibility.record_timestamp BETWEEN ?4 AND ?5
+         ORDER BY eligibility.record_timestamp,
+                  eligibility.record_client_uuid COLLATE BINARY
+         LIMIT ?6",
+    )?;
+    let rows = statement.query_map(
+        params![
+            family_id,
+            first.baby_client_uuid,
+            first.record_type,
+            minimum.saturating_sub(SUSPECTED_DUPLICATE_WINDOW),
+            maximum.saturating_add(SUSPECTED_DUPLICATE_WINDOW),
+            i64::try_from(MAX_SOURCE_RELATION_CANDIDATES + 1)
+                .map_err(|_| StoreError::InvalidStoredPayload)?,
+        ],
+        |row| {
+            Ok(CanonicalRecord {
+                client_uuid: row.get(0)?,
+                baby_client_uuid: row.get(1)?,
+                record_type: row.get(2)?,
+                timestamp: row.get(3)?,
+                author_membership_id: row.get(4)?,
+                stable_version_id: row.get(5)?,
+            })
+        },
+    )?;
+    let mut candidates = Vec::new();
+    for row in rows {
+        candidates.push(row?);
+    }
+    if candidates.len() > MAX_SOURCE_RELATION_CANDIDATES {
+        return Ok(Some("candidate_limit_exceeded"));
+    }
+
+    let mut parents = (0..candidates.len()).collect::<Vec<_>>();
+    for current in 0..candidates.len() {
+        for prior in (0..current).rev() {
+            if candidates[current]
+                .timestamp
+                .saturating_sub(candidates[prior].timestamp)
+                > SUSPECTED_DUPLICATE_WINDOW
+            {
+                break;
             }
-            let payload: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(&payload_json)?;
-            let ts = payload
-                .get("timestamp")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let author = payload
-                .get("created_by_membership_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned();
-            if author.is_empty() {
-                continue;
+            if candidates[current].author_membership_id != candidates[prior].author_membership_id {
+                union(&mut parents, current, prior);
             }
-            candidates.insert(
-                uuid.clone(),
-                Row {
-                    uuid,
-                    baby: row.baby.clone(),
-                    record_type: row.record_type.clone(),
-                    ts,
-                    author,
-                },
-            );
-        }
-    }
-    // Build adjacency for cross-membership within window, same baby+type.
-    let uuids: Vec<String> = candidates.keys().cloned().collect();
-    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for u in &uuids {
-        adj.entry(u.clone()).or_default();
-    }
-    for i in 0..uuids.len() {
-        for j in (i + 1)..uuids.len() {
-            let a = &candidates[&uuids[i]];
-            let b = &candidates[&uuids[j]];
-            if a.baby != b.baby || a.record_type != b.record_type {
-                continue;
-            }
-            if a.author == b.author {
-                continue;
-            }
-            if (a.ts - b.ts).abs() <= SUSPECTED_DUPLICATE_WINDOW {
-                adj.get_mut(&uuids[i]).unwrap().push(uuids[j].clone());
-                adj.get_mut(&uuids[j]).unwrap().push(uuids[i].clone());
-            }
-        }
-    }
-    // BFS component from first named member.
-    let start = members[0].clone();
-    let mut seen = BTreeSet::new();
-    let mut queue = std::collections::VecDeque::new();
-    queue.push_back(start.clone());
-    seen.insert(start);
-    while let Some(node) = queue.pop_front() {
-        for next in adj.get(&node).into_iter().flatten() {
-            if seen.insert(next.clone()) {
-                queue.push_back(next.clone());
-            }
-        }
-    }
-    for uuid in &seen {
-        if !member_set.contains(uuid) {
-            return Ok(Some(uuid.clone()));
         }
     }
-    for uuid in member_set {
-        if !seen.contains(uuid) {
-            // Named set includes something outside the component — still incomplete
-            // relative to soft-group semantics; prefer reporting first extra as missing.
-            continue;
-        }
+    let candidate_indices = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, record)| (record.client_uuid.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let Some(&start_index) = candidate_indices.get(first.client_uuid.as_str()) else {
+        return Err(StoreError::InvalidStoredPayload);
+    };
+    let component_root = find(&mut parents, start_index);
+    if named.iter().any(|record| {
+        candidate_indices
+            .get(record.client_uuid.as_str())
+            .is_none_or(|index| find(&mut parents, *index) != component_root)
+    }) {
+        return Ok(Some("disconnected_group"));
+    }
+    if candidates.iter().enumerate().any(|(index, record)| {
+        find(&mut parents, index) == component_root && !member_set.contains(&record.client_uuid)
+    }) {
+        return Ok(Some("incomplete_group"));
     }
     Ok(None)
+}
+
+fn find(parents: &mut [usize], index: usize) -> usize {
+    if parents[index] != index {
+        parents[index] = find(parents, parents[index]);
+    }
+    parents[index]
+}
+
+fn union(parents: &mut [usize], left: usize, right: usize) {
+    let left_root = find(parents, left);
+    let right_root = find(parents, right);
+    if left_root != right_root {
+        parents[right_root] = left_root;
+    }
 }

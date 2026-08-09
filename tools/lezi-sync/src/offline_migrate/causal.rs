@@ -82,6 +82,7 @@ pub(crate) fn finalize_causal_v12(
 ) -> Result<(), MigrateError> {
     transform_historical_sleeps(dest, media_root, report)?;
     mint_base_versions(dest, report)?;
+    crate::store::rebuild_record_eligibility(dest)?;
     Ok(())
 }
 
@@ -590,6 +591,50 @@ pub(crate) fn validate_causal_integrity_with_media(
             "stable heads ↔ versioned entities mismatch: entities={} heads={}",
             versioned.len(),
             heads.len()
+        ));
+    }
+
+    let eligible_records: BTreeSet<(String, String)> = {
+        let mut stmt = dest
+            .prepare(
+                "SELECT family_id, client_uuid
+                 FROM entities
+                 WHERE entity_type = 'record' AND deleted_at IS NULL
+                   AND json_type(payload_json, '$.baby_client_uuid') = 'text'
+                   AND json_extract(payload_json, '$.baby_client_uuid') != ''
+                   AND json_type(payload_json, '$.type') = 'text'
+                   AND json_extract(payload_json, '$.type') != ''
+                   AND json_type(payload_json, '$.timestamp') = 'integer'
+                   AND json_type(payload_json, '$.created_by_membership_id') = 'text'
+                   AND json_extract(payload_json, '$.created_by_membership_id') != ''",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    let projected_eligibility: BTreeSet<(String, String)> = {
+        let mut stmt = dest
+            .prepare(
+                "SELECT family_id, record_client_uuid
+                 FROM source_relation_record_eligibility",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    if eligible_records != projected_eligibility {
+        return Err(format!(
+            "source-relation eligibility mismatch: records={} projection={}",
+            eligible_records.len(),
+            projected_eligibility.len()
         ));
     }
 

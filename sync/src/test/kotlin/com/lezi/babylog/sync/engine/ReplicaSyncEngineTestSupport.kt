@@ -42,6 +42,7 @@ import com.lezi.babylog.sync.MemoryFulfillmentCandidateDao
 import com.lezi.babylog.sync.MemoryMediaDao
 import com.lezi.babylog.sync.MemoryRecordDao
 import com.lezi.babylog.sync.MemorySyncPreferences
+import com.lezi.babylog.sync.MemorySourceRelationDao
 import com.lezi.babylog.sync.MemoryWakeObservationDao
 import com.lezi.babylog.sync.RecordingSyncBackend
 import com.lezi.babylog.sync.RecordingTransactionRunner
@@ -74,6 +75,7 @@ internal class ReplicaEngineRig(
     val wakeObservations = MemoryWakeObservationDao()
     val conflictSummaries = MemoryConflictSummaryDao()
     val conflictDetails = MemoryConflictDetailCacheDao()
+    val sourceRelations = MemorySourceRelationDao()
     var familyBabyAppliedCalls = 0
     var authorityVisibleAtCallback = false
     val carePlanAppliedBatches = mutableListOf<List<String>>()
@@ -104,6 +106,7 @@ internal class ReplicaEngineRig(
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
         conflictDetailCacheDao = conflictDetails,
+        sourceRelationDao = sourceRelations,
         allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
 }

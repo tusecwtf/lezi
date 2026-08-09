@@ -15569,6 +15569,26 @@ async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() 
             result["stable_version_id"].as_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
+    let owner_display = Uuid::new_v4();
+    let (status, owner_display_created) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            owner_display,
+            causal_formula_root(baby_id, "owner-display", 50, 99),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_display_created}");
+    let owner_display_version = owner_display_created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let (_, baseline) = pull_page_bytes(&rig.app, owner_token, generation, 0).await;
     let baseline_cursor = baseline["cursor"].as_i64().unwrap();
 
@@ -15603,17 +15623,24 @@ async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() 
         .unwrap()
         .iter()
         .all(|result| result["status"] == "branched"));
+    let mut relation_members = records.iter().map(Uuid::to_string).collect::<Vec<_>>();
+    relation_members.push(owner_display.to_string());
+    let mut relation_versions = records
+        .iter()
+        .zip(&stable_versions)
+        .map(|(record_id, version)| (record_id.to_string(), version.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    relation_versions.insert(owner_display.to_string(), owner_display_version);
     let (status, relation) = json_request(
         &rig.app,
         Method::POST,
-        "/v1/source-relations/declare",
-        Some(member_token),
+        "/v1/source-relations/resolve-group",
+        Some(owner_token),
         json!({
             "mutation_id": "sidecar-page-relation",
-            "record_client_uuid": records[32],
-            "equivalent_to_client_uuid": records[0],
-            "expected_record_version": stable_versions[32],
-            "expected_other_version": stable_versions[0]
+            "member_client_uuids": relation_members,
+            "display_client_uuid": owner_display,
+            "expected_versions": relation_versions
         }),
     )
     .await;
@@ -15655,7 +15682,7 @@ async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() 
     assert!(records
         .iter()
         .all(|record_id| summaries.contains(record_id.to_string().as_str())));
-    for relation_member in [records[0], records[32]] {
+    for relation_member in [owner_display, records[32]] {
         let entity = entities
             .iter()
             .find(|entity| entity["client_uuid"] == relation_member.to_string())

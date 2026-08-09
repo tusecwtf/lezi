@@ -22,6 +22,10 @@ import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.SourceRelationDao
+import com.lezi.babylog.core.database.causal.SourceRelationDeclarationEntity
+import com.lezi.babylog.core.database.causal.SourceRelationEntity
+import com.lezi.babylog.core.database.causal.SourceRelationMemberEntity
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.model.RootPublicationState
 import java.io.IOException
@@ -2779,5 +2783,100 @@ internal class MemoryConflictDetailCacheDao :
 
     override suspend fun deleteAll() {
         items.clear()
+    }
+}
+
+internal class MemorySourceRelationDao : SourceRelationDao() {
+    private val relations = linkedMapOf<String, SourceRelationEntity>()
+    private val members = linkedMapOf<Pair<String, String>, SourceRelationMemberEntity>()
+    private val declarations = linkedMapOf<String, SourceRelationDeclarationEntity>()
+    private val memberFlow = MutableStateFlow<List<SourceRelationMemberEntity>>(emptyList())
+
+    private fun publishMembers() {
+        memberFlow.value = members.values.sortedWith(
+            compareBy<SourceRelationMemberEntity> {
+                it.relationId
+            }.thenBy { it.recordClientUuid },
+        )
+    }
+
+    suspend fun seedRaw(
+        relation: SourceRelationEntity,
+        seededMembers: List<SourceRelationMemberEntity>,
+    ) {
+        upsertRelationRow(relation)
+        seededMembers.forEach { upsertMemberRow(it) }
+    }
+
+    override suspend fun get(relationId: String) = relations[relationId]
+
+    override suspend fun listAll() = relations.values.toList()
+
+    override suspend fun upsertRelationRow(
+        entity: SourceRelationEntity,
+    ) {
+        relations[entity.relationId] = entity
+    }
+
+    override suspend fun upsertMemberRow(
+        member: SourceRelationMemberEntity,
+    ) {
+        members[member.relationId to member.recordClientUuid] = member
+        publishMembers()
+    }
+
+    override suspend fun listMembers(relationId: String) =
+        members.values.filter { it.relationId == relationId }
+
+    override suspend fun listAllMembers() = members.values.toList()
+
+    override fun observeAllMembers(): Flow<List<SourceRelationMemberEntity>> =
+        memberFlow
+
+    override suspend fun listMembersForRecord(recordClientUuid: String) =
+        members.values.filter { it.recordClientUuid == recordClientUuid }
+
+    override suspend fun deleteOtherMemberships(
+        relationId: String,
+        recordClientUuids: List<String>,
+    ) {
+        members.entries.removeAll { (_, member) ->
+            member.recordClientUuid in recordClientUuids && member.relationId != relationId
+        }
+        publishMembers()
+    }
+
+    override suspend fun deleteMembersOutsideCanonicalSet(
+        relationId: String,
+        recordClientUuids: List<String>,
+    ) {
+        members.entries.removeAll { (_, member) ->
+            member.relationId == relationId && member.recordClientUuid !in recordClientUuids
+        }
+        publishMembers()
+    }
+
+    override suspend fun upsertDeclaration(
+        declaration: SourceRelationDeclarationEntity,
+    ) {
+        declarations[declaration.mutationId] = declaration
+    }
+
+    override suspend fun getDeclaration(mutationId: String) = declarations[mutationId]
+
+    override suspend fun listPendingDeclarations() =
+        declarations.values.filter { it.status == "pending" }
+
+    override suspend fun deleteAllMembers() {
+        members.clear()
+        publishMembers()
+    }
+
+    override suspend fun deleteAllDeclarations() {
+        declarations.clear()
+    }
+
+    override suspend fun deleteAll() {
+        relations.clear()
     }
 }

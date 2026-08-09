@@ -18,10 +18,7 @@ import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
-import com.lezi.babylog.core.database.causal.SourceRelationEntity
-import com.lezi.babylog.core.database.causal.SourceRelationMemberEntity
 import com.lezi.babylog.core.database.causal.SourceRelationReason
-import com.lezi.babylog.core.database.causal.SourceRelationRole
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.model.RecordType
@@ -1280,6 +1277,7 @@ internal class ReplicaSyncEngine(
         val existing = recordDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseRecordWire(payload)
+        applySourceRelationSummary(entity)
         val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
             customItemDao.getByClientUuid(customItemUuid)?.id ?: return false
         }
@@ -1397,7 +1395,6 @@ internal class ReplicaSyncEngine(
                 entity.updatedAt,
             )
         }
-        applySourceRelationSummary(entity)
         return true
     }
 
@@ -1410,58 +1407,13 @@ internal class ReplicaSyncEngine(
     private suspend fun applySourceRelationSummary(entity: SyncEntity) {
         val summary = entity.sourceRelationSummary ?: return
         val dao = sourceRelationDao ?: return
-        val relationId = summary.relationId
-        val existing = dao.get(relationId)
-        val role = summary.role
-        val displayUuid = when {
-            role == SourceRelationRole.DISPLAY -> entity.clientUuid
-            !existing?.displayClientUuid.isNullOrBlank() -> existing!!.displayClientUuid
-            else -> "" // unknown until display-role attach; do not invent from peer_ids
-        }
-        val reason = when {
-            existing != null &&
-                existing.reason != SourceRelationReason.PULL_SUMMARY -> existing.reason
-            else -> SourceRelationReason.PULL_SUMMARY
-        }
-        val mutationId = existing?.mutationId?.takeIf { it.isNotBlank() }
-            ?: "pull-$relationId"
-        val membership = existing?.createdByMembershipId.orEmpty()
-        dao.upsert(
-            SourceRelationEntity(
-                relationId = relationId,
-                displayClientUuid = displayUuid,
-                mediaRetained = true,
-                reason = reason,
-                mutationId = mutationId,
-                createdByMembershipId = membership,
-                createdAt = existing?.createdAt ?: entity.updatedAt,
-            ),
+        dao.applyPullSummary(
+            relationId = summary.relationId,
+            recordClientUuid = entity.clientUuid,
+            role = summary.role,
+            peerIds = summary.peerIds,
+            observedAt = entity.updatedAt,
         )
-        dao.upsertMember(
-            SourceRelationMemberEntity(
-                relationId = relationId,
-                recordClientUuid = entity.clientUuid,
-                role = role,
-            ),
-        )
-        // Only mark peers when we know the display UUID; otherwise wait for
-        // display-role attach so roles stay accurate.
-        if (displayUuid.isNotBlank()) {
-            for (peer in summary.peerIds) {
-                val peerRole = if (peer == displayUuid) {
-                    SourceRelationRole.DISPLAY
-                } else {
-                    SourceRelationRole.SOURCE
-                }
-                dao.upsertMember(
-                    SourceRelationMemberEntity(
-                        relationId = relationId,
-                        recordClientUuid = peer,
-                        role = peerRole,
-                    ),
-                )
-            }
-        }
     }
 
     /**

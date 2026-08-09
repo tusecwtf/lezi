@@ -172,20 +172,25 @@ class LogViewModel @Inject constructor(
                     zoneId = zone,
                     nowMillis = screenTime.epochMillis,
                 ),
-            ).mapLatest { snapshot ->
+            ).combine(careLog.observeSourceRoleClientUuids()) { snapshot, sourceRoles ->
+                snapshot to sourceRoles
+            }.mapLatest { (snapshot, sourceRoles) ->
                 val rawRecords = snapshot.recordRows.map(TimelineRecordRow::record)
                 val rawRail = snapshot.railRecordRows.map(TimelineRecordRow::record)
-                val sourceRoles = careLog.sourceRoleClientUuids()
-                val records = careLog.projectOrdinaryRecords(rawRecords)
-                val railRecords = careLog.projectOrdinaryRecords(rawRail)
-                val openGroups = careLog.listOpenSuspectedDuplicateGroups(rawRecords)
+                val records = careLog.projectOrdinaryRecords(rawRecords, sourceRoles)
+                val railRecords = careLog.projectOrdinaryRecords(rawRail, sourceRoles)
+                val openGroups = careLog.listOpenSuspectedDuplicateGroups(rawRecords, sourceRoles)
                 val bounds = careLog.daySummaryBounds(
                     records = rawRecords,
                     date = day,
                     zone = zone,
                     now = screenTime.epochMillis,
+                    sourceRoleClientUuids = sourceRoles,
                 )
-                val duplicateRows = careLog.timelineDuplicateRows(rawRecords)
+                val duplicateRows = careLog.timelineDuplicateRows(
+                    rawRecords,
+                    sourceRoleClientUuids = sourceRoles,
+                )
                 val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan)
                 val timelineAxis = ThreeDayTimelineAxis(day, zone)
                 val summary = if (bounds.hasUncertainty) {

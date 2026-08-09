@@ -72,6 +72,7 @@ struct CausalFx {
     _dir: TempDir,
     family_id: String,
     owner: Principal,
+    member: Principal,
     baby_id: Uuid,
 }
 
@@ -87,11 +88,18 @@ impl CausalFx {
             .causal_commit(&owner, vec![create], 1_700_000_000)
             .unwrap();
         assert_eq!(result.results[0].status, "accepted");
+        let member = Principal {
+            family_id: family_id.clone(),
+            role: "member".to_owned(),
+            membership_id: "m-causal-member".to_owned(),
+            device_id: "d-causal-member".to_owned(),
+        };
         Self {
             store,
             _dir: dir,
             family_id,
             owner,
+            member,
             baby_id,
         }
     }
@@ -803,12 +811,12 @@ fn causal_pull_exposes_version_id_and_branch_conflict_summary() {
     assert!(cursor_before >= page.entities.iter().map(|e| e.rev).max().unwrap_or(0));
 }
 
-fn create_open_record_conflict(fx: &CausalFx, index: usize) -> (Uuid, String) {
+fn create_open_record_conflict(fx: &CausalFx, creator: &Principal, index: usize) -> (Uuid, String) {
     let record_id = Uuid::new_v4();
     let created = fx
         .store
         .causal_commit(
-            &fx.owner,
+            creator,
             vec![mut_unit(
                 "record",
                 record_id,
@@ -862,14 +870,21 @@ fn pull_sql_statement_count_is_constant_for_conflicted_record_pages() {
     fn measured_statement_count(conflict_count: usize) -> usize {
         let fx = CausalFx::new();
         let conflicts = (0..conflict_count)
-            .map(|index| create_open_record_conflict(&fx, index))
+            .map(|index| {
+                let creator = if index + 1 == conflict_count {
+                    &fx.member
+                } else {
+                    &fx.owner
+                };
+                create_open_record_conflict(&fx, creator, index)
+            })
             .collect::<Vec<_>>();
         if conflict_count > 1 {
             let (display_id, display_version) = &conflicts[0];
             let (source_id, source_version) = conflicts.last().unwrap();
             fx.store
                 .declare_source_relation(
-                    &fx.owner,
+                    &fx.member,
                     DeclareSourceRelationInput {
                         mutation_id: format!("mut-query-count-{conflict_count}"),
                         record_client_uuid: source_id.to_string(),
@@ -921,7 +936,14 @@ fn pull_paginates_every_mandatory_conflict_summary_without_cursor_loss() {
     for conflict_count in [31, 32, 33] {
         let fx = CausalFx::new();
         let conflicts = (0..conflict_count)
-            .map(|index| create_open_record_conflict(&fx, index))
+            .map(|index| {
+                let creator = if index + 1 == conflict_count {
+                    &fx.member
+                } else {
+                    &fx.owner
+                };
+                create_open_record_conflict(&fx, creator, index)
+            })
             .collect::<Vec<_>>();
         if conflict_count == 33 {
             let (display_id, display_version) = &conflicts[0];
@@ -929,7 +951,7 @@ fn pull_paginates_every_mandatory_conflict_summary_without_cursor_loss() {
             let relation = fx
                 .store
                 .declare_source_relation(
-                    &fx.owner,
+                    &fx.member,
                     DeclareSourceRelationInput {
                         mutation_id: "mut-conflict-cap-relation".to_owned(),
                         record_client_uuid: source_id.to_string(),

@@ -1092,6 +1092,18 @@ pub(crate) fn table_dispositions() -> &'static [TableDisposition] {
             note: "Empty after offline migrate (no duplicate resolutions)",
         },
         TableDisposition {
+            source_or_target_name: "source_relation_mutation_receipts",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Empty after offline migrate (no source-relation mutations yet)",
+        },
+        TableDisposition {
+            source_or_target_name: "source_relation_record_eligibility",
+            kind: TableDispositionKind::TargetCausalMinted,
+            row_filter: RowFilter::NotApplicable,
+            note: "Rebuilt by source-relation Module after migration base publication",
+        },
+        TableDisposition {
             source_or_target_name: "source_relation_members",
             kind: TableDispositionKind::TargetCausalMinted,
             row_filter: RowFilter::NotApplicable,

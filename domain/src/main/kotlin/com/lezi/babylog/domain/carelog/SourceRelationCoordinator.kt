@@ -14,6 +14,9 @@ import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.backend.SourceRelationDeclareRequest
 import com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest
 import com.lezi.babylog.sync.backend.SourceRelationResult
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 /**
  * Explicit author declare / Owner group resolve for 疑似重复组.
@@ -39,14 +42,29 @@ internal class SourceRelationCoordinator(
      */
     suspend fun openSuspectedGroups(records: List<Record>): List<SuspectedDuplicateGroup> {
         val excluded = sourceRoleClientUuids()
-        return SuspectedDuplicateGrouping.group(records, excludedClientUuids = excluded)
+        return openSuspectedGroups(records, excluded)
     }
+
+    fun openSuspectedGroups(
+        records: List<Record>,
+        sourceRoleClientUuids: Set<String>,
+    ): List<SuspectedDuplicateGroup> = SuspectedDuplicateGrouping.group(
+        records,
+        excludedClientUuids = sourceRoleClientUuids,
+    )
 
     /** Source-role UUIDs to drop from ordinary timeline/stats projection. */
     suspend fun sourceRoleClientUuids(): Set<String> =
         sourceRelationDao.listAllMembers()
             .filter { it.role == SourceRelationRole.SOURCE }
             .mapTo(mutableSetOf()) { it.recordClientUuid }
+
+    fun observeSourceRoleClientUuids(): Flow<Set<String>> =
+        sourceRelationDao.observeAllMembers().map { members ->
+            members.asSequence()
+                .filter { it.role == SourceRelationRole.SOURCE }
+                .mapTo(mutableSetOf()) { it.recordClientUuid }
+        }.distinctUntilChanged()
 
     /** All record UUIDs already bound in any source relation. */
     suspend fun relatedRecordClientUuids(): Set<String> =
@@ -281,7 +299,7 @@ internal class SourceRelationCoordinator(
             SourceRelationReason.OWNER_GROUP_RESOLVE -> {
                 sourceRelationDao.applyOwnerGroupResolution(relation, members)
             }
-            else -> sourceRelationDao.applyRelation(relation, members, declaration)
+            else -> sourceRelationDao.applyCanonicalTransition(relation, members, declaration)
         }
     }
 }

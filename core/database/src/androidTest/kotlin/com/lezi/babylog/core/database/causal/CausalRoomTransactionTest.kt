@@ -11,7 +11,12 @@ import com.lezi.babylog.core.database.LeziDatabase
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.RoomDatabaseTransactionRunner
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -311,6 +316,230 @@ class CausalRoomTransactionTest {
         assertThat(sources.listMembers("rel-1")).hasSize(2)
         assertThat(records.getByClientUuid("source-r")?.deletedAt).isNull()
         assertThat(records.getByClientUuid("display-r")?.deletedAt).isNull()
+    }
+
+    @Test
+    fun relationOnlyDeltaInvalidatesObserversAndRollsBackWithTheOuterPage() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val invalidation = async {
+            withTimeout(1_000) {
+                sources.observeAllMembers().drop(1).first()
+            }
+        }
+        yield()
+
+        sources.applyPullSummary(
+            relationId = "rel-observed",
+            recordClientUuid = "display-observed",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("source-observed"),
+            observedAt = 20,
+        )
+
+        assertThat(invalidation.await().map { it.recordClientUuid })
+            .containsExactly("display-observed", "source-observed")
+        val rollback = runCatching {
+            RoomDatabaseTransactionRunner(database).run {
+                sources.applyPullSummary(
+                    relationId = "rel-rolled-back",
+                    recordClientUuid = "display-rolled-back",
+                    role = SourceRelationRole.DISPLAY,
+                    peerIds = listOf("source-rolled-back"),
+                    observedAt = 30,
+                )
+                error("record body dependency failed")
+            }
+        }
+        assertThat(rollback.exceptionOrNull()).isNotNull()
+        assertThat(sources.get("rel-rolled-back")).isNull()
+        assertThat(sources.listMembers("rel-rolled-back")).isEmpty()
+    }
+
+    @Test
+    fun sourceFirstPullDeltaSurvivesReopenAndDisplayFinalizesCanonicalSet() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val databaseName = "source-relation-${System.nanoTime()}.db"
+        var local = Room.databaseBuilder(context, LeziDatabase::class.java, databaseName).build()
+        try {
+            val firstDao = local.sourceRelationDao()
+            val invalidation = async {
+                withTimeout(1_000) {
+                    firstDao.observeAllMembers().drop(1).first()
+                }
+            }
+            yield()
+            firstDao.applyPullSummary(
+                relationId = "rel-restart",
+                recordClientUuid = "source-a",
+                role = SourceRelationRole.SOURCE,
+                peerIds = listOf("display", "source-b"),
+                observedAt = 40,
+            )
+            assertThat(invalidation.await().map { it.recordClientUuid })
+                .containsExactly("source-a")
+            assertThat(firstDao.get("rel-restart")?.displayClientUuid).isEmpty()
+
+            local.close()
+            local = Room.databaseBuilder(context, LeziDatabase::class.java, databaseName).build()
+            val restartedDao = local.sourceRelationDao()
+            assertThat(restartedDao.observeAllMembers().first().map { it.recordClientUuid })
+                .containsExactly("source-a")
+            restartedDao.applyPullSummary(
+                relationId = "rel-restart",
+                recordClientUuid = "display",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("source-a", "source-b"),
+                observedAt = 41,
+            )
+
+            assertThat(restartedDao.get("rel-restart")?.displayClientUuid).isEqualTo("display")
+            assertThat(restartedDao.listMembers("rel-restart"))
+                .containsExactly(
+                    SourceRelationMemberEntity("rel-restart", "display", SourceRelationRole.DISPLAY),
+                    SourceRelationMemberEntity("rel-restart", "source-a", SourceRelationRole.SOURCE),
+                    SourceRelationMemberEntity("rel-restart", "source-b", SourceRelationRole.SOURCE),
+                )
+        } finally {
+            local.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun legacyPullMarkerUpgradesThroughPublicTransitionAndFreezesClosedSet() = runBlocking {
+        val relationId = "rel-legacy"
+        val sqlite = database.openHelper.writableDatabase
+        sqlite.execSQL(
+            """
+            INSERT INTO source_relations(
+                relationId, displayClientUuid, mediaRetained, reason, mutationId,
+                createdByMembershipId, createdAt
+            ) VALUES (?, ?, 1, ?, ?, '', 1)
+            """.trimIndent(),
+            arrayOf(relationId, "display", SourceRelationReason.PULL_SUMMARY, "pull-$relationId"),
+        )
+        sqlite.execSQL(
+            "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+            arrayOf(relationId, "display", SourceRelationRole.DISPLAY),
+        )
+        sqlite.execSQL(
+            "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+            arrayOf(relationId, "source", SourceRelationRole.SOURCE),
+        )
+        val sources = database.sourceRelationDao()
+
+        sources.applyPullSummary(
+            relationId = relationId,
+            recordClientUuid = "source",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display"),
+            observedAt = 2,
+        )
+
+        assertThat(sources.get(relationId)?.mutationId).startsWith("pull-$relationId:")
+        val drift = runCatching {
+            sources.applyPullSummary(
+                relationId = relationId,
+                recordClientUuid = "source",
+                role = SourceRelationRole.SOURCE,
+                peerIds = listOf("display", "other"),
+                observedAt = 3,
+            )
+        }
+        assertThat(drift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.listMembers(relationId).map { it.recordClientUuid })
+            .containsExactly("display", "source")
+    }
+
+    @Test
+    fun pendingPullMemberRoleDriftRollsBack() = runBlocking {
+        val sources = database.sourceRelationDao()
+        sources.applyPullSummary(
+            relationId = "rel-role-drift",
+            recordClientUuid = "source-a",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display", "source-b"),
+            observedAt = 1,
+        )
+
+        val drift = runCatching {
+            sources.applyPullSummary(
+                relationId = "rel-role-drift",
+                recordClientUuid = "source-a",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("display", "source-b"),
+                observedAt = 2,
+            )
+        }
+
+        assertThat(drift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-role-drift")?.displayClientUuid).isEmpty()
+        assertThat(sources.listMembers("rel-role-drift"))
+            .containsExactly(
+                SourceRelationMemberEntity(
+                    "rel-role-drift",
+                    "source-a",
+                    SourceRelationRole.SOURCE,
+                ),
+            )
+    }
+
+    @Test
+    fun malformedCanonicalTransitionAndPeerSetDriftRollBack() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val relation = SourceRelationEntity(
+            relationId = "rel-invalid",
+            displayClientUuid = "display",
+            mediaRetained = true,
+            reason = SourceRelationReason.OWNER_GROUP_RESOLVE,
+            mutationId = "mut-invalid",
+            createdByMembershipId = "owner",
+            createdAt = 50,
+        )
+        val relationMismatch = runCatching {
+            sources.applyOwnerGroupResolution(
+                relation,
+                listOf(
+                    SourceRelationMemberEntity("other-relation", "display", SourceRelationRole.DISPLAY),
+                    SourceRelationMemberEntity("rel-invalid", "source", SourceRelationRole.SOURCE),
+                ),
+            )
+        }
+        assertThat(relationMismatch.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-invalid")).isNull()
+
+        val invalidRole = runCatching {
+            sources.applyOwnerGroupResolution(
+                relation,
+                listOf(
+                    SourceRelationMemberEntity("rel-invalid", "display", SourceRelationRole.DISPLAY),
+                    SourceRelationMemberEntity("rel-invalid", "source", "winner"),
+                ),
+            )
+        }
+        assertThat(invalidRole.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-invalid")).isNull()
+
+        sources.applyPullSummary(
+            relationId = "rel-peer-drift",
+            recordClientUuid = "source-a",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display", "source-b"),
+            observedAt = 60,
+        )
+        val peerDrift = runCatching {
+            sources.applyPullSummary(
+                relationId = "rel-peer-drift",
+                recordClientUuid = "display",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("source-a"),
+                observedAt = 61,
+            )
+        }
+        assertThat(peerDrift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-peer-drift")?.displayClientUuid).isEmpty()
+        assertThat(sources.listMembers("rel-peer-drift").map { it.recordClientUuid })
+            .containsExactly("source-a")
     }
 
     @Test

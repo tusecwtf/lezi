@@ -776,6 +776,17 @@ class CareLog @Inject constructor(
     suspend fun sourceRoleClientUuids(): Set<String> =
         sourceRelationCoordinator.sourceRoleClientUuids()
 
+    fun observeSourceRoleClientUuids(): Flow<Set<String>> =
+        sourceRelationCoordinator.observeSourceRoleClientUuids()
+
+    fun listOpenSuspectedDuplicateGroups(
+        records: List<Record>,
+        sourceRoleClientUuids: Set<String>,
+    ): List<SuspectedDuplicateGroup> = sourceRelationCoordinator.openSuspectedGroups(
+        records,
+        sourceRoleClientUuids,
+    )
+
     /**
      * Ordinary timeline/stats projection: drop source-role UUIDs, keep display + independents.
      */
@@ -785,14 +796,24 @@ class CareLog @Inject constructor(
             sourceRelationCoordinator.sourceRoleClientUuids(),
         )
 
+    fun projectOrdinaryRecords(
+        records: List<Record>,
+        sourceRoleClientUuids: Set<String>,
+    ): List<Record> = SuspectedDuplicateBounds.filterDisplayProjection(
+        records,
+        sourceRoleClientUuids,
+    )
+
     suspend fun daySummaryBounds(
         records: List<Record>,
         date: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
         now: Long = clock.nowMillis(),
+        sourceRoleClientUuids: Set<String>? = null,
     ): CareDayBounds {
-        val projected = projectOrdinaryRecords(records)
-        val openGroups = sourceRelationCoordinator.openSuspectedGroups(projected)
+        val sourceRoles = sourceRoleClientUuids ?: sourceRelationCoordinator.sourceRoleClientUuids()
+        val projected = projectOrdinaryRecords(records, sourceRoles)
+        val openGroups = sourceRelationCoordinator.openSuspectedGroups(projected, sourceRoles)
         return SuspectedDuplicateBounds.day(projected, openGroups, date, zone, now)
     }
 
@@ -818,9 +839,10 @@ class CareLog @Inject constructor(
     suspend fun timelineDuplicateRows(
         records: List<Record>,
         expandedGroupIds: Set<String>? = null,
+        sourceRoleClientUuids: Set<String>? = null,
     ): List<com.lezi.babylog.domain.carelog.TimelineDuplicateRow> {
-        val sourceRoles = sourceRelationCoordinator.sourceRoleClientUuids()
-        val openGroups = sourceRelationCoordinator.openSuspectedGroups(records)
+        val sourceRoles = sourceRoleClientUuids ?: sourceRelationCoordinator.sourceRoleClientUuids()
+        val openGroups = sourceRelationCoordinator.openSuspectedGroups(records, sourceRoles)
         return com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation.timelineRows(
             records = records,
             openGroups = openGroups,

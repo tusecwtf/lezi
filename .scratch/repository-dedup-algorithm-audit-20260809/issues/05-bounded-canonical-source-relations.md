@@ -1,6 +1,6 @@
 # 05 — 将 source relation 收敛为一个有界 canonical graph
 
-Status: ready-for-agent
+Status: implemented
 
 Priority: P1
 
@@ -31,20 +31,36 @@ validation、rev emission 和 pull projection。Android 将 relation sidecar 视
 
 ## Acceptance
 
-- [ ] 每个 live record 在一个确定 canonical component 中至多一个角色；Owner resolve 原子合并/替代
+- [x] 每个 live record 在一个确定 canonical component 中至多一个角色；Owner resolve 原子合并/替代
   相关 half-edge，旧 relation 不再被无序读取
-- [ ] 非白名单、同作者-only、错 baby/type、超过 30 分钟、disconnected extra、重复 record 与超限
+- [x] 非白名单、同作者-only、错 baby/type、超过 30 分钟、disconnected extra、重复 record 与超限
   request 全部以稳定 code 拒绝；恰好 30 分钟合法，缺合法邻居返回 `incomplete_group`
-- [ ] 明确 member 与候选扫描上限；bulk load + sorted window/有界图替代 per-member SQL 和全 pair 扩张
-- [ ] relation durable transition 推进所有受影响 record 的 pull rev；普通 entity body/version 可不变
-- [ ] Android 在 same-version/dirty early-return 前独立校验并事务应用 sidecar；关系表变更有 observable
+- [x] 明确 member 与候选扫描上限；bulk load + sorted window/有界图替代 per-member SQL 和全 pair 扩张
+- [x] relation durable transition 推进所有受影响 record 的 pull rev；普通 entity body/version 可不变
+- [x] Android 在 same-version/dirty early-return 前独立校验并事务应用 sidecar；关系表变更有 observable
   invalidation，Timeline/Summary/Log 立即重算
-- [ ] peer 从“关系写入前 current cursor”增量 pull 能看到所有 member 的同一 summary；restart 后一致
-- [ ] record 仍 live、媒体永久可追溯；不得用 tombstone 或隐式 winner 代替来源关系
+- [x] peer 从“关系写入前 current cursor”增量 pull 能看到所有 member 的同一 summary；restart 后一致
+- [x] record 仍 live、媒体永久可追溯；不得用 tombstone 或隐式 winner 代替来源关系
 
 ## Validation
 
-- [ ] Store graph-transition、2/3/limit 组、非法 extra、cursor/replay/query-budget tests 通过
-- [ ] Android same-version sidecar 与 relation-only Room invalidation tests 通过
-- [ ] 隔离双客户端 resolve 后 source 从普通统计消失、详情仍可展开的 smoke 通过
-- [ ] Rust gates、相关 Android JVM/lint/assemble 通过
+- [x] Store graph-transition、2/3/limit 组、非法 extra、cursor/replay/query-budget tests 通过
+- [x] Android same-version sidecar JVM test 通过；relation-only Room invalidation/rollback instrumentation
+  test 已编译（当前无设备，未执行）
+- [x] 隔离双客户端 Router/Store + JVM product projection smoke 通过：resolve 后 source 从普通投影消失，
+  relation detail 仍保留，restart 后增量 pull summary 一致
+- [x] Rust gates、相关 Android JVM/lint/assemble 通过
+
+## Implementation evidence
+
+- Fixed implementation base: `4401004392d91084a67dfd95a20ec561f2379bd6`.
+- Rust: `cargo fmt --all -- --check`; `cargo test --locked`（222 lib + 171 API + 2 TLS）；
+  `cargo clippy --all-targets --all-features -- -D warnings`.
+- Android: `:sync:testDebugUnitTest`, `:domain:testDebugUnitTest`, `:feature:log:testDebugUnitTest`,
+  `:feature:summary:testDebugUnitTest`, `lintDebug`, `:app:assembleDebug`, and
+  `:core:database:compileDebugAndroidTestKotlin`.
+- Device boundary: `adb devices -l` returned no attached device/emulator, so instrumentation execution and
+  physical-device UI smoke remain unclaimed. No NAS, image, package, deployment, or production endpoint was used.
+- Review closure: Standards hard findings were repaired with the indexed eligibility projection, one durable
+  mutation-receipt ledger, protected Android canonical transition, legacy pull-marker upgrade, and member-role
+  drift rejection. The Spec axis found no remaining acceptance gap on the fixed base.

@@ -6,7 +6,20 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.Flow
+
+private fun sourceRelationMemberSetFingerprint(memberIds: Set<String>): String {
+    val canonical = memberIds.sorted().joinToString(separator = "") { memberId ->
+        val bytes = memberId.toByteArray(Charsets.UTF_8)
+        "${bytes.size}:$memberId"
+    }
+    return MessageDigest.getInstance("SHA-256")
+        .digest(canonical.toByteArray(Charsets.UTF_8))
+        .joinToString(separator = "") { byte ->
+            (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+        }
+}
 
 @Dao
 interface WakeObservationDao {
@@ -224,24 +237,27 @@ interface SuspectedDuplicateGroupDao {
 }
 
 @Dao
-interface SourceRelationDao {
+abstract class SourceRelationDao {
     @Query("SELECT * FROM source_relations WHERE relationId = :relationId LIMIT 1")
-    suspend fun get(relationId: String): SourceRelationEntity?
+    abstract suspend fun get(relationId: String): SourceRelationEntity?
 
     @Query("SELECT * FROM source_relations ORDER BY createdAt ASC")
-    suspend fun listAll(): List<SourceRelationEntity>
+    abstract suspend fun listAll(): List<SourceRelationEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(entity: SourceRelationEntity)
+    protected abstract suspend fun upsertRelationRow(entity: SourceRelationEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertMember(member: SourceRelationMemberEntity)
+    protected abstract suspend fun upsertMemberRow(member: SourceRelationMemberEntity)
 
     @Query("SELECT * FROM source_relation_members WHERE relationId = :relationId")
-    suspend fun listMembers(relationId: String): List<SourceRelationMemberEntity>
+    abstract suspend fun listMembers(relationId: String): List<SourceRelationMemberEntity>
 
     @Query("SELECT * FROM source_relation_members")
-    suspend fun listAllMembers(): List<SourceRelationMemberEntity>
+    abstract suspend fun listAllMembers(): List<SourceRelationMemberEntity>
+
+    @Query("SELECT * FROM source_relation_members ORDER BY relationId, recordClientUuid")
+    abstract fun observeAllMembers(): Flow<List<SourceRelationMemberEntity>>
 
     @Query(
         """
@@ -249,13 +265,39 @@ interface SourceRelationDao {
         WHERE recordClientUuid = :recordClientUuid
         """,
     )
-    suspend fun listMembersForRecord(recordClientUuid: String): List<SourceRelationMemberEntity>
+    abstract suspend fun listMembersForRecord(
+        recordClientUuid: String,
+    ): List<SourceRelationMemberEntity>
+
+    @Query(
+        """
+        DELETE FROM source_relation_members
+        WHERE recordClientUuid IN (:recordClientUuids)
+          AND relationId != :relationId
+        """,
+    )
+    protected abstract suspend fun deleteOtherMemberships(
+        relationId: String,
+        recordClientUuids: List<String>,
+    )
+
+    @Query(
+        """
+        DELETE FROM source_relation_members
+        WHERE relationId = :relationId
+          AND recordClientUuid NOT IN (:recordClientUuids)
+        """,
+    )
+    protected abstract suspend fun deleteMembersOutsideCanonicalSet(
+        relationId: String,
+        recordClientUuids: List<String>,
+    )
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsertDeclaration(declaration: SourceRelationDeclarationEntity)
+    abstract suspend fun upsertDeclaration(declaration: SourceRelationDeclarationEntity)
 
     @Query("SELECT * FROM source_relation_declarations WHERE mutationId = :mutationId LIMIT 1")
-    suspend fun getDeclaration(mutationId: String): SourceRelationDeclarationEntity?
+    abstract suspend fun getDeclaration(mutationId: String): SourceRelationDeclarationEntity?
 
     @Query(
         """
@@ -264,14 +306,14 @@ interface SourceRelationDao {
         ORDER BY createdAt ASC
         """,
     )
-    suspend fun listPendingDeclarations(): List<SourceRelationDeclarationEntity>
+    abstract suspend fun listPendingDeclarations(): List<SourceRelationDeclarationEntity>
 
     /**
      * Apply a source relation + members (+ optional declaration status) atomically.
      * Never mutates Record.deletedAt or ordinary media tombstones.
      */
     @Transaction
-    suspend fun applyRelation(
+    open suspend fun applyCanonicalTransition(
         relation: SourceRelationEntity,
         members: List<SourceRelationMemberEntity>,
         declaration: SourceRelationDeclarationEntity? = null,
@@ -284,11 +326,143 @@ interface SourceRelationDao {
         ) {
             "unknown source relation reason: ${relation.reason}"
         }
-        upsert(relation)
-        members.forEach { upsertMember(it) }
+        val canonicalMembers = members.distinctBy { it.recordClientUuid }
+        require(canonicalMembers.size == members.size) { "duplicate source relation member" }
+        require(canonicalMembers.isNotEmpty()) { "source relation requires a member" }
+        require(canonicalMembers.size <= 64) { "source relation exceeds canonical member limit" }
+        require(canonicalMembers.all { it.relationId == relation.relationId }) {
+            "source relation member relationId mismatch"
+        }
+        require(canonicalMembers.all { it.recordClientUuid.isNotBlank() }) {
+            "source relation member UUID must not be blank"
+        }
+        require(canonicalMembers.all {
+            it.role == SourceRelationRole.DISPLAY || it.role == SourceRelationRole.SOURCE
+        }) { "unknown source relation member role" }
+        val displays = canonicalMembers.filter { it.role == SourceRelationRole.DISPLAY }
+        if (relation.displayClientUuid.isBlank()) {
+            require(relation.reason == SourceRelationReason.PULL_SUMMARY && displays.isEmpty()) {
+                "only a pending pull delta may omit the display member"
+            }
+        } else {
+            require(displays.singleOrNull()?.recordClientUuid == relation.displayClientUuid) {
+                "canonical source relation requires exactly one matching display member"
+            }
+        }
+        val recordClientUuids = canonicalMembers.map { it.recordClientUuid }
+        deleteOtherMemberships(relation.relationId, recordClientUuids)
+        deleteMembersOutsideCanonicalSet(relation.relationId, recordClientUuids)
+        upsertRelationRow(relation)
+        canonicalMembers.forEach { upsertMemberRow(it) }
         if (declaration != null) {
             upsertDeclaration(declaration)
         }
+    }
+
+    /**
+     * Apply one wire §12.3 sidecar as an independent durable delta.
+     *
+     * A source-role page may arrive before its display peer; in that case only
+     * the observed source is committed. The later display-role sidecar carries
+     * the same closed peer set and atomically completes the canonical component.
+     */
+    @Transaction
+    open suspend fun applyPullSummary(
+        relationId: String,
+        recordClientUuid: String,
+        role: String,
+        peerIds: List<String>,
+        observedAt: Long,
+    ) {
+        require(relationId.isNotBlank()) { "source relation id must not be blank" }
+        require(role == SourceRelationRole.DISPLAY || role == SourceRelationRole.SOURCE) {
+            "unknown source relation role: $role"
+        }
+        require(recordClientUuid !in peerIds) { "source relation peers must exclude self" }
+        require(peerIds.distinct().size == peerIds.size) { "duplicate source relation peer" }
+        require(peerIds.size < 64) { "source relation exceeds canonical member limit" }
+        val closedMemberIds = (peerIds + recordClientUuid).toSet()
+        val memberSetFingerprint = sourceRelationMemberSetFingerprint(closedMemberIds)
+        val pullMutationId = "pull-$relationId:$memberSetFingerprint"
+        val legacyPullMutationId = "pull-$relationId"
+        val existing = get(relationId)
+        val existingMembers = listMembers(relationId)
+        require(existingMembers.all { it.recordClientUuid in closedMemberIds }) {
+            "source relation peer set drift"
+        }
+        require(existingMembers.all { it.relationId == relationId }) {
+            "source relation member relationId mismatch"
+        }
+        require(existingMembers.none {
+            it.recordClientUuid == recordClientUuid && it.role != role
+        }) {
+            "source relation member role drift"
+        }
+        if (existing != null) {
+            if (existing.reason == SourceRelationReason.PULL_SUMMARY) {
+                when (existing.mutationId) {
+                    pullMutationId -> Unit
+                    legacyPullMutationId -> if (existing.displayClientUuid.isNotBlank()) {
+                        require(existingMembers.mapTo(mutableSetOf()) { it.recordClientUuid } == closedMemberIds) {
+                            "source relation peer set drift"
+                        }
+                    }
+                    else -> throw IllegalArgumentException("source relation peer set drift")
+                }
+            } else if (existing.displayClientUuid.isNotBlank()) {
+                require(existingMembers.mapTo(mutableSetOf()) { it.recordClientUuid } == closedMemberIds) {
+                    "source relation peer set drift"
+                }
+            }
+        }
+        if (role == SourceRelationRole.DISPLAY) {
+            require(existing?.displayClientUuid.isNullOrBlank() || existing.displayClientUuid == recordClientUuid) {
+                "source relation display drift"
+            }
+        }
+        val displayClientUuid = when {
+            role == SourceRelationRole.DISPLAY -> recordClientUuid
+            !existing?.displayClientUuid.isNullOrBlank() -> existing!!.displayClientUuid
+            else -> ""
+        }
+        if (displayClientUuid.isNotBlank()) {
+            require(displayClientUuid in closedMemberIds) { "source relation peer set omits display" }
+        }
+        val reason = existing?.reason
+            ?.takeUnless { it == SourceRelationReason.PULL_SUMMARY }
+            ?: SourceRelationReason.PULL_SUMMARY
+        val relation = SourceRelationEntity(
+            relationId = relationId,
+            displayClientUuid = displayClientUuid,
+            mediaRetained = true,
+            reason = reason,
+            mutationId = when (existing?.mutationId) {
+                null, "", legacyPullMutationId -> pullMutationId
+                else -> existing.mutationId
+            },
+            createdByMembershipId = existing?.createdByMembershipId.orEmpty(),
+            createdAt = existing?.createdAt ?: observedAt,
+        )
+        val memberRoles = linkedMapOf<String, String>()
+        if (displayClientUuid.isBlank()) {
+            existingMembers.forEach { member ->
+                memberRoles[member.recordClientUuid] = member.role
+            }
+        }
+        memberRoles[recordClientUuid] = role
+        if (displayClientUuid.isNotBlank()) {
+            peerIds.forEach { peerId ->
+                memberRoles[peerId] = if (peerId == displayClientUuid) {
+                    SourceRelationRole.DISPLAY
+                } else {
+                    SourceRelationRole.SOURCE
+                }
+            }
+        }
+        val members = memberRoles.map { (clientUuid, memberRole) ->
+            SourceRelationMemberEntity(relationId, clientUuid, memberRole)
+        }
+        applyCanonicalTransition(relation, members)
     }
 
     /**
@@ -296,18 +470,18 @@ interface SourceRelationDao {
      * Never mutates Record.deletedAt or ordinary media tombstones.
      */
     @Transaction
-    suspend fun applyOwnerGroupResolution(
+    open suspend fun applyOwnerGroupResolution(
         relation: SourceRelationEntity,
         members: List<SourceRelationMemberEntity>,
     ) {
         require(relation.reason == SourceRelationReason.OWNER_GROUP_RESOLVE) {
             "applyOwnerGroupResolution requires owner_group_resolve reason"
         }
-        applyRelation(relation, members)
+        applyCanonicalTransition(relation, members)
     }
 
     @Transaction
-    suspend fun applyAuthorDeclaration(
+    open suspend fun applyAuthorDeclaration(
         relation: SourceRelationEntity,
         members: List<SourceRelationMemberEntity>,
         declaration: SourceRelationDeclarationEntity,
@@ -315,17 +489,17 @@ interface SourceRelationDao {
         require(relation.reason == SourceRelationReason.AUTHOR_DECLARE) {
             "applyAuthorDeclaration requires author_declare reason"
         }
-        applyRelation(relation, members, declaration)
+        applyCanonicalTransition(relation, members, declaration)
     }
 
     @Query("DELETE FROM source_relation_members")
-    suspend fun deleteAllMembers()
+    abstract suspend fun deleteAllMembers()
 
     @Query("DELETE FROM source_relation_declarations")
-    suspend fun deleteAllDeclarations()
+    abstract suspend fun deleteAllDeclarations()
 
     @Query("DELETE FROM source_relations")
-    suspend fun deleteAll()
+    abstract suspend fun deleteAll()
 }
 
 @Dao

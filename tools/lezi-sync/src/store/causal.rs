@@ -355,6 +355,14 @@ fn upsert_entity_projection(
             rev
         ],
     )?;
+    super::source_relations::project_record_eligibility(
+        tx,
+        family_id,
+        entity_type,
+        client_uuid,
+        deleted_at,
+        root,
+    )?;
     Ok(())
 }
 

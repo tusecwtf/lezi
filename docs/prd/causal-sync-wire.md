@@ -560,11 +560,44 @@ media_uuid(wake) = UUIDv5(NAMESPACE, UTF-8(NAME_MEDIA))
 源记录 **保持 live 实体**（`deleted_at=null`）；时间轴主路径只展示 display；来源可展开。
 **禁止** 用 `deleted_at` 表示来源隐藏。
 
+**Canonical / bounds（冻结）：** 一个 live Record 同时至多属于一个 canonical source
+component、且在其中恰有一个 `display|source` role。`member_client_uuids` 必须无重复、至多 64
+条；服务器一次至多扫描 256 条同 baby + 精确 type 的 live 邻域候选。校验必须 bulk-load named
+members；Record 稳定发布/墓碑同步维护 source-relation Module 私有的 eligibility projection，候选
+查询必须用 `(family,baby,type,timestamp,uuid)` 索引范围 + 257 行 fail-closed sentinel，不得扫描/排序
+全 family JSON。随后在 `timestamp, client_uuid` 稳定排序的含边界 30 分钟窗口内构造有界连通关系；
+不得在 family write lock 内逐 member 查询或物化无界全 pair graph。Owner resolve 原子停用所有完全包含于
+本次 member set 的旧 half-edge/component，再写一个 canonical component；旧 mutation 的精确 replay
+仍返回原 receipt，但不重新激活旧 component。每次 transition 同事务推进所有 member Record 的 pull
+rev，普通 root/version 保持不变。
+
+所有 mutation id 合法的 `accepted|cas_mismatch|rejected` 结果都在业务状态校验返回前以 canonical
+request fingerprint + closed receipt blob 写入单一 receipt ledger；精确 replay 返回原 receipt，内容漂移
+稳定返回 `content_drift`，不得因 Record/version/relation 后续变化重新求值。
+
+语义拒绝返回 `status=rejected` + 稳定 `code`：`duplicate_member`、`too_many_members`、
+`unsupported_record_type`、`same_author_only`、`wrong_baby_or_type`、`outside_time_window`、
+`disconnected_group`、`incomplete_group`、`candidate_limit_exceeded`、`already_related`、
+`content_drift`（以及 request shape 的 `invalid_mutation_id|too_few_members|display_not_member|`
+`incomplete_expected_versions|not_live_record|invalid_record`）。恰好 30 分钟合法；named set 漏掉同一
+连通分量内的合法邻居必须为 `incomplete_group`，不得静默接受。
+
 ### 12.3 Pull 可见性
 
 稳定实体可附可选 `source_relation_summary?`：`{ relation_id, role: display\|source, peer_ids[] }`。
 无关系则省略。关系耐久写入必须重新发射每个成员 Record；完整 summary 先参与普通 pull 的
 summary/实体数/最终 JSON envelope 分页预算，再决定 cursor，禁止在 cursor 后追加或省略。
+
+Android 把该 summary 当作独立 durable delta：先校验并事务应用 relation component，再决定相同
+`version_id`、dirty root 或旧 `updated_at` 的 Record body 是否需要重写。Room relation member 查询必须
+提供 observable invalidation；Timeline、Summary 与 Log 的普通投影同时观察该 Flow，使 relation-only
+pull 无需改写 Record body 即可立即隐藏 source、保留可展开 provenance。sidecar transaction 仍嵌套在
+整页 Room transaction 内；若同页其它 root dependency 失败，整页（含 relation）回滚且 cursor 不前进。
+若 source-role 页先于 display-role 页到达，Room 以 `displayClientUuid=""` 明确保存 pending pull delta，
+仅让已观察 source 参与 Flow，并在 synthetic pull mutation id 中持久绑定 closed member-set fingerprint；
+不得从无 role 的 peer id 猜 display。display-role summary 到达时必须与既有 relation/closed peer set
+fingerprint 精确一致，并在同一事务替换为恰有一个 display 的完整 canonical component。
+底层 relation/member 写方法不对产品层公开，所有写入只能经过上述 canonical transition。
 
 ---
 

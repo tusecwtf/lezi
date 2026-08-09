@@ -414,12 +414,40 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
         PRIMARY KEY (family_id, relation_id)
     );
 
+    CREATE TABLE source_relation_mutation_receipts (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        mutation_id TEXT NOT NULL,
+        request_kind TEXT NOT NULL CHECK(request_kind IN (
+            'author_declare', 'owner_group_resolve'
+        )),
+        request_fingerprint TEXT NOT NULL,
+        receipt_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, mutation_id)
+    );
+
+    CREATE TABLE source_relation_record_eligibility (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        record_client_uuid TEXT NOT NULL,
+        baby_client_uuid TEXT NOT NULL,
+        record_type TEXT NOT NULL,
+        record_timestamp INTEGER NOT NULL,
+        author_membership_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, record_client_uuid)
+    );
+    CREATE INDEX source_relation_eligibility_window
+        ON source_relation_record_eligibility(
+            family_id, baby_client_uuid, record_type,
+            record_timestamp, record_client_uuid
+        );
+
     CREATE TABLE source_relation_members (
         family_id TEXT NOT NULL,
         relation_id TEXT NOT NULL,
         record_client_uuid TEXT NOT NULL,
         role TEXT NOT NULL CHECK(role IN ('display', 'source')),
         PRIMARY KEY (family_id, relation_id, record_client_uuid),
+        UNIQUE (family_id, record_client_uuid),
         FOREIGN KEY (family_id, relation_id)
             REFERENCES source_relations(family_id, relation_id) ON DELETE CASCADE
     );
