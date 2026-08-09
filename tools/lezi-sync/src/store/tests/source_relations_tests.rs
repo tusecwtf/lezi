@@ -184,6 +184,48 @@ fn author_declare_creates_source_relation_without_tombstone() {
 }
 
 #[test]
+fn source_relation_write_reemits_unchanged_stable_roots_after_the_prior_cursor() {
+    let fx = Fx::new();
+    let display = Uuid::new_v4();
+    let source = Uuid::new_v4();
+    let display_version = fx.commit_record(&fx.owner, display, "keep", 100);
+    let source_version = fx.commit_record(&fx.member, source, "source", 120);
+    let cursor_before_relation = fx.store.pull(&fx.family_id, 0).unwrap().cursor;
+
+    let receipt = fx
+        .store
+        .declare_source_relation(
+            &fx.member,
+            DeclareSourceRelationInput {
+                mutation_id: "mut-reemit-after-cursor".to_owned(),
+                record_client_uuid: source.to_string(),
+                equivalent_to_client_uuid: display.to_string(),
+                expected_record_version: source_version.clone(),
+                expected_other_version: display_version.clone(),
+            },
+            1_700_000_100,
+        )
+        .unwrap();
+    assert_eq!(receipt.status, "accepted");
+
+    let page = fx
+        .store
+        .pull(&fx.family_id, cursor_before_relation)
+        .unwrap();
+    assert_eq!(page.entities.len(), 2);
+    for (record_id, version_id) in [(display, display_version), (source, source_version)] {
+        let entity = page
+            .entities
+            .iter()
+            .find(|entity| entity.client_uuid == record_id.to_string())
+            .expect("relation member must be re-emitted");
+        assert_eq!(entity.version_id.as_deref(), Some(version_id.as_str()));
+        assert!(entity.source_relation_summary.is_some());
+    }
+    assert!(!page.has_more);
+}
+
+#[test]
 fn author_cannot_declare_others_record() {
     let fx = Fx::new();
     let a = Uuid::new_v4();

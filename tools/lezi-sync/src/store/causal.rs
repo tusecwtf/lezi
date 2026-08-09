@@ -307,7 +307,7 @@ fn load_receipt(
     .map_err(StoreError::from)
 }
 
-fn advance_rev(tx: &Transaction<'_>, family_id: &str) -> Result<i64, StoreError> {
+pub(super) fn advance_rev(tx: &Transaction<'_>, family_id: &str) -> Result<i64, StoreError> {
     tx.execute(
         "UPDATE family_meta SET rev = rev + 1 WHERE family_id = ?1",
         params![family_id],

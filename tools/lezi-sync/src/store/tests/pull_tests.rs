@@ -431,6 +431,7 @@ fn pull_page_is_bounded_by_serialized_bytes_as_well_as_entity_count() {
     assert!(first.cursor < 11);
     assert!(serialized_bytes <= PULL_PAGE_TARGET_BYTES);
 }
+
 #[test]
 fn push_rejects_an_entity_that_cannot_fit_on_a_bounded_pull_page() {
     let directory = TempDir::new().unwrap();

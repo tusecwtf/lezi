@@ -280,10 +280,15 @@ Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
 - 新建或更新未解决的 `conflict_id`；
 - 新建 `branch_version_id`（`branched` 提交）；
 - 更新 tombstone-scoped restore 句柄（§8.2）的可见摘要。
+- 新建或更新 `source_relation_summary`（§12.3）；关系中的每个 Record 都必须推进自身
+  pull cursor/rev，即使其稳定 `version_id` 未变。
 
 `conflict_summary` 在存在未解决并发分支**或** restorable 纯 tombstone 句柄时必填；无上述情况时省略。页界仍适用。对端不得因「stable version_id 未变」而永久看不到分支或 restore 句柄。
 
 **不** 在普通 pull 返回：分支 root 全文、媒体 bytes、版本图。每页 conflict_summary ≤ 32。
+第 33 个 mandatory summary 必须留到下一页，并把本页 cursor 截在该实体尚未披露的 rev 之前；
+不得先推进 cursor 再静默省略。实体数和字节上限同样以附完 branch IDs、relation peers 的最终
+HTTP JSON envelope 为准；一个完整 dependency group 本身无法装入时 fail closed。
 
 ---
 
@@ -558,7 +563,8 @@ media_uuid(wake) = UUIDv5(NAMESPACE, UTF-8(NAME_MEDIA))
 ### 12.3 Pull 可见性
 
 稳定实体可附可选 `source_relation_summary?`：`{ relation_id, role: display\|source, peer_ids[] }`。
-无关系则省略。
+无关系则省略。关系耐久写入必须重新发射每个成员 Record；完整 summary 先参与普通 pull 的
+summary/实体数/最终 JSON envelope 分页预算，再决定 cursor，禁止在 cursor 后追加或省略。
 
 ---
 

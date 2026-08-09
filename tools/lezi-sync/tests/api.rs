@@ -15461,6 +15461,209 @@ async fn two_joined_clients(
     (owner, member)
 }
 
+#[tokio::test]
+async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() {
+    async fn pull_page_bytes(
+        app: &Router,
+        token: &str,
+        generation: &str,
+        cursor: i64,
+    ) -> (Bytes, Value) {
+        let response = request(
+            app,
+            Method::GET,
+            &format!("/v1/pull?cursor={cursor}&generation={generation}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            bytes.len() <= 8 * 1024 * 1024,
+            "final pull envelope exceeded byte budget: {}",
+            bytes.len()
+        );
+        let value = serde_json::from_slice(&bytes).unwrap();
+        (bytes, value)
+    }
+
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "sidecar-page-owner", "sidecar-page-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let records = (0..33).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| {
+                causal_unit(
+                    Uuid::new_v4(),
+                    None,
+                    "record",
+                    *record_id,
+                    causal_formula_root(
+                        baby_id,
+                        &format!("base-{index}"),
+                        50 + index as i64,
+                        20 + index as i64,
+                    ),
+                    vec![],
+                    false,
+                )
+            })
+            .collect(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base_versions = created["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| {
+            assert_eq!(result["status"], "accepted", "{result}");
+            result["stable_version_id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    let (status, accepted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| {
+                causal_unit(
+                    Uuid::new_v4(),
+                    Some(&base_versions[index]),
+                    "record",
+                    *record_id,
+                    causal_formula_root(
+                        baby_id,
+                        &format!("stable-{index}"),
+                        50 + index as i64,
+                        100 + index as i64,
+                    ),
+                    vec![],
+                    false,
+                )
+            })
+            .collect(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let stable_versions = accepted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| {
+            assert_eq!(result["status"], "accepted", "{result}");
+            result["stable_version_id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    let (_, baseline) = pull_page_bytes(&rig.app, owner_token, generation, 0).await;
+    let baseline_cursor = baseline["cursor"].as_i64().unwrap();
+
+    let (status, branched) = causal_commit_units(
+        &rig.app,
+        member_token,
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| {
+                causal_unit(
+                    Uuid::new_v4(),
+                    Some(&base_versions[index]),
+                    "record",
+                    *record_id,
+                    causal_formula_root(
+                        baby_id,
+                        &format!("branch-{index}"),
+                        50 + index as i64,
+                        200 + index as i64,
+                    ),
+                    vec![],
+                    false,
+                )
+            })
+            .collect(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{branched}");
+    assert!(branched["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result["status"] == "branched"));
+    let (status, relation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/source-relations/declare",
+        Some(member_token),
+        json!({
+            "mutation_id": "sidecar-page-relation",
+            "record_client_uuid": records[32],
+            "equivalent_to_client_uuid": records[0],
+            "expected_record_version": stable_versions[32],
+            "expected_other_version": stable_versions[0]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{relation}");
+    assert_eq!(relation["status"], "accepted");
+
+    let (first_bytes, first) =
+        pull_page_bytes(&rig.app, owner_token, generation, baseline_cursor).await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let (retry_bytes, retry) =
+        pull_page_bytes(&rig.app, owner_token, generation, baseline_cursor).await;
+    assert_eq!(
+        retry_bytes, first_bytes,
+        "page restart must be deterministic"
+    );
+    assert_eq!(retry, first);
+
+    let restarted = rig.restart(generation);
+    let first_cursor = first["cursor"].as_i64().unwrap();
+    let (_, second) = pull_page_bytes(&restarted, owner_token, generation, first_cursor).await;
+    assert_eq!(second["has_more"], false, "{second}");
+    assert!(second["cursor"].as_i64().unwrap() > first_cursor);
+
+    let entities = first["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["entities"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    let summaries = entities
+        .iter()
+        .filter_map(|entity| {
+            entity
+                .get("conflict_summary")
+                .map(|_| entity["client_uuid"].as_str().unwrap().to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(summaries.len(), records.len());
+    assert!(records
+        .iter()
+        .all(|record_id| summaries.contains(record_id.to_string().as_str())));
+    for relation_member in [records[0], records[32]] {
+        let entity = entities
+            .iter()
+            .find(|entity| entity["client_uuid"] == relation_member.to_string())
+            .expect("relation member was not re-emitted");
+        assert!(entity.get("source_relation_summary").is_some());
+    }
+}
+
 async fn pull_entities(app: &Router, token: &str, generation: &str) -> Value {
     let (status, body) = get_json(
         app,

@@ -803,6 +803,191 @@ fn causal_pull_exposes_version_id_and_branch_conflict_summary() {
     assert!(cursor_before >= page.entities.iter().map(|e| e.rev).max().unwrap_or(0));
 }
 
+fn create_open_record_conflict(fx: &CausalFx, index: usize) -> (Uuid, String) {
+    let record_id = Uuid::new_v4();
+    let created = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                record_id,
+                None,
+                record_root(fx.baby_id, &format!("base-{index}"), 100, 20),
+                false,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    let base = created.results[0].stable_version_id.as_deref().unwrap();
+    let accepted = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                record_id,
+                Some(base),
+                record_root(fx.baby_id, &format!("stable-{index}"), 100, 30),
+                false,
+            )],
+            1_700_000_001,
+        )
+        .unwrap();
+    assert_eq!(accepted.results[0].status, "accepted");
+    let branched = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                record_id,
+                Some(base),
+                record_root(fx.baby_id, &format!("branch-{index}"), 100, 40),
+                false,
+            )],
+            1_700_000_002,
+        )
+        .unwrap();
+    assert_eq!(branched.results[0].status, "branched");
+    let stable_version = accepted.results[0]
+        .stable_version_id
+        .clone()
+        .expect("accepted edit has stable version");
+    (record_id, stable_version)
+}
+
+#[test]
+fn pull_sql_statement_count_is_constant_for_conflicted_record_pages() {
+    fn measured_statement_count(conflict_count: usize) -> usize {
+        let fx = CausalFx::new();
+        let conflicts = (0..conflict_count)
+            .map(|index| create_open_record_conflict(&fx, index))
+            .collect::<Vec<_>>();
+        if conflict_count > 1 {
+            let (display_id, display_version) = &conflicts[0];
+            let (source_id, source_version) = conflicts.last().unwrap();
+            fx.store
+                .declare_source_relation(
+                    &fx.owner,
+                    DeclareSourceRelationInput {
+                        mutation_id: format!("mut-query-count-{conflict_count}"),
+                        record_client_uuid: source_id.to_string(),
+                        equivalent_to_client_uuid: display_id.to_string(),
+                        expected_record_version: source_version.clone(),
+                        expected_other_version: display_version.clone(),
+                    },
+                    1_700_000_100,
+                )
+                .unwrap();
+        }
+
+        begin_pull_statement_count(&fx.family_id);
+        let mut page = fx.store.pull(&fx.family_id, 0).unwrap();
+        let statement_count = finish_pull_statement_count(&fx.family_id);
+        assert_eq!(
+            page.entities
+                .iter()
+                .filter(|entity| entity.conflict_summary.is_some())
+                .count(),
+            conflict_count.min(32),
+        );
+        if conflict_count > 1 {
+            let mut relation_discovered = page
+                .entities
+                .iter()
+                .any(|entity| entity.source_relation_summary.is_some());
+            while page.has_more {
+                let prior_cursor = page.cursor;
+                page = fx.store.pull(&fx.family_id, prior_cursor).unwrap();
+                assert!(page.cursor > prior_cursor);
+                relation_discovered |= page
+                    .entities
+                    .iter()
+                    .any(|entity| entity.source_relation_summary.is_some());
+            }
+            assert!(relation_discovered);
+        }
+        statement_count
+    }
+
+    let one_record = measured_statement_count(1);
+    let one_hundred_records = measured_statement_count(100);
+    assert_eq!(one_hundred_records, one_record);
+}
+
+#[test]
+fn pull_paginates_every_mandatory_conflict_summary_without_cursor_loss() {
+    for conflict_count in [31, 32, 33] {
+        let fx = CausalFx::new();
+        let conflicts = (0..conflict_count)
+            .map(|index| create_open_record_conflict(&fx, index))
+            .collect::<Vec<_>>();
+        if conflict_count == 33 {
+            let (display_id, display_version) = &conflicts[0];
+            let (source_id, source_version) = &conflicts[32];
+            let relation = fx
+                .store
+                .declare_source_relation(
+                    &fx.owner,
+                    DeclareSourceRelationInput {
+                        mutation_id: "mut-conflict-cap-relation".to_owned(),
+                        record_client_uuid: source_id.to_string(),
+                        equivalent_to_client_uuid: display_id.to_string(),
+                        expected_record_version: source_version.clone(),
+                        expected_other_version: display_version.clone(),
+                    },
+                    1_700_000_100,
+                )
+                .unwrap();
+            assert_eq!(relation.status, "accepted");
+        }
+
+        let first = fx.store.pull(&fx.family_id, 0).unwrap();
+        let first_summaries = first
+            .entities
+            .iter()
+            .filter(|entity| entity.conflict_summary.is_some())
+            .map(|entity| entity.client_uuid.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        if conflict_count <= 32 {
+            assert_eq!(first_summaries.len(), conflict_count);
+            assert!(!first.has_more);
+            continue;
+        }
+
+        assert_eq!(first_summaries.len(), 32);
+        assert!(first.has_more);
+        let second = fx.store.pull(&fx.family_id, first.cursor).unwrap();
+        let discovered = first
+            .entities
+            .iter()
+            .chain(second.entities.iter())
+            .filter_map(|entity| {
+                entity
+                    .conflict_summary
+                    .as_ref()
+                    .map(|_| entity.client_uuid.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(discovered.len(), conflicts.len());
+        assert!(conflicts
+            .iter()
+            .all(|(id, _)| discovered.contains(id.to_string().as_str())));
+        for (relation_id, _) in [&conflicts[0], &conflicts[32]] {
+            let relation_entity = first
+                .entities
+                .iter()
+                .chain(second.entities.iter())
+                .find(|entity| entity.client_uuid == relation_id.to_string())
+                .expect("relation member remains pull-visible across conflict cap");
+            assert!(relation_entity.source_relation_summary.is_some());
+        }
+        assert!(!second.has_more);
+    }
+}
+
 #[test]
 fn causal_resolve_rejects_rewrote_auto_merged_path() {
     let fx = CausalFx::new();

@@ -472,6 +472,10 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
 impl Store {
     fn connect(&self) -> Result<Connection, StoreError> {
         let connection = Connection::open(&self.database_path)?;
+        #[cfg(test)]
+        let mut connection = connection;
+        #[cfg(test)]
+        connection.trace(Some(tests::test_support::trace_counted_pull_statement));
         crate::secure_file(&self.database_path)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         connection.execute_batch(

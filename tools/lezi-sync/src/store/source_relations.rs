@@ -195,6 +195,11 @@ impl Store {
             &principal.family_id,
             &[&input.record_client_uuid, &input.equivalent_to_client_uuid],
         )?;
+        bump_relation_member_revisions(
+            &tx,
+            &principal.family_id,
+            &[&input.record_client_uuid, &input.equivalent_to_client_uuid],
+        )?;
         tx.commit()?;
         Ok(SourceRelationReceipt {
             status: "accepted".to_owned(),
@@ -323,6 +328,7 @@ impl Store {
         )?;
         let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
         assert_records_still_live(&tx, &principal.family_id, &member_refs)?;
+        bump_relation_member_revisions(&tx, &principal.family_id, &member_refs)?;
         tx.commit()?;
         Ok(SourceRelationReceipt {
             status: "accepted".to_owned(),
@@ -333,51 +339,6 @@ impl Store {
             code: None,
             latest_versions: None,
         })
-    }
-
-    /// Load source-relation summary for a record root (pull attach).
-    pub(crate) fn source_relation_summary_for(
-        connection: &rusqlite::Connection,
-        family_id: &str,
-        record_client_uuid: &str,
-    ) -> Result<Option<SourceRelationSummary>, StoreError> {
-        let row = connection
-            .query_row(
-                "
-                SELECT m.relation_id, m.role
-                FROM source_relation_members m
-                WHERE m.family_id = ?1 AND m.record_client_uuid = ?2
-                LIMIT 1
-                ",
-                params![family_id, record_client_uuid],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let Some((relation_id, role)) = row else {
-            return Ok(None);
-        };
-        let mut peers = Vec::new();
-        {
-            let mut stmt = connection.prepare(
-                "
-                SELECT record_client_uuid FROM source_relation_members
-                WHERE family_id = ?1 AND relation_id = ?2 AND record_client_uuid != ?3
-                ORDER BY record_client_uuid COLLATE BINARY
-                ",
-            )?;
-            let rows = stmt
-                .query_map(params![family_id, relation_id, record_client_uuid], |row| {
-                    row.get::<_, String>(0)
-                })?;
-            for r in rows {
-                peers.push(r?);
-            }
-        }
-        Ok(Some(SourceRelationSummary {
-            relation_id,
-            role,
-            peer_ids: peers,
-        }))
     }
 }
 
@@ -567,6 +528,28 @@ fn assert_records_still_live(
             .optional()?
             .flatten();
         if deleted.is_some() {
+            return Err(StoreError::InvalidStoredPayload);
+        }
+    }
+    Ok(())
+}
+
+fn bump_relation_member_revisions(
+    tx: &rusqlite::Transaction<'_>,
+    family_id: &str,
+    member_client_uuids: &[&str],
+) -> Result<(), StoreError> {
+    let mut members = member_client_uuids.to_vec();
+    members.sort_unstable();
+    members.dedup();
+    for client_uuid in members {
+        let rev = super::causal::advance_rev(tx, family_id)?;
+        let changed = tx.execute(
+            "UPDATE entities SET rev = ?1
+             WHERE family_id = ?2 AND entity_type = 'record' AND client_uuid = ?3",
+            params![rev, family_id, client_uuid],
+        )?;
+        if changed != 1 {
             return Err(StoreError::InvalidStoredPayload);
         }
     }

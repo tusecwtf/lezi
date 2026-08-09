@@ -8,4 +8,4 @@ mod pull_tests;
 mod reconciliation_tests;
 mod schema_tests;
 mod source_relations_tests;
-mod test_support;
+pub(in crate::store) mod test_support;

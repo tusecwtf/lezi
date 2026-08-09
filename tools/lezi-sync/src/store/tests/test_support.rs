@@ -1,11 +1,57 @@
 //! Shared fixtures for store unit tests.
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use super::super::*;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+fn pull_statement_counts() -> &'static Mutex<BTreeMap<String, usize>> {
+    static COUNTS: OnceLock<Mutex<BTreeMap<String, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(in crate::store) fn trace_counted_pull_statement(sql: &str) {
+    let mut counts = pull_statement_counts().lock().unwrap();
+    for (family_id, count) in counts.iter_mut() {
+        if sql.contains(family_id.as_str()) {
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
+pub(super) fn begin_pull_statement_count(family_id: &str) {
+    pull_statement_counts()
+        .lock()
+        .unwrap()
+        .insert(family_id.to_owned(), 0);
+}
+
+pub(super) fn finish_pull_statement_count(family_id: &str) -> usize {
+    pull_statement_counts()
+        .lock()
+        .unwrap()
+        .remove(family_id)
+        .expect("pull statement counter was started")
+}
+
+pub(super) trait TestPull {
+    fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError>;
+}
+
+impl TestPull for Store {
+    fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError> {
+        self.pull_with_final_envelope_size(
+            family_id,
+            cursor,
+            |serialized_entity_bytes, entity_count, _, _| {
+                Ok(serialized_entity_bytes.saturating_add(entity_count.saturating_sub(1)))
+            },
+        )
+    }
+}
 
 pub(super) fn entity(
     entity_type: &str,

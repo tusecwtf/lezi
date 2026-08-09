@@ -5,7 +5,7 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::media::media_entity_is_pullable;
@@ -14,7 +14,7 @@ use crate::model::{
     MAX_BUNDLE_MEDIA_ENTITIES,
 };
 use crate::store::{
-    CausalMediaItem, CausalMutation, PulledEntity, ReconcileResult, ReconcileUnit,
+    CausalMediaItem, CausalMutation, PullPage, PulledEntity, ReconcileResult, ReconcileUnit,
     ResolveConflictInput, StoreError, MAX_CAUSAL_UNITS,
 };
 use crate::{
@@ -574,6 +574,46 @@ pub(crate) struct PullQuery {
     generation: String,
 }
 
+#[derive(Serialize)]
+struct PullResponse<E> {
+    entities: E,
+    cursor: i64,
+    generation: String,
+    has_more: bool,
+    family_name: Option<String>,
+}
+
+fn pull_response_value(page: PullPage, generation: &str) -> Result<Value, serde_json::Error> {
+    serde_json::to_value(PullResponse {
+        entities: page.entities,
+        cursor: page.cursor,
+        generation: generation.to_owned(),
+        has_more: page.has_more,
+        family_name: page.family_name,
+    })
+}
+
+fn pull_response_size(
+    serialized_entity_bytes: usize,
+    entity_count: usize,
+    current: i64,
+    family_name: &Option<String>,
+    generation: &str,
+) -> Result<usize, serde_json::Error> {
+    let framing = serde_json::to_vec(&PullResponse {
+        entities: Vec::<PulledEntity>::new(),
+        cursor: current,
+        generation: generation.to_owned(),
+        // `false` is one byte longer than `true`, so it safely budgets either.
+        has_more: false,
+        family_name: family_name.clone(),
+    })?
+    .len();
+    Ok(framing
+        .saturating_add(serialized_entity_bytes)
+        .saturating_add(entity_count.saturating_sub(1)))
+}
+
 fn media_owner_key(entity: &PulledEntity) -> Option<(&'static str, &str)> {
     if entity.entity_type != "media" || entity.deleted_at.is_some() {
         return None;
@@ -609,8 +649,22 @@ pub(crate) async fn pull_entities(
     let blocking_state = state.clone();
     let family_id = principal.family_id.clone();
     let cursor = query.cursor;
-    let mut page = run_blocking(move || {
-        let mut page = match blocking_state.store.pull(&family_id, cursor) {
+    let page = run_blocking(move || {
+        let generation = blocking_state.generation.clone();
+        let mut page = match blocking_state.store.pull_with_final_envelope_size(
+            &family_id,
+            cursor,
+            |serialized_entity_bytes, entity_count, current, family_name| {
+                pull_response_size(
+                    serialized_entity_bytes,
+                    entity_count,
+                    current,
+                    family_name,
+                    &generation,
+                )
+                .map_err(StoreError::from)
+            },
+        ) {
             Ok(result) => result,
             Err(StoreError::CursorAhead(server_cursor)) => {
                 return Err(ApiError::conflict_value(json!({
@@ -670,12 +724,7 @@ pub(crate) async fn pull_entities(
         Ok(page)
     })
     .await?;
-    let entities = std::mem::take(&mut page.entities);
-    Ok(Json(json!({
-        "entities": entities,
-        "cursor": page.cursor,
-        "generation": state.generation,
-        "has_more": page.has_more,
-        "family_name": page.family_name,
-    })))
+    Ok(Json(pull_response_value(page, &state.generation).map_err(
+        |_| ApiError::internal("failed to serialize pull response"),
+    )?))
 }
