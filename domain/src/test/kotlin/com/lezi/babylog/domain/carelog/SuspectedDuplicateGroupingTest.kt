@@ -93,6 +93,52 @@ class SuspectedDuplicateGroupingTest {
     }
 
     @Test
+    fun oneCrossAuthorRecordConnectsEverySameAuthorNeighbor() {
+        val t0 = 1_700_000_000_000L
+        val records = listOf(
+            record("a1", RecordType.FORMULA, t0, "author-a"),
+            record("a2", RecordType.FORMULA, t0 + 20 * 60_000L, "author-a"),
+            record("b", RecordType.FORMULA, t0 + 10 * 60_000L, "author-b"),
+        )
+
+        assertThat(SuspectedDuplicateGrouping.group(records).single().memberClientUuids)
+            .containsExactly("a1", "a2", "b")
+    }
+
+    @Test
+    fun sparseUnionMatchesExhaustivePairGraphOracle() {
+        val base = 1_700_000_000_000L
+        val authorCount = 3
+        val timestampChoices = longArrayOf(0L, 30L, 31L, 60L)
+        for (size in 2..5) {
+            val authorAssignments = intPower(authorCount, size)
+            val timestampAssignments = intPower(timestampChoices.size, size)
+            repeat(authorAssignments) { authorCode ->
+                repeat(timestampAssignments) { timestampCode ->
+                    val records = List(size) { index ->
+                        record(
+                            clientUuid = "r$index",
+                            type = RecordType.FORMULA,
+                            timestamp = base + timestampChoices[
+                                digit(timestampCode, timestampChoices.size, index).toInt()
+                            ] * 60_000L,
+                            membershipId = "m${digit(authorCode, authorCount, index)}",
+                        )
+                    }
+                    val expected = pairGraphComponents(records)
+                        .filter { it.size > 1 }
+                        .map(List<String>::sorted)
+                        .sortedBy { it.joinToString("\u0000") }
+                    val actual = SuspectedDuplicateGrouping.group(records)
+                        .map(SuspectedDuplicateGroup::memberClientUuids)
+                        .sortedBy { it.joinToString("\u0000") }
+                    assertThat(actual).isEqualTo(expected)
+                }
+            }
+        }
+    }
+
+    @Test
     fun crossDayBoundaryWithinWindow_stillGroups() {
         // Local midnight-ish: two timestamps straddle a calendar day but Δ < 30min.
         val almostMidnight = 1_704_067_140_000L // arbitrary epoch near a day boundary
@@ -190,6 +236,53 @@ class SuspectedDuplicateGroupingTest {
         updatedAt = timestamp,
         createdByMembershipId = membershipId,
     )
+
+    private fun pairGraphComponents(records: List<Record>): List<List<String>> {
+        val neighbors = Array(records.size) { mutableListOf<Int>() }
+        for (left in records.indices) {
+            for (right in left + 1 until records.size) {
+                if (
+                    records[left].createdByMembershipId != records[right].createdByMembershipId &&
+                    kotlin.math.abs(records[left].timestamp - records[right].timestamp) <=
+                    SuspectedDuplicateGrouping.WINDOW_MS
+                ) {
+                    neighbors[left] += right
+                    neighbors[right] += left
+                }
+            }
+        }
+        val seen = BooleanArray(records.size)
+        return records.indices.mapNotNull { start ->
+            if (seen[start]) return@mapNotNull null
+            val queue = ArrayDeque<Int>()
+            val component = mutableListOf<String>()
+            seen[start] = true
+            queue += start
+            while (queue.isNotEmpty()) {
+                val current = queue.removeFirst()
+                component += records[current].clientUuid
+                neighbors[current].forEach { neighbor ->
+                    if (!seen[neighbor]) {
+                        seen[neighbor] = true
+                        queue += neighbor
+                    }
+                }
+            }
+            component
+        }
+    }
+
+    private fun digit(value: Int, radix: Int, position: Int): Long {
+        var remaining = value
+        repeat(position) { remaining /= radix }
+        return (remaining % radix).toLong()
+    }
+
+    private fun intPower(base: Int, exponent: Int): Int {
+        var result = 1
+        repeat(exponent) { result *= base }
+        return result
+    }
 }
 
 @RunWith(Parameterized::class)

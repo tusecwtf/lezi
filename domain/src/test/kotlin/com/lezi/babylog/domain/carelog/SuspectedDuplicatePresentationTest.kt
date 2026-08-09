@@ -3,6 +3,9 @@ package com.lezi.babylog.domain.carelog
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import java.time.LocalDate
+import java.time.ZoneOffset
+import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class SuspectedDuplicatePresentationTest {
@@ -112,6 +115,34 @@ class SuspectedDuplicatePresentationTest {
         assertThat(expanded.map { it.record.clientUuid }.toSet()).containsExactly("a", "b")
         // Each expanded row points at one concrete record — not a group-wide edit target.
         assertThat(expanded.map { it.record.clientUuid }.distinct()).hasSize(2)
+    }
+
+    @Test
+    fun projectionIndexClassifiesOpenResolvedAndOrdinaryUuids() = runTest {
+        val day = LocalDate.of(2026, 8, 9)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val openA = formula("open-a", start + 1_000L, "m1")
+        val openB = formula("open-b", start + 2_000L, "m2")
+        val source = formula("source", start + 2 * 60 * 60_000L, "m3")
+        val ordinary = formula("ordinary", start + 4 * 60 * 60_000L, "m3")
+
+        val projection = SuspectedDuplicateProjection.project(
+            records = listOf(openA, openB, source, ordinary),
+            startDate = day,
+            dayCount = 1,
+            zone = ZoneOffset.UTC,
+            now = start + 24 * 60 * 60_000L,
+            sourceRoleClientUuids = setOf("source"),
+        )
+
+        assertThat(projection.timelineIndex["open-a"].role)
+            .isEqualTo(DuplicateRecordRole.OPEN_GROUP_MEMBER)
+        assertThat(projection.timelineIndex["open-a"].group)
+            .isEqualTo(projection.openGroups.single())
+        assertThat(projection.timelineIndex["source"].role)
+            .isEqualTo(DuplicateRecordRole.RESOLVED_SOURCE)
+        assertThat(projection.timelineIndex["ordinary"].role)
+            .isEqualTo(DuplicateRecordRole.ORDINARY)
     }
 
     private fun formula(uuid: String, ts: Long, membership: String): Record = Record(

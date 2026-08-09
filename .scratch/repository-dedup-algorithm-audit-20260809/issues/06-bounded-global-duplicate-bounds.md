@@ -1,6 +1,6 @@
 # 06 — 用全局有界解释替代疑似重复 bounds 笛卡尔积
 
-Status: ready-for-agent
+Status: implemented — JVM/lint/assemble and Android-test compile gates pass; device presentation remains post-01
 
 Priority: P1
 
@@ -28,18 +28,39 @@ Blocked by: `post-0.3.13-review-remediation/01` 的 bounds/UI 实现稳定；本
 
 ## Acceptance
 
-- [ ] grouping 使用排序窗口/有界 union 方案；timeline 用 UUID→group/role index，避免全 pair 与重复扫描
-- [ ] 以 instant 扩展精确 ±30 分钟 halo；DST 23/25 小时日不使用固定 24h 猜测；指标仍只计目标窗口
-- [ ] 每个 open group 在整个 range 只选择一次 singleton 或 full-set 解释，不得逐日换 winner
-- [ ] 不物化 interpretation list；时间/空间复杂度有文档化 polynomial 上界并支持 coroutine cancellation
-- [ ] 小规模 exhaustive oracle 与新算法对 formula/pumped/nursing/feed count、pee/poop、sleep、temperature
+- [x] grouping 使用排序窗口/有界 union 方案；timeline 用 UUID→group/role index，避免全 pair 与重复扫描
+- [x] 以 instant 扩展精确 ±30 分钟 halo；DST 23/25 小时日不使用固定 24h 猜测；指标仍只计目标窗口
+- [x] 每个 open group 在整个 range 只选择一次 singleton 或 full-set 解释，不得逐日换 winner
+- [x] 不物化 interpretation list；时间/空间复杂度有文档化 polynomial 上界并支持 coroutine cancellation
+- [x] 小规模 exhaustive oracle 与新算法对 formula/pumped/nursing/feed count、pee/poop、sleep、temperature
   等所有公开 bounds 完全一致；`hasUncertainty` 覆盖全部公开不确定指标
-- [ ] 删除未消费的 detail-bounds 计算，或把它接到真实可观察 surface；不得保留 `UNUSED_VARIABLE` façade
-- [ ] resolved source 仍过滤为单值，group identity 与 30 分钟 inclusive 边界不改变
+- [x] 删除未消费的 detail-bounds 计算，或把它接到真实可观察 surface；不得保留 `UNUSED_VARIABLE` façade
+- [x] resolved source 仍过滤为单值，group identity 与 30 分钟 inclusive 边界不改变
 
 ## Validation
 
-- [ ] 首尾边界、跨午夜、DST、两日 100/120 反例与 chain component tests 通过
-- [ ] property/exhaustive-oracle tests 通过；100+ groups 在固定 timeout/memory budget 内完成并可取消
-- [ ] Summary/Log parity 与现有 domain aggregation regressions 通过
-- [ ] Android JVM/lint/assemble 通过；产品呈现的 device gate 仍归 post-01
+- [x] 首尾边界、跨午夜、DST、两日 100/120 反例与 chain component tests 通过
+- [x] property/exhaustive-oracle tests 通过；100+ groups 在固定 timeout/memory budget 内完成并可取消
+- [x] Summary/Log parity 与现有 domain aggregation regressions 通过
+- [x] Android JVM/lint/assemble 通过；产品呈现的 device gate 仍归 post-01
+
+## Implementation evidence (fixed HEAD `50b20abbd54d71af76fca50719b23b7714f82e50`)
+
+- `SuspectedDuplicateProjection` is the single public calculation seam. It owns source filtering,
+  exact instant halo selection, open grouping, whole-range bounds, and the immutable timeline
+  UUID→group/role index. Summary performs one range projection; Log reuses one day projection.
+- The grouping oracle exhaustively compared roughly 270,000 small shards (2–5 records, three
+  authors, 0/30/31/60-minute timestamps) with the definition's full pair graph. The bounds oracle
+  compared all `3^7 = 2,187` interpretations across every public metric. A 120-group fixture
+  completed inside a 5-second timeout; a blocked 100,000-record snapshot stopped after cancellation.
+  A review hardening regression also proves grouping, bounds preprocessing, and timeline indexing
+  check cancellation before scanning their immutable snapshots.
+- Final post-review `./gradlew test` — pass (872 tasks; 2m43s).
+- Final post-review `./gradlew lintDebug :app:assembleDebug` — pass (816 tasks; 4m15s).
+- `./gradlew lintDebug :app:assembleDebug :app:assembleRelease
+  :feature:log:compileDebugAndroidTestKotlin :feature:summary:compileDebugAndroidTestKotlin` — pass
+  before the cancellation-only hardening (1,475 tasks; 11m13s; signed Release APK verification and
+  instrumentation compile included). The final full JVM gate recompiles the changed domain for both
+  debug and release variants; no second Release packaging run was needed.
+- `adb devices -l` — no attached device. Instrumentation was compile-only; the product presentation
+  device gate remains owned by `post-0.3.13-review-remediation/01`.

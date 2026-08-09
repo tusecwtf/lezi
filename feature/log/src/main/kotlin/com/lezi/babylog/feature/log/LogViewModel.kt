@@ -179,17 +179,25 @@ class LogViewModel @Inject constructor(
                 val rawRail = snapshot.railRecordRows.map(TimelineRecordRow::record)
                 val records = careLog.projectOrdinaryRecords(rawRecords, sourceRoles)
                 val railRecords = careLog.projectOrdinaryRecords(rawRail, sourceRoles)
-                val openGroups = careLog.listOpenSuspectedDuplicateGroups(rawRecords, sourceRoles)
-                val bounds = careLog.daySummaryBounds(
-                    records = rawRecords,
-                    date = day,
+                val duplicateProjection = careLog.suspectedDuplicateProjection(
+                    records = rawRail,
+                    startDate = day,
+                    dayCount = 1,
                     zone = zone,
                     now = screenTime.epochMillis,
                     sourceRoleClientUuids = sourceRoles,
                 )
+                val openGroups = duplicateProjection.openGroups
+                val bounds = duplicateProjection.bounds.days.single()
+                val duplicateMemberUuids = openGroups
+                    .flatMapTo(linkedSetOf()) { it.memberClientUuids }
+                val duplicatePresentationRecords = (rawRecords + rawRail.filter {
+                    it.clientUuid in duplicateMemberUuids
+                }).distinctBy { it.clientUuid }
                 val duplicateRows = careLog.timelineDuplicateRows(
-                    rawRecords,
+                    duplicatePresentationRecords,
                     sourceRoleClientUuids = sourceRoles,
+                    projection = duplicateProjection,
                 )
                 val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan)
                 val timelineAxis = ThreeDayTimelineAxis(day, zone)

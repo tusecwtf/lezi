@@ -25,9 +25,13 @@ object SuspectedDuplicatePresentation {
         openGroups: List<SuspectedDuplicateGroup>,
         sourceRoleClientUuids: Set<String>,
         expandedGroupIds: Set<String>? = null,
+        timelineIndex: DuplicateTimelineIndex = DuplicateTimelineIndex.build(
+            records,
+            openGroups,
+            sourceRoleClientUuids,
+        ),
     ): List<TimelineDuplicateRow> {
         val byUuid = records.associateBy { it.clientUuid }
-        val grouped = openGroups.flatMap { it.memberClientUuids }.toSet()
         val expandedIds = expandedGroupIds ?: openGroups.map { it.groupId }.toSet()
         val rows = mutableListOf<TimelineDuplicateRow>()
         val emittedGroups = mutableSetOf<String>()
@@ -41,7 +45,8 @@ object SuspectedDuplicatePresentation {
         val seenRecords = mutableSetOf<String>()
         for (record in ordered) {
             if (record.clientUuid in seenRecords) continue
-            val group = openGroups.firstOrNull { record.clientUuid in it.memberClientUuids }
+            val entry = timelineIndex[record.clientUuid]
+            val group = entry.group
             if (group != null) {
                 if (group.groupId in emittedGroups) continue
                 emittedGroups += group.groupId
@@ -62,7 +67,7 @@ object SuspectedDuplicatePresentation {
                         )
                     }
                 }
-            } else if (record.clientUuid !in grouped) {
+            } else if (entry.role == DuplicateRecordRole.ORDINARY) {
                 seenRecords += record.clientUuid
                 rows += TimelineDuplicateRow.Ordinary(record)
             }

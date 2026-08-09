@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.summary
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateProjection
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
@@ -238,6 +239,43 @@ class SummaryAggregationEngineTest {
         val completed = SummaryAggregationEngine().calculate(request(emptyList()))
 
         assertThat(completed.calculating).isFalse()
+    }
+
+    @Test
+    fun summaryAndLogDayUseTheSameDuplicateProjectionBoundsAcrossMidnight() = runBlocking {
+        val start = anchor.atStartOfDay(zone).toInstant().toEpochMilli()
+        val records = listOf(
+            record(
+                id = 1,
+                type = RecordType.FORMULA,
+                timestamp = start - 10 * 60_000L,
+                payloadJson = """{"amount_ml":100}""",
+            ).copy(createdByMembershipId = "m1"),
+            record(
+                id = 2,
+                type = RecordType.FORMULA,
+                timestamp = start + 10 * 60_000L,
+                payloadJson = """{"amount_ml":120}""",
+            ).copy(createdByMembershipId = "m2"),
+        )
+        val now = start + 12 * 60 * 60_000L
+        val directLogProjection = SuspectedDuplicateProjection.project(
+            records = records,
+            startDate = anchor,
+            dayCount = 1,
+            zone = zone,
+            now = now,
+        )
+        val summary = SummaryAggregationEngine(nowMillis = { now }).calculate(
+            request(records),
+        )
+
+        assertThat(summary.totals.feedMlMin)
+            .isEqualTo(directLogProjection.bounds.feedMl.min)
+        assertThat(summary.totals.feedMlMax)
+            .isEqualTo(directLogProjection.bounds.feedMl.max)
+        assertThat(summary.totals.feedMlLabel).isEqualTo("0–120ml")
+        assertThat(summary.totals.hasDuplicateUncertainty).isTrue()
     }
 
     private fun request(

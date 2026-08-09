@@ -57,6 +57,9 @@ import com.lezi.babylog.domain.carelog.SourceRelationCoordinator
 import com.lezi.babylog.domain.carelog.SourceRelationOutcome
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateBounds
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateProjection
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateProjectionResult
+import com.lezi.babylog.domain.carelog.DuplicateTimelineIndex
 import com.lezi.babylog.domain.carelog.WakeObservation
 import com.lezi.babylog.domain.carelog.WakeObservationCoordinator
 import com.lezi.babylog.domain.carelog.WeekSummary
@@ -787,6 +790,23 @@ class CareLog @Inject constructor(
         sourceRoleClientUuids,
     )
 
+    suspend fun suspectedDuplicateProjection(
+        records: List<Record>,
+        startDate: LocalDate,
+        dayCount: Int,
+        zone: ZoneId = ZoneId.systemDefault(),
+        now: Long = clock.nowMillis(),
+        sourceRoleClientUuids: Set<String>? = null,
+    ): SuspectedDuplicateProjectionResult = SuspectedDuplicateProjection.project(
+        records = records,
+        startDate = startDate,
+        dayCount = dayCount,
+        zone = zone,
+        now = now,
+        sourceRoleClientUuids = sourceRoleClientUuids
+            ?: sourceRelationCoordinator.sourceRoleClientUuids(),
+    )
+
     /**
      * Ordinary timeline/stats projection: drop source-role UUIDs, keep display + independents.
      */
@@ -811,10 +831,14 @@ class CareLog @Inject constructor(
         now: Long = clock.nowMillis(),
         sourceRoleClientUuids: Set<String>? = null,
     ): CareDayBounds {
-        val sourceRoles = sourceRoleClientUuids ?: sourceRelationCoordinator.sourceRoleClientUuids()
-        val projected = projectOrdinaryRecords(records, sourceRoles)
-        val openGroups = sourceRelationCoordinator.openSuspectedGroups(projected, sourceRoles)
-        return SuspectedDuplicateBounds.day(projected, openGroups, date, zone, now)
+        return suspectedDuplicateProjection(
+            records = records,
+            startDate = date,
+            dayCount = 1,
+            zone = zone,
+            now = now,
+            sourceRoleClientUuids = sourceRoleClientUuids,
+        ).bounds.days.single()
     }
 
     suspend fun rangeSummaryBounds(
@@ -824,30 +848,31 @@ class CareLog @Inject constructor(
         zone: ZoneId = ZoneId.systemDefault(),
         now: Long = clock.nowMillis(),
     ): com.lezi.babylog.domain.carelog.CareRangeBounds {
-        val projected = projectOrdinaryRecords(records)
-        val openGroups = sourceRelationCoordinator.openSuspectedGroups(projected)
-        return SuspectedDuplicateBounds.range(
-            records = projected,
-            openGroups = openGroups,
+        return suspectedDuplicateProjection(
+            records = records,
             startDate = startDate,
             dayCount = dayCount,
             zone = zone,
             now = now,
-        )
+        ).bounds
     }
 
     suspend fun timelineDuplicateRows(
         records: List<Record>,
         expandedGroupIds: Set<String>? = null,
         sourceRoleClientUuids: Set<String>? = null,
+        projection: SuspectedDuplicateProjectionResult? = null,
     ): List<com.lezi.babylog.domain.carelog.TimelineDuplicateRow> {
         val sourceRoles = sourceRoleClientUuids ?: sourceRelationCoordinator.sourceRoleClientUuids()
-        val openGroups = sourceRelationCoordinator.openSuspectedGroups(records, sourceRoles)
+        val openGroups = projection?.openGroups
+            ?: sourceRelationCoordinator.openSuspectedGroups(records, sourceRoles)
         return com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation.timelineRows(
             records = records,
             openGroups = openGroups,
             sourceRoleClientUuids = sourceRoles,
             expandedGroupIds = expandedGroupIds,
+            timelineIndex = projection?.timelineIndex
+                ?: DuplicateTimelineIndex.build(records, openGroups, sourceRoles),
         )
     }
 

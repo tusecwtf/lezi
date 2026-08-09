@@ -260,13 +260,14 @@ class SummaryViewModel @Inject constructor(
             )
             careLog.observeRecords(
                 babyId = baby.id,
-                startDayInclusive = queryStart,
-                endDayExclusive = queryEnd,
+                // The projection owns the exact instant ±30-minute halo. This
+                // date-level DAO overfetch guarantees both halo edges across DST.
+                startDayInclusive = queryStart.minusDays(1),
+                endDayExclusive = queryEnd.plusDays(1),
                 zone = zone,
             ).combine(careLog.observeSourceRoleClientUuids()) { records, sourceRoles ->
                 records to sourceRoles
             }.mapLatest { (records, sourceRoles) ->
-                val openGroups = careLog.listOpenSuspectedDuplicateGroups(records, sourceRoles)
                 SummaryAggregationRequest(
                     records = records,
                     range = selectedRange,
@@ -277,7 +278,6 @@ class SummaryViewModel @Inject constructor(
                     babyName = baby.nickname,
                     zone = zone,
                     sourceRoleClientUuids = sourceRoles,
-                    openGroups = openGroups,
                 )
             }.calculateLatest(aggregationEngine)
         }

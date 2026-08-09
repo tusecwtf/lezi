@@ -9,10 +9,8 @@ import com.lezi.babylog.domain.carelog.CareDayBounds
 import com.lezi.babylog.domain.carelog.CareRange
 import com.lezi.babylog.domain.carelog.CareRangeBounds
 import com.lezi.babylog.domain.carelog.IntBound
-import com.lezi.babylog.domain.carelog.SuspectedDuplicateBounds
-import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
-import com.lezi.babylog.domain.carelog.SuspectedDuplicateGrouping
 import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
+import com.lezi.babylog.domain.carelog.SuspectedDuplicateProjection
 import com.lezi.babylog.domain.carelog.WeekSummary
 import com.lezi.babylog.domain.carelog.weekStartFor
 import com.lezi.babylog.domain.carelog.formatRange
@@ -37,8 +35,6 @@ data class SummaryAggregationRequest(
     val zone: ZoneId,
     /** Source-role UUIDs excluded from ordinary stats (live for 来源详情). */
     val sourceRoleClientUuids: Set<String> = emptySet(),
-    /** Precomputed open soft groups (empty → exact CareAggregation path). */
-    val openGroups: List<SuspectedDuplicateGroup> = emptyList(),
 )
 
 /** Background calculation boundary used by the Summary presentation layer. */
@@ -70,18 +66,18 @@ class SummaryAggregationEngine(
                 .atStartOfDay(request.zone)
                 .toInstant()
                 .toEpochMilli()
-            // Prefer cancel-friendly CareAggregation.window first. Only materialize
-            // a filtered list when source roles exist; open groups come precomputed.
-            // Anchor-end exclusion is owned by recordStartBefore (not a full pre-scan).
-            val records = if (request.sourceRoleClientUuids.isEmpty()) {
-                request.records
-            } else {
-                SuspectedDuplicateBounds.filterDisplayProjection(
-                    request.records,
-                    request.sourceRoleClientUuids,
-                )
-            }
-            val openGroups = request.openGroups
+            // The projection owns cancellation, source filtering, and open grouping.
+            // Anchor-end exclusion is shared with the ordinary aggregation window.
+            val projection = SuspectedDuplicateProjection.project(
+                records = request.records,
+                startDate = rangeStart,
+                dayCount = request.range.dayCount,
+                zone = request.zone,
+                now = now,
+                sourceRoleClientUuids = request.sourceRoleClientUuids,
+                factEndExclusive = anchorEnd,
+            )
+            val records = projection.projectedRecords
             val window = CareAggregation.window(
                 records = records,
                 startDate = windowStart,
@@ -91,40 +87,15 @@ class SummaryAggregationEngine(
                 recordStartBefore = anchorEnd,
             )
             // Bounds only when open groups exist — avoids N× full scans on common path.
-            val rangeBounds = if (openGroups.isEmpty()) {
+            val rangeBounds = if (projection.openGroups.isEmpty()) {
                 null
             } else {
-                SuspectedDuplicateBounds.range(
-                    records = records,
-                    openGroups = openGroups,
-                    startDate = rangeStart,
-                    dayCount = request.range.dayCount,
-                    zone = request.zone,
-                    now = now,
-                )
+                projection.bounds
             }
-            val detailBounds = if (openGroups.isEmpty()) {
+            val anchorBounds = if (projection.openGroups.isEmpty()) {
                 null
             } else {
-                SuspectedDuplicateBounds.range(
-                    records = records,
-                    openGroups = openGroups,
-                    startDate = detailStart,
-                    dayCount = 7,
-                    zone = request.zone,
-                    now = now,
-                )
-            }
-            val anchorBounds = if (openGroups.isEmpty()) {
-                null
-            } else {
-                SuspectedDuplicateBounds.day(
-                    records = records,
-                    openGroups = openGroups,
-                    date = request.anchorDate,
-                    zone = request.zone,
-                    now = now,
-                )
+                projection.bounds.day(request.anchorDate)
             }
             assembleSummaryUi(
                 range = request.range,
@@ -146,7 +117,6 @@ class SummaryAggregationEngine(
                 babyName = request.babyName,
                 rangeBounds = rangeBounds,
                 anchorBounds = anchorBounds,
-                detailBounds = detailBounds,
             )
         }
 }
@@ -164,7 +134,7 @@ internal fun SummaryRange.startDate(anchorDate: LocalDate, weekStartDay: Int): L
         SummaryRange.Month -> anchorDate.minusDays((dayCount - 1).toLong())
     }
 
-internal fun buildSummaryUi(
+internal suspend fun buildSummaryUi(
     records: List<Record>,
     range: SummaryRange,
     anchorDate: LocalDate,
@@ -174,42 +144,30 @@ internal fun buildSummaryUi(
     babyName: String,
     zone: ZoneId,
     sourceRoleClientUuids: Set<String> = emptySet(),
-    openGroups: List<SuspectedDuplicateGroup> = emptyList(),
 ): SummaryUi {
     val now = RecordTime.currentTimeMillis()
     val anchorEnd = anchorDate.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val visible = records.filter { it.timestamp < anchorEnd }
-    val projected = if (sourceRoleClientUuids.isEmpty()) {
-        visible
-    } else {
-        SuspectedDuplicateBounds.filterDisplayProjection(visible, sourceRoleClientUuids)
-    }
-    val groups = openGroups.ifEmpty {
-        // Synchronous helper path may recompute; engine path expects precomputed.
-        SuspectedDuplicateGrouping.group(projected)
-    }
     val rangeStart = range.startDate(anchorDate, weekStartDay)
     val detailStart = weekStartFor(anchorDate, weekStartDay)
-    val rangeBounds = if (groups.isEmpty()) {
+    val projection = SuspectedDuplicateProjection.project(
+        records = records,
+        startDate = rangeStart,
+        dayCount = range.dayCount,
+        zone = zone,
+        now = now,
+        sourceRoleClientUuids = sourceRoleClientUuids,
+        factEndExclusive = anchorEnd,
+    )
+    val projected = projection.projectedRecords.filter { it.timestamp < anchorEnd }
+    val rangeBounds = if (projection.openGroups.isEmpty()) {
         null
     } else {
-        SuspectedDuplicateBounds.range(
-            projected, groups, rangeStart, range.dayCount, zone, now,
-        )
+        projection.bounds
     }
-    val detailBounds = if (groups.isEmpty()) {
+    val anchorBounds = if (projection.openGroups.isEmpty()) {
         null
     } else {
-        SuspectedDuplicateBounds.range(
-            projected, groups, detailStart, 7, zone, now,
-        )
-    }
-    val anchorBounds = if (groups.isEmpty()) {
-        null
-    } else {
-        SuspectedDuplicateBounds.day(
-            projected, groups, anchorDate, zone, now,
-        )
+        projection.bounds.day(anchorDate)
     }
     val rangeSummary = CareAggregation.range(
         records = projected,
@@ -251,7 +209,6 @@ internal fun buildSummaryUi(
         babyName = babyName,
         rangeBounds = rangeBounds,
         anchorBounds = anchorBounds,
-        detailBounds = detailBounds,
     )
 }
 
@@ -269,7 +226,6 @@ private fun assembleSummaryUi(
     babyName: String,
     rangeBounds: CareRangeBounds? = null,
     anchorBounds: CareDayBounds? = null,
-    detailBounds: CareRangeBounds? = null,
 ): SummaryUi {
     val allTemperatures = rangeSummary.temperatures
     val chartWindows = ChartWindowTotals(
@@ -350,9 +306,6 @@ private fun assembleSummaryUi(
             )
         },
     )
-    // silence unused detailBounds for now (kept for future week detail bound labels)
-    @Suppress("UNUSED_VARIABLE")
-    val _detail = detailBounds
     val previousWeekTotals = previousWeek?.let { previous ->
         SummaryTotals(
             feedMl = previous.feedMl,

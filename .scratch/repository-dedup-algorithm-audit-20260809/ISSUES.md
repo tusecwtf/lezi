@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–05 implemented
+Status: in-progress — tickets 01–06 implemented
 
 Spec: [`spec.md`](./spec.md)
 
@@ -34,7 +34,7 @@ post-0.3.13/01 implementation stabilizes
 | 03 | [Give causal media preimages a manifest-bound lifecycle](./issues/03-manifest-bound-causal-media-staging.md) | P1 | implemented | 02 |
 | 04 | [Paginate complete pull sidecars without cursor loss](./issues/04-lossless-batched-pull-sidecars.md) | P1 | implemented | — |
 | 05 | [Make source relations one bounded canonical graph](./issues/05-bounded-canonical-source-relations.md) | P1 | implemented | 04 + post-0.3.13/01 implementation stabilization |
-| 06 | [Replace Cartesian duplicate bounds with one global bounded interpretation](./issues/06-bounded-global-duplicate-bounds.md) | P1 | ready-for-agent | post-0.3.13/01 implementation stabilization |
+| 06 | [Replace Cartesian duplicate bounds with one global bounded interpretation](./issues/06-bounded-global-duplicate-bounds.md) | P1 | implemented | post-0.3.13/01 implementation stabilization |
 | 07 | [Batch and reactively observe the Wake read projection](./issues/07-batched-reactive-wake-projection.md) | P1 | ready-for-agent | 06 |
 | 08 | [Share one atomic fulfillment-authority settlement](./issues/08-atomic-fulfillment-authority-settlement.md) | P2 | ready-for-agent | 01 |
 | 09 | [Own and release camera capture temporary files](./issues/09-owned-camera-capture-sessions.md) | P2 | ready-for-agent | — |
