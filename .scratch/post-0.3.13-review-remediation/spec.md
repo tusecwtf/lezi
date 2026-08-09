@@ -29,4 +29,7 @@ domain 投影，未证明真实 UI。当前签名 Release APK 与更新 metadata
 
 本 tracker 只拥有审查修复与生产切割前证据。家庭 NAS 的 stop/rm/replace、TLS/SPKI 前后
 比对和 joined-device 生产 smoke 仍由现有 `lossless-family-causal-sync/09` 独占，且必须等待
-用户再次明确确认维护窗口。本 tracker 不修改或关闭该票。
+用户再次明确确认维护窗口。本 tracker 不修改或关闭该票。固定 `332f160d` 后新增发现的完整
+ConflictSnapshot、N 方合并、choice-only resolution、commit-first、重试/pull 与媒体一次读取由
+[`causal-sync-conflict-transport-hardening`](../causal-sync-conflict-transport-hardening/spec.md) 独占；
+本 tracker 的 `38cfbe7` 审查票不重复认领。

@@ -7,9 +7,10 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`repository-dedup-algorithm-audit-20260809`](./repository-dedup-algorithm-audit-20260809/) | **ready-for-agent** — 固定 `38cfbe7` 的全库重复/残留/算法审查；16 个去重 ticket，覆盖 causal proof/validator/sidecar/source graph、bounds/Wake 投影、共享事务命令、资源上限与 dead façade；首轮 frontier = **02 ∥ 04 ∥ 09 ∥ 10 ∥ 11 ∥ 13 ∥ 14 ∥ 16** |
+| [`causal-sync-conflict-transport-hardening`](./causal-sync-conflict-transport-hardening/) | **ready-for-agent** — **0.4.0**（code 21 / Room 28 / server schema 13）：43 张单-session 串行票覆盖无损 APK/后端升级、ConflictSnapshot、N 方合并、commit-first、传输、媒体、schema-cutover CD 与分段验收；frontier = **01**，资源合同复用审查票 12/17/18/19，生产切割仍归旧票 09 |
+| [`repository-dedup-algorithm-audit-20260809`](./repository-dedup-algorithm-audit-20260809/) | **in-progress** — 固定 `38cfbe7` 的全库重复/残留/算法审查；19 个 ticket，其中资源所有权拆为 admission 12、head loader 17、snapshot receipt/page 18、resolution metadata retention 19；当前 frontier 见 tracker |
 | [`post-0.3.13-review-remediation`](./post-0.3.13-review-remediation/) | **ready-for-agent** — 0.3.13 固定 HEAD 审查修复：票 01 闭合升级 dirty 因果安全及 Wake/conflict/duplicate 产品面；票 02 收缩旧路径、精简测试并重建预切割证据；frontier = **01** |
-| [`lossless-family-causal-sync`](./lossless-family-causal-sync/) | **ready-for-agent** — 通用家庭事实因果版本、三方合并/持久分支、WakeObservation、非破坏性疑似重复与安全 LocalWrite；票 01 complete（合同冻结），frontier = **02 ∥ 04** |
+| [`lossless-family-causal-sync`](./lossless-family-causal-sync/) | **local-partial** — 因果基础 01–08 已落地，0.4.0 生产验收票 09 仍开放；现被 `causal-sync-conflict-transport-hardening/43` 与新的 schema-cutover 维护窗口确认阻塞 |
 | [`continuous-timeline-navigation-0.3.12`](./continuous-timeline-navigation-0.3.12/) | **in-progress** — **0.3.12**：票 01–04 complete；签名升级安装矩阵已跑，票 05 等待携带完整家庭会话的 TLS/sync 夹具，票 06 仍需其通过及新的 CD 批准 |
 | [`family-sleep-wake-acl`](./family-sleep-wake-acl/) | **ready-for-agent** — **0.3.11**：跨成员家庭 wake 可发布 + 本机 B1 受限纠错 + 发版联调；票 01 complete → frontier = **02** |
 | [`neighbor-dedup-tombstone-0.3.10`](./neighbor-dedup-tombstone-0.3.10/) | **implementation-complete + released** — 0.3.10 近邻落选 + 墓碑永胜 + 同步 chrome（历史索引） |

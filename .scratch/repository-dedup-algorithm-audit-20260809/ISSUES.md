@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–10 implemented; tickets 11–16 remain
+Status: in-progress — tickets 01–10 implemented; tickets 11–19 remain
 
 Spec: [`spec.md`](./spec.md)
 
@@ -15,7 +15,9 @@ post-0.3.13/01 implementation stabilizes
 
 02 canonical causal ingress ─► 03 causal media staging
 04 lossless pull sidecars ───► 05 canonical source graph
-                            └─► 12 bounded conflict resources
+                            └─► 12 admission ─► 17 head loader ─► 18 receipt/page ─► 19 retention
+                                                                    ▲              ▲
+                                                        hardening 01 ┘  hardening 04 ┘
 
 09 capture ownership ─┐
 10 baby move command ─┼─► 15 dead Android residue
@@ -40,17 +42,20 @@ post-0.3.13/01 implementation stabilizes
 | 09 | [Own and release camera capture temporary files](./issues/09-owned-camera-capture-sessions.md) | P2 | implemented | — |
 | 10 | [Move babies through one live domain command](./issues/10-atomic-baby-move-command.md) | P2 | implemented | — |
 | 11 | [Share one untrusted member-login QR policy](./issues/11-shared-member-login-qr-policy.md) | P2 | ready-for-agent | — |
-| 12 | [Bound conflict branch, detail and resolution resources](./issues/12-bounded-conflict-resources.md) | P2 | ready-for-agent | 04 |
+| 12 | [Bound causal commit and open-branch admission](./issues/12-bounded-conflict-resources.md) | P2 | ready-for-agent | 04 + causal hardening 01 |
 | 13 | [Bound disaster-restore keyed locks](./issues/13-bounded-disaster-restore-locks.md) | P2 | ready-for-agent | — |
 | 14 | [Make TLS inspect-only genuinely read-only](./issues/14-read-only-tls-inspection.md) | P2 | ready-for-agent | — |
 | 15 | [Delete proven-dead Android façades and compatibility residue](./issues/15-delete-proven-dead-android-residue.md) | P3 | ready-for-agent | 09 + 10 + 11 + post-0.3.13/02 cleanup |
 | 16 | [Centralize structured-cancellation cause policy](./issues/16-shared-cancellation-cause-policy.md) | P3 | ready-for-agent | — |
+| 17 | [Batch-load bounded conflict heads](./issues/17-bounded-conflict-head-loader.md) | P1 | ready-for-agent | 12 + causal hardening 01 |
+| 18 | [Persist snapshot receipts with bounded pagination](./issues/18-conflict-snapshot-receipt-pagination.md) | P1 | ready-for-agent | 17 + causal hardening 01 |
+| 19 | [Bound resolution queries and retain conflict metadata](./issues/19-resolution-metadata-retention.md) | P1 | ready-for-agent | 18 + causal hardening 04 |
 
 ## Frontier
 
-在当前 post WIP 尚未固定提交时，可无文件冲突地先做 `02 ∥ 04 ∥ 09 ∥ 10 ∥ 11 ∥ 13 ∥ 14 ∥ 16`。
-`01/05/06` 必须等待 post-01 的重叠实现稳定并重新 pin HEAD；`15` 最后做，防止删除正在被其它
-cleanup/refactor 替换的唯一 seam。一个 agent 不应并行领取图中共享同一箭头端点的票。
+当前未完成且无活动 blocker 的独立票是 `11 ∥ 13 ∥ 14 ∥ 16`。`15` 等 11 与 post cleanup；
+`12 → 17 → 18` 等 causal hardening 01，`19` 再等 hardening 04。一个 agent 不应并行领取图中共享
+同一箭头端点的票；已标 implemented 的 02/04/09 不是 frontier。
 
 ## Excluded as already owned
 

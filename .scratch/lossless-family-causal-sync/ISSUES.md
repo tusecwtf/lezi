@@ -18,7 +18,7 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 03 + 04 + 05 ──► 06 conflict + WakeObservation + overlap UX
 03 + 04 + 05 ──► 07 non-destructive duplicate groups + bounds
 03 + 05 ───────► 08 LocalWrite no-pull fast path
-02–08 ─────────► 09 two-client E2E + forced cutover + release
+02–08 + causal hardening 43 ─► 09 0.4.0 schema cutover + release
 ```
 
 | # | File | Status | Blocked by |
@@ -31,13 +31,15 @@ Baseline: `5bc07bbb29806efe895babdfc37305cd48155f6c`
 | 06 | [`issues/06-conflict-wake-observation-overlap-ux.md`](./issues/06-conflict-wake-observation-overlap-ux.md) | complete | 03, 04, 05 |
 | 07 | [`issues/07-nondestructive-duplicate-groups-and-bounds.md`](./issues/07-nondestructive-duplicate-groups-and-bounds.md) | complete | 03, 04, 05 |
 | 08 | [`issues/08-localwrite-causal-no-pull-fast-path.md`](./issues/08-localwrite-causal-no-pull-fast-path.md) | complete | 03, 05 |
-| 09 | [`issues/09-two-client-cutover-release-and-acceptance.md`](./issues/09-two-client-cutover-release-and-acceptance.md) | local-partial — API E2E + floor 20; CareLog seam / Room device / NAS CD open | 02, 03, 04, 05, 06, 07, 08 |
+| 09 | [`issues/09-two-client-cutover-release-and-acceptance.md`](./issues/09-two-client-cutover-release-and-acceptance.md) | local-partial — prior v1 evidence retained; 0.4.0 hardening / APK+DB migration / schema-cutover CD open | 02, 03, 04, 05, 06, 07, 08, [`causal hardening 43`](../causal-sync-conflict-transport-hardening/issues/43-final-local-review-handoff.md) |
 
 ## Frontier
 
-`09` local release gates and isolated two-client API E2E are green; **family NAS CD and dual physical UI smoke remain blocked** on explicit maintenance-window confirmation. Spec/parent remain non-complete until that evidence exists.
-No runtime behavior ticket may invent a competing shape outside the frozen contract in ticket 01 /
-[`docs/prd/causal-sync-wire.md`](../../docs/prd/causal-sync-wire.md) / ADR-0019–0021.
+`09` retains its prior local/API evidence but is **not executable for production cutover** until
+[`causal-sync-conflict-transport-hardening/43`](../causal-sync-conflict-transport-hardening/issues/43-final-local-review-handoff.md)
+passes. Family NAS CD and dual physical UI smoke additionally require a new explicit maintenance-window confirmation.
+Spec/parent remain non-complete until both hardening and production evidence exist. New runtime work must follow the
+hardening ticket 01 contract once frozen; it may not silently extend the older wire or invent a competing shape.
 
 ## Primary acceptance seam
 
@@ -52,5 +54,5 @@ ordering; Store, Room migration and aggregation tests are supporting seams, not 
 - The nine tickets replace the deleted four-ticket sleep-only tracker; there is one executable owner.
 - Every ticket re-pins current HEAD and preserves unrelated dirty work.
 - Any server or Android wire implementation requires the listed local gates and isolated real-server smoke.
+- Ticket 09 requires causal hardening 43; the earlier direct-HTTP v1 matrix is historical support, not the new primary seam.
 - Ticket 09 must ask for a fresh NAS maintenance-window confirmation after all local evidence exists.
-

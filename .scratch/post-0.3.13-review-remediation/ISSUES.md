@@ -25,6 +25,9 @@ missing UI/E2E coverage, so contraction cannot erase the only evidence for a sti
 
 ## Relationship to the causal tracker
 
-This tracker is the sole owner of the 0.3.13 fixed-HEAD review findings. The existing
+This tracker is the sole owner of the 0.3.13 fixed-HEAD `38cfbe7` review findings. The newer
+[`causal-sync-conflict-transport-hardening`](../causal-sync-conflict-transport-hardening/) tracker solely owns
+the `332f160d` conflict correctness, protocol contraction, retry/pull and media-transfer findings; this tracker
+does not duplicate or close them. The existing
 `lossless-family-causal-sync/09` remains the sole owner of production NAS cutover and joined-device
 production smoke. Publishing these tickets is planning, not implementation or release acceptance.

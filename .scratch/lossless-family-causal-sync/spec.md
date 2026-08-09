@@ -13,6 +13,13 @@ Authority: `CONTEXT.md` 的 Record、护理事实、家庭 wake、近邻重复�
 本规格取代未提交的 `sleep-wake-lossless-sync` 窄方案，并要求实施时修订其中已被本决策
 废止的 LWW、近邻 tombstone、开放睡眠修复与 tombstone 永胜表述。
 
+Hardening amendment (2026-08-09): 固定 HEAD `332f160d` 的只读审查已发布
+[`causal-sync-conflict-transport-hardening`](../causal-sync-conflict-transport-hardening/spec.md)。它保留本规格的
+因果版本、持久分支、WakeObservation、来源关系、非破坏性重复与 LocalWrite 领域决定，但重新打开
+普通 reconcile-first、pairwise conflict detail、客户端提交 resolved root/media 与弱网/媒体传输合同。
+该 hardening 已冻结为 Android/server 0.4.0（code 21 / Room 28 / server schema 13），并要求 APK 与
+server DB 都非破坏性升级。在该 tracker 的票 43 验收前，本规格票 09 不得进入生产 schema cutover。
+
 ## Problem Statement
 
 家庭成员会在多台手机、不同网络状态和不准确的设备墙钟下记录同一宝宝。当前家庭同步把
