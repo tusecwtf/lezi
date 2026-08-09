@@ -58,12 +58,6 @@ object WidgetComposerContract {
         )
     }
 
-    @Deprecated(
-        message = "External widget intents are untrusted; use parseUntrusted",
-        replaceWith = ReplaceWith("parseUntrusted(intent)"),
-    )
-    fun parse(intent: Intent?): WidgetComposerTarget? = parseUntrusted(intent)
-
     internal fun decodeUntrustedTarget(
         snapshot: WidgetComposerIntentSnapshot,
     ): WidgetComposerTarget? {

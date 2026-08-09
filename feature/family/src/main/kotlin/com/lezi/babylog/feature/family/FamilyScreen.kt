@@ -21,6 +21,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardState
@@ -67,7 +68,6 @@ import com.lezi.babylog.feature.family.wizard.FamilyEndpointConnectionDialog
 import com.lezi.babylog.feature.family.wizard.FamilyJoinRoleDialog
 import com.lezi.babylog.feature.family.wizard.FamilyVerifiedEndpointDialog
 import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
-import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
 import com.lezi.babylog.feature.family.wizard.MemberLoginRequestDialog
 import com.lezi.babylog.feature.family.wizard.rememberFamilyMemberLoginQrScanAction
 import com.lezi.babylog.feature.family.wizard.memberApprovalRequestForDisplay
@@ -1267,7 +1267,7 @@ fun FamilyRoute(
     val memberLoginQrModel = projectMemberLoginQrDialog(familyWizardState)
     if (!showNetworkSettings && memberLoginQrModel != null) {
         val payload = memberLoginQrModel.payload
-        MemberLoginQrConfirmDialog(
+        MemberLoginQrConfirmSurface(
             familyName = memberLoginQrModel.display.familyName,
             memberDisplayName = memberLoginQrModel.display.memberDisplayName,
             deviceName = memberQrDeviceName,

@@ -35,11 +35,6 @@ fun formatBirthWeightKg(grams: Int): String =
         String.format(Locale.ROOT, "%.2fkg", grams / 1000.0)
     }
 
-/** Baby avatar size ladder; call sites pick a named tier instead of raw dp. */
-
-/** 当前宝宝大卡（family 概览首位）。 */
-val BabyAvatarSizeLarge: Dp = 56.dp
-
 /** 宝宝列表 / 设置菜单行。 */
 val BabyAvatarSizeMedium: Dp = 40.dp
 

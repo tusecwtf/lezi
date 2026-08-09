@@ -9,7 +9,6 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -132,11 +131,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-
-private val BabyThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
-    com.lezi.babylog.designsystem.normalizeBabyThemeArgb(it)
-}
-private val BabyThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
 
 internal const val SETTINGS_MENU_ROW_MORE_TAG = "settings_menu_row_more"
 
@@ -970,47 +964,6 @@ internal fun SettingsBabyRow(
             )
         },
     )
-}
-
-@Composable
-private fun BabyThemeColorSwatch(
-    argb: Int,
-    selected: Boolean,
-    actionLabel: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    Box(
-        modifier = modifier
-            .size(LeziSpacing.Touch)
-            .clip(CircleShape)
-            .clickable(
-                enabled = enabled,
-                onClickLabel = actionLabel,
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .then(
-                if (selected) {
-                    Modifier.border(
-                        2.dp,
-                        MaterialTheme.colorScheme.primary,
-                        CircleShape,
-                    )
-                } else {
-                    Modifier
-                },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(Color(argb)),
-        )
-    }
 }
 
 @Composable

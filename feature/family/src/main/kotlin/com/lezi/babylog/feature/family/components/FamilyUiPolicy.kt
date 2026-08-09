@@ -491,13 +491,6 @@ internal fun validateFamilyNameInput(raw: String): String? {
     return com.lezi.babylog.domain.family.familyNameValidationError(raw)
 }
 
-/** Member-count entry label on the family card (e.g.「3 位家人」). */
-internal fun familyMemberCountLabel(visibleCount: Int, loaded: Boolean): String = if (loaded) {
-    "$visibleCount 位家人"
-} else {
-    "查看家人"
-}
-
 internal fun familyMemberSummary(
     visibleCount: Int,
     role: FamilyRole,

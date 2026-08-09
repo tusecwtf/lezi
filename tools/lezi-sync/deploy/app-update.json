@@ -3,6 +3,6 @@
   "version_code": 20,
   "version_name": "0.3.13",
   "min_supported_version_code": 20,
-  "sha256": "bc99594fd0527f094cc2db880b41fe7ef1d550488bc8f775ecb63071a8eb6236",
+  "sha256": "93fa3ab1792958bf4db857d2390f02b476183b78a73a3d0c442a6a190f403edd",
   "release_notes": "0.3.13 家庭事实无损因果同步：base_version/mutation_id 三方合并与持久冲突分支；WakeObservation 独立醒来；近邻仅疑似重复组不再服务器落选；LocalWrite 无 pull 快速路径；Room 27 / server schema 12；强制 minSupported=20"
 }

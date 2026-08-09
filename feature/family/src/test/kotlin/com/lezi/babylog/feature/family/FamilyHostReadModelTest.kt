@@ -67,34 +67,4 @@ class FamilyHostReadModelTest {
         assertThat(fieldNames).containsNoneOf("optionalAppUpdate", "babies", "current", "status")
     }
 
-    @Test
-    fun shellMergesOverviewAndMembersPreferringOverviewIdentity() {
-        val overview = AccountOverviewUi(
-            identity = FamilyIdentityUi(
-                displayName = "妈妈",
-                enabled = true,
-                role = FamilyRole.Member,
-                familyName = "乐乐一家",
-            ),
-            status = SyncStatus.Idle,
-        )
-        val members = MembersDevicesUi(
-            identity = FamilyIdentityUi(
-                displayName = "stale-members-name",
-                enabled = true,
-                role = FamilyRole.Member,
-            ),
-            members = listOf(
-                FamilyMember("妈妈", FamilyRole.Member, true, "m-1"),
-                FamilyMember("爸爸", FamilyRole.Owner, false, "m-2"),
-            ),
-            membersLoaded = true,
-        )
-        val ui = familyUiFromHosts(overview, members)
-        assertThat(ui.familyName).isEqualTo("乐乐一家")
-        assertThat(ui.displayName).isEqualTo("妈妈") // overview wins identity
-        assertThat(ui.members).hasSize(2)
-        assertThat(ui.membersLoaded).isTrue()
-        assertThat(ui.optionalAppUpdate).isNull()
-    }
 }

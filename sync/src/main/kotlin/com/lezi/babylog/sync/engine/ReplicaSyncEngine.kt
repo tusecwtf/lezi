@@ -3281,4 +3281,3 @@ internal const val MAX_PUSH_BATCH_SIZE = 1_000
 private const val MAX_PULL_PAGE_COUNT = 500
 private const val MAX_AUTHORITY_RECONCILE_UNITS = 64
 private const val MAX_AUTHORITY_SETTLEMENT_PASSES = 8
-private const val SYNC_PULL_PAGE_ENTITY_LIMIT = 200

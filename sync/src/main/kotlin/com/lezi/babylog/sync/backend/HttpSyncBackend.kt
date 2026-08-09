@@ -61,7 +61,6 @@ internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Self-hosted release APK download bound (full package, not media). */
 internal const val MAX_SYNC_APP_UPDATE_APK_BYTES = 100 * 1024 * 1024
 private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
-private const val MILLIS_PER_SECOND = 1_000L
 private const val DEFAULT_UPLOAD_WRITE_STALL_TIMEOUT_MILLIS = 30_000L
 /** Attached on authenticated family requests so the server can gate minSupported later. */
 internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"

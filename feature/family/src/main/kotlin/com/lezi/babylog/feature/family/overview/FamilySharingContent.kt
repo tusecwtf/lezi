@@ -23,11 +23,11 @@ import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziSurfacePanel
+import com.lezi.babylog.designsystem.LeziDestructiveButton
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.feature.family.components.FamilyDestructiveButton
 import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
 import com.lezi.babylog.feature.family.components.FamilyPrimarySurface
 import com.lezi.babylog.feature.family.components.buildFamilyOverviewCard
@@ -201,21 +201,21 @@ internal fun FamilyAccountActions(
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(LeziSpacing.Xs))
-        FamilyDestructiveButton(
+        LeziDestructiveButton(
             "退出这台设备",
             onClick = onLogoutCurrentDevice,
             modifier = Modifier.fillMaxWidth(),
         )
         if (overview.role == FamilyRole.Member) {
             Spacer(Modifier.height(LeziSpacing.Xs))
-            FamilyDestructiveButton(
+            LeziDestructiveButton(
                 "退出家庭",
                 onClick = onLeaveFamily,
                 modifier = Modifier.fillMaxWidth(),
             )
         } else if (overview.role == FamilyRole.Owner) {
             Spacer(Modifier.height(LeziSpacing.Xs))
-            FamilyDestructiveButton(
+            LeziDestructiveButton(
                 "删除家庭",
                 onClick = onDeleteFamily,
                 modifier = Modifier.fillMaxWidth(),

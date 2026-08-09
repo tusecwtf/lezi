@@ -55,7 +55,6 @@ import com.lezi.babylog.feature.family.components.familyWizardProgress
 import com.lezi.babylog.feature.family.components.familyWizardTitle
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.session.SetupProbeResult
 @Composable
@@ -593,94 +592,5 @@ internal fun CreateFamilyDialog(
                 LeziTextButton(label = "取消", onClick = onDismiss, enabled = !creating)
             }
         },
-    )
-}
-
-
-@Composable
-internal fun MemberLoginQrConfirmDialog(
-    familyName: String?,
-    memberDisplayName: String,
-    deviceName: String,
-    onDeviceNameChange: (String) -> Unit,
-    feedback: String?,
-    submitting: Boolean,
-    verificationInProgress: Boolean = false,
-    verificationRetryRequired: Boolean = false,
-    recoveryRetryRequired: Boolean = false,
-    deviceNameEditable: Boolean = true,
-    showConfirm: Boolean = true,
-    confirmLabel: String = "在这台设备登录",
-    title: String = "登录家庭",
-    onConfirm: () -> Unit,
-    onManualJoin: () -> Unit,
-    onDismiss: () -> Unit,
-    showManualJoin: Boolean = true,
-) {
-    com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface(
-        familyName = familyName,
-        memberDisplayName = memberDisplayName,
-        deviceName = deviceName,
-        onDeviceNameChange = onDeviceNameChange,
-        feedback = feedback,
-        submitting = submitting,
-        verificationInProgress = verificationInProgress,
-        verificationRetryRequired = verificationRetryRequired,
-        recoveryRetryRequired = recoveryRetryRequired,
-        deviceNameEditable = deviceNameEditable,
-        showConfirm = showConfirm,
-        confirmLabel = confirmLabel,
-        title = title,
-        onConfirm = onConfirm,
-        onManualJoin = onManualJoin,
-        onDismiss = onDismiss,
-        showManualJoin = showManualJoin,
-    )
-}
-
-/** Compatibility overload for tests that still pass a live payload. */
-
-@Composable
-internal fun MemberLoginQrConfirmDialog(
-    payload: MemberLoginQrPayload,
-    deviceName: String,
-    onDeviceNameChange: (String) -> Unit,
-    feedback: String?,
-    submitting: Boolean,
-    verificationInProgress: Boolean = false,
-    verificationRetryRequired: Boolean = false,
-    recoveryRetryRequired: Boolean = false,
-    onLogin: () -> Unit,
-    onRetryVerification: () -> Unit = {},
-    onRetryRecovery: () -> Unit = {},
-    onManualJoin: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    MemberLoginQrConfirmDialog(
-        familyName = payload.familyName,
-        memberDisplayName = payload.memberDisplayName,
-        deviceName = deviceName,
-        onDeviceNameChange = onDeviceNameChange,
-        feedback = feedback,
-        submitting = submitting,
-        verificationInProgress = verificationInProgress,
-        verificationRetryRequired = verificationRetryRequired,
-        recoveryRetryRequired = recoveryRetryRequired,
-        deviceNameEditable = !submitting && !verificationInProgress,
-        showConfirm = !verificationInProgress,
-        confirmLabel = when {
-            submitting -> "同步中…"
-            verificationRetryRequired -> "重新确认"
-            recoveryRetryRequired -> "重试首次同步"
-            else -> "在这台设备登录"
-        },
-        title = if (verificationInProgress) "正在确认家庭服务器…" else "登录家庭",
-        onConfirm = when {
-            verificationRetryRequired -> onRetryVerification
-            recoveryRetryRequired -> onRetryRecovery
-            else -> onLogin
-        },
-        onManualJoin = onManualJoin,
-        onDismiss = onDismiss,
     )
 }

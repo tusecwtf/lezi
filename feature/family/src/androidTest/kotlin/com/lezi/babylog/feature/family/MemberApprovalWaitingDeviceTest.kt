@@ -1,32 +1,29 @@
 package com.lezi.babylog.feature.family
 
-import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
-
-import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
-
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.performTextReplacement
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface
 import com.lezi.babylog.feature.family.members.FamilyMembersListSheet
-import com.lezi.babylog.feature.family.members.PendingMemberDecisionDialog
 import com.lezi.babylog.feature.family.members.MemberLoginQrCodeDialog
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
-import com.lezi.babylog.feature.family.FamilyIdentityUi
-import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.feature.family.members.PendingMemberDecisionDialog
+import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import org.junit.Rule
 import org.junit.Test
@@ -351,25 +348,16 @@ class MemberApprovalWaitingDeviceTest {
     fun scannedMemberQrConfirmsTargetTrustEditableDeviceAndManualFallback() {
         var deviceName: String? = null
         var manualFallback = 0
-        val payload = MemberLoginQrPayload(
-            endpoint = TrustedEndpointProfile.tofuSpki(
-                "https://family.example.com:9443",
-                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            ),
-            grant = "grant-0000000000000000000000000000000000000",
-            familyName = "乐乐一家",
-            memberDisplayName = "妈妈",
-            expiresAtEpochSeconds = 1_753_419_000,
-        )
         compose.setContent {
             LeziTheme {
-                MemberLoginQrConfirmDialog(
-                    payload = payload,
+                MemberLoginQrConfirmSurface(
+                    familyName = "乐乐一家",
+                    memberDisplayName = "妈妈",
                     deviceName = "Pixel 10",
                     onDeviceNameChange = { deviceName = it },
                     feedback = "这个二维码已失效，请让管理员重新生成",
                     submitting = false,
-                    onLogin = { deviceName = "submitted" },
+                    onConfirm = { deviceName = "submitted" },
                     onManualJoin = { manualFallback += 1 },
                     onDismiss = {},
                 )
@@ -392,24 +380,17 @@ class MemberApprovalWaitingDeviceTest {
     fun failedMemberQrVerificationOffersRetryAndManualJoinWithoutLogin() {
         var retried = 0
         var manualFallback = 0
-        val payload = MemberLoginQrPayload(
-            endpoint = TrustedEndpointProfile.systemPki("https://family.example.com"),
-            grant = "grant-0000000000000000000000000000000000000",
-            familyName = "乐乐一家",
-            memberDisplayName = "妈妈",
-            expiresAtEpochSeconds = 1_753_419_000,
-        )
         compose.setContent {
             LeziTheme {
-                MemberLoginQrConfirmDialog(
-                    payload = payload,
+                MemberLoginQrConfirmSurface(
+                    familyName = "乐乐一家",
+                    memberDisplayName = "妈妈",
                     deviceName = "Pixel 10",
                     onDeviceNameChange = {},
                     feedback = "暂时无法确认二维码中的家庭服务器",
                     submitting = false,
                     verificationRetryRequired = true,
-                    onLogin = { throw AssertionError("unverified QR must not log in") },
-                    onRetryVerification = { retried += 1 },
+                    onConfirm = { retried += 1 },
                     onManualJoin = { manualFallback += 1 },
                     onDismiss = {},
                 )

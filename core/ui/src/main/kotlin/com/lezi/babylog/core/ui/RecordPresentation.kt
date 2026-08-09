@@ -62,32 +62,6 @@ enum class RecordSection(val title: String) {
     companion object
 }
 
-/**
- * Legacy text-glyph palette for custom item icons.
- * Kept for call sites not yet migrated; new UI must render the vector
- * `LeziCustomItemGlyphIcon(slot)` (designsystem) — the glyphs depend on system
- * fonts and mismatch the record glyph stroke language. Slot order is identical.
- */
-@Deprecated(
-    "Text glyphs depend on system fonts; render LeziCustomItemGlyphIcon(slot) instead.",
-    ReplaceWith(
-        "LeziCustomItemGlyphIcon(slot)",
-        "com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon",
-    ),
-)
-val CUSTOM_ITEM_ICON_GLYPHS: List<String> =
-    listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
-
-@Deprecated(
-    "Text glyphs depend on system fonts; render LeziCustomItemGlyphIcon(slot) instead.",
-    ReplaceWith(
-        "LeziCustomItemGlyphIcon(slot)",
-        "com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon",
-    ),
-)
-fun customItemIconGlyph(slot: Int): String =
-    CUSTOM_ITEM_ICON_GLYPHS[slot.coerceIn(0, CUSTOM_ITEM_ICON_GLYPHS.lastIndex)]
-
 enum class RecordChartMark {
     Circle,
     SleepBlock,

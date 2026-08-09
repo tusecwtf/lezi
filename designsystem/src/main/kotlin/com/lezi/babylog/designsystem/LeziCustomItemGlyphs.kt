@@ -20,8 +20,8 @@ import androidx.core.graphics.PathParser
 
 /**
  * Number of custom item icon slots (0..7). The slot order — star, heart, sun,
- * moon, music, circle, triangle, diamond — is the wire contract shared with the
- * legacy `CUSTOM_ITEM_ICON_GLYPHS` text list in core/ui (kept for older call sites).
+ * moon, music, circle, triangle, diamond — is the wire contract shared by the
+ * record catalog.
  */
 const val CUSTOM_ITEM_GLYPH_COUNT = 8
 

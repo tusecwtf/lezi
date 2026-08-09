@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–11, 13–14, 16 implemented; ticket 15 is frontier;
+Status: in-progress — tickets 01–11, 13–16 implemented;
 tickets 12, 17–19 remain blocked
 
 Spec: [`spec.md`](./spec.md)
@@ -46,7 +46,7 @@ post-0.3.13/01 implementation stabilizes
 | 12 | [Bound causal commit and open-branch admission](./issues/12-bounded-conflict-resources.md) | P2 | blocked | 04 + causal hardening 01 |
 | 13 | [Bound disaster-restore keyed locks](./issues/13-bounded-disaster-restore-locks.md) | P2 | implemented | — |
 | 14 | [Make TLS inspect-only genuinely read-only](./issues/14-read-only-tls-inspection.md) | P2 | implemented | — |
-| 15 | [Delete proven-dead Android façades and compatibility residue](./issues/15-delete-proven-dead-android-residue.md) | P3 | ready-for-agent | 09 + 10 + 11 + post-0.3.13/02 cleanup |
+| 15 | [Delete proven-dead Android façades and compatibility residue](./issues/15-delete-proven-dead-android-residue.md) | P3 | implemented | 09 + 10 + 11 + post-0.3.13/02 cleanup |
 | 16 | [Centralize structured-cancellation cause policy](./issues/16-shared-cancellation-cause-policy.md) | P3 | implemented | — |
 | 17 | [Batch-load bounded conflict heads](./issues/17-bounded-conflict-head-loader.md) | P1 | blocked | 12 + causal hardening 01 |
 | 18 | [Persist snapshot receipts with bounded pagination](./issues/18-conflict-snapshot-receipt-pagination.md) | P1 | blocked | 17 + causal hardening 01 |
@@ -54,8 +54,8 @@ post-0.3.13/01 implementation stabilizes
 
 ## Frontier
 
-当前未完成且无活动 blocker 的独立票是 `15`。其 prerequisite cleanup 已完成；
-`12 → 17 → 18` 等 causal hardening 01，`19` 再等 hardening 04。一个 agent 不应并行领取图中共享
+当前没有未完成且无活动 blocker 的独立票；`12 → 17 → 18` 等 causal hardening 01，`19` 再等
+hardening 04。一个 agent 不应并行领取图中共享
 同一箭头端点的票；已标 implemented 的 02/04/09 不是 frontier。
 
 ## Excluded as already owned
