@@ -1567,6 +1567,7 @@ internal class SyncRig(
     appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     apkIdentityReader: AppUpdateApkIdentityReader = FakeAppUpdateApkIdentityReader(),
     appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
+    allowHistoricalMutableRootEvidence: Boolean = true,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = (syncPreferences ?: MemorySyncPreferences(session)).also {
@@ -1636,6 +1637,7 @@ internal class SyncRig(
         appUpdateInstaller = appUpdateInstaller,
         apkIdentityReader = apkIdentityReader,
         appUpdateCacheDir = appUpdateCacheDir,
+        allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
 
     suspend fun awaitStartupRecovery() {

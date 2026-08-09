@@ -432,6 +432,51 @@ class LocalDataContractMigrationDeviceTest {
             )
             execSQL(
                 """
+                INSERT INTO custom_items(
+                    id, clientUuid, familyId, name, iconSlot, sortOrder, updatedAt,
+                    deletedAt, createdByMembershipId, syncDirty
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(
+                    7L,
+                    CUSTOM_ITEM_UUID,
+                    1L,
+                    "本机用药",
+                    2,
+                    0,
+                    105L,
+                    104L,
+                    "membership-a",
+                    1,
+                ),
+            )
+            execSQL(
+                """
+                INSERT INTO care_plans(
+                    id, clientUuid, babyId, type, customItemId, scheduledAt,
+                    scheduledZoneId, note, payloadJson, schemaVersion, status,
+                    createdByMembershipId, updatedAt, syncDirty
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """.trimIndent(),
+                arrayOf<Any>(
+                    8L,
+                    CARE_PLAN_UUID,
+                    1L,
+                    "medicine",
+                    7L,
+                    5_000L,
+                    "Asia/Shanghai",
+                    "本机计划",
+                    "{\"name\":\"维生素D\",\"dose\":\"1滴\"}",
+                    2,
+                    "pending",
+                    "membership-a",
+                    110L,
+                    1,
+                ),
+            )
+            execSQL(
+                """
                 INSERT INTO records(
                     id, clientUuid, babyId, type, timestamp, endTimestamp, note, payloadJson,
                     schemaVersion, updatedAt, syncDirty, createdByMembershipId,
@@ -551,8 +596,18 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.familyAuthority).isFalse()
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.syncDirty).isTrue()
         assertThat(room.babyDao().getByClientUuid(BABY_UUID)?.baseVersion).isNull()
+        val customItem = room.customItemDao().getByClientUuid(CUSTOM_ITEM_UUID)
+        assertThat(customItem?.name).isEqualTo("本机用药")
+        assertThat(customItem?.deletedAt).isEqualTo(104L)
+        assertThat(customItem?.syncDirty).isTrue()
+        assertThat(customItem?.baseVersion).isNull()
+        val carePlan = room.carePlanDao().getByClientUuid(CARE_PLAN_UUID)
+        assertThat(carePlan?.note).isEqualTo("本机计划")
+        assertThat(carePlan?.customItemId).isEqualTo(7L)
+        assertThat(carePlan?.syncDirty).isTrue()
+        assertThat(carePlan?.baseVersion).isNull()
         // Dual-compat: WakeObservation is projected while denormalized endTimestamp
-        // remains for LWW wire / open-sleep heal / timeline until tickets 05/06.
+        // remains only as historical closed-sleep compatibility evidence.
         assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.endTimestamp)
             .isEqualTo(2_000L)
         assertThat(room.recordDao().getByClientUuid(CLOSED_SLEEP_UUID)?.syncDirty).isTrue()
@@ -606,6 +661,8 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(wakeMedia).isNotEmpty()
         assertThat(wakeMedia.first().clientUuid).isEqualTo(expectedWakeMediaUuid)
         assertThat(wakeMedia.first().localUri).isEqualTo("retained-closed-sleep.jpg")
+        assertThat(wakeMedia.first().syncDirty).isTrue()
+        assertThat(wakeMedia.first().baseVersion).isNull()
         assertThat(room.mediaReferenceDao().listForMedia(expectedWakeMediaUuid)).isNotEmpty()
         assertThat(retainedMedia.readBytes().toList())
             .containsExactlyElementsIn(fixtureBytes.toList())
@@ -624,6 +681,8 @@ class LocalDataContractMigrationDeviceTest {
         const val CLOSED_SLEEP_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         const val OPEN_SLEEP_UUID = "55555555-5555-4555-8555-555555555555"
         const val TOMBSTONE_UUID = "66666666-6666-4666-8666-666666666666"
+        const val CUSTOM_ITEM_UUID = "77777777-7777-4777-8777-777777777777"
+        const val CARE_PLAN_UUID = "88888888-8888-4888-8888-888888888888"
     }
 
     private class CatalogMigrationStep(

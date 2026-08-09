@@ -221,6 +221,76 @@ class ConflictResolutionPresentationTest {
     }
 
     @Test
+    fun resolveAccepted_appliesExplicitNullFieldsFromStableRoot() = runTest {
+        val summaries = FakeConflictSummaryDao()
+        val records = FakeRecordDao()
+        summaries.upsert(
+            ConflictSummaryEntity(
+                conflictId = "c-null",
+                entityType = "record",
+                clientUuid = "r-null",
+                stableVersionId = "v-old",
+                status = "open",
+                kind = "concurrent",
+                branchVersionIdsJson = """["b1"]""",
+                updatedAt = 1L,
+            ),
+        )
+        records.upsert(
+            RecordEntity(
+                clientUuid = "r-null",
+                babyId = 1L,
+                type = "sleep",
+                timestamp = 100,
+                endTimestamp = 200,
+                note = "must-clear",
+                payloadJson = """{"is_nap":false}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                baseVersion = "v-old",
+                openConflictId = "c-null",
+                effectiveWakeObservationClientUuid = "wake-old",
+            ),
+        )
+        val base = com.lezi.babylog.sync.NoOpSyncPort()
+        val sync = object : com.lezi.babylog.sync.SyncPort by base {
+            override suspend fun resolveConflict(
+                conflictId: String,
+                request: ConflictResolveRequest,
+            ): ConflictResolveResult = ConflictResolveResult.Accepted(
+                stableVersionId = "v-new",
+                stableRootJson =
+                    """{"note":null,"timestamp":100,"end_timestamp":null,"effective_wake_observation_client_uuid":null,"updated_at":150}""",
+            )
+        }
+        val coordinator = ConflictResolutionCoordinator(
+            conflictSummaryDao = summaries,
+            conflictDetailCacheDao = FakeConflictDetailCacheDao(),
+            syncPort = sync,
+            recordDao = records,
+            wakeObservationDao = FakeWakeObservationDao(),
+            babyDao = FakeBabyDao(),
+            carePlanDao = FakeCarePlanDao(),
+            customItemDao = FakeCustomItemDao(),
+            transactionRunner = RecordingTransactionRunner(),
+        )
+
+        coordinator.resolve(
+            conflictId = "c-null",
+            expectedStableVersion = "v-old",
+            expectedBranchVersions = listOf("b1"),
+            resolvedRootJson = "{}",
+            resolvedMedia = emptyList(),
+            conflictChoices = emptyMap(),
+        )
+
+        val record = requireNotNull(records.getByClientUuid("r-null"))
+        assertThat(record.note).isNull()
+        assertThat(record.endTimestamp).isNull()
+        assertThat(record.effectiveWakeObservationClientUuid).isNull()
+    }
+
+    @Test
     fun resolveAccepted_clearsWakeOpenConflict() = runTest {
         val summaries = FakeConflictSummaryDao()
         val details = FakeConflictDetailCacheDao()

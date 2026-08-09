@@ -65,6 +65,10 @@ abstract class SyncModule {
         fun appUpdateCacheDir(@ApplicationContext context: Context): File = context.cacheDir
 
         @Provides
+        @Named("allowHistoricalMutableRootEvidence")
+        fun allowHistoricalMutableRootEvidence(): Boolean = false
+
+        @Provides
         @Singleton
         fun clientAppVersion(@ApplicationContext context: Context): ClientAppVersion {
             val packageInfo = context.packageManager.getPackageInfoCompat(

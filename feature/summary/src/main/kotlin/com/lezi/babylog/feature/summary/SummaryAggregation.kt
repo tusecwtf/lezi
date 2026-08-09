@@ -2,17 +2,20 @@ package com.lezi.babylog.feature.summary
 
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.formatRecordDuration
 import com.lezi.babylog.domain.carelog.CareAggregation
 import com.lezi.babylog.domain.carelog.CareDay
 import com.lezi.babylog.domain.carelog.CareDayBounds
 import com.lezi.babylog.domain.carelog.CareRange
 import com.lezi.babylog.domain.carelog.CareRangeBounds
+import com.lezi.babylog.domain.carelog.IntBound
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateBounds
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateGrouping
 import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
 import com.lezi.babylog.domain.carelog.WeekSummary
 import com.lezi.babylog.domain.carelog.weekStartFor
+import com.lezi.babylog.domain.carelog.formatRange
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
@@ -277,6 +280,21 @@ private fun assembleSummaryUi(
         daySleepSegments = anchorDay.sleepSegments,
         dayPee = anchorDay.bucket.pee,
         dayPoop = anchorDay.bucket.poop,
+        dayFeedMlLabel = anchorBounds?.feedMl?.let {
+            SuspectedDuplicatePresentation.formatMetricBound(it, "ml")
+        },
+        dayFeedCountLabel = anchorBounds?.feedCount?.formatRange(),
+        dayNursingMinLabel = anchorBounds?.nursingMinutes?.formatRange(),
+        daySleepMinLabel = anchorBounds?.sleepMinutes?.let(::formatMinuteBound),
+        daySleepSegmentsLabel = anchorBounds?.sleepSegments?.formatRange(),
+        dayPeeLabel = anchorBounds?.peeCount?.formatRange(),
+        dayPoopLabel = anchorBounds?.poopCount?.formatRange(),
+        dayDiaperLabel = anchorBounds?.let {
+            IntBound(
+                min = it.peeCount.min + it.poopCount.min,
+                max = it.peeCount.max + it.poopCount.max,
+            ).formatRange()
+        },
     )
     val rb = rangeBounds
     val totals = SummaryTotals(
@@ -317,8 +335,20 @@ private fun assembleSummaryUi(
         feedCountLabel = rb?.feedCount?.let {
             SuspectedDuplicatePresentation.formatMetricBound(it)
         },
+        nursingMinLabel = rb?.nursingMinutes?.let(::formatMinuteBound),
+        sleepMinLabel = rb?.sleepMinutes?.let(::formatMinuteBound),
+        sleepSegmentsLabel = rb?.sleepSegments?.formatRange(),
         peeLabel = rb?.peeCount?.let { SuspectedDuplicatePresentation.formatMetricBound(it) },
         poopLabel = rb?.poopCount?.let { SuspectedDuplicatePresentation.formatMetricBound(it) },
+        diaperLabel = rb?.let {
+            SuspectedDuplicatePresentation.formatMetricBound(
+                IntBound(
+                    min = it.peeCount.min + it.poopCount.min,
+                    max = it.peeCount.max + it.poopCount.max,
+                ),
+                "次",
+            )
+        },
     )
     // silence unused detailBounds for now (kept for future week detail bound labels)
     @Suppress("UNUSED_VARIABLE")
@@ -367,3 +397,10 @@ private fun assembleSummaryUi(
         babyName = babyName,
     )
 }
+
+private fun formatMinuteBound(bound: com.lezi.babylog.domain.carelog.LongBound): String =
+    if (bound.min == bound.max) {
+        formatRecordDuration(bound.min)
+    } else {
+        "${formatRecordDuration(bound.min)}–${formatRecordDuration(bound.max)}"
+    }

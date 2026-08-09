@@ -22,9 +22,9 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | partially superseded by ADR-0017（保留先对账/临时 plan，取代无 head 协议限制） |
 | [0017](./0017-authoritative-reconcile-settles-local-deltas.md) | 家庭服务器权威裁决必须终结本机待对账修改 | partially superseded by ADR-0019/0020 for 0.3.13+ causal LWW vocabulary; settle-before-publish skeleton retained |
 | [0018](./0018-neighbor-duplicate-records-and-tombstone-wins.md) | 跨成员近邻重复由服务器隐式落选，护理记录墓碑永胜 | partially superseded by ADR-0021 for 0.3.13+ new data; historical tombstones stay hidden |
-| [0019](./0019-server-validates-constraints-not-care-truth.md) | 服务器验证约束，不裁决护理真相 | accepted (0.3.13 planning freeze; not runtime-delivered) |
-| [0020](./0020-stable-projection-immutable-versions-and-branches.md) | 稳定投影 + 不可变版本/分支，三方合并与显式 resolution | accepted (0.3.13 planning freeze; not runtime-delivered) |
-| [0021](./0021-wake-observation-and-nondestructive-duplicate-groups.md) | WakeObservation 与非破坏性疑似重复分组 | accepted (0.3.13 planning freeze; not runtime-delivered) |
+| [0019](./0019-server-validates-constraints-not-care-truth.md) | 服务器验证约束，不裁决护理真相 | accepted (0.3.13 tree landed; production cutover pending) |
+| [0020](./0020-stable-projection-immutable-versions-and-branches.md) | 稳定投影 + 不可变版本/分支，三方合并与显式 resolution | accepted (0.3.13 tree landed; production cutover pending) |
+| [0021](./0021-wake-observation-and-nondestructive-duplicate-groups.md) | WakeObservation 与非破坏性疑似重复分组 | accepted (0.3.13 tree landed; production cutover pending) |
 
 ## Numbering
 

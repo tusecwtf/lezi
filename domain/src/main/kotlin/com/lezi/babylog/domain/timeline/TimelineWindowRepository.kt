@@ -109,6 +109,22 @@ data class TimelineRecordRow(
     val sleepEndBadge: String? = null,
     /** Concise open-conflict card summary when [Record.openConflictId] is set. */
     val conflictSummaryLabel: String? = null,
+    /** Full legal WakeObservation product detail, including provenance and photos. */
+    val wakeObservations: List<TimelineWakeObservation> = emptyList(),
+    /** Sleep author or Owner may select the effective observation. */
+    val canSelectEffectiveWakeObservation: Boolean = false,
+)
+
+data class TimelineWakeObservation(
+    val clientUuid: String,
+    val wakeTimestamp: Long,
+    val observerLabel: String,
+    val observerMembershipId: String,
+    val note: String?,
+    val photoPaths: List<String>,
+    val provisional: Boolean,
+    val effective: Boolean,
+    val canEdit: Boolean,
 )
 
 data class TimelineCarePlanRow(
@@ -190,6 +206,9 @@ class TimelineWindowRepository @Inject constructor(
         val planMedia = database.media
             .filter { it.carePlanId != null }
             .groupBy { requireNotNull(it.carePlanId) }
+        val wakeMedia = database.media
+            .filter { it.wakeObservationId != null && it.deletedAt == null }
+            .groupBy { requireNotNull(it.wakeObservationId) }
         val audience = TimelineAudienceSnapshot(
             revision = revision,
             isFamilyJoined = audienceSeed.key.isFamilyJoined,
@@ -242,6 +261,37 @@ class TimelineWindowRepository @Inject constructor(
                 creatorAcknowledgementPending = audienceSeed.key.pendingCreatorAcknowledgements
                     .contains(CreatorAcknowledgementRef("record", record.clientUuid)),
             )
+            val legalWakeUuids = sleepInterval?.visibleObservations
+                ?.mapTo(linkedSetOf(), WakeObservationFact::clientUuid)
+                .orEmpty()
+            val timelineWakes = wakesBySleep[entity.clientUuid]
+                .orEmpty()
+                .filter { it.clientUuid in legalWakeUuids }
+                .sortedWith(compareBy(WakeObservationEntity::wakeTimestamp, WakeObservationEntity::clientUuid))
+                .map { wake ->
+                    TimelineWakeObservation(
+                        clientUuid = wake.clientUuid,
+                        wakeTimestamp = wake.wakeTimestamp,
+                        observerLabel = resolveRecordUploaderLabel(
+                            isFamilyJoined = audience.isFamilyJoined,
+                            members = audience.members,
+                            createdByMembershipId = wake.observerMembershipId,
+                            selfMembershipId = audience.membershipId,
+                        ) ?: if (wake.observerMembershipId == audience.membershipId) "本人" else "家人",
+                        observerMembershipId = wake.observerMembershipId,
+                        note = wake.note,
+                        photoPaths = wakeMedia[wake.id].orEmpty()
+                            .map(MediaAssetEntity::localUri)
+                            .filter(String::isNotBlank),
+                        provisional = sleepInterval?.isProvisional == true &&
+                            sleepInterval.endObservationClientUuid == wake.clientUuid,
+                        effective = sleepInterval?.endSource ==
+                            com.lezi.babylog.core.model.SleepEndSource.EFFECTIVE &&
+                            sleepInterval.endObservationClientUuid == wake.clientUuid,
+                        canEdit = wake.observerMembershipId.isNotBlank() &&
+                            wake.observerMembershipId == audience.membershipId,
+                    )
+                }
             TimelineRecordRow(
                 revision = revision,
                 record = record,
@@ -270,6 +320,9 @@ class TimelineWindowRepository @Inject constructor(
                 conflictSummaryLabel = SleepPresentation.conflictCardSummary(
                     hasOpenConflict = !record.openConflictId.isNullOrBlank(),
                 ),
+                wakeObservations = timelineWakes,
+                canSelectEffectiveWakeObservation = entity.type == RecordType.SLEEP.key &&
+                    canManageRecord,
             )
         }
         val selectedRows = allRecordRows.filter { row ->
@@ -410,4 +463,3 @@ internal fun recordOverlapsWindow(
                 )
         )
 }
-

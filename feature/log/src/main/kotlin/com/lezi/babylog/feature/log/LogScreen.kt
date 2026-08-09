@@ -84,6 +84,10 @@ import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.carelog.DayChartCategories
 import com.lezi.babylog.domain.carelog.DayChartCategory
+import com.lezi.babylog.domain.carelog.ConflictResolveOutcome
+import com.lezi.babylog.domain.carelog.ConflictResolverDraft
+import com.lezi.babylog.domain.carelog.DuplicateGroupAction
+import com.lezi.babylog.domain.carelog.SourceRelationOutcome
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -122,6 +126,11 @@ fun LogRoute(
     var showCustomManage by remember { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
+    var causalDetailRecord by remember { mutableStateOf<Record?>(null) }
+    var conflictDraft by remember { mutableStateOf<ConflictResolverDraft?>(null) }
+    var conflictLoading by remember { mutableStateOf(false) }
+    var conflictSubmitting by remember { mutableStateOf(false) }
+    var conflictError by remember { mutableStateOf<String?>(null) }
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
     val timelineListState = rememberLogTimelineListState()
@@ -209,6 +218,25 @@ fun LogRoute(
 
     fun openComposer(type: RecordType) {
         openComposer(RecordItemIdentity.builtIn(type))
+    }
+
+    fun openCausalDetails(record: Record) {
+        causalDetailRecord = record
+        val conflictId = record.openConflictId ?: return
+        conflictLoading = true
+        conflictError = null
+        vm.loadConflictDetail(conflictId) { detail, error ->
+            conflictLoading = false
+            conflictDraft = detail?.let(ConflictResolverDraft::from)
+            conflictError = error ?: "暂时无法取得冲突详情，请联网后重试"
+                .takeIf { detail == null }
+        }
+    }
+
+    fun duplicateOutcomeMessage(outcome: SourceRelationOutcome): String = when (outcome) {
+        is SourceRelationOutcome.Accepted -> "重复来源已确认并保留"
+        is SourceRelationOutcome.CasMismatch -> outcome.message
+        is SourceRelationOutcome.Rejected -> outcome.message
     }
 
     LaunchedEffect(externalDay) {
@@ -423,6 +451,21 @@ fun LogRoute(
                             onOpenComposer = onOpenComposer,
                             onRequestDelete = { listDeleteTarget = it },
                             onOpenPublishChrome = { publishChromeRecord = it },
+                            onOpenCausalDetails = ::openCausalDetails,
+                            onDuplicateAction = { action ->
+                                when (action) {
+                                    is DuplicateGroupAction.AuthorDeclare ->
+                                        vm.declareDuplicateEquivalent(
+                                            action.recordClientUuid,
+                                            action.equivalentToClientUuid,
+                                        ) { onMessage(duplicateOutcomeMessage(it)) }
+                                    is DuplicateGroupAction.OwnerResolve ->
+                                        vm.resolveDuplicateGroupAsOwner(
+                                            action.memberClientUuids,
+                                            action.displayClientUuid,
+                                        ) { onMessage(duplicateOutcomeMessage(it)) }
+                                }
+                            },
                             onSkipCarePlan = vm::skipCarePlan,
                             onMessage = onMessage,
                             modifier = Modifier.weight(1f),
@@ -533,6 +576,90 @@ fun LogRoute(
             openLayoutEdit()
         },
     )
+
+    val causalRecord = causalDetailRecord
+    val causalRow = causalRecord?.let { state.recordMetadata[it.id] }
+    if (causalRecord != null && causalRecord.openConflictId != null) {
+        ConflictResolverSheet(
+            loading = conflictLoading,
+            draft = conflictDraft,
+            error = conflictError,
+            submitting = conflictSubmitting,
+            onDismiss = {
+                causalDetailRecord = null
+                conflictDraft = null
+                conflictError = null
+            },
+            onChoose = { path, value ->
+                conflictDraft = conflictDraft?.choose(path, value)
+            },
+            onSubmit = {
+                val draft = conflictDraft ?: return@ConflictResolverSheet
+                conflictSubmitting = true
+                conflictError = null
+                vm.resolveConflict(
+                    conflictId = draft.detail.conflictId,
+                    expectedStableVersion = draft.detail.stableVersionId,
+                    expectedBranchVersions = draft.detail.branchVersionIds,
+                    resolvedRootJson = draft.resolvedRootJson,
+                    resolvedMedia = draft.resolvedMedia,
+                    conflictChoices = draft.conflictChoices,
+                ) { outcome ->
+                    conflictSubmitting = false
+                    when (outcome) {
+                        is ConflictResolveOutcome.Accepted -> {
+                            causalDetailRecord = null
+                            conflictDraft = null
+                            onMessage("冲突已解决")
+                        }
+                        is ConflictResolveOutcome.CasMismatch -> {
+                            conflictDraft = outcome.refreshed?.let { refreshed ->
+                                draft.refresh(refreshed)
+                            } ?: draft
+                            conflictError = outcome.message
+                        }
+                        is ConflictResolveOutcome.Rejected -> {
+                            conflictError = outcome.message
+                        }
+                    }
+                }
+            },
+        )
+    } else if (causalRecord != null && causalRow != null && causalRow.sleepInterval != null) {
+        SleepObservationSheet(
+            row = causalRow,
+            zone = zone,
+            onDismiss = { causalDetailRecord = null },
+            onAddWake = {
+                causalDetailRecord = null
+                onOpenComposer(
+                    RecordComposerRequest.New(
+                        babyId = causalRecord.babyId,
+                        type = RecordType.SLEEP,
+                        timestamp = nowMs,
+                        historical = state.day != today,
+                        openSleepId = causalRecord.id,
+                    ),
+                )
+            },
+            onUpdate = { wake, timestamp, note ->
+                vm.updateWakeObservation(wake.clientUuid, timestamp, note) { error ->
+                    onMessage(error ?: "醒来观察已修正")
+                }
+            },
+            onWithdraw = { wake ->
+                vm.withdrawWakeObservation(wake.clientUuid) { error ->
+                    onMessage(error ?: "醒来观察已撤回")
+                }
+            },
+            onSelect = { wake ->
+                vm.selectEffectiveWakeObservation(
+                    causalRecord.clientUuid,
+                    wake?.clientUuid,
+                ) { error -> onMessage(error ?: "有效观察已更新") }
+            },
+        )
+    }
 }
 
 internal fun moreRecordContentDescription(entry: MoreCatalogEntry): String =

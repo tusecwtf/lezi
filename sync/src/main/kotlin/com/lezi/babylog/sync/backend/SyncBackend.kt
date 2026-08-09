@@ -633,10 +633,10 @@ interface SyncBackend {
     ): ReconcileResult = throw UnsupportedOperationException("Authoritative reconcile is not implemented")
 
     /**
-     * When false, [ReplicaSyncEngine] keeps the legacy authority reconcile path and
-     * does not freeze causal mutation epochs. Production [HttpSyncBackend] returns true
-     * only when the last health probe advertised the frozen causal capability set;
-     * recording/test backends opt in explicitly.
+     * Production [HttpSyncBackend] returns true only when the last health probe
+     * advertised the frozen causal capability set. A false value makes mutable
+     * roots fail closed; only immutable FulfillmentCandidate evidence may use the
+     * historical reconcile path.
      */
     fun supportsCausalWire(): Boolean = false
 

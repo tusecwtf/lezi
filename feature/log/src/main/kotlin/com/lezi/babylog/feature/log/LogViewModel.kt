@@ -80,6 +80,8 @@ data class LogUiState(
     /** One-revision metadata backing every care-plan row action and publication label. */
     val planMetadata: Map<Long, TimelineCarePlanRow> = emptyMap(),
     val familyJoined: Boolean = false,
+    val currentMembershipId: String = "",
+    val familyOwner: Boolean = false,
     val lastSyncFailed: Boolean = false,
     val shallowSyncLine: ShallowSyncLine = ShallowSyncLine(
         state = ShallowSyncState.Unjoined,
@@ -224,6 +226,9 @@ class LogViewModel @Inject constructor(
                     recordMetadata = recordMetadata,
                     planMetadata = planMetadata,
                     familyJoined = snapshot.audience.isFamilyJoined,
+                    currentMembershipId = snapshot.audience.membershipId,
+                    familyOwner = snapshot.audience.role ==
+                        com.lezi.babylog.sync.session.FamilyRole.Owner,
                 )
             }
         }
@@ -300,6 +305,83 @@ class LogViewModel @Inject constructor(
                 careLog.resolveSuspectedDuplicateGroupAsOwner(
                     memberClientUuids = memberClientUuids,
                     displayClientUuid = displayClientUuid,
+                ),
+            )
+        }
+    }
+
+    fun updateWakeObservation(
+        clientUuid: String,
+        wakeTimestamp: Long,
+        note: String?,
+        onDone: (String?) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching {
+                careLog.updateWakeObservation(clientUuid, wakeTimestamp, note)
+            }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "修正失败，请重试") })
+        }
+    }
+
+    fun withdrawWakeObservation(
+        clientUuid: String,
+        onDone: (String?) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.withdrawWakeObservation(clientUuid) }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "撤回失败，请重试") })
+        }
+    }
+
+    fun selectEffectiveWakeObservation(
+        sleepRecordClientUuid: String,
+        wakeObservationClientUuid: String?,
+        onDone: (String?) -> Unit = {},
+    ) {
+        viewModelScope.launch {
+            val result = runCatching {
+                careLog.selectEffectiveWakeObservation(
+                    sleepRecordClientUuid,
+                    wakeObservationClientUuid,
+                )
+            }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "选择失败，请重试") })
+        }
+    }
+
+    fun loadConflictDetail(
+        conflictId: String,
+        forceRefresh: Boolean = true,
+        onDone: (com.lezi.babylog.domain.carelog.ConflictResolverDetail?, String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.loadConflictDetail(conflictId, forceRefresh) }
+            onDone(
+                result.getOrNull(),
+                result.exceptionOrNull()?.let { productUiError(it, "加载失败，请重试") },
+            )
+        }
+    }
+
+    fun resolveConflict(
+        conflictId: String,
+        expectedStableVersion: String,
+        expectedBranchVersions: List<String>,
+        resolvedRootJson: String,
+        resolvedMedia: List<com.lezi.babylog.sync.backend.CausalMediaItem>,
+        conflictChoices: Map<String, kotlinx.serialization.json.JsonElement>,
+        onDone: (com.lezi.babylog.domain.carelog.ConflictResolveOutcome) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onDone(
+                careLog.resolveConflict(
+                    conflictId = conflictId,
+                    expectedStableVersion = expectedStableVersion,
+                    expectedBranchVersions = expectedBranchVersions,
+                    resolvedRootJson = resolvedRootJson,
+                    resolvedMedia = resolvedMedia,
+                    conflictChoices = conflictChoices,
                 ),
             )
         }

@@ -21,7 +21,10 @@ class RealSyncPortLocalWriteNoPullTest {
     @Test
     fun localWriteCausalOrderIsReconcileThenCommitWithNoPullAndUnchangedCursor() = runTest {
         val session = joinedSession("family-a").copy(pullCursor = 12)
-        val rig = SyncRig(session = session)
+        val rig = SyncRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        )
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
             localBaby().copy(
@@ -72,7 +75,10 @@ class RealSyncPortLocalWriteNoPullTest {
     @Test
     fun localWriteNoPullThenForegroundPullReceivesUnrelatedPeer() = runTest {
         val session = joinedSession("family-a").copy(pullCursor = 0)
-        val rig = SyncRig(session = session)
+        val rig = SyncRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        )
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
             localBaby().copy(
@@ -203,14 +209,19 @@ class RealSyncPortLocalWriteNoPullTest {
     @Test
     fun localWriteWithoutCausalCapabilityStillPullsOnFacade() = runTest {
         val session = joinedSession("family-a").copy(pullCursor = 2)
-        val rig = SyncRig(session = session)
+        val rig = SyncRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        )
         // enableCausal defaults false → no-pull must not apply.
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = true))
         rig.records.seed(localRecord(babyId).copy(syncDirty = true))
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
-        assertThat(result.isSuccess).isTrue()
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).isInstanceOf(IllegalStateException::class.java)
+        assertThat(result.exceptionOrNull()).hasMessageThat().contains("因果同步协议")
         assertThat(rig.backend.pullCount).isEqualTo(1)
         assertThat(rig.backend.syncOrder.first()).isEqualTo("pull:2")
         assertThat(rig.backend.causalReconciledUnits).isEmpty()

@@ -80,6 +80,7 @@ internal class CausalSettlement(
     private val mediaFiles: SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
+    private val protectDirtyCausalRoots: Boolean = true,
 ) {
     suspend fun settle(
         session: SyncSession,
@@ -169,9 +170,10 @@ internal class CausalSettlement(
     /**
      * Pull apply gate for causal roots.
      * - forceAuthority: always apply
-     * - dirty unfinished mutation (with causal epoch): never content-overwrite
+     * - dirty unfinished mutation: never content-overwrite
+     * - migrated pre-causal dirty root: capture the pulled stable version as its
+     *   causal baseline without changing local content or clearing pending
      * - open conflict: only advance when remote stable version_id changes
-     * - pre-causal dirty (no base/mutation): leave to legacy LWW callers
      */
     suspend fun shouldApplyStablePull(
         entityType: String,
@@ -182,15 +184,81 @@ internal class CausalSettlement(
         if (forceAuthority) return true
         if (entityType !in CAUSAL_ROOT_TYPES) return true
         val local = loadCausalLocal(entityType, clientUuid) ?: return true
+        if (local.syncDirty && protectDirtyCausalRoots) {
+            if (local.baseVersion == null && remoteVersionId != null) {
+                establishMigratedDirtyBaseline(
+                    entityType = entityType,
+                    clientUuid = clientUuid,
+                    expectedContentEpoch = local.contentEpoch,
+                    remoteVersionId = remoteVersionId,
+                )
+            }
+            return false
+        }
         val causalAware = local.baseVersion != null || local.mutationId != null ||
             local.openConflictId != null
         if (!causalAware) return true
-        // Any unfinished mutation (dirty or open conflict with re-edit) is protected.
-        if (local.syncDirty) return false
         if (local.openConflictId != null) {
             return remoteVersionId != null && remoteVersionId != local.baseVersion
         }
         return true
+    }
+
+    /**
+     * Room 26 dirty rows have no causal identity. The first causal full pull is the
+     * only authoritative place to learn the stable parent they were edited from.
+     * Persist only that parent; the local revision, tombstone, media references and
+     * dirty intent remain untouched and are reconciled immediately after the pull.
+     *
+     * A previously frozen null-base mutation cannot be reused after the envelope
+     * gains a base_version, so clear only its mutation identity. Freeze will mint a
+     * new stable id for the now-baselined envelope.
+     */
+    private suspend fun establishMigratedDirtyBaseline(
+        entityType: String,
+        clientUuid: String,
+        expectedContentEpoch: Long,
+        remoteVersionId: String,
+    ) {
+        when (entityType) {
+            "baby" -> babyDao.getByClientUuid(clientUuid)?.let { current ->
+                if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
+                    current.baseVersion == null
+                ) {
+                    babyDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
+                }
+            }
+            "record" -> recordDao.getByClientUuid(clientUuid)?.let { current ->
+                if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
+                    current.baseVersion == null
+                ) {
+                    recordDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
+                }
+            }
+            "care_plan" -> carePlanDao.getByClientUuid(clientUuid)?.let { current ->
+                if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
+                    current.baseVersion == null
+                ) {
+                    carePlanDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
+                }
+            }
+            "custom_item" -> customItemDao.getByClientUuid(clientUuid)?.let { current ->
+                if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
+                    current.baseVersion == null
+                ) {
+                    customItemDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
+                }
+            }
+            "wake_observation" -> wakeObservationDao.getByClientUuid(clientUuid)?.let { current ->
+                if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
+                    current.baseVersion == null
+                ) {
+                    wakeObservationDao.update(
+                        current.copy(baseVersion = remoteVersionId, mutationId = null),
+                    )
+                }
+            }
+        }
     }
 
     suspend fun applyPullConflictSummary(

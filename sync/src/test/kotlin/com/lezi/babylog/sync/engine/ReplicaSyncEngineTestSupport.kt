@@ -49,6 +49,7 @@ import com.lezi.babylog.sync.TestMediaFileStore
 
 internal class ReplicaEngineRig(
     session: SyncSession,
+    allowHistoricalMutableRootEvidence: Boolean = true,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
@@ -103,6 +104,7 @@ internal class ReplicaEngineRig(
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
         conflictDetailCacheDao = conflictDetails,
+        allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
 }
 

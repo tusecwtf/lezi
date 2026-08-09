@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -58,6 +59,9 @@ import com.lezi.babylog.designsystem.TimelineRailCard
 import com.lezi.babylog.designsystem.TimelinePanGesture
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.carelog.DayChartCategory
+import com.lezi.babylog.domain.carelog.DuplicateGroupAction
+import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
+import com.lezi.babylog.domain.carelog.formatRange
 import com.lezi.babylog.domain.carelog.formatClock
 import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import com.lezi.babylog.sync.localCarePlanPublishDetail
@@ -124,10 +128,13 @@ internal fun LogTimelineList(
     onOpenComposer: (RecordComposerRequest) -> Unit,
     onRequestDelete: (ListDeleteTarget) -> Unit,
     onOpenPublishChrome: (PublishChromeTarget) -> Unit,
+    onOpenCausalDetails: (Record) -> Unit,
+    onDuplicateAction: (DuplicateGroupAction) -> Unit,
     onSkipCarePlan: (Long, (Result<String>) -> Unit) -> Unit,
     onMessage: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val collapsedDuplicateGroups = remember { mutableStateListOf<String>() }
     fun openEditFromSwipe(request: RecordComposerRequest) {
         managementState.collapseSwipeRows()
         onOpenComposer(request)
@@ -202,27 +209,32 @@ internal fun LogTimelineList(
                             values = listOf(
                                 RecordSummaryValue(
                                     RecordType.FORMULA,
-                                    "${state.summary.feedMl}",
+                                    state.summaryBounds?.feedMl?.formatRange()
+                                        ?: "${state.summary.feedMl}",
                                     "奶ml",
                                 ),
                                 RecordSummaryValue(
                                     RecordType.NURSING,
-                                    logDaySummaryDuration(state.summary.nursingMinutes),
+                                    state.summaryBounds?.nursingMinutes?.let(::formatDurationBound)
+                                        ?: logDaySummaryDuration(state.summary.nursingMinutes),
                                     "母乳",
                                 ),
                                 RecordSummaryValue(
                                     RecordType.SLEEP,
-                                    logDaySummaryDuration(state.summary.sleepMinutes),
+                                    state.summaryBounds?.sleepMinutes?.let(::formatDurationBound)
+                                        ?: logDaySummaryDuration(state.summary.sleepMinutes),
                                     "睡眠",
                                 ),
                                 RecordSummaryValue(
                                     RecordType.PEE,
-                                    "${state.summary.peeCount}",
+                                    state.summaryBounds?.peeCount?.formatRange()
+                                        ?: "${state.summary.peeCount}",
                                     "尿",
                                 ),
                                 RecordSummaryValue(
                                     RecordType.POOP,
-                                    "${state.summary.poopCount}",
+                                    state.summaryBounds?.poopCount?.formatRange()
+                                        ?: "${state.summary.poopCount}",
                                     "便",
                                 ),
                             ),
@@ -236,38 +248,54 @@ internal fun LogTimelineList(
                                 type = RecordType.FORMULA,
                                 tone = LeziTone.Blue,
                                 label = "奶量",
-                                value = "${state.summary.feedMl}ml",
-                                spokenValue = "奶量 ${state.summary.feedMl}毫升",
+                                value = state.summaryBounds?.feedMl?.let {
+                                    SuspectedDuplicatePresentation.formatMetricBound(it, "ml")
+                                } ?: "${state.summary.feedMl}ml",
+                                spokenValue = state.summaryBounds?.feedMl?.let {
+                                    "奶量 ${SuspectedDuplicatePresentation.formatMetricBound(it, "毫升")}"
+                                } ?: "奶量 ${state.summary.feedMl}毫升",
                             ),
                             SummaryMetricSpec(
                                 type = RecordType.NURSING,
                                 tone = LeziTone.Blue,
                                 label = "母乳",
-                                value = logDaySummaryDuration(state.summary.nursingMinutes),
-                                spokenValue =
-                                    logDaySummaryNursingSpoken(state.summary.nursingMinutes),
+                                value = state.summaryBounds?.nursingMinutes?.let(::formatDurationBound)
+                                    ?: logDaySummaryDuration(state.summary.nursingMinutes),
+                                spokenValue = state.summaryBounds?.nursingMinutes?.let {
+                                    "母乳 ${formatDurationBound(it)}"
+                                } ?: logDaySummaryNursingSpoken(state.summary.nursingMinutes),
                             ),
                             SummaryMetricSpec(
                                 type = RecordType.SLEEP,
                                 tone = LeziTone.Yellow,
                                 label = "睡眠",
-                                value = logDaySummaryDuration(state.summary.sleepMinutes),
-                                spokenValue =
-                                    logDaySummarySleepSpoken(state.summary.sleepMinutes),
+                                value = state.summaryBounds?.sleepMinutes?.let(::formatDurationBound)
+                                    ?: logDaySummaryDuration(state.summary.sleepMinutes),
+                                spokenValue = state.summaryBounds?.sleepMinutes?.let {
+                                    "睡眠 ${formatDurationBound(it)}"
+                                } ?: logDaySummarySleepSpoken(state.summary.sleepMinutes),
                             ),
                             SummaryMetricSpec(
                                 type = RecordType.PEE,
                                 tone = LeziTone.Cream,
                                 label = "尿尿",
-                                value = "${state.summary.peeCount}次",
-                                spokenValue = "尿尿 ${state.summary.peeCount}次",
+                                value = state.summaryBounds?.peeCount?.let {
+                                    SuspectedDuplicatePresentation.formatMetricBound(it, "次")
+                                } ?: "${state.summary.peeCount}次",
+                                spokenValue = state.summaryBounds?.peeCount?.let {
+                                    "尿尿 ${SuspectedDuplicatePresentation.formatMetricBound(it, "次")}"
+                                } ?: "尿尿 ${state.summary.peeCount}次",
                             ),
                             SummaryMetricSpec(
                                 type = RecordType.POOP,
                                 tone = LeziTone.Neutral,
                                 label = "便便",
-                                value = "${state.summary.poopCount}次",
-                                spokenValue = "便便 ${state.summary.poopCount}次",
+                                value = state.summaryBounds?.poopCount?.let {
+                                    SuspectedDuplicatePresentation.formatMetricBound(it, "次")
+                                } ?: "${state.summary.poopCount}次",
+                                spokenValue = state.summaryBounds?.poopCount?.let {
+                                    "便便 ${SuspectedDuplicatePresentation.formatMetricBound(it, "次")}"
+                                } ?: "便便 ${state.summary.poopCount}次",
                             ),
                         )
                         Row(
@@ -516,7 +544,41 @@ internal fun LogTimelineList(
                 }
             }
 
-            if (state.loading || filteredTimelineRecords.isEmpty()) {
+            val filteredUuids = filteredTimelineRecords.mapTo(hashSetOf(), Record::clientUuid)
+            val visibleDuplicateGroups = state.openDuplicateGroups.filter { group ->
+                group.memberClientUuids.any { it in filteredUuids }
+            }
+            items(visibleDuplicateGroups, key = { "duplicate-group-${it.groupId}" }) { group ->
+                DuplicateGroupCard(
+                    group = group,
+                    recordsByUuid = state.records.associateBy(Record::clientUuid),
+                    recordRowsById = state.recordMetadata,
+                    currentMembershipId = state.currentMembershipId,
+                    isOwner = state.familyOwner,
+                    expanded = group.groupId !in collapsedDuplicateGroups,
+                    onToggle = {
+                        if (group.groupId in collapsedDuplicateGroups) {
+                            collapsedDuplicateGroups.remove(group.groupId)
+                        } else {
+                            collapsedDuplicateGroups.add(group.groupId)
+                        }
+                    },
+                    onAction = onDuplicateAction,
+                    modifier = Modifier.padding(horizontal = pageHorizontal),
+                )
+            }
+
+            val collapsedMemberUuids = visibleDuplicateGroups
+                .filter { it.groupId in collapsedDuplicateGroups }
+                .flatMapTo(hashSetOf()) { it.memberClientUuids }
+            val displayedTimelineRecords = filteredTimelineRecords.filter {
+                it.clientUuid !in collapsedMemberUuids
+            }
+
+            if (
+                state.loading ||
+                (displayedTimelineRecords.isEmpty() && visibleDuplicateGroups.isEmpty())
+            ) {
                 item(key = "records_phase", contentType = "records_phase") {
                     Crossfade(
                         targetState = state.loading,
@@ -547,7 +609,7 @@ internal fun LogTimelineList(
                     }
                 }
             } else {
-                items(filteredTimelineRecords, key = { it.id }) { record ->
+                items(displayedTimelineRecords, key = { it.id }) { record ->
                     val title = record.displayLabel()
                     val recordMetadata = state.recordMetadata[record.id]
                     val recordCapabilities = recordMetadata?.capabilities
@@ -612,6 +674,13 @@ internal fun LogTimelineList(
                             onClick = {
                                 if (recordRevealed) {
                                     managementState.collapseSwipeRows()
+                                } else if (
+                                    recordMetadata?.conflictSummaryLabel != null ||
+                                    recordMetadata?.sleepInterval?.isOverlapPending == true ||
+                                    recordMetadata?.wakeObservations?.isNotEmpty() == true
+                                ) {
+                                    managementState.collapseSwipeRows()
+                                    onOpenCausalDetails(record)
                                 } else if (publishLabel != null) {
                                     managementState.collapseSwipeRows()
                                     onOpenPublishChrome(
@@ -652,3 +721,10 @@ internal fun LogTimelineList(
 }
 
 internal fun recordSummaryLine(record: Record): String = record.presentationSummary()
+
+private fun formatDurationBound(bound: com.lezi.babylog.domain.carelog.LongBound): String =
+    if (bound.min == bound.max) {
+        logDaySummaryDuration(bound.min)
+    } else {
+        "${logDaySummaryDuration(bound.min)}–${logDaySummaryDuration(bound.max)}"
+    }

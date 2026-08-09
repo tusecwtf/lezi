@@ -54,6 +54,7 @@ data class ConflictResolverDetail(
     val conflictId: String,
     val stableVersionId: String,
     val stableRootJson: String,
+    val stableMedia: List<CausalMediaItem> = emptyList(),
     val baseRootJson: String? = null,
     val branchesJson: String,
     val conflictingPaths: List<String>,
@@ -263,18 +264,26 @@ internal class ConflictResolutionCoordinator(
                 if (existing.openConflictId != null && existing.openConflictId != conflictId) {
                     return false
                 }
-                val note = root?.stringOrNull("note")
+                val note = if (root?.containsKey("note") == true) {
+                    root.stringOrNull("note")
+                } else {
+                    existing.note
+                }
                 val timestamp = root?.get("timestamp")?.jsonPrimitive?.longOrNull
                     ?: existing.timestamp
-                val endTimestamp = root?.get("end_timestamp")?.let {
-                    if (it is JsonNull) null else it.jsonPrimitive.longOrNull
-                } ?: existing.endTimestamp
+                val endTimestamp = if (root?.containsKey("end_timestamp") == true) {
+                    root["end_timestamp"]?.let {
+                        if (it is JsonNull) null else it.jsonPrimitive.longOrNull
+                    }
+                } else {
+                    existing.endTimestamp
+                }
                 val updatedAt = root?.get("updated_at")?.jsonPrimitive?.longOrNull
                     ?: existing.updatedAt
                 val payload = root?.get("payload_json") as? JsonObject
                 recordDao.update(
                     existing.copy(
-                        note = note ?: existing.note,
+                        note = note,
                         timestamp = timestamp,
                         endTimestamp = endTimestamp,
                         payloadJson = payload?.toString() ?: existing.payloadJson,
@@ -284,9 +293,13 @@ internal class ConflictResolutionCoordinator(
                         syncDirty = existing.syncDirty,
                         openConflictId = null,
                         localBranchVersionId = null,
-                        effectiveWakeObservationClientUuid =
-                            root?.stringOrNull("effective_wake_observation_client_uuid")
-                                ?: existing.effectiveWakeObservationClientUuid,
+                        effectiveWakeObservationClientUuid = if (
+                            root?.containsKey("effective_wake_observation_client_uuid") == true
+                        ) {
+                            root.stringOrNull("effective_wake_observation_client_uuid")
+                        } else {
+                            existing.effectiveWakeObservationClientUuid
+                        },
                     ),
                 )
                 true
@@ -298,7 +311,11 @@ internal class ConflictResolutionCoordinator(
                 }
                 val wakeTs = root?.get("wake_timestamp")?.jsonPrimitive?.longOrNull
                     ?: existing.wakeTimestamp
-                val note = root?.stringOrNull("note")
+                val note = if (root?.containsKey("note") == true) {
+                    root.stringOrNull("note")
+                } else {
+                    existing.note
+                }
                 val withdrawn = root?.get("withdrawn")?.jsonPrimitive?.contentOrNull
                     ?.toBooleanStrictOrNull()
                     ?: existing.withdrawn
@@ -307,7 +324,7 @@ internal class ConflictResolutionCoordinator(
                 wakeObservationDao.update(
                     existing.copy(
                         wakeTimestamp = wakeTs,
-                        note = note ?: existing.note,
+                        note = note,
                         withdrawn = withdrawn,
                         updatedAt = updatedAt,
                         baseVersion = stableVersionId,
@@ -325,8 +342,16 @@ internal class ConflictResolutionCoordinator(
                     return false
                 }
                 val nickname = root?.stringOrNull("nickname") ?: existing.nickname
-                val sex = root?.stringOrNull("sex")
-                val avatar = root?.stringOrNull("avatar_media_uuid")
+                val sex = if (root?.containsKey("sex") == true) {
+                    root.stringOrNull("sex")
+                } else {
+                    existing.sex
+                }
+                val avatar = if (root?.containsKey("avatar_media_uuid") == true) {
+                    root.stringOrNull("avatar_media_uuid")
+                } else {
+                    existing.avatarMediaUuid
+                }
                 val updatedAt = root?.get("updated_at")?.jsonPrimitive?.longOrNull
                     ?: existing.updatedAt
                 babyDao.update(
@@ -349,14 +374,18 @@ internal class ConflictResolutionCoordinator(
                 if (existing.openConflictId != null && existing.openConflictId != conflictId) {
                     return false
                 }
-                val note = root?.stringOrNull("note")
+                val note = if (root?.containsKey("note") == true) {
+                    root.stringOrNull("note")
+                } else {
+                    existing.note
+                }
                 val status = root?.stringOrNull("status") ?: existing.status
                 val updatedAt = root?.get("updated_at")?.jsonPrimitive?.longOrNull
                     ?: existing.updatedAt
                 val payload = root?.get("payload_json") as? JsonObject
                 carePlanDao.update(
                     existing.copy(
-                        note = note ?: existing.note,
+                        note = note,
                         status = status,
                         payloadJson = payload?.toString() ?: existing.payloadJson,
                         updatedAt = updatedAt,
@@ -474,6 +503,7 @@ private fun ConflictDetail.toResolverDetail(): ConflictResolverDetail =
         conflictId = conflictId,
         stableVersionId = stableVersionId,
         stableRootJson = stableRootJson,
+        stableMedia = stableMedia,
         baseRootJson = baseRootJson,
         branchesJson = branchesJson,
         conflictingPaths = conflictingPaths,

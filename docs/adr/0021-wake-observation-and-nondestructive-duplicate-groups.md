@@ -55,7 +55,7 @@ status: accepted (0.3.13; runtime landing via lossless-family-causal-sync ticket
 ### 4. 与 0.3.11 家庭 wake / B1 的关系
 
 - 0.3.11 整行闭合 + 本机 B1 纠错是 **已交付** 过渡行为。
-- 0.3.13 规划以 WakeObservation 取代整行 end 竞争与 portable closer；ACL 仍是
+- 0.3.13 以 WakeObservation 取代整行 end 竞争与 portable closer；ACL 仍是
   membership 自我或 Owner，观察者只能改自己的观察。
 
 ## Considered Options
@@ -75,6 +75,9 @@ status: accepted (0.3.13; runtime landing via lossless-family-causal-sync ticket
 
 ## 实现状态
 
-规划目标随 0.3.13 因果切割一并交付。Store/API、Room、domain soft-group、bounds 与
-timeline/summary 投影已在 `lossless-family-causal-sync` 票 04–07 落地；两客户端 E2E 与
-发版验收仍由票 09 收口。
+0.3.13 tree 已交付 Store/API、Room、domain soft-group/bounds、Timeline 产品详情、
+WakeObservation 编辑/撤回/有效观察选择、按字段 conflict resolver 与 Log/Summary
+上下界。退役 B1、多开放睡眠自动闭合、服务器 neighbor winner 及
+`neighbor_losers` 产品协议已删除；历史 closed Sleep 迁移与不可变
+FulfillmentCandidate 证据仍保留。家庭 NAS 切割与生产双端 smoke 仍由票 09
+在用户确认的维护窗收口。

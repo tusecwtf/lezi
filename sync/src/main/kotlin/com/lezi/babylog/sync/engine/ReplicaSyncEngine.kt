@@ -132,8 +132,9 @@ private class AuthorityCasMismatchException : IllegalStateException()
  * [SyncTrigger.LocalWrite] declares [SyncPlan.pull]=false. That no-pull plan is applied only
  * when [SyncBackend.supportsCausalWire] is true: freeze current dirty atomic roots and settle
  * via the same causal reconcile→commit (or legacy fulfillment) seam without incremental pull
- * or pull-cursor advance. Without causal wire capability, LocalWrite still pulls first so
- * LWW cannot run as an unsafe faster push. Authenticated [SyncBackend.members] + self-membership
+ * or pull-cursor advance. Without causal wire capability, mutable roots fail closed after
+ * the safety pull; only immutable FulfillmentCandidate evidence retains the historical path.
+ * Authenticated [SyncBackend.members] + self-membership
  * convergence remains a deliberate LocalWrite precondition (roster, not pull cursor).
  *
  * Every remote page and media retry re-enters the same gate. Failures and cancellation escape
@@ -164,6 +165,8 @@ internal class ReplicaSyncEngine(
         com.lezi.babylog.core.database.causal.ConflictDetailCacheDao? = null,
     private val sourceRelationDao:
         com.lezi.babylog.core.database.causal.SourceRelationDao? = null,
+    /** Historical non-causal contract fixtures only; production callers must use the default. */
+    private val allowHistoricalMutableRootEvidence: Boolean = false,
 ) : FamilySessionReplica {
     private val publisher = EphemeralPublishPipeline(
         backend = backend,
@@ -189,6 +192,7 @@ internal class ReplicaSyncEngine(
         mediaFiles = mediaFiles,
         transactionRunner = transactionRunner,
         requireRemoteAllowed = requireRemoteAllowed,
+        protectDirtyCausalRoots = !allowHistoricalMutableRootEvidence,
     )
 
     suspend fun synchronize(
@@ -309,10 +313,13 @@ internal class ReplicaSyncEngine(
             val causalSlice = candidates.filter {
                 it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
             }
-            var causalHandled = false
+            if (causalSlice.isNotEmpty() && !backend.supportsCausalWire()) {
+                check(allowHistoricalMutableRootEvidence) {
+                    "家庭服务器缺少因果同步协议，已保留本机待同步内容"
+                }
+            }
             if (causalSlice.isNotEmpty() && backend.supportsCausalWire()) {
                 causalSettlement.settle(session, causalSlice)
-                causalHandled = true
                 // Concurrent user edits keep dirty Room state for the next cycle.
                 // Co-batched create-create (e.g. Sleep then Wake under LocalWrite) can
                 // leave residual dirty causal roots after a recoverable reject such as
@@ -341,12 +348,13 @@ internal class ReplicaSyncEngine(
                 }
                 candidates = remainingLegacy
             }
-            // FulfillmentCandidate remains immutable evidence — legacy authority + bundle path.
-            // When causal is unavailable, the full candidate set uses legacy reconcile/push.
-            val forLegacy = if (causalHandled) {
-                candidates.filter { it.entityType == "fulfillment_candidate" }
-            } else {
+            // FulfillmentCandidate remains immutable historical evidence. Mutable atomic
+            // roots never enter this branch in production; the wider slice exists solely
+            // for the pre-causal contract fixtures enabled explicitly by tests.
+            val forLegacy = if (allowHistoricalMutableRootEvidence) {
                 candidates
+            } else {
+                candidates.filter { it.entityType == "fulfillment_candidate" }
             }
             if (forLegacy.isEmpty()) return neighborLosers
             val settlement = reconcileFrozenChanges(session, forLegacy)

@@ -152,6 +152,9 @@ class RealSyncPort @Inject constructor(
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictDetailCacheDao: ConflictDetailCacheDao,
     private val sourceRelationDao: SourceRelationDao? = null,
+    /** Historical non-causal contract fixtures only; production DI binds this to false. */
+    @Named("allowHistoricalMutableRootEvidence")
+    private val allowHistoricalMutableRootEvidence: Boolean = false,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     private val apkIdentityReader: AppUpdateApkIdentityReader =
@@ -218,6 +221,7 @@ class RealSyncPort @Inject constructor(
         conflictSummaryDao = conflictSummaryDao,
         conflictDetailCacheDao = conflictDetailCacheDao,
         sourceRelationDao = sourceRelationDao,
+        allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
     private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
         babyDao = babyDao,

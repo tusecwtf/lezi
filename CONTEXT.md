@@ -328,5 +328,5 @@ _Avoid_: 把醒来压回 Sleep `end_timestamp` 竞争、整行 LWW 选醒来、�
 _Avoid_: 服务器自动落选、同 membership 连记进组、未确认就改写源记录、把组当成家庭权威裁决
 
 **LocalWrite 因果快速路径**（**0.3.13 已交付引擎路径**；双端隔离实机证据见发版票）：
-前台、可信 endpoint、健康租约、且后端具备因果 wire capability 时，本机写成功后冻结当前待对账原子单元并直接因果 reconcile/commit，**不先 pull**，也 **不推进** 增量 pull cursor。远端变化只能自动无损合并或建分支，不能覆盖本机。回前台、网络恢复、下拉与常规周期仍完整 pull。在无因果 capability 时 LocalWrite **仍先 pull**，禁止把 no-pull 当成更快 LWW。
+前台、可信 endpoint、健康租约、且后端具备因果 wire capability 时，本机写成功后冻结当前待对账原子单元并直接因果 reconcile/commit，**不先 pull**，也 **不推进** 增量 pull cursor。远端变化只能自动无损合并或建分支，不能覆盖本机。回前台、网络恢复、下拉与常规周期仍完整 pull。无因果 capability 时，LocalWrite 先执行安全 pull，但任何可变根随即 **fail closed 并保留 dirty**；只有不可变 FulfillmentCandidate 证据可继续历史 reconcile/bundle 缝。
 _Avoid_: 无因果协议就去掉 pull、快速路径推进 pull cursor、后台写触发快速路径、把低延迟当无损保证

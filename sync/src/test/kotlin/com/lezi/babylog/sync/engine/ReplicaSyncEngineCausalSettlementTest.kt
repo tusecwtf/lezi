@@ -24,9 +24,45 @@ import org.junit.runners.Parameterized
 class ReplicaSyncEngineCausalSettlementTest {
 
     @Test
+    fun missingCausalCapabilityFailsClosedBeforeMutableRootLegacyReconcile() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        )
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-no-causal-fallback",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().contains("因果同步协议")
+        assertThat(rig.backend.reconciledUnits).isEmpty()
+        assertThat(rig.records.getByClientUuid("record-no-causal-fallback")!!.syncDirty).isTrue()
+    }
+
+    @Test
     fun freezeMutationIdStableAcrossRetryAndClearsOnAccepted() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val rig = ReplicaEngineRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        ).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
             localReplicaBaby().copy(syncDirty = false, familyAuthority = true, baseVersion = "v-baby"),
         )
@@ -74,7 +110,10 @@ class ReplicaSyncEngineCausalSettlementTest {
     @Test
     fun confirmedExactMutationClearsPendingWithoutCommit() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val rig = ReplicaEngineRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        ).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
             localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
         )
@@ -284,7 +323,10 @@ class ReplicaSyncEngineCausalSettlementTest {
     @Test
     fun pullDoesNotOverwriteDirtyUnfinishedMutationByUpdatedAt() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val rig = ReplicaEngineRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        ).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
             localReplicaBaby().copy(syncDirty = false, familyAuthority = true, baseVersion = "v-b"),
         )
@@ -353,6 +395,69 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(row.syncDirty).isTrue()
         assertThat(row.updatedAt).isEqualTo(100)
         assertThat(row.baseVersion).isEqualTo("v-r0")
+    }
+
+    @Test
+    fun firstCausalPullEstablishesBaselineWithoutOverwritingMigratedDirtyRoot() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        ).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true, baseVersion = "v-b"),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-upgraded-dirty",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "离线保留",
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = null,
+                mutationId = null,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteReplicaRecord("record-upgraded-dirty").copy(
+                    updatedAt = 999_999,
+                    versionId = "v-upgrade-baseline",
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-local",
+                          "created_by_membership_id":"membership-b",
+                          "type":"formula",
+                          "custom_item_client_uuid":null,
+                          "timestamp":210,
+                          "end_timestamp":null,
+                          "note":"远端稳定投影",
+                          "payload_json":{"amount_ml":90},
+                          "schema_version":2
+                        }
+                    """.trimIndent(),
+                ),
+            ),
+            cursor = 1,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
+        rig.backend.onCausalReconcile = { units ->
+            val mutation = units.single()
+            assertThat(mutation.baseVersion).isEqualTo("v-upgrade-baseline")
+            assertThat(mutation.rootJson).contains("离线保留")
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        val settled = requireNotNull(rig.records.getByClientUuid("record-upgraded-dirty"))
+        assertThat(settled.note).isEqualTo("离线保留")
+        assertThat(settled.syncDirty).isFalse()
+        assertThat(settled.baseVersion).isNotEqualTo("v-upgrade-baseline")
     }
 
     @Test
@@ -738,6 +843,153 @@ class ReplicaSyncEngineCausalSettlementTest {
 class ReplicaSyncEngineCausalRootTypesTest(
     private val entityType: String,
 ) {
+    @Test
+    fun migratedDirtyRootLearnsBaselineWithoutLosingLocalIntent() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val settlement = CausalSettlement(
+            backend = rig.backend,
+            recordDao = rig.records,
+            carePlanDao = rig.carePlans,
+            babyDao = rig.babies,
+            mediaDao = rig.media,
+            customItemDao = rig.customItems,
+            wakeObservationDao = rig.wakeObservations,
+            conflictSummaryDao = rig.conflictSummaries,
+            conflictDetailCacheDao = rig.conflictDetails,
+            mediaFiles = rig.mediaFiles,
+            transactionRunner = rig.transactions,
+            requireRemoteAllowed = {},
+            protectDirtyCausalRoots = true,
+        )
+        when (entityType) {
+            "baby" -> rig.babies.seed(
+                localReplicaBaby().copy(
+                    nickname = "本机宝宝",
+                    syncDirty = true,
+                    familyAuthority = true,
+                    updatedAt = 50,
+                    baseVersion = null,
+                    mutationId = "old-null-base-envelope",
+                ),
+            )
+            "record" -> {
+                val babyId = rig.babies.seed(
+                    localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+                )
+                val recordId = rig.records.seed(
+                    RecordEntity(
+                        clientUuid = "root-record",
+                        babyId = babyId,
+                        type = "formula",
+                        timestamp = 1,
+                        note = "本机修改",
+                        payloadJson = """{"amount_ml":88}""",
+                        schemaVersion = 2,
+                        updatedAt = 50,
+                        syncDirty = true,
+                        mutationId = "old-null-base-envelope",
+                    ),
+                )
+                rig.media.seed(
+                    com.lezi.babylog.core.database.MediaAssetEntity(
+                        recordId = recordId,
+                        clientUuid = "root-record-photo",
+                        localUri = "/private/local-photo.jpg",
+                        createdAt = 40,
+                        updatedAt = 50,
+                        syncDirty = true,
+                    ),
+                )
+            }
+            "care_plan" -> {
+                val babyId = rig.babies.seed(
+                    localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+                )
+                rig.carePlans.seed(
+                    localReplicaCarePlan("root-plan", "membership-a", 50).copy(
+                        babyId = babyId,
+                        note = "本机计划",
+                        syncDirty = true,
+                        mutationId = "old-null-base-envelope",
+                    ),
+                )
+            }
+            "custom_item" -> rig.customItems.seed(
+                localReplicaCustomItem("root-custom", "membership-a", 50).copy(
+                    name = "本机自定义",
+                    syncDirty = true,
+                    deletedAt = 49,
+                    mutationId = "old-null-base-envelope",
+                ),
+            )
+            "wake_observation" -> rig.wakeObservations.seed(
+                com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                    clientUuid = "root-wake",
+                    sleepRecordClientUuid = "sleep-local",
+                    wakeTimestamp = 2,
+                    observerMembershipId = "membership-a",
+                    note = "本机醒来",
+                    withdrawn = true,
+                    updatedAt = 50,
+                    syncDirty = true,
+                    mutationId = "old-null-base-envelope",
+                ),
+            )
+        }
+
+        val clientUuid = when (entityType) {
+            "baby" -> "baby-local"
+            "record" -> "root-record"
+            "care_plan" -> "root-plan"
+            "custom_item" -> "root-custom"
+            "wake_observation" -> "root-wake"
+            else -> error(entityType)
+        }
+        assertThat(
+            settlement.shouldApplyStablePull(
+                entityType = entityType,
+                clientUuid = clientUuid,
+                remoteVersionId = "remote-baseline-$entityType",
+                forceAuthority = false,
+            ),
+        ).isFalse()
+
+        when (entityType) {
+            "baby" -> with(requireNotNull(rig.babies.getByClientUuid(clientUuid))) {
+                assertThat(nickname).isEqualTo("本机宝宝")
+                assertThat(baseVersion).isEqualTo("remote-baseline-baby")
+                assertThat(mutationId).isNull()
+            }
+            "record" -> with(requireNotNull(rig.records.getByClientUuid(clientUuid))) {
+                assertThat(note).isEqualTo("本机修改")
+                assertThat(baseVersion).isEqualTo("remote-baseline-record")
+                assertThat(mutationId).isNull()
+                assertThat(rig.media.getByClientUuid("root-record-photo")!!.localUri)
+                    .isEqualTo("/private/local-photo.jpg")
+            }
+            "care_plan" -> with(requireNotNull(rig.carePlans.getByClientUuid(clientUuid))) {
+                assertThat(note).isEqualTo("本机计划")
+                assertThat(baseVersion).isEqualTo("remote-baseline-care_plan")
+                assertThat(mutationId).isNull()
+            }
+            "custom_item" -> with(requireNotNull(rig.customItems.getByClientUuid(clientUuid))) {
+                assertThat(name).isEqualTo("本机自定义")
+                assertThat(deletedAt).isEqualTo(49L)
+                assertThat(baseVersion).isEqualTo("remote-baseline-custom_item")
+                assertThat(mutationId).isNull()
+            }
+            "wake_observation" -> with(
+                requireNotNull(rig.wakeObservations.getByClientUuid(clientUuid)),
+            ) {
+                assertThat(note).isEqualTo("本机醒来")
+                assertThat(withdrawn).isTrue()
+                assertThat(baseVersion).isEqualTo("remote-baseline-wake_observation")
+                assertThat(mutationId).isNull()
+            }
+        }
+    }
+
     @Test
     fun acceptedSettlesEachRootType() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
