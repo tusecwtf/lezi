@@ -364,7 +364,7 @@ pub(crate) async fn causal_commit(
     let blocking_state = state.clone();
     let generation = state.generation.clone();
     let result = run_blocking(move || {
-        // Causal commit never runs neighbor adjudication (ticket 03 / ADR-0019).
+        // Causal commit preserves each fact; duplicate grouping is an explicit relation.
         blocking_state
             .store
             .causal_commit(&principal, units, blocking_state.now())

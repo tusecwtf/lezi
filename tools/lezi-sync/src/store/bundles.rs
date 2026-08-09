@@ -462,11 +462,6 @@ fn stamp_and_authorize_custom_items(
 /// Once published, only that membership (across all of its devices) or the
 /// family owner may edit or tombstone the record. Soft-deleted records cannot
 /// be resurrected (record tombstone wins — ADR-0018 / 0.3.10).
-///
-/// Family wake is a baby-level fact (data-model.md): any family member may close
-/// a still-open sleep interval (`type=sleep`, open `end_timestamp` → closed). The
-/// original `created_by_membership_id` is preserved; this does not grant later
-/// edit/delete rights on the completed sleep or on non-sleep records.
 fn canonicalize_record_authors(
     role: &str,
     membership_id: &str,
@@ -489,12 +484,7 @@ fn canonicalize_record_authors(
                 .filter(|value| !value.is_empty());
             if let Some(value) = value {
                 if role != "owner" && value != membership_id {
-                    if !is_family_open_sleep_close(current, entity) {
-                        return Err(StoreError::ForbiddenRecord);
-                    }
-                    // Non-author family wake: keep published open-start fields;
-                    // only end / note / photos (and media package) may change.
-                    force_preserve_family_wake_open_fields(current, entity);
+                    return Err(StoreError::ForbiddenRecord);
                 }
                 entity.payload.insert(
                     "created_by_membership_id".to_owned(),
@@ -516,82 +506,6 @@ fn canonicalize_record_authors(
         }
     }
     Ok(())
-}
-
-/// True when [entity] is a live close of a live open sleep published as [current].
-/// Used so any membership may record family wake without gaining general edit rights.
-fn is_family_open_sleep_close(current: &ExistingEntity, entity: &Entity) -> bool {
-    if current.deleted_at.is_some() || entity.deleted_at.is_some() {
-        return false;
-    }
-    if current.payload.get("type").and_then(Value::as_str) != Some("sleep") {
-        return false;
-    }
-    if entity.payload.get("type").and_then(Value::as_str) != Some("sleep") {
-        return false;
-    }
-    let current_open = match current.payload.get("end_timestamp") {
-        None | Some(Value::Null) => true,
-        Some(Value::Number(_)) => false,
-        Some(_) => false,
-    };
-    if !current_open {
-        return false;
-    }
-    entity
-        .payload
-        .get("end_timestamp")
-        .and_then(Value::as_i64)
-        .is_some()
-}
-
-/// For non-author open→close only: restore open-start fields from the published
-/// open row so clients cannot rewrite sleep-down time or is_nap via family wake.
-/// Also keeps published anomaly_flag so a wake package cannot clear heal marks.
-fn force_preserve_family_wake_open_fields(current: &ExistingEntity, entity: &mut Entity) {
-    if let Some(timestamp) = current.payload.get("timestamp") {
-        entity
-            .payload
-            .insert("timestamp".to_owned(), timestamp.clone());
-    }
-    if let Some(baby_id) = current.payload.get("baby_client_uuid") {
-        entity
-            .payload
-            .insert("baby_client_uuid".to_owned(), baby_id.clone());
-    }
-    let published_sleep = current.payload.get("payload_json").and_then(|value| {
-        if let Value::Object(map) = value {
-            Some(map)
-        } else {
-            None
-        }
-    });
-    let Some(published) = published_sleep else {
-        return;
-    };
-    let preserve_keys = ["is_nap", "anomaly_flag"];
-    match entity.payload.get_mut("payload_json") {
-        Some(Value::Object(map)) => {
-            for key in preserve_keys {
-                if let Some(value) = published.get(key) {
-                    map.insert(key.to_owned(), value.clone());
-                }
-            }
-        }
-        _ => {
-            let mut map = Map::new();
-            for key in preserve_keys {
-                if let Some(value) = published.get(key) {
-                    map.insert(key.to_owned(), value.clone());
-                }
-            }
-            if !map.is_empty() {
-                entity
-                    .payload
-                    .insert("payload_json".to_owned(), Value::Object(map));
-            }
-        }
-    }
 }
 
 fn record_author_acknowledgement(
@@ -1446,18 +1360,7 @@ fn validate_push(
                     .filter(|creator| !creator.is_empty())
                     .ok_or(StoreError::InvalidStoredPayload)?;
                 if creator != membership_id {
-                    // Photos attached while recording family wake on another
-                    // member's open sleep must ride the same atomic package.
-                    let family_wake_close = entities.iter().any(|root| {
-                        root.entity_type == "record"
-                            && root.client_uuid == *record_id
-                            && existing
-                                .get(&("record".to_owned(), root.client_uuid.clone()))
-                                .is_some_and(|current| is_family_open_sleep_close(current, root))
-                    });
-                    if !family_wake_close {
-                        return Err(StoreError::ForbiddenRecord);
-                    }
+                    return Err(StoreError::ForbiddenRecord);
                 }
             }
             let record_baby_id = effective_records[record_id]["baby_client_uuid"]
@@ -2158,7 +2061,6 @@ impl Store {
                     applied,
                     cursor,
                     record_authors,
-                    neighbor_losers: Vec::new(),
                 },
                 package,
             ));
@@ -2176,8 +2078,10 @@ impl Store {
             return Err(StoreError::ForbiddenBaby);
         }
 
-        // Causal fail-closed: once a stable head exists, only causal commit may
-        // advance the root. LWW here would poison pull `version_id` vs payload.
+        // Historical pre-causal Store/API fixtures still exercise the old atomic
+        // bundle contract. Once a stable head exists, however, timestamp LWW can
+        // never advance that root; current Android clients use causal commit for
+        // every mutable root and reserve this path for FulfillmentCandidate.
         let causal_head_exists = transaction
             .query_row(
                 "SELECT 1 FROM entity_stable_heads
@@ -2188,7 +2092,9 @@ impl Store {
             .optional()?
             .is_some();
         if causal_head_exists {
-            return Err(StoreError::LegacyBundleCommitOnCausalEntity);
+            return Err(StoreError::LegacyBundleCausalRootUnsupported(
+                root.entity_type.clone(),
+            ));
         }
 
         if root.updated_at > max_updated_at
@@ -2341,12 +2247,8 @@ impl Store {
             "fulfillment_candidate" => 2,
             _ => 3,
         });
-        // Schema 12 / causal generation (ADR-0019/0021): never mint neighbor-loser
-        // tombstones. Legacy LWW bundle path may still accept pre-causal roots that
-        // lack a stable head, but must not reintroduce server near-neighbor truth.
-        let neighbor_losers: Vec<Entity> = Vec::new();
-        let mut entity_count = effective.len();
-        for entity in effective.iter().chain(neighbor_losers.iter()) {
+        let entity_count = effective.len();
+        for entity in &effective {
             cursor += 1;
             transaction.execute(
                 "
@@ -2371,11 +2273,6 @@ impl Store {
                 ],
             )?;
         }
-        entity_count += neighbor_losers.len();
-        let neighbor_loser_ids = neighbor_losers
-            .iter()
-            .map(|entity| entity.client_uuid.clone())
-            .collect::<Vec<_>>();
         transaction.execute(
             "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
             params![cursor, family_id],
@@ -2483,7 +2380,6 @@ impl Store {
                 applied: entity_count,
                 cursor,
                 record_authors,
-                neighbor_losers: neighbor_loser_ids,
             },
             package,
         ))

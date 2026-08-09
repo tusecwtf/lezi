@@ -176,12 +176,6 @@ internal data class QuickRecordDraft(
     val stoolColor: Int = 0,
     val sleepAction: SleepDraftAction? = null,
     val isNap: Boolean = false,
-    /**
-     * Device-local B1 family-wake correction: open-start fields (sleep-down time /
-     * is_nap) are locked; end, note, and photos remain editable. Domain save also
-     * force-preserves open-start fields.
-     */
-    val restrictedSleepOpenFields: Boolean = false,
     val temperature: String = "36.5",
     val temperatureUnit: TemperatureUnit = TemperatureUnit.Celsius,
     val body: String = "",

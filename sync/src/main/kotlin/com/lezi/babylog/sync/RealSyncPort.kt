@@ -1891,11 +1891,7 @@ class RealSyncPort @Inject constructor(
         preferences.markSuccess(clock.nowMillis())
         cachedSession = preferences.session.first()
         currentStatus.value = when (outcome) {
-            is ReplicaSyncOutcome.Synchronized -> {
-                // Causal generation: do not toast neighbor_losers or interpret
-                // ordinary remote tombstones as duplicates (ADR-0021 / ticket 07).
-                SyncStatus.Idle
-            }
+            ReplicaSyncOutcome.Synchronized -> SyncStatus.Idle
         }
     }
 

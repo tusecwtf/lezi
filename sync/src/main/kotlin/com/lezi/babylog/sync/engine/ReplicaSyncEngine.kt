@@ -24,13 +24,8 @@ import com.lezi.babylog.core.database.causal.SourceRelationReason
 import com.lezi.babylog.core.database.causal.SourceRelationRole
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
-import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
-import com.lezi.babylog.core.model.OpenSleepCandidate
-import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.limitBabyNicknameInput
-import com.lezi.babylog.core.model.normalizeOpenSleeps
 import java.time.ZoneId
 import java.security.MessageDigest
 import java.util.UUID
@@ -93,10 +88,7 @@ internal object AtomicBundleId {
 }
 
 internal sealed interface ReplicaSyncOutcome {
-    data class Synchronized(
-        /** Explicit server neighbor-loser uuids from this cycle's commits. */
-        val neighborLoserClientUuids: Set<String> = emptySet(),
-    ) : ReplicaSyncOutcome
+    data object Synchronized : ReplicaSyncOutcome
 }
 
 private data class CapturedLocalChanges(
@@ -215,7 +207,6 @@ internal class ReplicaSyncEngine(
             backend.members(current),
         )
         var recovered = false
-        val neighborLosers = linkedSetOf<String>()
         // When doPull is false (LocalWrite + causal): freeze dirty roots → settle only.
         // Do not incremental-pull and do not advance the pull cursor; full cycles still pull.
         if (doPull) {
@@ -236,7 +227,7 @@ internal class ReplicaSyncEngine(
                 current = preferences.session.first()
             }
             try {
-                neighborLosers += settleAndPublish(current, captured.candidates)
+                settleAndPublish(current, captured.candidates)
             } catch (error: AuthorityProofException) {
                 current = recoverFullResync(
                     current,
@@ -270,7 +261,7 @@ internal class ReplicaSyncEngine(
         // Tombstone metadata remains as family deletion evidence; only unowned
         // bytes and their retry marker are reclaimed here.
         mediaFileCleanup.cleanupPendingTombstones()
-        return ReplicaSyncOutcome.Synchronized(neighborLoserClientUuids = neighborLosers)
+        return ReplicaSyncOutcome.Synchronized
     }
 
     override suspend fun applyInitialEntities(
@@ -293,7 +284,7 @@ internal class ReplicaSyncEngine(
     private suspend fun pushPending(
         session: SyncSession,
         candidates: List<PublishCandidate>,
-    ): Set<String> = publisher.pushPending(session, candidates)
+    ) = publisher.pushPending(session, candidates)
 
     /**
      * Resolve dependency-ordered authority in one bounded foreground cycle.
@@ -304,9 +295,8 @@ internal class ReplicaSyncEngine(
     private suspend fun settleAndPublish(
         session: SyncSession,
         initialCandidates: List<PublishCandidate>,
-    ): Set<String> {
+    ) {
         var candidates = initialCandidates
-        val neighborLosers = linkedSetOf<String>()
         for (pass in 0 until MAX_AUTHORITY_SETTLEMENT_PASSES) {
             // Causal roots (baby/record/care_plan/custom_item/wake + media manifests)
             // settle via reconcile/commit with exact mutation CAS — not LWW updatedAt.
@@ -344,7 +334,7 @@ internal class ReplicaSyncEngine(
                     continue
                 }
                 if (remainingLegacy.isEmpty()) {
-                    return neighborLosers
+                    return
                 }
                 candidates = remainingLegacy
             }
@@ -356,10 +346,10 @@ internal class ReplicaSyncEngine(
             } else {
                 candidates.filter { it.entityType == "fulfillment_candidate" }
             }
-            if (forLegacy.isEmpty()) return neighborLosers
+            if (forLegacy.isEmpty()) return
             val settlement = reconcileFrozenChanges(session, forLegacy)
-            neighborLosers += pushPending(session, settlement.publishable)
-            if (settlement.retryCount == 0) return neighborLosers
+            pushPending(session, settlement.publishable)
+            if (settlement.retryCount == 0) return
             require(settlement.publishable.isNotEmpty()) {
                 "家庭服务器暂时无法完成权威裁决，请稍后重试"
             }
@@ -488,17 +478,6 @@ internal class ReplicaSyncEngine(
                 .forEach { babyId ->
                     appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
                 }
-            // Causal wire: do not invent local care truth by auto-closing overlapping sleeps.
-            // Overlap UX / WakeObservation projection belongs to later tickets.
-            if (!backend.supportsCausalWire()) {
-                entities.filter { it.type == "record" }
-                    .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.babyId }
-                    .distinct()
-                    .forEach { babyId ->
-                        healOpenSleepsClosedByFamilyWake(babyId)
-                        healDuplicateOpenSleeps(babyId)
-                    }
-            }
             (
                 entities.filter { it.type == "baby" }
                     .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
@@ -1479,103 +1458,6 @@ internal class ReplicaSyncEngine(
                 )
             }
         }
-    }
-
-    /**
-     * Keep at most one open sleep per baby after sync apply. Older open
-     * intervals are closed at the next open's start and flagged as anomaly so
-     * sleep aggregates cannot double-count forever.
-     */
-    private suspend fun healDuplicateOpenSleeps(babyId: Long) {
-        val opens = recordDao.listOpenSleeps(babyId)
-        if (opens.size <= 1) return
-        val now = clock.nowMillis()
-        val decision = normalizeOpenSleeps(
-            candidates = opens.map { open ->
-                OpenSleepCandidate(
-                    stableKey = open.clientUuid,
-                    startedAtMillis = open.timestamp,
-                )
-            },
-            repairAtMillis = now,
-        )
-        val byClientUuid = opens.associateBy(RecordEntity::clientUuid)
-        for (closure in decision.closures) {
-            val current = byClientUuid.getValue(closure.candidate.stableKey)
-            val flagged = withSleepAnomaly(current.payloadJson, current.schemaVersion)
-            val updatedAt = if (current.updatedAt == Long.MAX_VALUE) {
-                Long.MAX_VALUE
-            } else {
-                maxOf(now, current.updatedAt + 1)
-            }
-            recordDao.update(
-                current.copy(
-                    endTimestamp = closure.closedAtMillis,
-                    payloadJson = flagged.first,
-                    schemaVersion = flagged.second,
-                    updatedAt = updatedAt,
-                    syncDirty = true,
-                ),
-            )
-        }
-    }
-
-    /**
-     * A wake is family-global, not scoped to the UUID opened on one device.
-     * Close every still-open sleep that began no later than the newest known
-     * wake. A clock-skewed open beginning after that wake remains the single
-     * residual open instead of being given an invalid negative interval.
-     */
-    private suspend fun healOpenSleepsClosedByFamilyWake(babyId: Long) {
-        val records = recordDao.listAllIncludingDeleted()
-        val latestWake = records.asSequence()
-            .filter { record ->
-                record.babyId == babyId &&
-                    record.type == RecordType.SLEEP.key &&
-                    record.deletedAt == null &&
-                    record.endTimestamp != null
-            }
-            .maxWithOrNull(
-                compareBy<RecordEntity> { it.endTimestamp ?: Long.MIN_VALUE }
-                    .thenBy { it.updatedAt }
-                    .thenBy { it.clientUuid },
-            ) ?: return
-        val wakeAt = requireNotNull(latestWake.endTimestamp)
-        val now = clock.nowMillis()
-        recordDao.listOpenSleeps(babyId)
-            .filter { it.timestamp <= wakeAt }
-            .forEach { open ->
-                val flagged = withSleepAnomaly(open.payloadJson, open.schemaVersion)
-                val revisionFloor = maxOf(open.updatedAt, latestWake.updatedAt, now)
-                val updatedAt = if (revisionFloor == Long.MAX_VALUE) {
-                    Long.MAX_VALUE
-                } else {
-                    revisionFloor + 1
-                }
-                recordDao.update(
-                    open.copy(
-                        endTimestamp = wakeAt,
-                        payloadJson = flagged.first,
-                        schemaVersion = flagged.second,
-                        updatedAt = updatedAt,
-                        syncDirty = true,
-                    ),
-                )
-            }
-    }
-
-    private fun withSleepAnomaly(
-        payloadJson: String,
-        schemaVersion: Int,
-    ): Pair<String, Int> {
-        val document = RecordPayloadCodec.decode(RecordType.SLEEP, payloadJson, schemaVersion)
-        val sleep = document.payload as? SleepPayload
-            ?: return payloadJson to schemaVersion
-        val normalized = document.copy(
-            payload = sleep.copy(anomaly = true),
-            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        )
-        return RecordPayloadCodec.encode(normalized) to CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
     }
 
     /**

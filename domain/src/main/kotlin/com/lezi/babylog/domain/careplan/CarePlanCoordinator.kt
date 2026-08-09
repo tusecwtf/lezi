@@ -429,7 +429,6 @@ internal class CarePlanCoordinator(
                 val resolvedEnd = endTimestamp
                 if (type == RecordType.SLEEP) {
                     validateSleepInterval(RecordType.SLEEP, actualTimestamp, resolvedEnd)
-                    recordMutations.healDuplicateOpenSleeps(plan.babyId)
                     val currentOpen = recordDao.findOpenSleep(plan.babyId)
                     // Open-interval fulfill and closed-interval fulfill both require
                     // no competing open sleep for a different interval.
@@ -791,7 +790,6 @@ internal class CarePlanCoordinator(
                 requireActiveBaby(source.babyId)
                 if (type == RecordType.SLEEP && source.endTimestamp == null) {
                     // Open sleep from a fulfill is unexpected; still guard open-sleep invariants.
-                    recordMutations.healDuplicateOpenSleeps(source.babyId)
                     if (recordDao.findOpenSleep(source.babyId) != null) {
                         throw SleepStateChangedException()
                     }

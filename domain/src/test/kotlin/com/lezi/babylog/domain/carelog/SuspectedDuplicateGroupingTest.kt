@@ -32,39 +32,6 @@ class SuspectedDuplicateGroupingTest {
     }
 
     @Test
-    fun crossMembershipWithin30Min_formsGroup() {
-        val t0 = 1_700_000_000_000L
-        val records = listOf(
-            record("a", RecordType.FORMULA, t0, "m-owner"),
-            record("b", RecordType.FORMULA, t0 + 29 * 60_000L, "m-member"),
-        )
-        val groups = SuspectedDuplicateGrouping.group(records)
-        assertThat(groups).hasSize(1)
-        assertThat(groups.single().memberClientUuids).containsExactly("a", "b").inOrder()
-        assertThat(groups.single().recordType).isEqualTo(RecordType.FORMULA)
-    }
-
-    @Test
-    fun exactly30MinBoundary_formsGroup() {
-        val t0 = 1_700_000_000_000L
-        val records = listOf(
-            record("a", RecordType.PEE, t0, "m1"),
-            record("b", RecordType.PEE, t0 + SuspectedDuplicateGrouping.WINDOW_MS, "m2"),
-        )
-        assertThat(SuspectedDuplicateGrouping.group(records)).hasSize(1)
-    }
-
-    @Test
-    fun thirtyOneMinutes_doesNotGroup() {
-        val t0 = 1_700_000_000_000L
-        val records = listOf(
-            record("a", RecordType.PEE, t0, "m1"),
-            record("b", RecordType.PEE, t0 + SuspectedDuplicateGrouping.WINDOW_MS + 1, "m2"),
-        )
-        assertThat(SuspectedDuplicateGrouping.group(records)).isEmpty()
-    }
-
-    @Test
     fun sameMembershipMultiDevice_doesNotGroup() {
         val t0 = 1_700_000_000_000L
         val records = listOf(

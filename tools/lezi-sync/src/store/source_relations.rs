@@ -581,7 +581,9 @@ fn incomplete_component_member(
     members: &[String],
     member_set: &BTreeSet<String>,
 ) -> Result<Option<String>, StoreError> {
-    use crate::store::neighbor::{is_neighbor_whitelist_type, NEIGHBOR_WINDOW};
+    use crate::store::suspected_duplicates::{
+        is_suspected_duplicate_type, SUSPECTED_DUPLICATE_WINDOW,
+    };
 
     #[derive(Clone)]
     struct Row {
@@ -609,7 +611,7 @@ fn incomplete_component_member(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        if !is_neighbor_whitelist_type(&record_type) {
+        if !is_suspected_duplicate_type(&record_type) {
             continue;
         }
         let baby = payload
@@ -641,8 +643,8 @@ fn incomplete_component_member(
     let mut candidates: BTreeMap<String, Row> = BTreeMap::new();
     for row in &named {
         candidates.insert(row.uuid.clone(), row.clone());
-        let lo = row.ts.saturating_sub(NEIGHBOR_WINDOW);
-        let hi = row.ts.saturating_add(NEIGHBOR_WINDOW);
+        let lo = row.ts.saturating_sub(SUSPECTED_DUPLICATE_WINDOW);
+        let hi = row.ts.saturating_add(SUSPECTED_DUPLICATE_WINDOW);
         let mut stmt = tx.prepare(
             "
             SELECT client_uuid, payload_json FROM entities
@@ -704,7 +706,7 @@ fn incomplete_component_member(
             if a.author == b.author {
                 continue;
             }
-            if (a.ts - b.ts).abs() <= NEIGHBOR_WINDOW {
+            if (a.ts - b.ts).abs() <= SUSPECTED_DUPLICATE_WINDOW {
                 adj.get_mut(&uuids[i]).unwrap().push(uuids[j].clone());
                 adj.get_mut(&uuids[j]).unwrap().push(uuids[i].clone());
             }

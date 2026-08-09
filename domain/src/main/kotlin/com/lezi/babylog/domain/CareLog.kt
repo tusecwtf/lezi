@@ -311,7 +311,6 @@ class CareLog @Inject constructor(
         reminderProjection = reminderProjection,
         sleepMutationMutex = sleepMutationMutex,
         mediaPathGate = mediaPathGate,
-        healDuplicateOpenSleeps = recordMutations::healDuplicateOpenSleeps,
         cleanupCommittedPhotoTombstones = recordMutations::cleanupCommittedPhotoTombstones,
         requestLocalSync = ::requestLocalSync,
     )
@@ -568,17 +567,13 @@ class CareLog @Inject constructor(
     suspend fun canManageRecord(record: Record): Boolean =
         recordMutations.canManageRecord(record)
 
-    /** Full manage or device-local B1 restricted wake correction. */
+    /** Full edit permission: record author or Owner. */
     suspend fun canEditRecord(record: Record): Boolean =
         recordMutations.canEditRecord(record)
 
-    /** Soft-delete: author or owner only; B1 never grants delete. */
+    /** Soft-delete: author or Owner only. */
     suspend fun canDeleteRecord(record: Record): Boolean =
         recordMutations.canDeleteRecord(record)
-
-    /** Active B1 privilege for this record on the current device/session. */
-    suspend fun hasActiveFamilyWakePrivilege(record: Record): Boolean =
-        recordMutations.hasActiveFamilyWakePrivilege(record)
 
 
     /** Active record photo paths. MediaAsset is the sole current photo source. */

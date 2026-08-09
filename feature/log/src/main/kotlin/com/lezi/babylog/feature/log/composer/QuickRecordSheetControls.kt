@@ -227,21 +227,16 @@ internal fun TimeFields(
             }
         }
         draft.sleepAction == SleepDraftAction.Manual -> {
-            if (draft.restrictedSleepOpenFields) {
-                // B1 family-wake correction: sleep-down is read-only; end remains editable.
-                TimeReadOnly("开始", draft.timestamp, zone)
-            } else {
-                TimeButton(
-                    label = "开始",
-                    millis = draft.timestamp,
-                    zone = zone,
-                    onClick = onOpenStart,
-                    containerColor = container,
-                    accentColor = accent,
-                    highlighted = startHighlighted,
-                    enabled = enabled,
-                )
-            }
+            TimeButton(
+                label = "开始",
+                millis = draft.timestamp,
+                zone = zone,
+                onClick = onOpenStart,
+                containerColor = container,
+                accentColor = accent,
+                highlighted = startHighlighted,
+                enabled = enabled,
+            )
             if (draft.endTimestamp == null) {
                 EmptyTimeButton(
                     prompt = if (draft.mode == QuickRecordMode.Sleep) {

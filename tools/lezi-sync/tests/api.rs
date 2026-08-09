@@ -10678,118 +10678,6 @@ async fn member_record_manage_requires_the_effective_creator_or_owner() {
 }
 
 #[tokio::test]
-async fn member_may_close_another_members_open_sleep_but_not_edit_after_close() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "sleep-wake-acl-owner-device",
-        "sleep-wake-acl-owner-request-000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let mom = approve_new_member(&rig.app, owner_token, "sleep-wake-acl-mom-device").await;
-    let dad = approve_new_member(&rig.app, owner_token, "sleep-wake-acl-dad-device").await;
-    let mom_token = mom["access_token"].as_str().unwrap();
-    let dad_token = dad["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let sleep_id = Uuid::new_v4().to_string();
-
-    let mut open_payload = record_payload(&baby_id);
-    open_payload["type"] = json!("sleep");
-    open_payload["timestamp"] = json!(1_000);
-    open_payload["end_timestamp"] = Value::Null;
-    open_payload["payload_json"] = json!({"is_nap": false, "anomaly_flag": false});
-    let (created, body) = publish_root_bundle(
-        &rig.app,
-        mom_token,
-        entity_wire("record", &sleep_id, 2, open_payload.clone(), None),
-    )
-    .await;
-    assert_eq!(created, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["record_authors"][0]["created_by_membership_id"],
-        mom["membership_id"]
-    );
-
-    // Dad records family wake; client tries to rewrite open-start fields too.
-    let mut wake_payload = open_payload.clone();
-    wake_payload["timestamp"] = json!(2_000); // rewrite sleep-down — server must reject rewrite
-    wake_payload["end_timestamp"] = json!(1_000 + 90 * 60_000);
-    wake_payload["note"] = json!("爸爸记醒来");
-    wake_payload["payload_json"] = json!({"is_nap": true, "anomaly_flag": false});
-    // Client may claim its own author; server keeps the original.
-    wake_payload["created_by_membership_id"] = dad["membership_id"].clone();
-    let (woke, wake_body) = publish_root_bundle(
-        &rig.app,
-        dad_token,
-        entity_wire("record", &sleep_id, 3, wake_payload.clone(), None),
-    )
-    .await;
-    assert_eq!(woke, StatusCode::OK, "{wake_body}");
-    assert_eq!(
-        wake_body["record_authors"][0]["created_by_membership_id"], mom["membership_id"],
-        "{wake_body}"
-    );
-
-    let (_, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(dad_token)).await;
-    let closed = pulled["entities"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == sleep_id)
-        .expect("closed sleep on pull");
-    assert_eq!(closed["payload"]["timestamp"], json!(1_000), "{closed}");
-    assert_eq!(
-        closed["payload"]["end_timestamp"],
-        json!(1_000 + 90 * 60_000),
-        "{closed}"
-    );
-    assert_eq!(closed["payload"]["note"], json!("爸爸记醒来"), "{closed}");
-    assert_eq!(
-        closed["payload"]["payload_json"]["is_nap"],
-        json!(false),
-        "{closed}"
-    );
-    assert_eq!(
-        closed["payload"]["created_by_membership_id"], mom["membership_id"],
-        "{closed}"
-    );
-
-    // Canonical closed payload (open-start fields as published) for later forbidden edits.
-    let mut closed_payload = open_payload.clone();
-    closed_payload["end_timestamp"] = json!(1_000 + 90 * 60_000);
-    closed_payload["note"] = json!("爸爸记醒来");
-
-    // After close, ordinary foreign edit/delete still forbidden (no closer stamp).
-    let mut later_edit = closed_payload.clone();
-    later_edit["note"] = json!("篡改已完成睡眠");
-    later_edit["end_timestamp"] = json!(1_000 + 120 * 60_000);
-    let (edit_status, edit_body) = publish_root_bundle(
-        &rig.app,
-        dad_token,
-        entity_wire("record", &sleep_id, 4, later_edit, None),
-    )
-    .await;
-    assert_eq!(edit_status, StatusCode::FORBIDDEN, "{edit_body}");
-    assert_eq!(
-        edit_body,
-        json!({"detail": "Only the record creator or family owner may change this record"})
-    );
-
-    let (delete_status, delete_body) = publish_root_bundle(
-        &rig.app,
-        dad_token,
-        entity_wire("record", &sleep_id, 5, closed_payload, Some(5)),
-    )
-    .await;
-    assert_eq!(delete_status, StatusCode::FORBIDDEN, "{delete_body}");
-    assert_eq!(
-        delete_body,
-        json!({"detail": "Only the record creator or family owner may change this record"})
-    );
-}
-
-#[tokio::test]
 async fn second_device_on_the_same_membership_may_manage_its_record_and_log_media() {
     let rig = Rig::new();
     let owner = create_family(
@@ -15938,13 +15826,6 @@ async fn causal_two_client_wake_observations_and_near_duplicates_retained() {
         live.len(),
         2,
         "near-duplicate records must stay live: {pull2}"
-    );
-    assert!(
-        pull2
-            .get("neighbor_losers")
-            .map(|v| v.is_null() || v.as_array().map(|a| a.is_empty()).unwrap_or(false))
-            .unwrap_or(true),
-        "must not emit neighbor_losers: {pull2}"
     );
 }
 

@@ -95,7 +95,7 @@ class ReplicaSyncEngineCreatorAckTest {
             trigger = SyncTrigger.Foreground,
         )
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.stagedBundles).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(1)
         assertThat(rig.carePlans.getByClientUuid("plan-recovered-blank")?.let {
@@ -167,7 +167,7 @@ class ReplicaSyncEngineCreatorAckTest {
             trigger = SyncTrigger.Foreground,
         )
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.pullCount).isEqualTo(2)
         assertThat(rig.carePlans.getByClientUuid("plan-retry-ack")?.createdByMembershipId)
             .isEqualTo("canonical-membership")
@@ -251,7 +251,7 @@ class ReplicaSyncEngineCreatorAckTest {
             trigger = SyncTrigger.Foreground,
         )
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
         assertThat(rig.carePlans.getByClientUuid("plan-commit-retry")?.createdByMembershipId)
             .isEqualTo("canonical-membership")
@@ -326,7 +326,7 @@ class ReplicaSyncEngineCreatorAckTest {
             trigger = SyncTrigger.Foreground,
         )
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.pullCursors).containsExactly(0L, 0L, 0L, 1L).inOrder()
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
         assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()

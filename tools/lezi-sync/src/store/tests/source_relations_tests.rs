@@ -106,7 +106,7 @@ impl Fx {
 }
 
 #[test]
-fn causal_near_duplicates_remain_live_without_neighbor_losers() {
+fn independent_nearby_sources_remain_live_before_explicit_relation() {
     let fx = Fx::new();
     let r1 = Uuid::new_v4();
     let r2 = Uuid::new_v4();

@@ -1291,12 +1291,11 @@ class CareLogRecordWriteTest {
         assertThat(wakes.single().note).isEqualTo("爸爸记醒来")
         assertThat(wakes.single().wakeTimestamp).isEqualTo(wakeAt)
         assertThat(wakes.single().observerMembershipId).isEqualTo("m-dad")
-        // Sleep manage stays author-only; B1 gone; observer may edit own wake.
+        // Sleep manage stays author-only; observer may edit only their own wake.
         val closed = dadCare.getRecord(openId)!!
         assertThat(dadCare.canManageRecord(closed)).isFalse()
         assertThat(dadCare.canEditRecord(closed)).isFalse()
         assertThat(dadCare.canDeleteRecord(closed)).isFalse()
-        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isFalse()
         assertThat(dadCare.canEditWakeObservation(wakes.single().clientUuid)).isTrue()
 
         val correctedEnd = wakeAt + 5 * 60_000L
@@ -1361,7 +1360,6 @@ class CareLogRecordWriteTest {
         assertThat(closed.timestamp).isEqualTo(startedAt)
         assertThat(closed.payloadJson).contains("\"is_nap\":true")
         assertThat(dadCare.canManageRecord(closed)).isFalse()
-        assertThat(dadCare.hasActiveFamilyWakePrivilege(closed)).isFalse()
         assertThat(dadCare.canEditRecord(closed)).isFalse()
         assertThat(dadCare.canDeleteRecord(closed)).isFalse()
         val wake = dadCare.listWakeObservations(closed.clientUuid).single()

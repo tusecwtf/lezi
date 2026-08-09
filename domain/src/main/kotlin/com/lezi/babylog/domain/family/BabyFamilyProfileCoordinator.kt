@@ -77,7 +77,6 @@ internal class BabyFamilyProfileCoordinator(
     private val reminderProjection: CarePlanReminderProjection,
     private val sleepMutationMutex: Mutex,
     private val mediaPathGate: MediaLocalPathGate,
-    private val healDuplicateOpenSleeps: suspend (Long) -> Unit,
     /** Best-effort post-commit GC; same policy as [RecordMutationCoordinator.cleanupCommittedPhotoTombstones]. */
     private val cleanupCommittedPhotoTombstones: suspend (Set<String>) -> Unit,
     private val requestLocalSync: () -> Unit,
@@ -548,7 +547,6 @@ internal class BabyFamilyProfileCoordinator(
                     )
                     avatarCleanupClientUuids += asset.clientUuid
                 }
-                healDuplicateOpenSleeps(target.id)
                 babyDao.update(
                     nextSyncUpdatedAt(source.updatedAt, now).let { deletedAt ->
                         source.copy(

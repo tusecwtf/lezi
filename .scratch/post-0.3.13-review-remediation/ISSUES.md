@@ -1,6 +1,6 @@
 # 0.3.13 审查修复与预切割闭环 — issues
 
-Status: in-progress — ticket 01 implemented with device/isolated E2E residual
+Status: implemented — device, isolated rollback, and production cutover residual
 
 Spec: [`spec.md`](./spec.md)
 
@@ -16,7 +16,7 @@ Audit baseline: `38cfbe7dbcf1f410237dce77b50ec1bd4854d8a6`
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
 | 01 | [`issues/01-close-causal-safety-and-product-surfaces.md`](./issues/01-close-causal-safety-and-product-surfaces.md) | implemented; acceptance residual | — |
-| 02 | [`issues/02-contract-legacy-and-rebuild-acceptance.md`](./issues/02-contract-legacy-and-rebuild-acceptance.md) | ready-for-agent | 01 |
+| 02 | [`issues/02-contract-legacy-and-rebuild-acceptance.md`](./issues/02-contract-legacy-and-rebuild-acceptance.md) | implemented; acceptance residual | 01 |
 
 ## Frontier
 

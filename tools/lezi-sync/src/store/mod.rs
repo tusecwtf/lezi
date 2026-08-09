@@ -22,12 +22,12 @@ mod causal;
 mod causal_merge;
 mod identity;
 mod media;
-mod neighbor;
 mod pull;
 mod reconciliation;
 mod restore;
 mod schema;
 mod source_relations;
+mod suspected_duplicates;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -357,10 +357,9 @@ pub enum StoreError {
     BundleMediaIncomplete,
     #[error("bundle root is not newer than the published version")]
     BundleRootNotNewer,
-    /// Fail-closed: LWW bundle commit must not advance entities while a causal
-    /// stable head exists (would leave `version_id` on a stale immutable snapshot).
-    #[error("legacy bundle commit refused for entity with causal stable head")]
-    LegacyBundleCommitOnCausalEntity,
+    /// A legacy timestamp-LWW bundle may never advance a root after causal cutover.
+    #[error("legacy bundle cannot advance causal root type {0}")]
+    LegacyBundleCausalRootUnsupported(String),
     #[error("authoritative reconcile batch is invalid")]
     InvalidReconcileBatch,
     #[error("conflict not found")]
@@ -391,10 +390,6 @@ pub struct BundleCommitResult {
     pub applied: usize,
     pub cursor: i64,
     pub record_authors: Vec<RecordAuthor>,
-    /// Record `client_uuid` values soft-deleted by neighbor adjudication in this commit.
-    /// Empty when no whitelist near-duplicate losers were written. Explicit signal only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub neighbor_losers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -106,53 +106,6 @@ class ReplicaSyncEngineConflictTest {
     }
 
     @Test
-    fun remoteWakeClosesAConcurrentOpenSleepWithDifferentUuid() = runTest {
-        val session = joinedReplicaSession()
-        val rig = ReplicaEngineRig(session)
-        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
-        rig.records.seed(
-            RecordEntity(
-                clientUuid = "sleep-open-other-device",
-                babyId = babyId,
-                type = "sleep",
-                timestamp = 1_000L,
-                endTimestamp = null,
-                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
-                schemaVersion = 2,
-                updatedAt = 100L,
-                syncDirty = false,
-            ),
-        )
-        val remoteWake = SyncEntity(
-            type = "record",
-            clientUuid = "sleep-woken-first-device",
-            payloadJson = """
-                {
-                  "baby_client_uuid":"baby-local",
-                  "created_by_membership_id":"membership-b",
-                  "type":"sleep",
-                  "custom_item_client_uuid":null,
-                  "timestamp":900,
-                  "end_timestamp":1500,
-                  "note":null,
-                  "payload_json":{"is_nap":false,"anomaly_flag":false},
-                  "schema_version":2
-                }
-            """.trimIndent(),
-            updatedAt = 200L,
-        )
-
-        rig.engine.applyInitialEntities(session, listOf(remoteWake))
-
-        assertThat(rig.records.listOpenSleeps(babyId)).isEmpty()
-        val healed = rig.records.getByClientUuid("sleep-open-other-device")!!
-        assertThat(healed.endTimestamp).isEqualTo(1_500L)
-        assertThat(healed.payloadJson).contains("\"anomaly_flag\":true")
-        assertThat(healed.syncDirty).isTrue()
-        assertThat(healed.updatedAt).isGreaterThan(200L)
-    }
-
-    @Test
     fun dirtyRecordAdoptsStrictlyNewerRemoteTombstone() = runTest {
         val session = joinedReplicaSession()
         val rig = ReplicaEngineRig(session)
@@ -370,7 +323,7 @@ class ReplicaSyncEngineConflictTest {
         val outcome = rig.engine.synchronize(session, SyncTrigger.Foreground)
 
         val winner = rig.carePlans.getByClientUuid(planUuid)!!
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.pullCount).isEqualTo(2)
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .containsExactly(planUuid)
@@ -440,7 +393,7 @@ class ReplicaSyncEngineConflictTest {
 
         val outcome = rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         val record = rig.records.getByClientUuid(recordUuid)!!
         assertThat(record.updatedAt).isEqualTo(300)
         assertThat(record.deletedAt).isEqualTo(300)

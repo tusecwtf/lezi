@@ -1339,7 +1339,6 @@ class HttpSyncBackend internal constructor(
             applied = json.requiredLong("applied", "bundle commit").toInt(),
             cursor = json.requiredLong("cursor", "bundle commit"),
             recordAuthors = json.recordAuthors(),
-            neighborLosers = json.neighborLosers(),
         )
     }
 
@@ -2239,20 +2238,6 @@ private fun JsonObject.recordAuthors(): List<CanonicalRecordAuthor> =
         )
         CanonicalRecordAuthor(clientUuid, membershipId)
     }
-
-/** Additive 0.3.10 field; missing/null → empty (older servers). */
-private fun JsonObject.neighborLosers(): List<String> {
-    val element = this["neighbor_losers"] ?: return emptyList()
-    if (element is JsonNull) return emptyList()
-    val array = element as? JsonArray
-        ?: throw IllegalArgumentException("neighbor_losers 不是数组")
-    return array.mapIndexed { index, item ->
-        val primitive = item as? JsonPrimitive
-            ?: throw IllegalArgumentException("neighbor_losers[$index] 不是字符串")
-        primitive.contentOrNull?.takeIf { it.isNotBlank() }
-            ?: throw IllegalArgumentException("neighbor_losers[$index] 不能为空")
-    }
-}
 
 private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageStatus(
     bundleId = requiredNonBlankString("bundle_id", "bundle stage"),

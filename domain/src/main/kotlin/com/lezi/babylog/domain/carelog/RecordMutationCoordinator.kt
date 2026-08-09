@@ -133,7 +133,6 @@ internal class RecordMutationCoordinator(
                             return@run existing.id
                         }
                         requireActiveBaby(babyId)
-                        healDuplicateOpenSleeps(babyId)
                         if (recordDao.findOpenSleep(babyId) != null) {
                             throw SleepStateChangedException()
                         }
@@ -435,7 +434,6 @@ internal class RecordMutationCoordinator(
     /**
      * Whether the actor may fully edit/delete/convert this nursing record.
      * Same membership rule as care plans: creator or family owner/admin.
-     * B1 family-wake correction does **not** grant manage (delete stays forbidden).
      */
     fun canManageRecord(
         record: Record,
@@ -460,18 +458,11 @@ internal class RecordMutationCoordinator(
         )
     }
 
-    /** Timeline edit chrome: author or Owner only (B1 closer privilege retired). */
+    /** Timeline edit chrome: author or Owner only. */
     suspend fun canEditRecord(record: Record): Boolean = canManageRecord(record)
 
     /** Delete stays author-or-owner. */
     suspend fun canDeleteRecord(record: Record): Boolean = canManageRecord(record)
-
-    /**
-     * @deprecated Ticket 06: B1 family-wake privilege is retired. Always false.
-     * Use [WakeObservationCoordinator.canEditWake] for wake corrections.
-     */
-    @Suppress("UNUSED_PARAMETER")
-    suspend fun hasActiveFamilyWakePrivilege(record: Record): Boolean = false
 
     private suspend fun actorCanManageRecord(record: RecordEntity): Boolean {
         val session = syncPort.session().first()
@@ -959,15 +950,6 @@ internal class RecordMutationCoordinator(
                 syncDirty = true,
             ),
         )
-    }
-
-    /**
-     * Ticket 06 / ADR-0021: overlapping open SleepStarts are retained.
-     * Older opens surface as overlap-pending via [projectSleepInterval]; this
-     * method is intentionally a no-op so pull/sync never synthesizes end times.
-     */
-    internal suspend fun healDuplicateOpenSleeps(babyId: Long) {
-        // No-op: do not auto-close, edit, or tombstone older open SleepStarts.
     }
 
 

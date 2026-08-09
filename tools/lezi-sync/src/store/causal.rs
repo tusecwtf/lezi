@@ -2289,7 +2289,7 @@ impl Store {
         Ok(CausalBatchResult { cursor, results })
     }
 
-    /// Atomic causal commit (wire §6). No neighbor adjudication.
+    /// Atomic causal commit (wire §6). Distinct roots remain distinct facts.
     pub fn causal_commit(
         &self,
         principal: &Principal,

@@ -52,7 +52,7 @@ class ReplicaSyncEnginePushReplanTest {
 
         val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         // Without causal wire LocalWrite still pulls (no-pull is capability-gated).
         assertThat(rig.backend.syncOrder)
             .containsExactly("pull:0", "reconcile:1", "stage:baby")
@@ -86,7 +86,7 @@ class ReplicaSyncEnginePushReplanTest {
         // Full cycle still pulls first; LocalWrite no longer does.
         val outcome = rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
         assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .doesNotContain(recordUuid)
@@ -193,7 +193,7 @@ class ReplicaSyncEnginePushReplanTest {
             trigger = SyncTrigger.LocalWrite,
         )
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         val current = requireNotNull(
             rig.records.getByClientUuid("record-receipt-cas-miss"),
         )

@@ -1072,53 +1072,9 @@ fn causal_stable_head_blocks_legacy_bundle_commit() {
         100,
     )
     .unwrap_err();
-    assert!(matches!(err, StoreError::LegacyBundleCommitOnCausalEntity));
-}
-
-#[test]
-fn causal_no_neighbor_losers_on_near_duplicate_records() {
-    // Causal path never produces neighbor tombstones (different UUIDs all live).
-    let fx = CausalFx::new();
-    let member = Principal {
-        family_id: fx.family_id.clone(),
-        role: "member".to_owned(),
-        membership_id: "m-member".to_owned(),
-        device_id: "d-member".to_owned(),
-    };
-    let r1 = Uuid::new_v4();
-    let r2 = Uuid::new_v4();
-    let u1 = mut_unit(
-        "record",
-        r1,
-        None,
-        record_root(fx.baby_id, "a", 100, 20),
-        false,
-    );
-    let u2 = mut_unit(
-        "record",
-        r2,
-        None,
-        record_root(fx.baby_id, "b", 100, 21),
-        false,
-    );
-    // Same timestamp window, different memberships.
-    fx.store
-        .causal_commit(&fx.owner, vec![u1], 1_700_000_000)
-        .unwrap();
-    let second = fx
-        .store
-        .causal_commit(&member, vec![u2], 1_700_000_001)
-        .unwrap();
-    assert_eq!(second.results[0].status, "accepted");
-    let page = fx.store.pull(&fx.family_id, 0).unwrap();
-    let live: Vec<_> = page
-        .entities
-        .iter()
-        .filter(|e| {
-            e.entity_type == "record"
-                && (e.client_uuid == r1.to_string() || e.client_uuid == r2.to_string())
-                && e.deleted_at.is_none()
-        })
-        .collect();
-    assert_eq!(live.len(), 2);
+    assert!(matches!(
+        err,
+        StoreError::LegacyBundleCausalRootUnsupported(ref entity_type)
+            if entity_type == "record"
+    ));
 }

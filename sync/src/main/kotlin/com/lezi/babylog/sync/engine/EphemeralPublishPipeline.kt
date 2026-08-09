@@ -51,26 +51,20 @@ internal class EphemeralPublishPipeline(
         requireRemoteAllowed = requireRemoteAllowed,
     )
 
-    /**
-     * @return neighbor-loser record client_uuids reported by server commits in this push.
-     */
     suspend fun pushPending(
         session: SyncSession,
         candidates: List<PublishCandidate>,
-    ): Set<String> {
+    ) {
         val plan = EphemeralPublishPlan(candidates)
-        val neighborLosers = linkedSetOf<String>()
-        while (pushPendingBatch(session, plan, neighborLosers)) {
+        while (pushPendingBatch(session, plan)) {
             // Acknowledged candidates leave only this in-memory plan. The next
             // sync cycle always snapshots Room again after reconcile.
         }
-        return neighborLosers
     }
 
     private suspend fun pushPendingBatch(
         session: SyncSession,
         ephemeral: EphemeralPublishPlan,
-        neighborLosers: MutableSet<String>,
     ): Boolean {
         val roots = ephemeral.peek(PUSH_ROOT_BATCH_SIZE)
         if (roots.isEmpty()) return false
@@ -131,7 +125,6 @@ internal class EphemeralPublishPipeline(
                         recordRow,
                         pending,
                         ephemeral,
-                        neighborLosers,
                     ) && mayContinue
             }
             if (residual.isNotEmpty()) {
@@ -459,7 +452,6 @@ internal class EphemeralPublishPipeline(
         recordRow: PublishCandidate,
         pending: List<PublishCandidate>,
         ephemeral: EphemeralPublishPlan,
-        neighborLosers: MutableSet<String>,
     ): Boolean {
         val record = recordDao.getByClientUuid(recordRow.clientUuid)
             ?: error("本地记录不存在")
@@ -485,7 +477,6 @@ internal class EphemeralPublishPipeline(
         )
         val bundleId = AtomicBundleId.forRecord(record.clientUuid, recordRow.updatedAt)
         val commit = publishRootWithMedia(session, bundleId, root, mediaRows)
-        neighborLosers += commit.neighborLosers
         mergeCanonicalRecordAuthors(
             authors = commit.recordAuthors,
             expectedUpdatedAt = mapOf(record.clientUuid to recordRow.updatedAt),

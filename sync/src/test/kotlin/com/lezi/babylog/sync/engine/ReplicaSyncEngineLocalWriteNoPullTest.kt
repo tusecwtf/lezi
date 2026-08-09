@@ -396,7 +396,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
         val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized())
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.pullCount).isEqualTo(1)
         assertThat(rig.backend.syncOrder)
             .containsExactly("pull:5", "reconcile:1", "stage:baby")

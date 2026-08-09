@@ -337,8 +337,6 @@ class CareLogWakeObservationTest {
         assertThat(wakes).hasSize(1)
         assertThat(wakes.single().observerMembershipId).isEqualTo("m-dad")
         assertThat(wakes.single().wakeTimestamp).isEqualTo(wakeAt)
-        // B1 closer privilege retired: no restricted edit of the Sleep row.
-        assertThat(dadCare.hasActiveFamilyWakePrivilege(dadCare.getRecord(openId)!!)).isFalse()
         assertThat(dadCare.canManageRecord(dadCare.getRecord(openId)!!)).isFalse()
         assertThat(dadCare.canEditWakeObservation(wakes.single().clientUuid)).isTrue()
     }
