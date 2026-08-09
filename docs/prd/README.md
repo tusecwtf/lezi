@@ -2,9 +2,10 @@
 
 > **个人/家庭使用** · Android · 无商业化
 > 决策日：2026-07-25 · **tree 发布线**以 `config/android-release-compatibility.json` 为准
-> （**0.3.13** / versionCode **20** / Room **27** / server schema **12** / 因果 wire）。
-> 因果协议与 wire 已在 tree 落地；**家庭 NAS 强制切割**（minSupported=20 生产生效、
-> stop/rm/replace）仍须维护窗证据，见 [`.scratch/lossless-family-causal-sync`](../../.scratch/lossless-family-causal-sync/)。
+> 当前运行时升级源为 **0.3.13** / code **20** / Room **27** / server schema **12**。
+> 0.4.0 conflict-v2 合同冻结为 code **21** / Room **28** / local-data contract **5** /
+> server schema **13** / floor **21**，但 `causal_sync_v2` 在 hardening H27 前不得 advertise；
+> 本文档更新不表示 APK/server/NAS 已切换。
 > Wire 权威：[`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 | 项 | 内容 |
@@ -35,9 +36,9 @@
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约；**tree** SleepStart/WakeObservation 与疑似重复汇总（NAS 切割见 scratch ticket 09） |
 | [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前已交付合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
-| [causal-sync-wire.md](./causal-sync-wire.md) | **0.3.13 因果 wire（tree 已落地）**：reconcile/commit/pull/resolution 与合并例子；生产 NAS 切割仍待维护窗 |
+| [causal-sync-wire.md](./causal-sync-wire.md) | **0.4.0 conflict-v2 目标合同**：commit-first、N-way ConflictSnapshot、choice-only resolution 与升级边界；当前 runtime 仍是 0.3.13 source，H27 前不激活 |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
-| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收；0.3.13 版本/schema **tree 目标**与 minSupported=20 |
+| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收；区分 0.3.13 runtime source 与未激活的 0.4.0 contract |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 
 ---
@@ -370,3 +371,4 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 | 2026-07-22 | 配方奶 **默认 5ml 一档**；滚轮/加减/芯片与设置同步 |
 | 2026-07-23 | 所有记录改为用途专属二级确认面板；统一备注与圆盘时间；新增睡下/醒来状态确认及睡眠中头像反馈 |
 | 2026-08-08 | 冻结 0.3.13 因果领域/wire/ADR（规划）：CONTEXT 术语、ADR-0019/0020/0021、causal-sync-wire；标明对 ADR-0017/0018 与近邻/LWW/整行 sleep 的 supersession 范围 |
+| 2026-08-10 | 冻结 0.4.0 conflict-v2 目标：ADR-0022、commit-first、完整 N-way ConflictSnapshot、choice-only resolution、direct-base restore 与 shared Kotlin/Rust golden corpus；H27 前不激活 capability |

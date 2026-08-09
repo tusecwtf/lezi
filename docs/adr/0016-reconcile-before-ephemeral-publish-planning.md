@@ -1,5 +1,5 @@
 ---
-status: partially superseded by ADR-0017
+status: partially superseded by ADR-0017 and ADR-0022
 ---
 
 # 先对账，再从 Room 临时规划家庭发布
@@ -14,3 +14,6 @@ atomic bundle 协议提交。发布成功只以修订 CAS 写回发布回执并�
 这一选择最初保留增量 pull、现有 LWW/履行裁决与 atomic bundle wire，并拒绝新增
 head-by-UUID、全家庭快照或服务端协议。ADR-0017 保留先对账、Room 长期事实、临时计划与
 atomic commit，但取代该协议限制和“任意 dirty 即待发布”的状态边界。
+
+ADR-0022 进一步仅为 0.4.0 mutation 允许一份不可变 durable transport envelope，并以
+commit-first 取代普通发表 reconcile。Room product facts 仍是领域真相；不得据此恢复通用 outbox。

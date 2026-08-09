@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: ready-for-agent
+Status: in-progress — H01 implemented, reviewed and fully gated; R12 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -25,7 +25,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
-| 01 | [`01-freeze-conflict-v2-contract`](./issues/01-freeze-conflict-v2-contract.md) | ready-for-agent | — |
+| 01 | [`01-freeze-conflict-v2-contract`](./issues/01-freeze-conflict-v2-contract.md) | implemented (review/gates pass) | — |
 | 02 | [`02-deterministic-nway-conflict-snapshot`](./issues/02-deterministic-nway-conflict-snapshot.md) | ready-for-agent | 01, R17, R18 |
 | 03 | [`03-choice-only-authoritative-resolution`](./issues/03-choice-only-authoritative-resolution.md) | ready-for-agent | 02 |
 | 04 | [`04-causal-tombstone-restore`](./issues/04-causal-tombstone-restore.md) | ready-for-agent | 03 |
@@ -78,8 +78,9 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-Only H01 is executable. Follow the serial order above. H27 completes local 0.4.0 schemas/capability; H28–H30
-prove non-destructive backend migration and guarded CD locally; H43 hands evidence to release 09.
+R12 is the next executable ticket, followed by R17→R18 before H02. Follow the serial order above. H27
+completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
+locally; H43 hands evidence to release 09.
 
 ## Program invariants
 

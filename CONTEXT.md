@@ -227,24 +227,35 @@ _Avoid_: 应用内更新、家庭加入页、应用商店
 _Avoid_: 独立同步卡片、仅 Wi-Fi 偏好、IP/端口、内部状态枚举名
 
 **家庭对账**：
-一次同步周期先把家庭服务器的增量权威合入本机事实，再为冻结的待对账修改取得逐实体权威裁决，使后续发布或丢弃判断都有远端证明。**0.3.13 规划** 仍保留「先取得权威证明再发布」骨架，但裁决词汇与证明改为因果 `base_version` / `mutation_id` 与 `confirmed|publish|conflict_preview|rejected`（见 ADR-0017 修订范围、ADR-0020）。
-_Avoid_: 先推后拉、仅凭健康成功清状态、用旧发送队列猜测远端状态、把 LWW head 证明说成无损因果证明
+0.3.13 source runtime 中，一次同步周期先 pull，再对冻结修改执行因果 reconcile/commit。**0.4.0
+目标合同**的普通发表改为 commit-first：增量 pull 仍把远端稳定事实/冲突收敛进 Room，但本机
+mutation 以 `base_version`、`mutation_id`、canonical request hash 与 commit 终态取得权威证明，
+不再用普通 reconcile 预裁决（ADR-0022）。
+_Avoid_: 仅凭健康成功清状态、用旧发送队列猜测远端状态、把 LWW head 证明说成无损因果证明、在 v2 普通发表保留 reconcile fallback
 
 **待对账修改**：
-已加入家庭的设备在本机形成、但尚未取得家庭同步裁决的家庭域修订；它可能最终发布，也可能确认相同、采用远端或退出家庭同步域。**0.3.13 规划** 每一冻结修改携带它读到的 **因果基线** 与稳定 **修改身份**。
-_Avoid_: 待发布、outbox 行、失败重试次数、无 base 的静默覆盖
+已加入家庭的设备在 Room 事实上形成、但尚未取得匹配 commit 终态的家庭域修订。0.4.0 每一
+pending mutation 允许一份绑定因果基线、修改身份、request hash 与媒体 spool/receipt 的不可变
+冻结传输信封；它不是可编辑的第二份事实或通用 outbox。
+_Avoid_: 可变待发送队列、失败重试次数当事实、无 base 的静默覆盖、同一 mutation 多份漂移 payload
 
-**家庭同步裁决**（0.3.9–0.3.12 head-by-UUID + LWW；**0.3.13 规划** 因果 reconcile/commit）：
-历史：家庭服务器对冻结原子同步单元给出远端 head/absence 与 `confirmed|publish|adopt_remote|…`，复用 `updated_at` LWW。**0.3.13 规划**：reconcile 只做有界 dry-run（`confirmed|publish|conflict_preview|rejected`）；commit 原子返回 `accepted|merged|branched` 与稳定版本/冲突引用；服务器验证约束与执行显式管理操作，**不**用墙钟或启发式替家庭裁决护理真相（ADR-0019）。
+**家庭同步裁决**（0.3.9–0.3.12 head-by-UUID + LWW；0.3.13 因果 reconcile/commit；0.4.0 commit-first）：
+历史服务器曾给出 head/LWW verdict；0.3.13 source runtime 用因果 reconcile dry-run 后 commit。
+0.4.0 普通发表只由一次幂等 commit 返回 `accepted|merged|branched` 与 stable/conflict 引用；精确
+replay 返回原 status 加 marker。服务器验证约束与执行显式管理操作，**不**用墙钟或启发式替家庭
+裁决护理真相（ADR-0019/0022）。
 _Avoid_: health 成功、客户端猜测、按超时清除、把 LWW 赢家说成无损合并
 
 **家庭发布计划**：
-家庭对账后仅从裁决为应发布的本机事实临时导出的原子同步包集合；它可随进程消失，下次同步会从 Room 重新裁决并生成。**0.3.13 规划** 计划单元是带 `base_version`+`mutation_id` 的完整原子根期望态，不是无 base 的 LWW 整行。
-_Avoid_: 持久发送队列、第二份同步事实、outbox epoch
+0.3.13 source runtime 从 Room 临时导出的 reconcile/commit units。0.4.0 不再以 plan/reconcile
+决定是否发表；它冻结一个带 `base_version`+`mutation_id` 的完整原子根期望态，并允许在进程死亡后
+从 Room facts 与唯一 immutable envelope 恢复同一请求。
+_Avoid_: 通用持久发送队列、第二份可编辑同步事实、outbox epoch、为 retry 重新读取可变媒体来源
 
 **待发布**：
-家庭同步裁决已经确认本机原子单元应提交、但尚未取得匹配修订 commit 回执的状态。**0.3.13 规划**：`branched` 是成功的无损落库，本地 pending 转为可见未解决冲突，不得当作传输失败无限重试。
-_Avoid_: 任意 dirty 行、待对账修改、outbox 行
+本机 mutation 尚未取得匹配 commit 终态的状态；不再要求先有 publish verdict。`branched` 是成功
+的无损落库，本地 pending 转为可见未解决冲突，不得当作传输失败无限重试。
+_Avoid_: 任意 dirty 行、reconcile publish verdict、通用 outbox 行
 
 **本机保留内容**：
 具有用户意义但当前不能进入家庭权威图的本机事实；它不计入家庭待同步，只有完成明确或确定性的权威宝宝绑定后才重新进入待对账。
@@ -314,6 +325,22 @@ _Avoid_: 每次重试新 id、用 transport request id 冒充 mutation_id、内�
 同 UUID 真并发且无法自动三方合并时，服务器持久保留的竞争版本；不静默投影为稳定快照，但必须可发现、可详读、可经 CAS resolution 收敛。`branched` commit 表示本机分支已耐久落库。
 _Avoid_: 丢弃输方、只留 LWW 赢家、把 branched 当 transport 失败、resolution 时重问已自动合并字段
 
+**ConflictSnapshot**（`conflict_snapshot_v2`）：
+一个冲突的完整、可分页、可持久读取事实单元；包含 stable 与所有 branch 的完整 root/media/deleted/
+base/provenance，以及严格不相交的 auto-merged outcomes 与 conflicting candidates。所有页面绑定同一
+持久 receipt，不得把局部页当成可 resolution 的完整分支集。
+_Avoid_: lossy conflict cache、Compose 解析 transport JSON、仅缓存 candidate label/value、用部分页提交
+
+**快照 token**（`snapshot_token`）：
+服务端 CSPRNG 生成、由持久 receipt 支撑的 opaque 标识，绑定 family/root/stable/完整 branch set/
+分页视图/合同版本与 expiry；同一快照跨重复 detail、分页与服务重启有效，state 变化或过期后必须刷新。
+_Avoid_: 客户端自包含声明、一次性 page token、从 token 解出并信任 branch set、过期后盲重试
+
+**冲突选择身份**（`choice_id`）：
+在一个 snapshot/token 内稳定绑定某 canonical path 的 typed outcome 与来源集合的 opaque 身份；
+resolution 只提交每条冲突路径恰一个 choice ID，label 只用于展示。新快照可签发新 ID。
+_Avoid_: 提交裸值或 rebuilt root、按 label 选择、把旧 token 的 ID 猜配到新快照、漏选/重复选路径
+
 **来源关系**：
 显式确认「不同 UUID 实为同一事件」后，把未选为展示版的原根与媒体永久保留的关系；**不是** 普通 record tombstone，也不进入墓碑复活/禁复活语义。
 _Avoid_: 把来源写成 deleted_at tombstone、丢弃非展示源照片、用近邻落选墓碑冒充来源关系
@@ -327,6 +354,9 @@ _Avoid_: 把醒来压回 Sleep `end_timestamp` 竞争、整行 LWW 选醒来、�
 客户端按精确类型白名单、跨 membership 与含边界 30 分钟近邻时间窗生成的 **软提示** 连通分量；默认展开并保留全部原记录。服务器不因组存在而 tombstone 任一条。作者仅可声明自己的记录与另一来源相同；Owner 可解决整组。确认后选一展示版本，其它根/媒体以 **来源关系** 永久保留。
 _Avoid_: 服务器自动落选、同 membership 连记进组、未确认就改写源记录、把组当成家庭权威裁决
 
-**LocalWrite 因果快速路径**（**0.3.13 已交付引擎路径**；双端隔离实机证据见发版票）：
-前台、可信 endpoint、健康租约、且后端具备因果 wire capability 时，本机写成功后冻结当前待对账原子单元并直接因果 reconcile/commit，**不先 pull**，也 **不推进** 增量 pull cursor。远端变化只能自动无损合并或建分支，不能覆盖本机。回前台、网络恢复、下拉与常规周期仍完整 pull。无因果 capability 时，LocalWrite 先执行安全 pull，但任何可变根随即 **fail closed 并保留 dirty**；只有不可变 FulfillmentCandidate 证据可继续历史 reconcile/bundle 缝。
+**LocalWrite 因果快速路径**（0.3.13 source 为 reconcile/commit；0.4.0 目标为 commit-first）：
+前台、可信 endpoint、健康租约、且后端 advertise 完整对应 capability 时，本机写成功后冻结当前
+pending mutation；0.4.0 直接 commit-first，**不先 reconcile/pull**，也**不推进**增量 pull cursor。
+远端变化只能自动无损合并或建分支，不能覆盖本机。回前台、网络恢复、下拉与常规周期仍完整 pull。
+`causal_sync_v2` 在 H27 前不得 advertise；mixed generation 在 mutation 前 fail closed。
 _Avoid_: 无因果协议就去掉 pull、快速路径推进 pull cursor、后台写触发快速路径、把低延迟当无损保证

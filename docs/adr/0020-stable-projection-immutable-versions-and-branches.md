@@ -1,5 +1,5 @@
 ---
-status: accepted (0.3.13; runtime landed via lossless-family-causal-sync tickets 02–08; production cutover residual ticket 09)
+status: partially superseded by ADR-0022 for 0.4.0 commit-first and choice-only resolution; immutable versions, stable projection and durable branches retained
 ---
 
 # 稳定投影 + 不可变版本/分支，三方合并与显式 resolution
@@ -19,6 +19,10 @@ status: accepted (0.3.13; runtime landed via lossless-family-causal-sync tickets
 [ADR-0021](./0021-wake-observation-and-nondestructive-duplicate-groups.md)（醒来与疑似重复）。
 **字段/枚举/例子唯一权威：** [`docs/prd/causal-sync-wire.md`](../prd/causal-sync-wire.md)。
 
+> **0.4.0 supersession:** [ADR-0022](./0022-commit-first-choice-only-conflict-snapshots.md)
+> 取代本 ADR 的普通 reconcile-first 与 client-supplied rebuilt result；不可变版本、因果 base、
+> stable/branch、显式 resolution 与媒体原子性继续有效。
+
 ## 决策
 
 ### 1. 版本化可变原子根
@@ -34,14 +38,15 @@ status: accepted (0.3.13; runtime landed via lossless-family-causal-sync tickets
 **FulfillmentCandidate** 保持不可变候选证据模型：首次接受后整元组冻结，只允许精确
 幂等 replay；**不** 进入可变三方编辑路径。
 
-### 2. Reconcile / Commit / Pull / Resolution
+### 2. Commit / Pull / Resolution
 
 协议 verdict、必填字段与 `conflict_id` 句柄以 wire §5–§8 为准。决策层要求：
 
-- Reconcile 为有界 dry-run，不写稳定版本/分支。
+- 0.4.0 普通发表仅走 ADR-0022 commit-first；0.3.13 reconcile 只是升级源，不是 fallback。
 - Commit 原子返回 accepted / merged / branched，并始终带回完整稳定投影。
 - Pull 只投递稳定投影 + 有界冲突摘要；分支字节按需 detail。
-- Resolution CAS 只允许选择真实冲突路径；自动合并路径 fail-closed 不可改写。
+- Resolution CAS 只接受 snapshot 绑定的 `{path, choice_id}` 完整冲突路径集；
+  自动合并路径 fail-closed 不可改写。
 
 ### 3. 三方合并粒度
 
@@ -57,7 +62,7 @@ status: accepted (0.3.13; runtime landed via lossless-family-causal-sync tickets
 - 同一 live base 上的删除与离线编辑 → 顺序 commit 下先到 accepted、后到 branched
   （stable = 先接受版本；wire 例 E；删除先到见例 J）。
 - 稳定 tombstone 之后：
-  - 无 parent 证明的陈旧 live → **`rejected` `stale_live_over_tombstone`**（wire 例 F）；
+  - 无 parent 证明的陈旧 live → **`rejected` `invalid_domain`**（wire 例 F）；
   - `incoming.base_version ∈ parents(stable_tombstone)` 的并发 live 编辑 → **`branched`**，
     稳定仍为 tombstone（wire 例 J）；
   - 同一 tombstone `mutation_id` 精确重放 → 幂等（wire 例 I）；
@@ -72,7 +77,7 @@ branch 前全部保留。客户端不得看见「有元数据无照片」的半�
 ### 6. LocalWrite no-pull
 
 因果协议落地后，前台 + 可信 endpoint + 健康租约下可对当前冻结单元直接
-reconcile/commit，**不先 pull**、**不推进 pull cursor**。无因果 base 前禁止靠去掉
+commit，**不先 pull**、**不推进 pull cursor**。无因果 base 前禁止靠去掉
 pull 声称正确性。回前台 / 网络恢复 / 下拉 / 常规周期仍完整 pull。
 
 ## Considered Options
@@ -85,10 +90,9 @@ pull 声称正确性。回前台 / 网络恢复 / 下拉 / 常规周期仍完整
 
 ## Consequences
 
-- Server schema 规划 v12：版本/冲突/分支/resolution/幂等/来源关系表；entity 表仍为
-  稳定投影与 pull cursor 所有者。v11→v12 仅审计 offline-migrate；启动仍 fail-closed。
-- Android Room 规划 27：`baseVersion`、冻结 `mutation_id`、WakeObservation、冲突
-  摘要/详情、疑似重复与来源关系、媒体引用态。
+- 0.3.13 source 使用 server schema 12 / Room 27；0.4.0 目标 schema 13 / Room 28
+  由 ADR-0022 与 wire 的 offline-migrate / capability 门统一约束。entity 表仍为
+  稳定投影与 pull cursor 所有者。
 - ADR-0017 保留对账优先与临时 plan 思想；LWW head 词汇与「采用远端整行」默认路径在
   新能力代被三方合并/分支取代。
 - 深度 façade 不变：`CareLog`、`SyncPort`/`RealSyncPort`/`ReplicaSyncEngine`、`Store`。

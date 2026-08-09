@@ -1,15 +1,20 @@
-# 乐记 — 0.3.13 因果同步 Wire 合同（规划冻结）
+# 乐记 — 0.4.0 因果同步 Wire 合同（conflict-v2 冻结）
 
-> **状态：** **tree 运行时已落地**（tickets 02–08）；**家庭 NAS 强制切割与 minSupported=20 生产生效**
-> 仍须 ticket 09 维护窗 CD 与双机冒烟证据。历史 0.3.9–0.3.12 叙述见
+> **状态：** 本文冻结 0.4.0 **目标合同**；运行时实现与 capability 激活仍由
+> `causal-sync-conflict-transport-hardening` 02–27 逐票交付，本文本身不构成交付或生产证据。
+> 当前 tree 的 0.3.13/code 20/Room 27/server schema 12 是升级源；家庭 NAS 的实际 source
+> schema 仅允许在获批维护窗 preflight 中只读确认，未确认时不得猜成 11 或 12。历史
+> 0.3.9–0.3.12 叙述见
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 与 [`data-model.md`](./data-model.md)。
 > 架构决策（不含 wire 字段权威）：[ADR-0019](../adr/0019-server-validates-constraints-not-care-truth.md)、
-> [ADR-0020](../adr/0020-stable-projection-immutable-versions-and-branches.md)、
+> [ADR-0022](../adr/0022-commit-first-choice-only-conflict-snapshots.md)、
 > [ADR-0021](../adr/0021-wake-observation-and-nondestructive-duplicate-groups.md)。
 > 术语（不含字段/枚举权威）：根 [`CONTEXT.md`](../../CONTEXT.md)。
 > **字段名、枚举、closed key set、合并路径与例子：本文是唯一权威。**
-> 版本目标：Android/server **0.3.13**、versionCode **20**、Room **27**、server schema
-> **12**（切割前须从实时清单与 live health 重核）。
+> 单一发布身份：Android/server **0.4.0**、versionCode **21**、Room **28**、本地数据契约
+> **5**、server schema **13**、同步 floor **21**。共享语言无关语料：
+> [`config/conflict-v2-golden.json`](../../config/conflict-v2-golden.json) 及其
+> [JSON Schema](../../config/conflict-v2-golden.schema.json)。
 
 实现票不得发明竞争 shape、第二套 verdict 名或第二套删除/媒体编码。
 
@@ -19,12 +24,28 @@
 
 | 项 | 合同 |
 |----|------|
-| Capability keys（setup-status `capabilities` 数组，字面量冻结） | `causal_versions`、`wake_observation`、`source_relations`；三者皆缺一则停止护理同步，无 dual-read |
-| minSupported | 抬到 versionCode **20** 之前须已发布可安装签名 APK + 验证更新通道 |
-| 旧客户端 | 低于 floor 不得写入/拉取新 shape；无 skip-unknown |
-| Schema | server `user_version` **12** fresh-current；v11 仅 offline-migrate |
+| 新 capability（认证握手 `capabilities` 数组，字面量冻结） | `causal_sync_v2`；票 27 完成前服务端与客户端都**不得** advertise/接受；旧 `causal_versions`/`wake_observation`/`source_relations` 集合只标识 0.3.13 source wire，不等价于 v2 |
+| minSupported | 抬到 versionCode **21** 之前须先原子发布可安装、签名与 hash 匹配的 code 21 APK + metadata；能力、schema、floor 在票 27 一起激活 |
+| 旧客户端 / mixed generation | mutation 前 `capability_mismatch`；无 dual-read、dual-write、downgrade 或 skip-unknown |
+| Android upgrade | Room **27→28** 相邻非破坏迁移；永久 code 6/Room 24 链连续到 28；facts/tombstone/pending/frozen envelope/conflict/media/spool/session/credentials/endpoint/TLS trust 全保留 |
+| Server startup | 只接受精确 `user_version=13` 或空 fresh root；不在 startup/ordinary CD 自动迁移 |
+| Server source | 维护窗 copy-out `offline-migrate` 只接受完整且 shape 匹配的 **11 或 12**，写独立 staging root；其它版本/WAL/SHM/media 不完整 fail closed；实际生产 source 须在 stop/rm 前只读测量 |
+| CD / rollback | H28 实现迁移，H29 独占 guarded schema-cutover CD，H30 独占隔离 rollback rehearsal；生产执行仍由 `lossless-family-causal-sync/09` 且必须再次获批维护窗 |
 
 HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现有路由树，但 **职责、方法语义与 body shape 以本节为准**，不得另起竞争 API。
+
+### 1.1 跨 tracker 所有权（不复制实现）
+
+- [R12](../../.scratch/repository-dedup-algorithm-audit-20260809/issues/12-bounded-conflict-resources.md)：
+  commit limiter 与每根 open-branch cap。
+- [R17](../../.scratch/repository-dedup-algorithm-audit-20260809/issues/17-bounded-conflict-head-loader.md)：
+  bounded branch/base loader。
+- [R18](../../.scratch/repository-dedup-algorithm-audit-20260809/issues/18-conflict-snapshot-receipt-pagination.md)：
+  snapshot receipt、continuation、full-set token 与 response budgets。
+- [R19](../../.scratch/repository-dedup-algorithm-audit-20260809/issues/19-resolution-metadata-retention.md)：
+  resolution query budget 与 metadata retention。
+- [release 09](../../.scratch/lossless-family-causal-sync/issues/09-two-client-cutover-release-and-acceptance.md)：
+  唯一生产切割/双端 smoke owner；H01–H43 与本合同都不能自行 deploy 或宣称生产完成。
 
 ---
 
@@ -43,7 +64,7 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 
 ## 3. Mutation 与响应信封
 
-### 3.1 Mutation 单元（reconcile 与 commit **同一完整 shape**）
+### 3.1 Mutation 单元（commit-first 完整 shape）
 
 | 字段 | 类型 | 约束 |
 |------|------|------|
@@ -57,21 +78,21 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 
 **禁止** 在 mutation 上携带媒体 bytes。
 
-### 3.2 写路径成功响应（reconcile unit / commit unit）— **必填**
+### 3.2 Commit batch 成功响应（closed）
 
-| 字段 | 说明 |
-|------|------|
-| `status` | 见 §5 / §6 |
-| `mutation_id` | 回显 |
-| `stable_version_id` | 当前稳定投影版本（branched 时仍为冲突前稳定） |
-| `stable_root` | 完整稳定 root（tombstone 时仍为规范 tombstone root 或空对象规则见 §4） |
-| `stable_media` | 完整稳定媒体清单（canonical 排序，§8.3） |
-| `generation` | 权威 generation |
-| `request_hash` | 请求内容 hash 回显 |
-| `branch_version_id` | 仅 `branched`：**必填**；其它 status 必须省略或 `null` |
-| `conflict_id` | 存在未解决并发冲突时：**必填** string 句柄；稳定变为纯 tombstone（无未解决分支）时亦**必填** tombstone-scoped 句柄（§8.2）；既无并发冲突也非 restorable tombstone 时必须省略或 `null`。**唯一**冲突句柄名（禁止 `conflict_ref`） |
+顶层只有一次 `generation` 与 `results`；unit **禁止**重复 generation/cursor：
 
-失败：稳定 `code` + 可映射 reason；不泄露跨家庭存在性。
+| Unit 字段 | 说明 |
+|-----------|------|
+| `status` | `accepted\|merged\|branched`；精确重放仍返回原 status，不新增 `replayed` status |
+| `mutation_id` / `request_hash` | 回显稳定身份与 canonical 请求 hash |
+| `replay` | bool；首次终态 `false`，同 mutation/hash 重放原终态为 `true` |
+| `stable` | `{ version_id, root, media, deleted, deleted_at }` 完整规范投影；branched 时仍为冲突前 stable |
+| `branch_version_id` | 仅 `branched` 必填；其它 status 禁止 |
+| `conflict_id` | 存在 open branch 或可恢复纯 tombstone 时必填；其它状态禁止 |
+
+失败统一使用 §9.5 terminal envelope；不得泄露跨家庭存在性。响应收缩的运行时删除由 H25
+实现；在此之前 0.3.13 runtime 的冗余字段不是 v2 合同的一部分。
 
 ---
 
@@ -88,13 +109,13 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 |----|------|----------|
 | 客户端可合并 | root 内业务叶路径、`/_mutation.deleted`、`/media/{uuid}` | §8 |
 | 服务器盖章 / 非冲突 | `created_by_membership_id`、`observer_membership_id`、`updated_at` | **永不因两侧值不同而 branch**；见下 |
-| 禁止客户端伪造盖章 | 同上盖章字段 | 入站自报：忽略或 `rejected` `forged_stamp`（实现二选一必须在 Store 全路径一致；默认 **忽略客户端值并重盖章**） |
+| 禁止客户端伪造盖章 | 同上盖章字段 | mutation closed root 中出现即 `unknown_field`；服务器只从已认证 principal/既有版本重建，禁止“忽略或拒绝”双解释 |
 
 **`updated_at`：** 在 root 内，类型 integer epoch ms。是用户可见编辑/审计时间，**不是** 并发 token。
 合并/接受后服务器规范化：
 
-- `accepted`（单方）：`updated_at = max(mutation.root.updated_at, previous_stable.updated_at if any)`，若 mutation 省略则用服务器接收时刻；
-- `merged`：`updated_at = max(stable.updated_at, incoming.updated_at)`（两侧都缺则服务器接收时刻）；
+- `accepted`（单方）：`updated_at = max(mutation.root.updated_at, previous_stable.updated_at if any)`；
+- `merged`：`updated_at = max(stable.updated_at, incoming.updated_at)`；
 - 单独两侧 `/updated_at` 不同而其它路径可合并 → **仍 merged**，不 branch。
 
 **`created_by_membership_id` / `observer_membership_id`：** 仅服务器首次盖章后冻结；后续 mutation 不得改写；比较时排除出冲突集。
@@ -104,11 +125,11 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | 键 | 必填 | 作者 |
 |----|------|------|
 | `nickname` | 是 | client |
-| `sex` | 否 (null 可) | client |
-| `birthday` | 否 | client |
-| `avatar_media_uuid` | 否 (null 可) | client；须 ∈ media 或 null |
+| `sex` | 是 (null 可) | client |
+| `birthday` | 是 (null 可) | client |
+| `avatar_media_uuid` | 是 (null 可) | client；须 ∈ media 或 null |
 | `updated_at` | 是 | 见 §4.0 |
-| `created_by_membership_id` | pull 有；mutation 可省略 | server |
+| `created_by_membership_id` | stable/snapshot 有；mutation 禁止 | server |
 
 未知键 → reject。媒体 role：`avatar` 0–1。
 
@@ -120,20 +141,20 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | `type` | 是 | 既有 RecordType 字面量 |
 | `custom_item_client_uuid` | 是 (非 custom 时为 null) | |
 | `timestamp` | 是 | 主时间 / SleepStart |
-| `end_timestamp` | 见下 | 闭集内键；sleep 禁止；非 sleep 允许 |
+| `end_timestamp` | 见下 | 闭集内键；sleep 禁止；非 sleep 必须显式具体值或 null |
 | `note` | 是 (可为 null) | |
 | `payload_json` | 是 | object；typed closed keys 沿用现网 schema v2 白名单（data-model §3.6） |
 | `schema_version` | 是 | 字面量 `2` |
 | `updated_at` | 是 | §4.0 |
-| `created_by_membership_id` | pull 有；mutation 可省略 | server |
+| `created_by_membership_id` | stable/snapshot 有；mutation 禁止 | server |
 | `effective_wake_observation_client_uuid` | **仅** `type=sleep`：是 (可为 null) | 有效 WakeObservation；非 sleep 禁止出现 |
 
 **`end_timestamp`（closed 键，按 `type` 分叉）：**
 
 | `type` | 必填 | 规则 |
 |--------|------|------|
-| `sleep` | 禁止 | 键**不得**出现（含 null）→ `rejected` `forbidden_field`（醒来走 WakeObservation，§4.5） |
-| 非 sleep | 否（`null` 可） | 键允许；类型 `integer \| null`；语义与 0.3.12 相同（区间类若有）；当前非 sleep 类型保持 `null` |
+| `sleep` | 禁止 | 键**不得**出现（含 null）→ `rejected` `invalid_domain`（醒来走 WakeObservation，§4.5） |
+| 非 sleep | 是（`null` 可） | 类型 `integer \| null`；语义与 0.3.12 相同（区间类若有）；当前非 sleep 类型保持 `null` |
 
 未知键 → reject。
 
@@ -143,7 +164,11 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 
 ### 4.3 `care_plan` root
 
-沿用现网 closed 键（`baby_client_uuid`, `type`, `scheduled_at`, `scheduled_zone_id`, `note`, `payload_json`, `schema_version`, `status`, `fulfilled_record_client_uuid`, `fulfilled_at`, `source_record_client_uuid`, `custom_item_client_uuid`, `updated_at`, `created_by_membership_id`）；未知键 reject。媒体 role：`plan` 0–3。
+业务 closed 键为 `baby_client_uuid`, `type`, `scheduled_at`, `scheduled_zone_id`, `note`,
+`payload_json`, `schema_version`, `status`, `fulfilled_record_client_uuid`, `fulfilled_at`,
+`source_record_client_uuid`, `custom_item_client_uuid`, `updated_at`；全部已知业务键必须出现，
+领域允许清空者显式为 null。`created_by_membership_id` 仅 stable/snapshot 有、mutation 禁止。
+未知或缺少已知键均 reject。媒体 role：`plan` 0–3。
 
 ### 4.4 `custom_item` root
 
@@ -152,7 +177,7 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | `name` | 是 |
 | `icon_slot` | 是 |
 | `updated_at` | 是 |
-| `created_by_membership_id` | server |
+| `created_by_membership_id` | stable/snapshot 必填；mutation 禁止 |
 
 无媒体。
 
@@ -161,11 +186,11 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | 键 | 必填 | 说明 |
 |----|------|------|
 | `sleep_record_client_uuid` | 是 | 同家庭 Sleep Record |
-| `wake_timestamp` | 是 | 必须 `>=` 目标 Sleep 的 `timestamp`，否则 `rejected` `invalid_wake_timestamp` |
+| `wake_timestamp` | 是 | 必须 `>=` 目标 Sleep 的 `timestamp`，否则 `rejected` `invalid_domain` |
 | `note` | 是 (可为 null) | |
 | `withdrawn` | 是 | bool；`true` = 观察者撤回，不参与暂定/有效投影 |
 | `updated_at` | 是 | §4.0 |
-| `observer_membership_id` | pull 有；mutation 可省略 | **仅服务器盖章** |
+| `observer_membership_id` | stable/snapshot 有；mutation 禁止 | **仅服务器盖章** |
 
 禁止键：`end_timestamp`、`deleted`、`deleted_at`、自报观察者覆盖。
 媒体 role：`wake` 0–3。
@@ -193,11 +218,13 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 | `width` | 是 (可为 null) | |
 | `height` | 是 (可为 null) | |
 
-未知键 → reject。根上 `avatar_media_uuid` / 引用与清单不一致 → `rejected` `media_referential_integrity`（**不** branch；入站 fail closed）。
+未知键 → reject。根上 `avatar_media_uuid` / 引用与清单不一致 → `rejected`
+`invalid_domain`（**不** branch；入站 fail closed）。
 
 **顺序：** 数组顺序 **不是** 产品语义；三方合并按 `media_uuid` 键集合。
-稳定投影与成功响应中的 `media` / `stable_media` **必须** 按 `media_uuid` 字典序升序输出。
-仅顺序不同的 mutation 与稳定内容在 media 集合意义上相同 → `confirmed` / 幂等，不创建新版本。
+稳定投影与成功响应中的 `media` **必须** 按 `media_uuid` 字典序升序输出。
+仅顺序不同的 mutation 与稳定内容在 media 集合意义上相同，不创建新版本；
+服务端按其因果 base 返回 `accepted|merged`，精确 mutation replay 返回原 status 且 `replay=true`。
 
 #### 4.6.1 Preimage lifecycle
 
@@ -215,23 +242,16 @@ accepted/merged/branched 引用标记为 consumed。最终 `media/{family}/{uuid
 
 ---
 
-## 5. Reconcile（dry-run）
+## 5. 普通发表只走 commit-first
 
-`POST` … `/reconcile`（路径叶子名冻结为 `reconcile`）
+`causal_sync_v2` 下，普通发表从 Room product facts 冻结一个 §3.1 完整 mutation；如有媒体先取得
+durable preimage receipt，然后**只调用一次** `POST …/commit`。安全性来自不可变
+`mutation_id`、canonical `request_hash`、`base_version` 与持久终态；不得先调用普通
+`/reconcile`，不得推进 pull cursor。
 
-**请求：** `{ "units": [ Mutation, ... ] }`，每 unit **完整** §3.1 shape（不是摘要）。
-Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
-
-**每 unit `status`（恰一，闭集）：**
-
-| status | 含义 | 写稳定版本？ |
-|--------|------|----------------|
-| `confirmed` | 期望态已是当前稳定，或精确幂等已接受的同一 `mutation_id` | 否 |
-| `publish` | 可 commit；证明绑定 generation / 稳定版本 / request_hash | 否 |
-| `conflict_preview` | 若 commit 将 `branched` 或字段冲突；含预览摘要 | 否 |
-| `rejected` | ACL、形状、引用、content_drift、非法 wake、陈旧 live-over-tombstone 等 | 否 |
-
-权威证明：响应 `generation` + 涉及 UUID 的稳定版本戳 + `request_hash`；commit 须回放或安全重评。
+0.3.13 runtime 的 `/reconcile` 与 `confirmed|publish|conflict_preview|rejected` 是升级源合同，
+不是 v2 fallback。H26 在全部 root/media 已迁移后删除其 runtime route/state/recording/test；在此之前
+不得提前删除仍由 0.3.13 source runtime 消费的路径，也不得让 v2 advertise 成功后调用它。
 
 ---
 
@@ -248,6 +268,7 @@ Bounds：`units.length` ∈ 1…64；超批 `rejected` 整请求。
 | `branched` | 无法自动合并；本 mutation 分支耐久；稳定投影不变；`conflict_id`+`branch_version_id` 必填 |
 
 同一 `mutation_id` + 相同 canonical 内容：返回 **原始** 结果（幂等）。
+响应保留原 `accepted|merged|branched` 并设置 `replay=true`；`replayed` 禁止成为第四种 status。
 同一 `mutation_id` + 不同内容：`rejected` `content_drift`。
 
 ---
@@ -292,72 +313,101 @@ HTTP JSON envelope 为准；一个完整 dependency group 本身无法装入时 
 
 ---
 
-## 8. Conflict detail 与 Resolution CAS
+## 8. ConflictSnapshot v2 与 choice-only Resolution CAS
 
 ### 8.1 Detail
 
 `GET` … `/conflicts/{conflict_id}`
 
-返回 closed 对象：
+返回 `contract="conflict_snapshot_v2"` 的 closed page。共享 token 下所有页合起来是一个不可损
+快照；分页 limit/receipt/response budget 的实现所有权属于 external R18。
 
 | 字段 | 说明 |
 |------|------|
-| `conflict_id` | |
-| `stable_version_id` / `stable_root` / `stable_media` | |
-| `branches[]` | 每项：`branch_version_id`, `root`, `media`, `mutation_id?` |
-| `conflicting_paths` | 真实冲突 canonical 路径列表（字典序） |
-| `auto_merged` | object：路径 → 冻结值（已自动合并、resolution **不可改**） |
+| `conflict_id` / `entity_type` / `client_uuid` | 句柄与根身份 |
+| `snapshot_token` | 至少 256-bit CSPRNG opaque 值；仅 hash/等价秘密表示持久化；禁止把绑定字段编码成自包含客户端声明 |
+| `expires_at` | server epoch ms；detail 可重复读取，token 非单次使用 |
+| `stable` | 完整 `{ version_id, base_version, root, media, deleted, mutation_id, actor_id, device_id, received_at }` |
+| `branches[]` | 本页完整 version view；按 `version_id` 字典序，不丢 root/media/deleted/base/provenance |
+| `conflicting[]` | 本页 path + 完整 candidates；每 candidate 为 `{ choice_id, outcome, sources[] }` |
+| `auto_merged[]` | 本页 `{ path, outcome, sources[] }`；path 与 conflicting 全集严格不相交 |
+| `page_index` / `continuation` / `complete` | index 从 0 单调；非末页 continuation 为 opaque，末页 null + complete=true |
+
+version view 是 closed object，键只有
+`version_id|base_version|root|media|deleted|mutation_id|actor_id|device_id|received_at`；
+`base_version` 为该 mutation 声明的直接因果 base（首版为 null）。candidate 的 `outcome` 必须是
+§9.1 typed outcome；`sources[]` 每项是 closed
+`{ version_id, mutation_id, actor_id, device_id, received_at }`，不得只返回 label/value
+或不可追溯的摘要。`choice_id` 是 receipt 内候选 outcome+完整 sources 的 opaque 稳定标识，
+不是客户端可解析的编码。
+
+receipt 绑定 family/root、contract version、stable version、**完整** open branch set、全部
+choice/outcome/source、分页视图与 expiry。相同 receipt 的重复 detail、各页与服务重启必须给同一
+choice ID；stable/branch 改变或 expiry 后旧 token 只返回 `snapshot_stale|snapshot_expired`，客户端
+丢弃提交资格并从 summary/detail 刷新。刷新生成新 token，choice ID 可变，客户端只能从新快照重建
+选择，禁止按 label/旧 value 猜映射。部分页永远不能授权 resolution。
 
 ### 8.2 Resolve
 
 `POST` … `/conflicts/{conflict_id}/resolve`
 
-| 字段 | 必填 |
-|------|------|
-| `expected_stable_version` | 是 |
-| `expected_branch_versions` | 是（完整集合，字典序；**无分支时必须 `[]`**） |
-| `resolved_root` | 是 |
-| `resolved_media` | 是（canonical 排序） |
-| `resolution_mutation_id` | 是 |
-| `conflict_choices` | 是 | map：`path` → 所选值（仅 `conflicting_paths` 内键） |
+| 字段 | 必填 | 规则 |
+|------|------|------|
+| `snapshot_token` | 是 | opaque receipt token |
+| `resolution_mutation_id` | 是 | UUID；相同 id + 相同 canonical choices 精确 replay 原终态 |
+| `choices` | 是 | 数组；每项仅 `{ path, choice_id }`，按 path 字典序；每个 conflicting path 恰一项 |
 
-**校验 fail-closed：**
-对每个 **非** `conflicting_paths` 的可合并路径，`resolved_root`/`resolved_media` 必须等于
-`auto_merged`（或 stable⊕已合并结果）。改写自动合并路径或非冲突媒体 → `rejected`
-`rewrote_auto_merged_path`。服务器以 `auto_merged ⊕ conflict_choices` 重建权威稳定根；
-`resolved_*` 必须与重建结果 deep-equal（规范化后），否则 reject。
-**不** 提供「Owner 任意改写已合并字段」旁路；若需改非冲突字段，先 resolution 后再发新 mutation。
+请求**禁止** `expected_stable_version`、`expected_branch_versions`、`resolved_root`、
+`resolved_media`、裸 value 或 candidate label。服务器从 receipt 独立验证完整 branch set、token
+expiry/state、ACL、choice membership 与 path 恰好覆盖，再用 `auto_merged + choices` 重建
+root/media/deleted，经过与普通 commit **同一** canonical decoder、领域约束、媒体验证与稳定投影
+builder，最后做 stable+branch full-set CAS。修改期间出现新 branch/stable → `snapshot_stale`；
+CAS 竞争 → `cas_mismatch`，都不写状态。若需改非冲突字段，resolution 成功后另发普通 mutation。
 
 授权：Record/WakeObservation 作者或 Owner；其它根既有 ACL。
 CAS 失败：返回最新 summary，不改状态。
 
 **显式 restore（tombstone→live）— 唯一路径（冻结为本 CAS，禁止普通 mutation revive）：**
 
-1. **有未解决并发分支时**（例 E/J 后）：使用既有并发 `conflict_id`；`expected_branch_versions` = 完整分支集合；`conflicting_paths` 含 `/_mutation.deleted`（及真实业务冲突路径）；choices/resolved 选 live → 新稳定 live。
+1. **有未解决并发分支时**（例 E/J 后）：使用既有 `conflict_id` 的完整 snapshot；
+   `conflicting` 含 `/_mutation.deleted`（及真实业务冲突路径）；choice 选 live source 后由服务端重建。
 2. **纯 tombstone、无未解决并发分支时**（当前 base 删除已 accepted，例 D/G）：服务器为该稳定 tombstone 维护 **tombstone-scoped** `conflict_id`：
    - 绑定 `(entity_type, client_uuid, stable_tombstone_version_id)`；同一三元组幂等同一 `conflict_id`（可在 delete `accepted`/`merged` 时铸造，或首次授权 detail 懒铸造，但不得漂移）。
-   - `branch_version_ids` / `expected_branch_versions` **必须为 `[]`**。
-   - detail 的 `conflicting_paths` **至少** 含 `/_mutation.deleted`；`auto_merged` 为 tombstone 根/媒体规范投影。
-   - `conflict_choices["/_mutation.deleted"] = false`，且 `resolved_root`/`resolved_media` 为授权方期望的 live 完整根（须通过 `auto_merged ⊕ choices` 重建校验）。
+   - snapshot 的 open branch set 必须为 `[]`，`conflicting` 至少含 `/_mutation.deleted`。
+   - restore choice 只绑定 tombstone mutation **声明的直接 `base_version`**；该版本必须是完整 live
+     root + 完整 media，且所有 bytes 可读。禁止搜索祖先、猜多个 parent、补造字段或缺失媒体。
+   - 缺 base / base 不完整 / bytes 缺失分别为 `missing_restore_base` /
+     `incomplete_restore_base` / `missing_restore_media`；保持 tombstone 不变。
    - 成功 → 新稳定 live；该 `conflict_id` 关闭；pull 不再带该 restore 句柄。
    - 若随后有并发 live 分支附着（例 J）：**同一** `conflict_id` 升级为非空 `branch_version_ids`（不再是纯空分支句柄）；resolve 改走本条 1。
-3. **禁止** 用 §6 `commit` / 普通 mutation 将稳定 tombstone 推回 live（例 F：`stale_live_over_tombstone`）。
+3. **禁止** 用 §6 `commit` / 普通 mutation 将稳定 tombstone 推回 live（例 F：`invalid_domain`）。
 4. 历史无法证明原因的迁移 tombstone：无批量恢复；单条若产品开放，仍仅本 CAS + 同一 ACL，不得另开旁路。
 
 ---
 
 ## 9. Canonical 路径与三方合并
 
-### 9.1 路径
+### 9.1 路径与 typed outcome
 
 - Root 叶：`/note`、`/timestamp`、`/payload_json/amount_ml`、`/withdrawn`、
   `/effective_wake_observation_client_uuid`、…
-- 删除意图：`/_mutation.deleted`（bool）
+- 删除意图：`/_mutation.deleted`
 - 媒体：`/media/{media_uuid}` keyed；成员变更 = 增删改该 uuid 的 manifest 项内容
+
+每个业务 leaf/subtree outcome 只有 `{ "op":"set", "value":… }`；业务可空字段清空必须是
+`set(null)`。`{ "op":"remove" }` 仅允许媒体成员删除与 live→tombstone deletion transition；
+普通业务字段禁止 remove。live/restore 候选在 `/_mutation.deleted` 上使用 `set(false)` 并绑定
+可重建的 live source；tombstone 候选使用 `remove`。缺少已知字段永远不是“未改动”或“清空”。
 
 ### 9.2 数组
 
-`payload_json` 内未 keyed 的数组整组原子。未知 root/`payload_json` 键 → reject。
+`payload_json` 内未 keyed 的数组整组原子。未知键→`unknown_field`，缺少已知键→
+`missing_field`，错误 JSON 类型→`wrong_type`，非规范数字/时间/UUID/hash→
+`non_canonical_value`，领域组合非法→`invalid_domain`。所有这些在 commit 与 resolution 共用。
+
+先把 base→head diff 规范化为不重叠 leaf/subtree outcomes。ancestor `set(null)` 与并发 descendant
+edit 归到 ancestor path 并冲突；只有最终完整 canonical subtree deep-equal 才合并。禁止因 JSON
+Pointer 前缀不同把它们当不相交。
 
 ### 9.3 媒体合并
 
@@ -374,6 +424,35 @@ CAS 失败：返回最新 summary，不改状态。
 
 `/updated_at`、`/created_by_membership_id`、`/observer_membership_id` **不进入**
 `conflicting_paths`（§4.0）。
+
+### 9.5 Terminal error 与 replay closed shape
+
+终态错误统一为：
+
+```json
+{ "status": "rejected", "mutation_id": "<optional>", "error": { "code": "<closed>", "retryable": false } }
+```
+
+resolution 可用 `resolution_mutation_id` 取代 `mutation_id`，两者不得同时出现。closed code：
+`unknown_field|missing_field|wrong_type|non_canonical_value|invalid_domain|content_drift|`
+`unauthenticated|forbidden|capability_mismatch|invalid_snapshot_token|snapshot_expired|snapshot_stale|`
+`invalid_choice|duplicate_choice|incomplete_choices|missing_restore_base|incomplete_restore_base|`
+`missing_restore_media|cas_mismatch`。认证/ACL/能力/canonical/token/choice/restore/CAS 错误不得被
+客户端当弱网盲重试；状态改变或取得新 snapshot/session/capability 后才可发起新操作。
+
+成功 replay 不进入本 envelope：返回原 `accepted|merged|branched` 终态并只把 `replay` 设为
+`true`。同 resolution mutation ID 但 choices 漂移也返回 `content_drift`。
+
+本 closed list 只属于 v2 authenticated handshake、commit 与 conflict detail/resolve；§12 已冻结的
+source-relation 管理 mutation 保留其 route-specific semantic codes，本票不重新设计其产品合同。
+
+### 9.6 确定性 N-way 分类
+
+一次 snapshot 对 stable 与**全部** open branches 同时计算，不做 pairwise fold。每个 head 相对其
+真实因果 base 产生 canonical outcomes；未改变某 path 的 head 不投反对票。所有 changed heads 在
+一条 path 只有一个 distinct outcome → auto-merged；有两个或更多 → conflicting。完整 history
+不可比较时保守 conflicting；base/head 无法有界完整加载时 fail closed。stable、auto/conflict、
+candidates、source set 与 byte ordering 必须与 branch arrival/enumeration、UUID、墙钟、作者或角色无关。
 
 ---
 
@@ -426,7 +505,8 @@ live V1; mutation deleted=true, base_version=V1
 
 任一顺序：先到者 accepted（或可 merged），后到者同 base 并发 mutation → branched；
 **stable = 先接受的版本**，不会停留在 V1。
-未 commit 前：reconcile 可将双方标为 conflict_preview（仍不写稳定版本）。
+0.4.0 不做普通 reconcile preview；双方直接按稳定 `mutation_id` commit，先到者建立 stable，后到者
+无损合并或耐久 branched。
 最终可见性变更（删↔活或选字段）仅经 §8.2 resolve CAS。
 ```
 
@@ -436,9 +516,9 @@ live V1; mutation deleted=true, base_version=V1
 stable = tombstone V2 (parent live was V1)
 incoming: deleted=false, base_version=V1 以外的旧证明 / null / 与 parent 无关
   或 base_version=V2 却推 live 而无 resolution
-→ commit/reconcile unit status = rejected
-→ code = stale_live_over_tombstone
-→ 不得 revive；不得 branched；客户端 pending 不得靠 confirmed 清掉
+→ commit unit status = rejected
+→ code = invalid_domain（stale live over tombstone）
+→ 不得 revive；不得 branched；客户端 pending 不得当作成功终态清掉
 ```
 
 **例 G — 显式 restore（唯一路径 = §8.2 resolve CAS）**
@@ -447,14 +527,13 @@ incoming: deleted=false, base_version=V1 以外的旧证明 / null / 与 parent 
 # 纯 tombstone（无未解决并发分支）— 例 D 之后
 stable tombstone V2；tombstone-scoped conflict_id C（branch_version_ids=[]）
 POST /conflicts/C/resolve
-  expected_stable_version=V2
-  expected_branch_versions=[]
-  conflict_choices["/_mutation.deleted"]=false
-  resolved_* = 授权 live 完整根/媒体
+  snapshot_token=<C 对应的完整 receipt token>
+  resolution_mutation_id=<stable UUID>
+  choices=[{path:"/_mutation.deleted", choice_id:<direct-base-live choice>}]
 → 新稳定 live V3；C 关闭
 
 # 有并发分支时 — 例 E/J 之后
-既有 conflict_id + 非空 expected_branch_versions；choices 含 live / 业务路径
+既有 conflict_id 的完整 snapshot token；choices 恰覆盖全部 conflict path
 → 新稳定 live（或仍 tombstone，若 choices 选删除）
 ```
 
@@ -464,7 +543,7 @@ POST /conflicts/C/resolve
 
 ```text
 tombstone mutation_id=M 已 accepted
-retry 同 M 同 body → 原 accepted 结果（confirmed/accepted 幂等回放）
+retry 同 M 同 body → 原 accepted 结果，`replay=true`
 ```
 
 **例 J — 删除已稳定，后到的同 base 并发编辑（证明规则）**
@@ -477,7 +556,7 @@ later mutation E: deleted=false, base_version=V1, mutation_id=Me≠Md, 业务字
 → 检测：stable 为 tombstone 且 incoming.base_version ∈ parents(stable_version)
   且 incoming 为 live 且 mutation_id 非删除幂等 → **branched**
   （编辑保留为冲突分支；stable 仍 tombstone V2；conflict_id 必填）
-若 E.base_version 不是 V2 的 parent（例如更旧或未知）→ rejected stale_live_over_tombstone
+若 E.base_version 不是 V2 的 parent（例如更旧或未知）→ rejected invalid_domain
 ```
 
 ---
@@ -509,7 +588,7 @@ media_uuid(wake) = UUIDv5(NAMESPACE, UTF-8(NAME_MEDIA))
 字段转移：`wake_timestamp = legacy end_timestamp`；`note` 原样；每条 log 媒体：
 **字节与 sha256 原样复用**，`role=wake`，`media_uuid` **仅** 按上式 UUIDv5 生成
 （hash 相同不足以代替 uuid 公式；双端必须得到同一 `media_uuid` 才能对齐
-`stable_media` / 引用 CAS）。`observer_membership_id = created_by_membership_id`
+稳定版本的 `media` / 引用 CAS）。`observer_membership_id = created_by_membership_id`
 （legacy 作者）；`withdrawn=false`；Sleep
 `effective_wake_observation_client_uuid =` 该观察 uuid。
 开放 sleep：不创建 WakeObservation。
@@ -607,28 +686,29 @@ fingerprint 精确一致，并在同一事务替换为恰有一个 display 的�
 |------|------|
 | 协议 | 具备 §1 全部 capability |
 | 运行 | 前台 + 可信 endpoint + 健康租约 |
-| 行为 | 冻结 dirty 单元 → reconcile → commit；**不** pull |
+| 行为 | 冻结 dirty 单元 → commit-first；**不** reconcile、pull |
 | cursor | **不** 前进增量 pull cursor |
 | 失败 | 保留 pending；不回滚本机护理事务 |
 | 完整周期 | 回前台/网络恢复/下拉/常规周期仍 pull + 结算 |
 
 ---
 
-## 14. 与旧 wire 对照（禁止混写为已交付）
+## 14. 与升级源 wire 对照（禁止双读双写）
 
-| 主题 | 0.3.9–0.3.12 已交付 | 0.3.13 规划 |
+| 主题 | 0.3.13 tree/source | 0.4.0 `causal_sync_v2` |
 |------|---------------------|------------|
-| 同 UUID | `updated_at` LWW | 三方合并 / 分支；`updated_at` 不冲突 |
-| Reconcile | adopt_remote 等 | `confirmed\|publish\|conflict_preview\|rejected` |
-| Commit | 修订 CAS | `accepted\|merged\|branched` + `conflict_id` |
-| 跨 UUID | 服务器近邻 tombstone | 来源关系 API |
-| 睡眠醒来 | `end_timestamp` | WakeObservation + `effective_wake_observation_client_uuid` |
-| 删除复活 | 墓碑永胜 / 新 UUID | 因果 tombstone + 例 F/J/G |
+| 普通发表 | reconcile → commit | 一次 commit-first；reconcile 禁止 |
+| 合并 | pairwise 三方 fold | 完整 head set 的确定性 N-way |
+| 冲突详情 | stable/branch 字段不完整、客户端 result | 完整 ConflictSnapshot pages + choice-only request |
+| nullable | 字段省略与清空可能混义 | 已知业务字段显式值或 null；清空=`set(null)` |
+| replay | 原终态但 response marker 不统一 | 原 `accepted\|merged\|branched` + `replay` bool |
+| 版本/schema | 0.3.13/code20/Room27/server12 | 0.4.0/code21/Room28/contract5/server13/floor21 |
 
 ---
 
 ## 15. 验收（文档冻结）
 
-1. 字段/枚举/例子以本文为准；ADR/CONTEXT 只链到本文，不另造标识符方言。
-2. 票 02–08 不得发明第五 reconcile status、第二冲突句柄名或第二套删除编码。
-3. 无 StructureTest 锁行数/目录布局。
+1. 字段/枚举/例子以本文与 shared golden corpus 为准；ADR/CONTEXT 不另造标识符方言。
+2. H02–H27 与 external R12/R17/R18/R19 不得发明第二 snapshot/token/choice/error/replay shape。
+3. `causal_sync_v2` 在 H27 前不得 advertise；source runtime 保留到其明确删除票，禁止作为 v2 fallback。
+4. 无 StructureTest 锁行数/目录布局；Kotlin/Rust 读取同一 fixture，runtime conformance 留给实现票。

@@ -12,10 +12,9 @@
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
 > membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 >
-> **0.3.13 tree 已落地（NAS 切割待维护窗）：** 因果版本 / WakeObservation / 非破坏性疑似重复 wire 见
-> [`causal-sync-wire.md`](./causal-sync-wire.md) 与 ADR-0019/0020/0021。下文凡标
-> 「0.3.13 规划」的不得读成当前运行时行为；0.3.10–0.3.12 已交付的 LWW、近邻落选与
-> 整行 sleep end 仍以标注「已交付」的段落为准，直至能力切割上线。
+> **当前 runtime source：** 0.3.13 / Room 27 因果版本、WakeObservation 与非破坏性疑似重复。
+> **0.4.0 目标 wire** 见 [`causal-sync-wire.md`](./causal-sync-wire.md) 与 ADR-0022：Room 28、
+> commit-first、完整 ConflictSnapshot、choice-only resolution；H27 前 capability 不激活。
 
 ---
 
@@ -567,6 +566,8 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 > CAS；批量 head-by-UUID + LWW。
 > **0.3.13 tree：** ADR-0019/0020 与 [`causal-sync-wire.md`](./causal-sync-wire.md)；
 > 因果 `base_version`/`mutation_id`、三方合并/分支；FulfillmentCandidate **仍不** 三方编辑。
+> **0.4.0 目标：** ADR-0022；普通发表 commit-first、完整 snapshot 与 choice-only resolution；
+> 0.3.13 source 路径在各 root/media 迁移完成前保留，但不得作为 v2 fallback。
 
 #### 3.12.1 已交付（head-by-UUID + LWW）
 
@@ -594,7 +595,17 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
 - Commit：`accepted|merged|branched` + 稳定 `version_id` + 完整稳定投影 + 可选冲突引用。
 - Pull：稳定投影 + `version_id` + 有界冲突摘要；详情与 resolution CAS 见 wire 文档。
 - LocalWrite no-pull **仅** 在因果协议后启用，且不推进 pull cursor（CONTEXT /
-  [`causal-sync-wire.md`](./causal-sync-wire.md) §11）。
+  [`causal-sync-wire.md`](./causal-sync-wire.md) §13）。
+
+#### 3.12.3 0.4.0 conflict-v2（合同冻结，runtime 未激活）
+
+- 已知业务 nullable 字段必须显式具体值或 null；清空为 `set(null)`，普通业务字段没有 remove。
+- stable 与每个 branch 的 root/media/deleted/base/provenance 进入一个完整 ConflictSnapshot；
+  auto/conflict paths 不相交，choice ID 在同 token 全页与重启间稳定。
+- resolution 请求只有 snapshot token、resolution mutation ID 和完整 path→choice ID；服务端重建、
+  共用普通 commit validator 并 full-set CAS。纯 restore 只选 tombstone 声明的完整直接 live base。
+- pending mutation 可持久一份不可变 frozen envelope，但 Room product facts 仍是领域真相。
+- `causal_sync_v2` 只在 H27 完成 0.4.0/code21/Room28/contract5/server13/floor21 全链后 advertise。
 
 ---
 
@@ -782,7 +793,8 @@ interface SyncPort {
 | 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`/`family_authority`、护理计划提醒与系统日历状态、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
 | 冲突（已交付） | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
-| 冲突（0.3.13 规划） | `base_version` 三方合并 / 持久分支 / 显式 resolution；见 [`causal-sync-wire.md`](./causal-sync-wire.md) |
+| 冲突（0.3.13 source） | `base_version` 三方合并 / 持久分支 / client-supplied resolution result；仅作升级源 runtime |
+| 冲突（0.4.0 目标） | 完整 N-way ConflictSnapshot / choice-only resolution / direct-base restore；见 [`causal-sync-wire.md`](./causal-sync-wire.md)，H27 前不激活 |
 | 同步域扩展（0.3.13 规划） | + WakeObservation（+ wake 媒体）；近邻不再服务器落选 |
 | LocalWrite（0.3.13 规划） | 因果协议后才允许 no-pull；不推进 pull cursor |
 | 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |

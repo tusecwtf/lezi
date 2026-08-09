@@ -1,0 +1,224 @@
+{
+  "$schema": "https://lezi.invalid/contracts/conflict-v2-golden.schema.json",
+  "contract": "lezi.conflict-v2-golden",
+  "version": 2,
+  "release": {
+    "android": "0.4.0", "server": "0.4.0", "version_code": 21, "room": 28,
+    "local_data_contract": 5, "server_schema": 13, "minimum_sync_version_code": 21,
+    "source_room": 27, "source_server_schemas": [11, 12]
+  },
+  "capability": {
+    "key": "causal_sync_v2", "advertise_after_ticket": 27,
+    "mixed_generation": "reject_before_mutation"
+  },
+  "terminal_error_codes": [
+    "unknown_field", "missing_field", "wrong_type", "non_canonical_value", "invalid_domain",
+    "content_drift", "unauthenticated", "forbidden", "capability_mismatch",
+    "invalid_snapshot_token", "snapshot_expired", "snapshot_stale", "invalid_choice",
+    "duplicate_choice", "incomplete_choices", "missing_restore_base",
+    "incomplete_restore_base", "missing_restore_media", "cas_mismatch"
+  ],
+  "terminal_error_examples": [
+    { "code": "unknown_field", "response": { "status": "rejected", "error": { "code": "unknown_field", "retryable": false } } },
+    { "code": "missing_field", "response": { "status": "rejected", "error": { "code": "missing_field", "retryable": false } } },
+    { "code": "wrong_type", "response": { "status": "rejected", "error": { "code": "wrong_type", "retryable": false } } },
+    { "code": "non_canonical_value", "response": { "status": "rejected", "error": { "code": "non_canonical_value", "retryable": false } } },
+    { "code": "invalid_domain", "response": { "status": "rejected", "error": { "code": "invalid_domain", "retryable": false } } },
+    { "code": "content_drift", "response": { "status": "rejected", "error": { "code": "content_drift", "retryable": false } } },
+    { "code": "unauthenticated", "response": { "status": "rejected", "error": { "code": "unauthenticated", "retryable": false } } },
+    { "code": "forbidden", "response": { "status": "rejected", "error": { "code": "forbidden", "retryable": false } } },
+    { "code": "capability_mismatch", "response": { "status": "rejected", "error": { "code": "capability_mismatch", "retryable": false } } },
+    { "code": "invalid_snapshot_token", "response": { "status": "rejected", "error": { "code": "invalid_snapshot_token", "retryable": false } } },
+    { "code": "snapshot_expired", "response": { "status": "rejected", "error": { "code": "snapshot_expired", "retryable": false } } },
+    { "code": "snapshot_stale", "response": { "status": "rejected", "error": { "code": "snapshot_stale", "retryable": false } } },
+    { "code": "invalid_choice", "response": { "status": "rejected", "error": { "code": "invalid_choice", "retryable": false } } },
+    { "code": "duplicate_choice", "response": { "status": "rejected", "error": { "code": "duplicate_choice", "retryable": false } } },
+    { "code": "incomplete_choices", "response": { "status": "rejected", "error": { "code": "incomplete_choices", "retryable": false } } },
+    { "code": "missing_restore_base", "response": { "status": "rejected", "error": { "code": "missing_restore_base", "retryable": false } } },
+    { "code": "incomplete_restore_base", "response": { "status": "rejected", "error": { "code": "incomplete_restore_base", "retryable": false } } },
+    { "code": "missing_restore_media", "response": { "status": "rejected", "error": { "code": "missing_restore_media", "retryable": false } } },
+    { "code": "cas_mismatch", "response": { "status": "rejected", "error": { "code": "cas_mismatch", "retryable": false } } }
+  ],
+  "cases": [
+    {
+      "id": "canonical-explicit-null", "kind": "accept",
+      "input": { "entity_type": "baby", "root": { "nickname": "安安", "sex": null, "birthday": null, "avatar_media_uuid": null, "updated_at": 1000 } },
+      "expect": { "canonical": true, "outcome": { "path": "/birthday", "op": "set", "value": null } }
+    },
+    {
+      "id": "canonical-missing-known-field", "kind": "reject",
+      "input": { "entity_type": "baby", "root": { "nickname": "安安", "sex": null, "avatar_media_uuid": null, "updated_at": 1000 } },
+      "expect": { "status": "rejected", "error": { "code": "missing_field", "retryable": false } }
+    },
+    {
+      "id": "canonical-unknown-field", "kind": "reject",
+      "input": { "entity_type": "baby", "root": { "nickname": "安安", "sex": null, "birthday": null, "avatar_media_uuid": null, "updated_at": 1000, "alias": "A" } },
+      "expect": { "status": "rejected", "error": { "code": "unknown_field", "retryable": false } }
+    },
+    {
+      "id": "canonical-wrong-type", "kind": "reject",
+      "input": { "entity_type": "record", "root": { "baby_client_uuid": "00000000-0000-0000-0000-000000000001", "type": "formula", "custom_item_client_uuid": null, "timestamp": "1000", "end_timestamp": null, "note": null, "payload_json": { "amount_ml": 60 }, "schema_version": 2, "updated_at": 1000 } },
+      "expect": { "status": "rejected", "error": { "code": "wrong_type", "retryable": false } }
+    },
+    {
+      "id": "canonical-parent-null-versus-child-edit", "kind": "classify",
+      "input": { "base": { "dose": { "amount": 1, "unit": "ml" } }, "heads": [{ "dose": null }, { "dose": { "amount": 2, "unit": "ml" } }] },
+      "expect": { "conflicting_paths": ["/dose"], "auto_merged_paths": [] }
+    },
+    {
+      "id": "canonical-media-remove", "kind": "classify",
+      "input": { "path": "/media/00000000-0000-0000-0000-000000000010", "before": { "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "after": null },
+      "expect": { "outcome": { "op": "remove" } }
+    },
+    {
+      "id": "canonical-delete-transition", "kind": "classify",
+      "input": { "path": "/_mutation.deleted", "before": false, "after": true },
+      "expect": { "outcome": { "op": "remove" } }
+    },
+    {
+      "id": "snapshot-two-pages", "kind": "accept",
+      "input": {
+        "pages": [
+          {
+            "contract": "conflict_snapshot_v2",
+            "conflict_id": "00000000-0000-0000-0000-000000000100",
+            "entity_type": "baby",
+            "client_uuid": "00000000-0000-0000-0000-000000000101",
+            "snapshot_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "expires_at": 2000000,
+            "stable": {
+              "version_id": "v1", "base_version": null,
+              "root": { "nickname": "安安", "sex": null, "birthday": null, "avatar_media_uuid": null, "updated_at": 1000, "created_by_membership_id": "member-a" },
+              "media": [], "deleted": false,
+              "mutation_id": "00000000-0000-0000-0000-000000000102",
+              "actor_id": "member-a", "device_id": "device-a", "received_at": 1000
+            },
+            "branches": [
+              {
+                "version_id": "b1", "base_version": "v1",
+                "root": { "nickname": "安安-b", "sex": null, "birthday": null, "avatar_media_uuid": null, "updated_at": 1100, "created_by_membership_id": "member-b" },
+                "media": [], "deleted": false,
+                "mutation_id": "00000000-0000-0000-0000-000000000103",
+                "actor_id": "member-b", "device_id": "device-b", "received_at": 1100
+              }
+            ],
+            "conflicting": [
+              {
+                "path": "/nickname",
+                "candidates": [
+                  { "choice_id": "choice_nickname_b", "outcome": { "op": "set", "value": "安安-b" }, "sources": [{ "version_id": "b1", "mutation_id": "00000000-0000-0000-0000-000000000103", "actor_id": "member-b", "device_id": "device-b", "received_at": 1100 }] },
+                  { "choice_id": "choice_nickname_c", "outcome": { "op": "set", "value": "安安-c" }, "sources": [{ "version_id": "b2", "mutation_id": "00000000-0000-0000-0000-000000000104", "actor_id": "member-c", "device_id": "device-c", "received_at": 1200 }] }
+                ]
+              }
+            ],
+            "auto_merged": [],
+            "page_index": 0,
+            "continuation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "complete": false
+          },
+          {
+            "contract": "conflict_snapshot_v2",
+            "conflict_id": "00000000-0000-0000-0000-000000000100",
+            "entity_type": "baby",
+            "client_uuid": "00000000-0000-0000-0000-000000000101",
+            "snapshot_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "expires_at": 2000000,
+            "stable": {
+              "version_id": "v1", "base_version": null,
+              "root": { "nickname": "安安", "sex": null, "birthday": null, "avatar_media_uuid": null, "updated_at": 1000, "created_by_membership_id": "member-a" },
+              "media": [], "deleted": false,
+              "mutation_id": "00000000-0000-0000-0000-000000000102",
+              "actor_id": "member-a", "device_id": "device-a", "received_at": 1000
+            },
+            "branches": [
+              {
+                "version_id": "b2", "base_version": "v1",
+                "root": { "nickname": "安安-c", "sex": null, "birthday": "2026-01-01", "avatar_media_uuid": null, "updated_at": 1200, "created_by_membership_id": "member-c" },
+                "media": [], "deleted": true,
+                "mutation_id": "00000000-0000-0000-0000-000000000104",
+                "actor_id": "member-c", "device_id": "device-c", "received_at": 1200
+              }
+            ],
+            "conflicting": [
+              {
+                "path": "/_mutation.deleted",
+                "candidates": [
+                  { "choice_id": "choice_live_base", "outcome": { "op": "set", "value": false }, "sources": [{ "version_id": "b1", "mutation_id": "00000000-0000-0000-0000-000000000103", "actor_id": "member-b", "device_id": "device-b", "received_at": 1100 }] },
+                  { "choice_id": "choice_delete_branch", "outcome": { "op": "remove" }, "sources": [{ "version_id": "b2", "mutation_id": "00000000-0000-0000-0000-000000000104", "actor_id": "member-c", "device_id": "device-c", "received_at": 1200 }] }
+                ]
+              }
+            ],
+            "auto_merged": [
+              { "path": "/birthday", "outcome": { "op": "set", "value": "2026-01-01" }, "sources": [{ "version_id": "b2", "mutation_id": "00000000-0000-0000-0000-000000000104", "actor_id": "member-c", "device_id": "device-c", "received_at": 1200 }] }
+            ],
+            "page_index": 1,
+            "continuation": null,
+            "complete": true
+          }
+        ]
+      },
+      "expect": { "full_branch_set": ["b1", "b2"], "resolution_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+    },
+    {
+      "id": "snapshot-choice-stable-across-pages", "kind": "accept",
+      "input": { "snapshot_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "path": "/nickname", "page_choice_ids": ["choice_nickname_b", "choice_nickname_b"] },
+      "expect": { "choice_id": "choice_nickname_b" }
+    },
+    {
+      "id": "snapshot-choice-stable-after-restart", "kind": "accept",
+      "input": { "snapshot_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "before_restart": "choice_nickname_b", "after_restart": "choice_nickname_b" },
+      "expect": { "same": true }
+    },
+    {
+      "id": "snapshot-auto-conflict-disjoint", "kind": "accept",
+      "input": { "conflicting_paths": ["/note", "/_mutation.deleted"], "auto_merged_paths": ["/payload_json/amount_ml", "/media/00000000-0000-0000-0000-000000000010"] },
+      "expect": { "intersection": [] }
+    },
+    {
+      "id": "resolve-choice-only-full-set", "kind": "accept",
+      "input": { "snapshot_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "resolution_mutation_id": "00000000-0000-0000-0000-000000000020", "choices": [{ "path": "/_mutation.deleted", "choice_id": "choice_live_base" }, { "path": "/nickname", "choice_id": "choice_nickname_b" }] },
+      "expect": { "request_keys": ["snapshot_token", "resolution_mutation_id", "choices"], "status": "accepted", "replay": false }
+    },
+    {
+      "id": "resolve-direct-base-restore", "kind": "accept",
+      "input": {
+        "stable": { "version_id": "v2", "deleted": true, "base_version": "v1" },
+        "direct_base": {
+          "version_id": "v1", "base_version": null,
+          "root": { "nickname": "安安", "sex": null, "birthday": null, "avatar_media_uuid": "00000000-0000-0000-0000-000000000110", "updated_at": 1000, "created_by_membership_id": "member-a" },
+          "media": [{ "media_uuid": "00000000-0000-0000-0000-000000000110", "role": "avatar", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "byte_size": 4, "mime": "image/jpeg", "width": 1, "height": 1 }],
+          "deleted": false, "mutation_id": "00000000-0000-0000-0000-000000000111",
+          "actor_id": "member-a", "device_id": "device-a", "received_at": 1000,
+          "media_bytes_readable": true
+        },
+        "choice_id": "choice_restore_v1"
+      },
+      "expect": { "restore_version": "v1", "post_restore_edit": "separate_mutation" }
+    },
+    {
+      "id": "resolve-missing-direct-base", "kind": "reject",
+      "input": { "stable": { "version_id": "v2", "deleted": true, "base_version": "v1" }, "direct_base": null },
+      "expect": { "status": "rejected", "error": { "code": "missing_restore_base", "retryable": false } }
+    },
+    {
+      "id": "resolve-missing-direct-base-media", "kind": "reject",
+      "input": {
+        "stable": { "version_id": "v2", "deleted": true, "base_version": "v1" },
+        "direct_base": {
+          "version_id": "v1", "base_version": null,
+          "root": { "nickname": "安安", "sex": null, "birthday": null, "avatar_media_uuid": "00000000-0000-0000-0000-000000000110", "updated_at": 1000, "created_by_membership_id": "member-a" },
+          "media": [{ "media_uuid": "00000000-0000-0000-0000-000000000110", "role": "avatar", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "byte_size": 4, "mime": "image/jpeg", "width": 1, "height": 1 }],
+          "deleted": false, "mutation_id": "00000000-0000-0000-0000-000000000111",
+          "actor_id": "member-a", "device_id": "device-a", "received_at": 1000,
+          "media_bytes_readable": false
+        }
+      },
+      "expect": { "status": "rejected", "error": { "code": "missing_restore_media", "retryable": false } }
+    },
+    {
+      "id": "commit-exact-replay-marker", "kind": "accept",
+      "input": { "mutation_id": "00000000-0000-0000-0000-000000000030", "request_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "attempts": 2 },
+      "expect": { "first": { "status": "branched", "replay": false }, "second": { "status": "branched", "replay": true }, "new_status": false }
+    }
+  ]
+}

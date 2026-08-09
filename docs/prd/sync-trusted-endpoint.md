@@ -5,18 +5,16 @@
 > 架构决策：[ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)、
 > [ADR-0014](../adr/0014-owner-device-restores-only-empty-family-servers.md)、
 > [ADR-0017](../adr/0017-authoritative-reconcile-settles-local-deltas.md)
-> （0.3.13+ 因果 supersession 见 ADR-0019/0020/0021）
+> （0.3.13 因果代见 ADR-0019/0020/0021；0.4.0 commit-first supersession 见 ADR-0022）
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
 > 权威裁决扩展状态：0.3.9 在既有批量 head-by-UUID 裁决、Android 冻结/CAS 终结与
 > atomic pending 投影上增加启动 authority graph 校验及延迟履约能力门闩；发布验收证据
 > 由本地 tracker 固定到实际构建与联调结果。
 >
-> **0.3.13 因果 wire（tree 已落地；NAS 生产切割待维护窗）** 冻结于
-> [`causal-sync-wire.md`](./causal-sync-wire.md)：版本化原子根、`base_version` /
-> `mutation_id`、reconcile/commit/pull/resolution CAS、WakeObservation、非破坏性疑似重复。
-> 在能力切割上线前，本文 §1–11 的已交付 HTTPS/身份/前台同步合同仍有效；不得把规划
-> 因果行为写成当前生产行为。
+> 当前 0.3.13 source runtime 已有版本化原子根、reconcile/commit 与 branch。0.4.0
+> [`causal-sync-wire.md`](./causal-sync-wire.md) 冻结 `causal_sync_v2` 的 commit-first、完整
+> ConflictSnapshot 与 choice-only resolution；H27 前不得 advertise，不能把目标合同写成已上线。
 
 本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选按 ADR-0016 的先对账临时计划与 ADR-0017 的权威终态裁决生成。
 
@@ -368,16 +366,14 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 - authenticated session summary：从 credential 返回 canonical family/membership/device/role；
 - bundle push/pull/media：沿用原子同步和服务端 ACL；并在请求头 versionCode 低于 minSupported 时
   以 `client_update_required` 拒绝；
-- authenticated reconcile：**已交付** 对有界 atomic-unit 批次返回同一 generation/cursor 的
+- authenticated reconcile：**0.3.13 source runtime** 对有界 atomic-unit 批次返回同一 generation/cursor 的
   canonical head/absence、hash、typed disposition 与稳定 reason；复用 Store 的 LWW/ACL/
   tombstone/履行冻结/atomic bundle 规则，不接受请求体自报权限，不传媒体 bytes。
-  **0.3.13 规划** 改为因果 dry-run
-  `confirmed|publish|conflict_preview|rejected`（见 [`causal-sync-wire.md`](./causal-sync-wire.md)），
-  服务器仍只验证约束与执行显式管理，不裁决护理真相（ADR-0019）；
-- authenticated commit（0.3.13 规划）：`accepted|merged|branched` + 稳定版本投影 + 可选
-  `conflict_id`；与媒体字节/分支创建同事务（shape 见 causal-sync-wire）；
-- conflict detail / resolution CAS（0.3.13 规划）：`conflict_id` 句柄；按需详情；
-  期望稳定版本 + 完整分支集 CAS；resolved 不得改写 auto-merged 路径；
+  0.3.13 因果 dry-run 为 `confirmed|publish|conflict_preview|rejected`；
+- authenticated commit：0.3.13 source 返回 `accepted|merged|branched`。0.4.0 v2 普通发表只
+  commit-first，返回一个 batch generation、原终态与 replay marker；不调用 reconcile、不推进 cursor；
+- conflict detail / resolution CAS：0.4.0 返回持久 receipt 支撑的完整 ConflictSnapshot pages；
+  resolution 只提交 token + mutation ID + 每 path 一个 choice ID，服务端独立重建和 full-set CAS；
 - authenticated app-update：`GET /v1/app-update` 返回部署元数据 JSON；`GET /v1/app-update/apk`
   在 sha256 与元数据一致时提供 release APK；均需设备会话，不设匿名旁路；
 - invite install：独立 LAN HTTP Router 只能提供无家庭信息的 `/join` 与经同一 SHA-256 校验的
@@ -452,8 +448,9 @@ Room dirty/发布回执或 media。
 - 本文、ADR-0011、ADR-0014 与 ADR-0017 是 **当前已交付** 传输/身份/前台同步合同；
   ADR-0009、ADR-0010 已被取代，ADR-0016 的无 head/full-snapshot 限制被 ADR-0017 取代但
   先对账/临时 plan 仍有效。
-- **0.3.13 规划** 因果实体与 wire 以 [`causal-sync-wire.md`](./causal-sync-wire.md) 与
-  ADR-0019/0020/0021 为权威；ADR-0017/0018 的 LWW 与服务器近邻落选仅作历史已交付范围。
+- **0.4.0 目标** wire 以 [`causal-sync-wire.md`](./causal-sync-wire.md) 与 ADR-0022 为权威；
+  ADR-0019/0021 的服务器/事实边界保留，ADR-0020 的 immutable version/branch 保留；0.3.13
+  reconcile-first 只作 source runtime，H26 后不得残留为 v2 fallback。
 - LocalWrite no-pull 快速路径 **只能** 在因果协议落地后启用，且不推进 pull cursor；在
   无 base/三方合并/分支前去掉 pull 不构成正确性（见 CONTEXT「LocalWrite 因果快速路径」）。
 - 旧 `sync-home-lan` 合同已删除；不得据 git 历史中的旧文恢复旧 wire、配置或界面。

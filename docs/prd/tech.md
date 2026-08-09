@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 tree**：可信 HTTPS、每设备会话、仅前台同步；**0.3.13 因果 wire 已在 tree 落地**（reconcile/commit、版本/分支、WakeObservation、LocalWrite 无 pull）。家庭 NAS 强制切割与 minSupported=20 仍须维护窗 CD（见 ticket 09）。合同：ADR-0019/0020/0021 与 [`causal-sync-wire.md`](./causal-sync-wire.md) |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 runtime source**：0.3.13 reconcile/commit、版本/分支、WakeObservation、LocalWrite 无 pull。**0.4.0 目标**：ADR-0022 的 commit-first + ConflictSnapshot v2；`causal_sync_v2` 在 H27 前不得 advertise，本文冻结不表示 runtime/NAS 已切换 |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -35,7 +35,8 @@
 | versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.3.13 / versionCode **20**）；家庭 NAS 是否已切到该代以 live health 为准 |
 | versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
 | 本地数据契约 | 当前 tree `v4` / Room **v27**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
-| **0.3.13 发版目标（tree 就绪；生产切割待维护窗）** | versionName `0.3.13`、versionCode **20**、Room **27**、server schema **12**、因果 wire（[`causal-sync-wire.md`](./causal-sync-wire.md)）；`app-update.json` minSupported=**20** 且已与签名 release APK 对齐；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
+| **0.3.13 发版目标（tree 就绪；生产切割待维护窗）** | versionName `0.3.13`、versionCode **20**、Room **27**、server schema **12**；source wire 以该版本 runtime 与测试为准，0.4.0 target 另见 [`causal-sync-wire.md`](./causal-sync-wire.md)；`app-update.json` minSupported=**20** 且已与签名 release APK 对齐；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
+| **0.4.0 合同目标（未激活）** | versionName `0.4.0`、versionCode **21**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；H27 才能切换版本/capability，H28–H30 证明迁移与 guarded CD，本票不修改 runtime 版本 |
 | 应用名 | 乐记 |
 
 ---
