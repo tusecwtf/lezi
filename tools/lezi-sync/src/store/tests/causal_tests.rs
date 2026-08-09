@@ -34,6 +34,20 @@ fn baby_root(nick: &str, updated_at: i64) -> Map<String, Value> {
     }))
 }
 
+fn sleep_root(baby: Uuid, timestamp: i64, updated_at: i64) -> Map<String, Value> {
+    map(json!({
+        "baby_client_uuid": baby,
+        "type": "sleep",
+        "custom_item_client_uuid": null,
+        "timestamp": timestamp,
+        "note": null,
+        "payload_json": {"anomaly_flag": false, "is_nap": false},
+        "schema_version": 2,
+        "updated_at": updated_at,
+        "effective_wake_observation_client_uuid": null,
+    }))
+}
+
 fn mut_unit(
     entity_type: &str,
     client_uuid: Uuid,
@@ -635,6 +649,16 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
 
     // Fresh root for delete/edit same media conflict.
     let record2 = Uuid::new_v4();
+    let m3 = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: "d".repeat(64),
+        byte_size: 10,
+        mime: "image/jpeg".into(),
+        width: None,
+        height: None,
+    };
+    fx.stage_media_bytes(&m3);
     let mut create2 = mut_unit(
         "record",
         record2,
@@ -642,7 +666,7 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         record_root(fx.baby_id, "x", 10, 50),
         false,
     );
-    create2.media = vec![m1.clone()];
+    create2.media = vec![m3.clone()];
     let base = fx
         .store
         .causal_commit(&fx.owner, vec![create2], 1_700_000_003)
@@ -669,9 +693,9 @@ fn causal_independent_media_merge_and_delete_edit_branch() {
         record_root(fx.baby_id, "x", 10, 52),
         false,
     );
-    let mut m1_edit = m1.clone();
-    m1_edit.sha256 = "c".repeat(64);
-    edit_media.media = vec![m1_edit];
+    let mut m3_edit = m3;
+    m3_edit.sha256 = "c".repeat(64);
+    edit_media.media = vec![m3_edit];
     let branch = fx
         .store
         .causal_commit(&fx.owner, vec![edit_media], 1_700_000_005)
@@ -913,6 +937,455 @@ fn causal_unknown_root_field_rejected() {
         .unwrap();
     assert_eq!(result.results[0].status, "rejected");
     assert_eq!(result.results[0].code.as_deref(), Some("unknown_field"));
+}
+
+#[test]
+fn causal_ingress_accepts_the_canonical_diary_payload() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut root = record_root(fx.baby_id, "日记", 100, 20);
+    root.insert("type".to_owned(), json!("diary"));
+    root.insert("payload_json".to_owned(), json!({"body": "今天第一次翻身"}));
+
+    let result = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit("record", record_id, None, root, false)],
+            1_700_000_000,
+        )
+        .unwrap();
+
+    assert_eq!(result.results[0].status, "accepted", "{result:?}");
+}
+
+#[test]
+fn causal_ingress_matches_current_android_typed_payloads() {
+    let fx = CausalFx::new();
+    let custom_item_id = Uuid::new_v4();
+    let custom = mut_unit(
+        "custom_item",
+        custom_item_id,
+        None,
+        map(json!({"name": "维生素D", "icon_slot": 2, "updated_at": 15})),
+        false,
+    );
+    assert_eq!(
+        fx.store
+            .causal_commit(&fx.owner, vec![custom], 1_700_000_000)
+            .unwrap()
+            .results[0]
+            .status,
+        "accepted"
+    );
+
+    let fixtures = [
+        ("diary", json!({"body": "今天第一次翻身"}), None),
+        ("cough", json!({"severity": 2, "description": "偶尔"}), None),
+        ("height", json!({"value": 52.5, "unit": "cm"}), None),
+        (
+            "baby_food",
+            json!({"content": "南瓜泥", "amount": "两勺"}),
+            None,
+        ),
+        (
+            "custom",
+            json!({"title": "维生素D", "detail": "1滴", "icon_slot": 2}),
+            Some(custom_item_id),
+        ),
+    ];
+    for (record_type, payload, custom_item) in fixtures {
+        let mut root = record_root(fx.baby_id, record_type, 100, 20);
+        root.insert("type".to_owned(), json!(record_type));
+        root.insert("payload_json".to_owned(), payload);
+        root.insert(
+            "custom_item_client_uuid".to_owned(),
+            custom_item.map_or(Value::Null, |id| json!(id)),
+        );
+        let result = fx
+            .store
+            .causal_commit(
+                &fx.owner,
+                vec![mut_unit("record", Uuid::new_v4(), None, root, false)],
+                1_700_000_001,
+            )
+            .unwrap();
+        assert_eq!(
+            result.results[0].status, "accepted",
+            "{record_type}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn causal_ingress_rejects_invalid_canonical_values_with_stable_codes() {
+    let fx = CausalFx::new();
+    let negative_amount = record_root(fx.baby_id, "negative", -1, 20);
+    let mut missing_typed_required = record_root(fx.baby_id, "missing", 1, 20);
+    missing_typed_required.insert("type".to_owned(), json!("diary"));
+    missing_typed_required.insert("payload_json".to_owned(), json!({}));
+    let mut schema_drift = record_root(fx.baby_id, "schema", 1, 20);
+    schema_drift.insert("schema_version".to_owned(), json!(3));
+    let mut unknown_type = record_root(fx.baby_id, "type", 1, 20);
+    unknown_type.insert("type".to_owned(), json!("memo"));
+    let mut overlong_note = record_root(fx.baby_id, "note", 1, 20);
+    overlong_note.insert("note".to_owned(), json!("字".repeat(20_001)));
+    let invalid_zone = map(json!({
+        "baby_client_uuid": fx.baby_id,
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "scheduled_at": 100,
+        "scheduled_zone_id": "Mars/Olympus",
+        "note": null,
+        "payload_json": {"amount_ml": 100},
+        "schema_version": 2,
+        "status": "pending",
+        "fulfilled_record_client_uuid": null,
+        "fulfilled_at": null,
+        "updated_at": 20,
+    }));
+    let units = [
+        ("record", negative_amount),
+        ("record", missing_typed_required),
+        ("record", schema_drift),
+        ("record", unknown_type),
+        ("record", overlong_note),
+        ("care_plan", invalid_zone),
+    ]
+    .into_iter()
+    .map(|(entity_type, root)| mut_unit(entity_type, Uuid::new_v4(), None, root, false))
+    .collect();
+
+    let before = fx.store.pull(&fx.family_id, 0).unwrap().cursor;
+    let result = fx
+        .store
+        .causal_commit(&fx.owner, units, 1_700_000_000)
+        .unwrap();
+
+    assert!(
+        result.results.iter().all(|unit| {
+            unit.status == "rejected" && unit.code.as_deref() == Some("invalid_entity_value")
+        }),
+        "{result:?}"
+    );
+    assert_eq!(result.cursor, before);
+}
+
+#[test]
+fn causal_ingress_rejects_a_dangling_baby_reference_without_publication() {
+    let fx = CausalFx::new();
+    let before = fx.store.pull(&fx.family_id, 0).unwrap();
+    let record_id = Uuid::new_v4();
+    let unit = mut_unit(
+        "record",
+        record_id,
+        None,
+        record_root(Uuid::new_v4(), "dangling", 100, 20),
+        false,
+    );
+
+    let result = fx
+        .store
+        .causal_commit(&fx.owner, vec![unit], 1_700_000_000)
+        .unwrap();
+
+    assert_eq!(result.results[0].status, "rejected", "{result:?}");
+    assert_eq!(result.results[0].code.as_deref(), Some("invalid_reference"));
+    let after = fx.store.pull(&fx.family_id, 0).unwrap();
+    assert_eq!(after.cursor, before.cursor);
+    assert!(after
+        .entities
+        .iter()
+        .all(|row| row.client_uuid != record_id.to_string()));
+}
+
+#[test]
+fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
+    let fx = CausalFx::new();
+
+    let mut dangling_custom = record_root(fx.baby_id, "custom", 1, 20);
+    dangling_custom.insert("type".to_owned(), json!("custom"));
+    dangling_custom.insert("custom_item_client_uuid".to_owned(), json!(Uuid::new_v4()));
+    dangling_custom.insert("payload_json".to_owned(), json!({"title": "不存在"}));
+    let custom_rejected = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                Uuid::new_v4(),
+                None,
+                dangling_custom,
+                false,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    assert_eq!(
+        custom_rejected.results[0].code.as_deref(),
+        Some("invalid_reference")
+    );
+
+    let sleep_id = Uuid::new_v4();
+    let sleep_created = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                sleep_id,
+                None,
+                sleep_root(fx.baby_id, 100, 30),
+                false,
+            )],
+            1_700_000_001,
+        )
+        .unwrap();
+    let sleep_version = sleep_created.results[0].stable_version_id.clone().unwrap();
+    let mut invalid_effective = sleep_root(fx.baby_id, 100, 31);
+    invalid_effective.insert(
+        "effective_wake_observation_client_uuid".to_owned(),
+        json!(Uuid::new_v4()),
+    );
+    let effective_rejected = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                sleep_id,
+                Some(&sleep_version),
+                invalid_effective,
+                false,
+            )],
+            1_700_000_002,
+        )
+        .unwrap();
+    assert_eq!(
+        effective_rejected.results[0].code.as_deref(),
+        Some("invalid_reference")
+    );
+
+    let deleted_sleep = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                sleep_id,
+                Some(&sleep_version),
+                sleep_root(fx.baby_id, 100, 32),
+                true,
+            )],
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(deleted_sleep.results[0].status, "accepted");
+    let wake_rejected = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "wake_observation",
+                Uuid::new_v4(),
+                None,
+                map(json!({
+                    "sleep_record_client_uuid": sleep_id,
+                    "wake_timestamp": 120,
+                    "note": null,
+                    "withdrawn": false,
+                    "updated_at": 40,
+                })),
+                false,
+            )],
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(
+        wake_rejected.results[0].code.as_deref(),
+        Some("invalid_reference")
+    );
+
+    let other_baby_id = Uuid::new_v4();
+    assert_eq!(
+        fx.store
+            .causal_commit(
+                &fx.owner,
+                vec![mut_unit(
+                    "baby",
+                    other_baby_id,
+                    None,
+                    baby_root("二宝", 50),
+                    false,
+                )],
+                1_700_000_005,
+            )
+            .unwrap()
+            .results[0]
+            .status,
+        "accepted"
+    );
+    let other_record_id = Uuid::new_v4();
+    assert_eq!(
+        fx.store
+            .causal_commit(
+                &fx.owner,
+                vec![mut_unit(
+                    "record",
+                    other_record_id,
+                    None,
+                    record_root(other_baby_id, "other", 100, 51),
+                    false,
+                )],
+                1_700_000_006,
+            )
+            .unwrap()
+            .results[0]
+            .status,
+        "accepted"
+    );
+    let mismatched_plan = map(json!({
+        "baby_client_uuid": fx.baby_id,
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "scheduled_at": 100,
+        "scheduled_zone_id": "Asia/Shanghai",
+        "note": null,
+        "payload_json": {"amount_ml": 100},
+        "schema_version": 2,
+        "status": "completed",
+        "fulfilled_record_client_uuid": other_record_id,
+        "fulfilled_at": 100,
+        "updated_at": 52,
+    }));
+    let fulfillment_rejected = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "care_plan",
+                Uuid::new_v4(),
+                None,
+                mismatched_plan,
+                false,
+            )],
+            1_700_000_007,
+        )
+        .unwrap();
+    assert_eq!(
+        fulfillment_rejected.results[0].code.as_deref(),
+        Some("invalid_reference")
+    );
+}
+
+#[test]
+fn causal_wake_receipt_replays_before_changed_sleep_validation() {
+    let fx = CausalFx::new();
+    let sleep_id = Uuid::new_v4();
+    let created_sleep = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                sleep_id,
+                None,
+                sleep_root(fx.baby_id, 100, 20),
+                false,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    let sleep_v1 = created_sleep.results[0]
+        .stable_version_id
+        .clone()
+        .expect("sleep version");
+
+    let wake_id = Uuid::new_v4();
+    let wake = mut_unit(
+        "wake_observation",
+        wake_id,
+        None,
+        map(json!({
+            "sleep_record_client_uuid": sleep_id,
+            "wake_timestamp": 120,
+            "note": "醒了",
+            "withdrawn": false,
+            "updated_at": 30,
+        })),
+        false,
+    );
+    let accepted = fx
+        .store
+        .causal_commit(&fx.owner, vec![wake.clone()], 1_700_000_001)
+        .unwrap();
+    assert_eq!(accepted.results[0].status, "accepted", "{accepted:?}");
+    let wake_version = accepted.results[0].stable_version_id.clone();
+
+    let moved_sleep = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                sleep_id,
+                Some(&sleep_v1),
+                sleep_root(fx.baby_id, 130, 40),
+                false,
+            )],
+            1_700_000_002,
+        )
+        .unwrap();
+    assert_eq!(moved_sleep.results[0].status, "accepted");
+    let cursor_before_replay = moved_sleep.cursor;
+
+    let replay = fx
+        .store
+        .causal_commit(&fx.owner, vec![wake.clone()], 1_700_000_003)
+        .unwrap();
+    assert_eq!(replay.results[0].status, "accepted", "{replay:?}");
+    assert_eq!(replay.results[0].stable_version_id, wake_version);
+    assert_eq!(replay.cursor, cursor_before_replay);
+
+    let mut drift = wake;
+    drift.root.insert("note".to_owned(), json!("不同内容"));
+    let rejected = fx
+        .store
+        .causal_commit(&fx.owner, vec![drift], 1_700_000_004)
+        .unwrap();
+    assert_eq!(rejected.results[0].status, "rejected");
+    assert_eq!(rejected.results[0].code.as_deref(), Some("content_drift"));
+}
+
+#[test]
+fn causal_ingress_rejects_a_root_that_cannot_fit_the_pull_budget() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut root = record_root(fx.baby_id, "oversized", 100, 20);
+    root.insert("type".to_owned(), json!("diary"));
+    root.insert(
+        "payload_json".to_owned(),
+        json!({"body": "x".repeat(crate::PULL_ENTITY_TARGET_BYTES + 1_024)}),
+    );
+
+    let result = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit("record", record_id, None, root, false)],
+            1_700_000_000,
+        )
+        .unwrap();
+
+    assert_eq!(result.results[0].status, "rejected", "{result:?}");
+    assert_eq!(result.results[0].code.as_deref(), Some("root_too_large"));
+    assert!(fx
+        .store
+        .pull(&fx.family_id, 0)
+        .unwrap()
+        .entities
+        .iter()
+        .all(|row| row.client_uuid != record_id.to_string()));
 }
 
 #[test]

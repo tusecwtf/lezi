@@ -882,6 +882,29 @@ fn validation_reference_keys(entities: &[Entity]) -> BTreeSet<EntityKey> {
                 {
                     references.insert(("record".to_owned(), id.to_owned()));
                 }
+                if let Some(id) = entity
+                    .payload
+                    .get("source_record_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("record".to_owned(), id.to_owned()));
+                }
+                if let Some(id) = entity
+                    .payload
+                    .get("effective_wake_observation_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("wake_observation".to_owned(), id.to_owned()));
+                }
+            }
+            "wake_observation" => {
+                if let Some(id) = entity
+                    .payload
+                    .get("sleep_record_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("record".to_owned(), id.to_owned()));
+                }
             }
             "fulfillment_candidate" => {
                 if let Some(id) = entity.payload["care_plan_client_uuid"].as_str() {
@@ -1120,6 +1143,73 @@ fn validate_push(
     persisted: &HashMap<EntityKey, ExistingEntity>,
     fulfillment_custom_references: &BTreeSet<(String, String)>,
 ) -> Result<(), StoreError> {
+    for entity in entities {
+        match entity.entity_type.as_str() {
+            "wake_observation" if entity.deleted_at.is_none() => {
+                let sleep_id = entity
+                    .payload
+                    .get("sleep_record_client_uuid")
+                    .and_then(Value::as_str)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                let sleep =
+                    effective_entity(entities, existing, "record", sleep_id).ok_or_else(|| {
+                        StoreError::UnresolvedReference(
+                            "wake_observation sleep_record_client_uuid does not exist".to_owned(),
+                        )
+                    })?;
+                if sleep.deleted_at.is_some()
+                    || sleep.payload.get("type").and_then(Value::as_str) != Some("sleep")
+                {
+                    return Err(StoreError::UnresolvedReference(
+                        "wake_observation must reference a live sleep record".to_owned(),
+                    ));
+                }
+                let sleep_start = sleep
+                    .payload
+                    .get("timestamp")
+                    .and_then(Value::as_i64)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                let wake_timestamp = entity
+                    .payload
+                    .get("wake_timestamp")
+                    .and_then(Value::as_i64)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                if wake_timestamp < sleep_start {
+                    return Err(StoreError::UnresolvedReference(
+                        "wake_observation precedes its sleep record".to_owned(),
+                    ));
+                }
+            }
+            "record" if entity.deleted_at.is_none() => {
+                let Some(wake_id) = entity
+                    .payload
+                    .get("effective_wake_observation_client_uuid")
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let wake = effective_entity(entities, existing, "wake_observation", wake_id)
+                    .ok_or_else(|| {
+                        StoreError::UnresolvedReference(
+                            "effective WakeObservation does not exist".to_owned(),
+                        )
+                    })?;
+                let valid = wake.deleted_at.is_none()
+                    && wake
+                        .payload
+                        .get("sleep_record_client_uuid")
+                        .and_then(Value::as_str)
+                        == Some(entity.client_uuid.as_str())
+                    && wake.payload.get("withdrawn").and_then(Value::as_bool) == Some(false);
+                if !valid {
+                    return Err(StoreError::UnresolvedReference(
+                        "effective WakeObservation is not valid for this sleep".to_owned(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
     let mut baby_ids = existing
         .keys()
         .filter(|(entity_type, _)| entity_type == "baby")
@@ -1447,6 +1537,28 @@ fn validate_push(
     Ok(())
 }
 
+fn effective_entity(
+    entities: &[Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+    entity_type: &str,
+    client_uuid: &str,
+) -> Option<ExistingEntity> {
+    entities
+        .iter()
+        .rev()
+        .find(|entity| entity.entity_type == entity_type && entity.client_uuid == client_uuid)
+        .map(|entity| ExistingEntity {
+            updated_at: entity.updated_at,
+            deleted_at: entity.deleted_at,
+            payload: entity.payload.clone(),
+        })
+        .or_else(|| {
+            existing
+                .get(&(entity_type.to_owned(), client_uuid.to_owned()))
+                .cloned()
+        })
+}
+
 /// Dry-run the same canonicalization, ACL, immutable-evidence, reference, and
 /// atomic-package rules that commit applies. Reconciliation calls this while
 /// holding its own Store transaction; no staging or entity row is written.
@@ -1541,6 +1653,53 @@ pub(in crate::store) fn validate_reconcile_package(
         &persisted,
         &fulfillment_custom_references,
     )
+}
+
+/// Validate one already shape-adapted canonical atomic package against the
+/// current family graph. Both legacy reconciliation and causal ingress route
+/// reference/association invariants through `validate_push`; wire adapters do
+/// not reimplement the graph rules.
+pub(in crate::store) fn validate_canonical_package_ingress(
+    transaction: &Transaction<'_>,
+    principal: &Principal,
+    package: &[Entity],
+) -> Result<(), StoreError> {
+    validate_pull_entity_sizes(package)?;
+    let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
+    let mut existing = load_existing_entities(transaction, &principal.family_id, &incoming_keys)?;
+    existing.extend(load_family_custom_items(transaction, &principal.family_id)?);
+    existing.extend(load_family_media(transaction, &principal.family_id)?);
+    let reference_keys = validation_reference_keys(package);
+    let missing_references = reference_keys
+        .difference(&incoming_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    existing.extend(load_existing_entities(
+        transaction,
+        &principal.family_id,
+        &missing_references,
+    )?);
+    let persisted = existing.clone();
+    let fulfillment_custom_references =
+        load_fulfillment_custom_references(transaction, &principal.family_id, package)?;
+    validate_push(
+        &principal.role,
+        &principal.membership_id,
+        package,
+        &existing,
+        &persisted,
+        &fulfillment_custom_references,
+    )
+}
+
+fn validate_pull_entity_sizes(entities: &[Entity]) -> Result<(), StoreError> {
+    for entity in entities {
+        let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
+        if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
+            return Err(StoreError::PullEntityTooLarge);
+        }
+    }
+    Ok(())
 }
 
 fn validate_custom_item_reference(
@@ -2192,12 +2351,7 @@ impl Store {
             &mut effective,
             &existing,
         )?;
-        for entity in &effective {
-            let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
-            if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
-                return Err(StoreError::PullEntityTooLarge);
-            }
-        }
+        validate_pull_entity_sizes(&effective)?;
         let reference_keys = validation_reference_keys(&effective);
         let missing_references = reference_keys
             .difference(&incoming_keys)

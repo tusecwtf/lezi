@@ -14,6 +14,9 @@ use uuid::Uuid;
 
 use std::path::{Path, PathBuf};
 
+use crate::model::{validate_causal_root, validate_causal_root_shape, Entity};
+
+use super::bundles::validate_canonical_package_ingress;
 use super::causal_merge::{
     leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
 };
@@ -1064,7 +1067,16 @@ fn validate_mutation_shape(mutation: &CausalMutation) -> Result<(), &'static str
     if mutation.root.contains_key("deleted") || mutation.root.contains_key("deleted_at") {
         return Err("unknown_field");
     }
-    validate_causal_root_closed(&mutation.entity_type, &mutation.root)?;
+    validate_causal_root_shape(&mutation.entity_type, &mutation.root)?;
+    Ok(())
+}
+
+fn validate_mutation_content(
+    mutation: &CausalMutation,
+) -> Result<Map<String, Value>, &'static str> {
+    let canonical_root =
+        validate_causal_root(&mutation.entity_type, &mutation.client_uuid, &mutation.root)
+            .map_err(|_| "invalid_entity_value")?;
     // Media order independence: duplicates forbidden; wire §4.6 constraints.
     let mut seen = BTreeSet::new();
     for item in &mutation.media {
@@ -1093,188 +1105,7 @@ fn validate_mutation_shape(mutation: &CausalMutation) -> Result<(), &'static str
     if mutation.media.len() > cap {
         return Err("media_limit_exceeded");
     }
-    Ok(())
-}
-
-/// Wire §4 closed key sets + required `updated_at`. Unknown keys → reject.
-fn validate_causal_root_closed(
-    entity_type: &str,
-    root: &Map<String, Value>,
-) -> Result<(), &'static str> {
-    if root.get("updated_at").and_then(Value::as_i64).is_none() {
-        return Err("missing_updated_at");
-    }
-    let allowed: &[&str] = match entity_type {
-        "baby" => &[
-            "nickname",
-            "sex",
-            "birthday",
-            "avatar_media_uuid",
-            "updated_at",
-            "created_by_membership_id",
-        ],
-        "record" => &[
-            "baby_client_uuid",
-            "type",
-            "custom_item_client_uuid",
-            "timestamp",
-            "end_timestamp",
-            "note",
-            "payload_json",
-            "schema_version",
-            "updated_at",
-            "created_by_membership_id",
-            "effective_wake_observation_client_uuid",
-        ],
-        "care_plan" => &[
-            "baby_client_uuid",
-            "type",
-            "scheduled_at",
-            "scheduled_zone_id",
-            "note",
-            "payload_json",
-            "schema_version",
-            "status",
-            "fulfilled_record_client_uuid",
-            "fulfilled_at",
-            "source_record_client_uuid",
-            "custom_item_client_uuid",
-            "updated_at",
-            "created_by_membership_id",
-        ],
-        "custom_item" => &[
-            "name",
-            "icon_slot",
-            "updated_at",
-            "created_by_membership_id",
-        ],
-        "wake_observation" => &[
-            "sleep_record_client_uuid",
-            "wake_timestamp",
-            "note",
-            "withdrawn",
-            "updated_at",
-            "observer_membership_id",
-        ],
-        _ => return Err("unsupported_entity_type"),
-    };
-    for key in root.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err("unknown_field");
-        }
-    }
-    #[allow(clippy::collapsible_match)]
-    match entity_type {
-        "baby" => {
-            if root.get("nickname").and_then(Value::as_str).is_none() {
-                return Err("missing_required_field");
-            }
-        }
-        "record" => {
-            let ty = root
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or("missing_required_field")?;
-            if root
-                .get("baby_client_uuid")
-                .and_then(Value::as_str)
-                .is_none()
-            {
-                return Err("missing_required_field");
-            }
-            if root.get("timestamp").and_then(Value::as_i64).is_none() {
-                return Err("missing_required_field");
-            }
-            if root.get("schema_version").and_then(Value::as_i64) != Some(2) {
-                return Err("invalid_schema_version");
-            }
-            if !root
-                .get("payload_json")
-                .map(Value::is_object)
-                .unwrap_or(false)
-            {
-                return Err("invalid_payload_json");
-            }
-            if ty == "sleep" {
-                if root.contains_key("end_timestamp") {
-                    return Err("forbidden_field");
-                }
-            } else if root.contains_key("effective_wake_observation_client_uuid") {
-                return Err("forbidden_field");
-            }
-            // payload_json closed allowlist via model (formula amount_ml, etc.).
-            validate_payload_json_allowlist(ty, root.get("payload_json"))?;
-        }
-        "wake_observation" => {
-            if root
-                .get("sleep_record_client_uuid")
-                .and_then(Value::as_str)
-                .is_none()
-                || root.get("wake_timestamp").and_then(Value::as_i64).is_none()
-                || root.get("withdrawn").and_then(Value::as_bool).is_none()
-            {
-                return Err("missing_required_field");
-            }
-        }
-        "custom_item" => {
-            if root.get("name").and_then(Value::as_str).is_none() {
-                return Err("missing_required_field");
-            }
-            if root.get("icon_slot").and_then(Value::as_i64).is_none() {
-                return Err("missing_required_field");
-            }
-        }
-        "care_plan" => {
-            if root
-                .get("baby_client_uuid")
-                .and_then(Value::as_str)
-                .is_none()
-            {
-                return Err("missing_required_field");
-            }
-            if root.get("scheduled_at").and_then(Value::as_i64).is_none() {
-                return Err("missing_required_field");
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn validate_payload_json_allowlist(
-    record_type: &str,
-    payload_json: Option<&Value>,
-) -> Result<(), &'static str> {
-    let obj = payload_json
-        .and_then(Value::as_object)
-        .ok_or("invalid_payload_json")?;
-    // Minimal closed sets for common types (wire: typed closed keys along existing schema).
-    let allowed: &[&str] = match record_type {
-        "formula" => &["amount_ml", "prepared_ml", "duration_min"],
-        "nursing" => &["left_min", "right_min", "order", "amount_ml", "record_mode"],
-        "pumped_feed" | "pump_express" => &["amount_ml"],
-        "pee" => &["pee_amount"],
-        "poop" => &["stool_amount", "stool_consistency", "stool_color"],
-        "both_diaper" => &[
-            "pee_amount",
-            "stool_amount",
-            "stool_consistency",
-            "stool_color",
-        ],
-        "temperature" => &["celsius"],
-        "sleep" => &["anomaly_flag", "is_nap"],
-        "medicine" => &["name", "dose", "unit"],
-        "baby_food" | "snack" | "drink" => &["amount_ml", "name", "note"],
-        "bath" | "diary" | "walk" | "cough" | "rash" | "vomit" | "injury" | "hospital"
-        | "height" | "weight" | "head" | "chest" | "foot_size" | "vaccine" | "custom" => &[],
-        _ => return Err("unknown_record_type"),
-    };
-    for key in obj.keys() {
-        if !allowed.contains(&key.as_str()) {
-            return Err("unknown_field");
-        }
-    }
-    Ok(())
+    Ok(canonical_root)
 }
 
 fn authority_media_path(database_path: &Path, family_id: &str, media_uuid: &str) -> PathBuf {
@@ -1307,6 +1138,39 @@ fn root_content_hash(
     deleted: bool,
 ) -> String {
     mutation_content_hash("_", "_", None, deleted, root, media)
+}
+
+fn canonical_package(
+    mutation: &CausalMutation,
+    root: &Map<String, Value>,
+    media: &[CausalMediaItem],
+    now: i64,
+) -> Result<Vec<Entity>, StoreError> {
+    let updated_at = root
+        .get("updated_at")
+        .and_then(Value::as_i64)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let mut payload = root.clone();
+    payload.remove("updated_at");
+    let deleted_at = mutation.deleted.then_some(now.saturating_mul(1_000));
+    let mut package = Vec::with_capacity(1 + media.len());
+    package.push(Entity {
+        entity_type: mutation.entity_type.clone(),
+        client_uuid: mutation.client_uuid.clone(),
+        updated_at,
+        deleted_at,
+        payload,
+    });
+    for item in media {
+        package.push(Entity {
+            entity_type: "media".to_owned(),
+            client_uuid: item.media_uuid.clone(),
+            updated_at,
+            deleted_at,
+            payload: media_entity_payload(&mutation.entity_type, &mutation.client_uuid, item)?,
+        });
+    }
+    Ok(package)
 }
 
 fn bump_entity_rev_only(
@@ -1355,22 +1219,11 @@ fn evaluate_unit(
             None,
         ));
     }
-    // Wire §4.5: wake_timestamp must be >= target SleepStart timestamp.
-    if mutation.entity_type == "wake_observation" {
-        if let Err(code) =
-            validate_wake_against_sleep_start(ctx.tx, &ctx.principal.family_id, mutation)
-        {
-            return Ok(rejected(
-                &mutation.mutation_id,
-                &request_hash,
-                code,
-                code,
-                None,
-            ));
-        }
-    }
 
-    // Idempotent receipt.
+    // Receipt/content-drift precedes mutable external validation. A mutation
+    // already accepted keeps replaying its durable receipt even if a referenced
+    // root later changes; the same id with different canonical content still
+    // fails closed before reference inspection.
     if let Some((stored_hash, receipt_json)) = load_receipt(
         ctx.tx,
         &ctx.principal.family_id,
@@ -1395,12 +1248,38 @@ fn evaluate_unit(
             ));
         }
         let mut receipt: CausalUnitResult = serde_json::from_str(&receipt_json)?;
-        // Reconcile maps commit statuses to confirmed.
         if ctx.dry_run && matches!(receipt.status.as_str(), "accepted" | "merged" | "branched") {
             receipt.status = "confirmed".to_owned();
         }
         receipt.request_hash = request_hash;
         return Ok(receipt);
+    }
+
+    let canonical_root = match validate_mutation_content(mutation) {
+        Ok(root) => root,
+        Err(code) => {
+            return Ok(rejected(
+                &mutation.mutation_id,
+                &request_hash,
+                code,
+                code,
+                None,
+            ));
+        }
+    };
+    // Wire §4.5: first-seen wake_timestamp must be >= target SleepStart timestamp.
+    if mutation.entity_type == "wake_observation" {
+        if let Err(code) =
+            validate_wake_against_sleep_start(ctx.tx, &ctx.principal.family_id, mutation)
+        {
+            return Ok(rejected(
+                &mutation.mutation_id,
+                &request_hash,
+                code,
+                code,
+                None,
+            ));
+        }
     }
 
     let stable = load_stable(
@@ -1431,7 +1310,7 @@ fn evaluate_unit(
         ));
     }
 
-    let mut incoming_root = mutation.root.clone();
+    let mut incoming_root = canonical_root;
     stamp_root(
         &mut incoming_root,
         &mutation.entity_type,
@@ -1441,6 +1320,22 @@ fn evaluate_unit(
     );
     let incoming_media = media_sorted(mutation.media.clone());
     let incoming_deleted = mutation.deleted;
+    let package = canonical_package(mutation, &incoming_root, &incoming_media, ctx.now)?;
+    if let Err(error) = validate_canonical_package_ingress(ctx.tx, ctx.principal, &package) {
+        let code = match error {
+            StoreError::UnresolvedReference(_) => "invalid_reference",
+            StoreError::ImmutableMediaAssociation => "media_referential_integrity",
+            StoreError::PullEntityTooLarge => "root_too_large",
+            _ => "invalid_entity_value",
+        };
+        return Ok(rejected(
+            &mutation.mutation_id,
+            &request_hash,
+            code,
+            &error.to_string(),
+            stable.as_ref(),
+        ));
+    }
 
     // First create: base_version must be null.
     if stable.is_none() {

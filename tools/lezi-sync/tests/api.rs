@@ -15037,6 +15037,85 @@ async fn seed_causal_baby(app: &Router, token: &str) -> Uuid {
     baby_id
 }
 
+#[tokio::test]
+async fn causal_ingress_api_uses_the_canonical_store_validation_codes() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "canonical-ingress-owner",
+        "canonical-ingress-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let diary_id = Uuid::new_v4();
+    let (status, accepted) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            diary_id,
+            json!({
+                "baby_client_uuid": baby_id,
+                "type": "diary",
+                "custom_item_client_uuid": null,
+                "timestamp": 100,
+                "end_timestamp": null,
+                "note": null,
+                "payload_json": {"body": "今天第一次翻身"},
+                "schema_version": 2,
+                "updated_at": 20
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted", "{accepted}");
+
+    let invalid_value_id = Uuid::new_v4();
+    let dangling_id = Uuid::new_v4();
+    let (status, rejected) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![
+            causal_unit(
+                Uuid::new_v4(),
+                None,
+                "record",
+                invalid_value_id,
+                causal_formula_root(baby_id, "negative", -1, 30),
+                vec![],
+                false,
+            ),
+            causal_unit(
+                Uuid::new_v4(),
+                None,
+                "record",
+                dangling_id,
+                causal_formula_root(Uuid::new_v4(), "dangling", 100, 30),
+                vec![],
+                false,
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "invalid_entity_value");
+    assert_eq!(rejected["results"][1]["status"], "rejected");
+    assert_eq!(rejected["results"][1]["code"], "invalid_reference");
+
+    let pull = pull_entities(&rig.app, token, owner["generation"].as_str().unwrap()).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != invalid_value_id.to_string()
+            && row["client_uuid"] != dangling_id.to_string()
+    }));
+}
+
 async fn two_joined_clients(
     app: &Router,
     owner_device: &str,
