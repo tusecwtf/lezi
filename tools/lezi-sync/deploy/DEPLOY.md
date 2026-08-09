@@ -403,6 +403,9 @@ values; fingerprints carried only inside the candidate ciphertext are not a trus
   `LEZI_ALLOW_TLS_BOOTSTRAP=1` for the first deployment to a verified fresh data root where both
   files are absent. Ordinary CD leaves the flag unset. If both files are absent from an established/configured family
   data root, treat that as an incident and stop; do not use CD to create a replacement identity.
+- `LEZI_TLS_INSPECT_ONLY=1` is a separate read-only capability. It never creates the data root or
+  `tls/`, never stages temporary files, and never shares bootstrap authorization. Container-side
+  inspection mounts the existing data root read-only; any unreadable/partial/unsafe state aborts.
 - Existing-file checks and validation must run from the helper-container uid `10001` view. The NAS
   SSH user not being able to traverse a mode-`700` bind does **not** mean the identity is absent.
 - A missing half, invalid/expired certificate, mismatched key, helper-container read failure, or

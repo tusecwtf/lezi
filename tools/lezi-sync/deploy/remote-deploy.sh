@@ -430,7 +430,7 @@ fi
 
 echo "==> initialize or validate persistent TLS identity"
 tls_identity_state_before="$(
-  LEZI_TLS_INSPECT_ONLY=1 \
+  LEZI_ALLOW_TLS_BOOTSTRAP=0 LEZI_TLS_INSPECT_ONLY=1 \
     "${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
 )"
 case "${tls_identity_state_before}" in
@@ -455,7 +455,8 @@ case "${tls_identity_state_before}" in
     exit 1
     ;;
 esac
-"${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
+LEZI_TLS_INSPECT_ONLY=0 \
+  "${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
 tls_certificate_sha256_expected="$(
   "${DIR}/tls-certificate-sha256.sh" "${data_path}" "${image}"
 )"

@@ -52,3 +52,13 @@ jobs:
 
       - name: remote-deploy app-update atomic pair
         run: bash deploy/test-remote-deploy-app-update-atomic.sh
+
+      - name: TLS inspect-only read-only contract
+        run: |
+          bash deploy/test-init-tls-read-only.sh
+          bash deploy/test-remote-deploy-tls-inspection-read-only.sh
+
+      - name: TLS identity preservation
+        run: |
+          bash deploy/test-init-tls.sh
+          bash deploy/test-remote-deploy-tls-guard.sh
