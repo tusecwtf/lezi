@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01 and R12 reviewed and fully gated; R17 is the serial frontier
+Status: in-progress — H01, R12 and R17 reviewed and fully gated; R18 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-R17 is the next executable ticket, followed by R18 before H02. Follow the serial order above. H27
+R18 is the next executable ticket, followed by H02. Follow the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.
 

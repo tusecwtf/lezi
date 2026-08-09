@@ -406,6 +406,16 @@ pub(crate) fn bundle_content_hash(root: &Entity, media: &[Entity]) -> Result<Str
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+/// Framed hash used by schema-12 migration-base versions and their media rows.
+pub(crate) fn migration_content_hash(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0xff]);
+    }
+    hex::encode(hasher.finalize())
+}
+
 /// Stamp creator membership on first insert; freeze creator; enforce member-own /
 /// owner-all ACL; refuse clearing deleted_at on tombstones.
 fn stamp_and_authorize_custom_items(

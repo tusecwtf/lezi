@@ -22,7 +22,7 @@ use super::causal_media_staging::{consume_manifest, verify_manifest};
 use super::causal_merge::{
     leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
 };
-use super::{CausalCommitSaturation, Principal, Store, StoreError};
+use super::{migration_content_hash, CausalCommitSaturation, Principal, Store, StoreError};
 
 /// Wire §7: at most 32 conflict_summary entries per ordinary pull page.
 pub(crate) const MAX_CONFLICT_SUMMARIES_PER_PAGE: usize = 32;
@@ -139,8 +139,40 @@ struct StableSnapshot {
     media: Vec<CausalMediaItem>,
     deleted_at: Option<i64>,
     updated_at: i64,
-    #[allow(dead_code)]
-    content_hash: String,
+    mutation_id: Option<String>,
+    parents: BTreeSet<String>,
+}
+
+struct ConflictHeads {
+    conflict_id: String,
+    entity_type: String,
+    client_uuid: String,
+    stable_version_id: String,
+    kind: String,
+    branch_version_ids: Vec<String>,
+    versions: BTreeMap<String, StableSnapshot>,
+}
+
+impl ConflictHeads {
+    fn version(&self, version_id: &str) -> &StableSnapshot {
+        self.versions
+            .get(version_id)
+            .expect("validated conflict version")
+    }
+
+    fn stable(&self) -> &StableSnapshot {
+        self.version(&self.stable_version_id)
+    }
+
+    fn direct_base(&self, version_id: &str) -> &StableSnapshot {
+        let parent = self
+            .version(version_id)
+            .parents
+            .iter()
+            .next()
+            .expect("validated direct base");
+        self.version(parent)
+    }
 }
 
 fn is_causal_type(entity_type: &str) -> bool {
@@ -154,6 +186,14 @@ fn sort_media(media: &mut [CausalMediaItem]) {
 fn media_sorted(mut media: Vec<CausalMediaItem>) -> Vec<CausalMediaItem> {
     sort_media(&mut media);
     media
+}
+
+fn parse_media_json(raw: &str) -> Result<Vec<CausalMediaItem>, StoreError> {
+    serde_json::from_str::<Vec<String>>(raw)?
+        .into_iter()
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .map(|value| CausalMediaItem::from_value(&value?).ok_or(StoreError::InvalidStoredPayload))
+        .collect()
 }
 
 fn rejected(
@@ -211,76 +251,217 @@ fn load_version(
 ) -> Result<Option<StableSnapshot>, StoreError> {
     let row = tx
         .query_row(
-            "SELECT payload_json, content_hash, updated_at, deleted_at
-             FROM entity_versions
-             WHERE family_id = ?1 AND version_id = ?2",
+            "SELECT v.payload_json, v.updated_at, v.deleted_at, v.mutation_id,
+                (SELECT json_group_array(parent_version_id) FROM (
+                    SELECT parent_version_id FROM entity_version_parents
+                     WHERE family_id = v.family_id AND version_id = v.version_id
+                     ORDER BY parent_version_id COLLATE BINARY)),
+                (SELECT json_group_array(media_payload_json) FROM (
+                    SELECT media_payload_json FROM entity_version_media
+                     WHERE family_id = v.family_id AND version_id = v.version_id
+                     ORDER BY media_uuid COLLATE BINARY))
+         FROM entity_versions v WHERE v.family_id = ?1 AND v.version_id = ?2",
             params![family_id, version_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((payload_json, content_hash, updated_at, deleted_at)) = row else {
+    let Some((payload, updated_at, deleted_at, mutation_id, parents, media)) = row else {
         return Ok(None);
     };
-    let root: Map<String, Value> = serde_json::from_str(&payload_json)?;
-    let mut media = load_version_media(tx, family_id, version_id)?;
-    sort_media(&mut media);
+    let root = serde_json::from_str::<Map<String, Value>>(&payload)?;
+    let parents = serde_json::from_str::<BTreeSet<String>>(&parents)?;
+    let media = parse_media_json(&media)?;
     Ok(Some(StableSnapshot {
         version_id: version_id.to_owned(),
         root,
         media,
-        deleted_at,
         updated_at,
-        content_hash,
+        deleted_at,
+        mutation_id,
+        parents,
     }))
 }
 
-fn load_version_media(
+/// Load the complete bounded conflict graph in two statements. Both detail and
+/// resolution consume this projection so neither can regress to per-head I/O.
+fn load_conflict_heads(
     tx: &Transaction<'_>,
     family_id: &str,
-    version_id: &str,
-) -> Result<Vec<CausalMediaItem>, StoreError> {
-    let mut stmt = tx.prepare(
-        "SELECT media_payload_json FROM entity_version_media
-         WHERE family_id = ?1 AND version_id = ?2
-         ORDER BY media_uuid COLLATE BINARY",
+    conflict_id: &str,
+) -> Result<ConflictHeads, StoreError> {
+    let metadata = tx
+        .query_row(
+            "SELECT c.entity_type, c.client_uuid, c.stable_version_id,
+                c.kind, c.status, (SELECT json_group_array(branch_version_id) FROM (
+                    SELECT branch_version_id FROM conflict_branches
+                     WHERE family_id = c.family_id AND conflict_id = c.conflict_id
+                     ORDER BY branch_version_id COLLATE BINARY LIMIT 65))
+         FROM conflicts c WHERE c.family_id = ?1 AND c.conflict_id = ?2",
+            params![family_id, conflict_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((entity_type, client_uuid, stable_version_id, kind, status, branches)) = metadata
+    else {
+        return Err(StoreError::ConflictNotFound);
+    };
+    if status != "open" {
+        return Err(StoreError::ConflictNotFound);
+    }
+    let branch_version_ids = serde_json::from_str::<Vec<String>>(&branches)?;
+    if branch_version_ids.len() > 64
+        || (kind == "concurrent" && branch_version_ids.is_empty())
+        || (kind == "tombstone_restore" && !branch_version_ids.is_empty())
+    {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    let mut versions = BTreeMap::<String, StableSnapshot>::new();
+    let mut statement = tx.prepare(
+        "WITH heads(version_id) AS (
+             SELECT stable_version_id FROM conflicts
+              WHERE family_id = ?1 AND conflict_id = ?2
+             UNION
+             SELECT branch_version_id FROM conflict_branches
+              WHERE family_id = ?1 AND conflict_id = ?2
+         ), wanted(version_id) AS (
+             SELECT version_id FROM heads
+             UNION
+             SELECT p.parent_version_id FROM entity_version_parents p
+              JOIN heads h ON h.version_id = p.version_id
+              WHERE p.family_id = ?1
+         )
+         SELECT v.version_id, v.entity_type, v.client_uuid, v.payload_json,
+                v.content_hash, v.updated_at, v.deleted_at, v.mutation_id, v.origin,
+                (SELECT json_group_array(parent_version_id) FROM (
+                    SELECT parent_version_id FROM entity_version_parents
+                     WHERE family_id = v.family_id AND version_id = v.version_id
+                     ORDER BY parent_version_id COLLATE BINARY)),
+                (SELECT json_group_array(media_payload_json) FROM (
+                    SELECT media_payload_json FROM entity_version_media
+                     WHERE family_id = v.family_id AND version_id = v.version_id
+                     ORDER BY media_uuid COLLATE BINARY)),
+                (SELECT json_group_array(media_uuid) FROM (
+                    SELECT media_uuid FROM entity_version_media
+                     WHERE family_id = v.family_id AND version_id = v.version_id
+                     ORDER BY media_uuid COLLATE BINARY))
+         FROM wanted w
+         JOIN entity_versions v ON v.family_id = ?1 AND v.version_id = w.version_id
+         ORDER BY v.version_id COLLATE BINARY",
     )?;
-    let rows = stmt.query_map(params![family_id, version_id], |row| {
-        row.get::<_, String>(0)
-    })?;
-    let mut media = Vec::new();
-    for row in rows {
-        let raw = row?;
-        let value: Value = serde_json::from_str(&raw)?;
-        if let Some(item) = CausalMediaItem::from_value(&value) {
-            media.push(item);
-        } else {
+    let mut rows = statement.query(params![family_id, conflict_id])?;
+    while let Some(row) = rows.next()? {
+        let version_id = row.get::<_, String>(0)?;
+        if row.get::<_, String>(1)? != entity_type || row.get::<_, String>(2)? != client_uuid {
             return Err(StoreError::InvalidStoredPayload);
         }
+        let payload_json = row.get::<_, String>(3)?;
+        let root = serde_json::from_str::<Map<String, Value>>(&payload_json)?;
+        let content_hash = row.get::<_, String>(4)?;
+        let mutation_id = row.get::<_, Option<String>>(7)?;
+        let origin = row.get::<_, String>(8)?;
+        let parents = serde_json::from_str::<BTreeSet<String>>(&row.get::<_, String>(9)?)?;
+        let media_json = row.get::<_, String>(10)?;
+        let media_ids = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(11)?)?;
+        let media_payloads = serde_json::from_str::<Vec<String>>(&media_json)?;
+        let media = parse_media_json(&media_json)?;
+        let updated_at = row.get(5)?;
+        let deleted_at = row.get(6)?;
+        let snapshot = StableSnapshot {
+            version_id: version_id.clone(),
+            root,
+            media,
+            updated_at,
+            deleted_at,
+            mutation_id,
+            parents,
+        };
+        let media_cap = if entity_type == "baby" {
+            1
+        } else if entity_type == "custom_item" {
+            0
+        } else {
+            3
+        };
+        let legacy_hash = || {
+            let updated = updated_at.to_string();
+            let deleted = deleted_at
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            let mut parts = vec![updated.as_str(), deleted.as_str(), payload_json.as_str()];
+            for (id, payload) in media_ids.iter().zip(&media_payloads) {
+                parts.extend([id.as_str(), payload.as_str()]);
+            }
+            migration_content_hash(&parts)
+        };
+        if media_ids.len() != media_payloads.len()
+            || !validate_causal_root(&entity_type, &client_uuid, &snapshot.root)
+                .is_ok_and(|canonical| canonical == snapshot.root)
+            || snapshot.media.len() > media_cap
+            || snapshot
+                .media
+                .iter()
+                .any(|item| item.validate_for_entity(&entity_type).is_err())
+            || if origin == "migration_base" {
+                snapshot.mutation_id.is_some() || content_hash != legacy_hash()
+            } else {
+                snapshot.mutation_id.is_none()
+                    || content_hash
+                        != root_content_hash(
+                            &snapshot.root,
+                            &snapshot.media,
+                            snapshot.deleted_at.is_some(),
+                        )
+            }
+        {
+            return Err(StoreError::InvalidStoredPayload);
+        }
+        versions.insert(version_id, snapshot);
     }
-    Ok(media)
-}
 
-fn load_parents(
-    tx: &Transaction<'_>,
-    family_id: &str,
-    version_id: &str,
-) -> Result<BTreeSet<String>, StoreError> {
-    let mut stmt = tx.prepare(
-        "SELECT parent_version_id FROM entity_version_parents
-         WHERE family_id = ?1 AND version_id = ?2",
-    )?;
-    let rows = stmt.query_map(params![family_id, version_id], |row| {
-        row.get::<_, String>(0)
-    })?;
-    rows.collect::<Result<BTreeSet<_>, _>>()
-        .map_err(StoreError::from)
+    if branch_version_ids
+        .iter()
+        .chain(std::iter::once(&stable_version_id))
+        .any(|head| !versions.contains_key(head))
+    {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    let has_direct_base = |id: &str| {
+        versions.get(id).is_some_and(|version| {
+            version.parents.len() == 1 && versions.contains_key(version.parents.first().unwrap())
+        })
+    };
+    if branch_version_ids.iter().any(|id| !has_direct_base(id))
+        || (kind == "tombstone_restore" && !has_direct_base(&stable_version_id))
+    {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    Ok(ConflictHeads {
+        conflict_id: conflict_id.to_owned(),
+        entity_type,
+        client_uuid,
+        stable_version_id,
+        kind,
+        branch_version_ids,
+        versions,
+    })
 }
 
 fn load_receipt(
@@ -1431,8 +1612,7 @@ fn evaluate_unit(
 
     // Stale live over tombstone (wire 例 F).
     if stable_deleted && !incoming_deleted {
-        let parents = load_parents(ctx.tx, &ctx.principal.family_id, &stable.version_id)?;
-        let concurrent = parents.contains(&base_version);
+        let concurrent = stable.parents.contains(&base_version);
         if !concurrent {
             return Ok(rejected(
                 &mutation.mutation_id,
@@ -2306,87 +2486,13 @@ impl Store {
     ) -> Result<ConflictDetail, StoreError> {
         let mut connection = self.connect()?;
         let tx = connection.transaction().map_err(StoreError::from)?;
-        let row = tx
-            .query_row(
-                "SELECT entity_type, client_uuid, stable_version_id, kind, status
-                 FROM conflicts
-                 WHERE family_id = ?1 AND conflict_id = ?2",
-                params![principal.family_id, conflict_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((_entity_type, _client_uuid, stable_version_id, kind, status)) = row else {
-            return Err(StoreError::ConflictNotFound);
-        };
-        if status != "open" {
-            return Err(StoreError::ConflictNotFound);
-        }
-        let stable = load_version(&tx, &principal.family_id, &stable_version_id)?
-            .ok_or(StoreError::InvalidStoredPayload)?;
-
-        let mut branch_ids = Vec::new();
-        {
-            let mut stmt = tx.prepare(
-                "SELECT branch_version_id FROM conflict_branches
-                 WHERE family_id = ?1 AND conflict_id = ?2
-                 ORDER BY branch_version_id COLLATE BINARY",
-            )?;
-            let rows = stmt.query_map(params![principal.family_id, conflict_id], |row| {
-                row.get::<_, String>(0)
-            })?;
-            for row in rows {
-                branch_ids.push(row?);
-            }
-        }
-        let mut branches = Vec::new();
-        let mut branch_deleted_flags = Vec::new();
-        for branch_id in &branch_ids {
-            let snap = load_version(&tx, &principal.family_id, branch_id)?
-                .ok_or(StoreError::InvalidStoredPayload)?;
-            branch_deleted_flags.push(snap.deleted_at.is_some());
-            let mutation_id: Option<String> = tx
-                .query_row(
-                    "SELECT mutation_id FROM entity_versions
-                     WHERE family_id = ?1 AND version_id = ?2",
-                    params![principal.family_id, branch_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .flatten();
-            branches.push(ConflictBranchDetail {
-                branch_version_id: branch_id.clone(),
-                root: snap.root,
-                media: snap.media,
-                mutation_id,
-            });
-        }
-
-        let (conflicting_paths, auto_merged) = compute_conflict_paths(
-            &tx,
-            &principal.family_id,
-            kind.as_str(),
-            &stable,
-            &branches,
-            &branch_deleted_flags,
-        )?;
-
-        Ok(ConflictDetail {
-            conflict_id: conflict_id.to_owned(),
-            stable_version_id,
-            stable_root: stable.root,
-            stable_media: stable.media,
-            branches,
+        let projection = load_conflict_heads(&tx, &principal.family_id, conflict_id)?;
+        let (conflicting_paths, auto_merged) = compute_conflict_paths(&projection);
+        Ok(conflict_detail_from_projection(
+            projection,
             conflicting_paths,
             auto_merged,
-        })
+        ))
     }
 
     pub fn resolve_conflict(
@@ -2398,29 +2504,11 @@ impl Store {
     ) -> Result<ResolveConflictResult, StoreError> {
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let row = tx
-            .query_row(
-                "SELECT entity_type, client_uuid, stable_version_id, kind, status
-                 FROM conflicts
-                 WHERE family_id = ?1 AND conflict_id = ?2",
-                params![principal.family_id, conflict_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((entity_type, client_uuid, stable_version_id, kind, status)) = row else {
-            return Err(StoreError::ConflictNotFound);
-        };
-        if status != "open" {
-            return Err(StoreError::ConflictNotFound);
-        }
+        let projection = load_conflict_heads(&tx, &principal.family_id, conflict_id)?;
+        let entity_type = projection.entity_type.clone();
+        let client_uuid = projection.client_uuid.clone();
+        let stable_version_id = projection.stable_version_id.clone();
+        let branch_ids = projection.branch_version_ids.clone();
 
         // CAS: expected stable + complete branch set. Also pin to live head so a
         // newer accepted projection cannot be overwritten by an old screen.
@@ -2432,18 +2520,6 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let mut branch_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT branch_version_id FROM conflict_branches
-                 WHERE family_id = ?1 AND conflict_id = ?2
-                 ORDER BY branch_version_id COLLATE BINARY",
-            )?;
-            let rows = stmt.query_map(params![principal.family_id, conflict_id], |row| {
-                row.get::<_, String>(0)
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        branch_ids.sort();
         let mut expected_branches = input.expected_branch_versions.clone();
         expected_branches.sort();
         let cas_stable = live_head
@@ -2472,8 +2548,7 @@ impl Store {
             });
         }
 
-        let stable = load_version(&tx, &principal.family_id, &stable_version_id)?
-            .ok_or(StoreError::InvalidStoredPayload)?;
+        let stable = projection.stable();
         authorize_resolve(principal, &entity_type, &stable.root)?;
 
         // Idempotent resolution mutation.
@@ -2502,28 +2577,7 @@ impl Store {
             });
         }
 
-        // Load branches for path recompute.
-        let mut branches = Vec::new();
-        let mut branch_deleted_flags = Vec::new();
-        for branch_id in &branch_ids {
-            let snap = load_version(&tx, &principal.family_id, branch_id)?
-                .ok_or(StoreError::InvalidStoredPayload)?;
-            branch_deleted_flags.push(snap.deleted_at.is_some());
-            branches.push(ConflictBranchDetail {
-                branch_version_id: branch_id.clone(),
-                root: snap.root,
-                media: snap.media,
-                mutation_id: None,
-            });
-        }
-        let (conflicting_paths, auto_merged) = compute_conflict_paths(
-            &tx,
-            &principal.family_id,
-            kind.as_str(),
-            &stable,
-            &branches,
-            &branch_deleted_flags,
-        )?;
+        let (conflicting_paths, auto_merged) = compute_conflict_paths(&projection);
 
         // Choices must be subset of conflicting paths.
         for key in input.conflict_choices.keys() {
@@ -2553,7 +2607,7 @@ impl Store {
 
         // Server rebuild: auto_merged ⊕ conflict_choices (wire §8.2).
         let (mut rebuilt_root, rebuilt_media, rebuilt_deleted) = rebuild_from_auto_merged(
-            &stable,
+            stable,
             &auto_merged,
             &input.conflict_choices,
             &conflicting_paths,
@@ -2599,8 +2653,8 @@ impl Store {
             return Ok(ResolveConflictResult {
                 status: "rejected".to_owned(),
                 stable_version_id: Some(stable_version_id),
-                stable_root: stable.root,
-                stable_media: stable.media,
+                stable_root: stable.root.clone(),
+                stable_media: stable.media.clone(),
                 code: Some("rewrote_auto_merged_path".to_owned()),
                 conflict_summary: None,
             });
@@ -2621,8 +2675,8 @@ impl Store {
                 return Ok(ResolveConflictResult {
                     status: "rejected".to_owned(),
                     stable_version_id: Some(stable_version_id),
-                    stable_root: stable.root,
-                    stable_media: stable.media,
+                    stable_root: stable.root.clone(),
+                    stable_media: stable.media.clone(),
                     code: Some(code.to_owned()),
                     conflict_summary: None,
                 });
@@ -2736,44 +2790,52 @@ impl Store {
     }
 }
 
-/// Union conflicting paths across all branches (wire §8.1 multi-device).
-fn compute_conflict_paths(
-    tx: &Transaction<'_>,
-    family_id: &str,
-    kind: &str,
-    stable: &StableSnapshot,
-    branches: &[ConflictBranchDetail],
-    branch_deleted_flags: &[bool],
-) -> Result<(Vec<String>, Map<String, Value>), StoreError> {
-    if kind == "tombstone_restore" {
+fn conflict_detail_from_projection(
+    projection: ConflictHeads,
+    conflicting_paths: Vec<String>,
+    auto_merged: Map<String, Value>,
+) -> ConflictDetail {
+    let stable = projection.stable();
+    let branches = projection
+        .branch_version_ids
+        .iter()
+        .map(|branch_id| {
+            let branch = projection.version(branch_id);
+            ConflictBranchDetail {
+                branch_version_id: branch.version_id.clone(),
+                root: branch.root.clone(),
+                media: branch.media.clone(),
+                mutation_id: branch.mutation_id.clone(),
+            }
+        })
+        .collect();
+    ConflictDetail {
+        conflict_id: projection.conflict_id.clone(),
+        stable_version_id: stable.version_id.clone(),
+        stable_root: stable.root.clone(),
+        stable_media: stable.media.clone(),
+        branches,
+        conflicting_paths,
+        auto_merged,
+    }
+}
+
+/// Union conflicting paths across the already-complete bounded snapshot.
+fn compute_conflict_paths(projection: &ConflictHeads) -> (Vec<String>, Map<String, Value>) {
+    let stable = projection.stable();
+    if projection.kind == "tombstone_restore" {
         let mut auto = Map::new();
         for (k, v) in &stable.root {
             auto.insert(format!("/{k}"), v.clone());
         }
         auto.insert("/_mutation.deleted".to_owned(), Value::Bool(true));
-        return Ok((vec!["/_mutation.deleted".to_owned()], auto));
+        return (vec!["/_mutation.deleted".to_owned()], auto);
     }
     let mut all_paths: BTreeSet<String> = BTreeSet::new();
     let mut auto_merged: Map<String, Value> = Map::new();
-    for (idx, branch) in branches.iter().enumerate() {
-        let parent: Option<String> = tx
-            .query_row(
-                "SELECT parent_version_id FROM entity_version_parents
-                 WHERE family_id = ?1 AND version_id = ?2
-                 LIMIT 1",
-                params![family_id, branch.branch_version_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(base_id) = parent else {
-            all_paths.insert("/_mutation.deleted".to_owned());
-            continue;
-        };
-        let Some(base) = load_version(tx, family_id, &base_id)? else {
-            all_paths.insert("/_mutation.deleted".to_owned());
-            continue;
-        };
-        let branch_deleted = branch_deleted_flags.get(idx).copied().unwrap_or(false);
+    for branch_id in &projection.branch_version_ids {
+        let branch = projection.version(branch_id);
+        let base = projection.direct_base(branch_id);
         let decision = three_way_merge(
             &base.root,
             &base.media,
@@ -2783,7 +2845,7 @@ fn compute_conflict_paths(
             stable.deleted_at.is_some(),
             &branch.root,
             &branch.media,
-            branch_deleted,
+            branch.deleted_at.is_some(),
         );
         match decision {
             MergeDecision::Conflict {
@@ -2805,12 +2867,12 @@ fn compute_conflict_paths(
             MergeDecision::Identical => {}
         }
     }
-    if all_paths.is_empty() && !branches.is_empty() {
+    if all_paths.is_empty() && !projection.branch_version_ids.is_empty() {
         // Distinct branches on same field values still need a path if roots differ
         // only by stamps — treat as note conflict fallback for resolution UI.
         all_paths.insert("/note".to_owned());
     }
-    Ok((all_paths.into_iter().collect(), auto_merged))
+    (all_paths.into_iter().collect(), auto_merged)
 }
 
 /// Rebuild authoritative root/media/deleted from auto_merged ⊕ choices.

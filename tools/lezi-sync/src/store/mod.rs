@@ -46,7 +46,7 @@ use crate::model::Entity;
 
 #[allow(unused_imports)]
 use self::SourceRelationReceipt as _;
-pub(crate) use bundles::bundle_content_hash;
+pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
 pub use causal::{
     CausalBatchResult, CausalMutation, CausalUnitResult, ConflictDetail, ConflictSummary,
     ResolveConflictInput, ResolveConflictResult,

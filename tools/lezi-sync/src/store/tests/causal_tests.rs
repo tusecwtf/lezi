@@ -1147,6 +1147,16 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
         .as_deref()
         .expect("first branch has conflict id")
         .to_owned();
+    begin_statement_count(&fx.family_id);
+    assert_eq!(
+        fx.store
+            .conflict_detail(&fx.owner, &conflict_id)
+            .unwrap()
+            .branches
+            .len(),
+        1,
+    );
+    let one_branch_statements = finish_statement_count(&fx.family_id);
 
     for index in 1..MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT {
         let result = fx
@@ -1157,16 +1167,6 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
             )
             .unwrap();
         assert_eq!(result.results[0].status, "branched", "branch {index}");
-        if index + 1 == MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT - 1 {
-            assert_eq!(
-                fx.store
-                    .conflict_detail(&fx.owner, &conflict_id)
-                    .unwrap()
-                    .branches
-                    .len(),
-                MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT - 1,
-            );
-        }
     }
 
     let replay = fx.commit(&fx.owner, first_branch, 1_700_000_002).unwrap();
@@ -1184,8 +1184,12 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
         StoreError::CausalCommitSaturated(CausalCommitSaturation::OpenBranch)
     ));
 
+    begin_statement_count(&fx.family_id);
     let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    let full_branch_statements = finish_statement_count(&fx.family_id);
     assert_eq!(detail.branches.len(), MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT);
+    assert_eq!(one_branch_statements, 2);
+    assert_eq!(full_branch_statements, one_branch_statements);
 
     let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
     assert_eq!(
@@ -1214,6 +1218,7 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
         .iter()
         .map(|branch| branch.branch_version_id.clone())
         .collect::<Vec<_>>();
+    assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
     let resolved = restarted
         .resolve_conflict(
             &fx.owner,
@@ -1461,9 +1466,9 @@ fn pull_sql_statement_count_is_constant_for_conflicted_record_pages() {
                 .unwrap();
         }
 
-        begin_pull_statement_count(&fx.family_id);
+        begin_statement_count(&fx.family_id);
         let mut page = fx.store.pull(&fx.family_id, 0).unwrap();
-        let statement_count = finish_pull_statement_count(&fx.family_id);
+        let statement_count = finish_statement_count(&fx.family_id);
         assert_eq!(
             page.entities
                 .iter()
@@ -1493,6 +1498,240 @@ fn pull_sql_statement_count_is_constant_for_conflicted_record_pages() {
     let one_record = measured_statement_count(1);
     let one_hundred_records = measured_statement_count(100);
     assert_eq!(one_hundred_records, one_record);
+}
+
+fn seed_media_conflict(branch_deleted: bool) -> (CausalFx, String, String, String) {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut media = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".to_owned(),
+        sha256: String::new(),
+        byte_size: 16,
+        mime: "image/jpeg".to_owned(),
+        width: Some(4),
+        height: Some(4),
+    };
+    fx.stage_media_bytes(&mut media);
+    let mut create = fx.record_mutation(record_id, None, "base");
+    create.media = vec![media.clone()];
+    let base = fx.commit(&fx.owner, create, 1_700_000_000).unwrap().results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let mut stable = fx.record_mutation(record_id, Some(&base), "stable");
+    stable.media = vec![media.clone()];
+    fx.commit(&fx.owner, stable, 1_700_000_001).unwrap();
+    let mut branch = fx.record_mutation(record_id, Some(&base), "branch");
+    branch.deleted = branch_deleted;
+    branch.media = if branch_deleted { vec![] } else { vec![media] };
+    let result = fx.commit(&fx.owner, branch, 1_700_000_002).unwrap();
+    assert_eq!(result.results[0].status, "branched");
+    (
+        fx,
+        result.results[0].conflict_id.clone().unwrap(),
+        base,
+        result.results[0].branch_version_id.clone().unwrap(),
+    )
+}
+
+fn mark_migration_base(fx: &CausalFx, version_id: &str) {
+    let connection = fx.store.connect().unwrap();
+    let (updated_at, deleted_at, payload): (i64, Option<i64>, String) = connection
+        .query_row(
+            "SELECT updated_at, deleted_at, payload_json FROM entity_versions
+             WHERE family_id = ?1 AND version_id = ?2",
+            params![fx.family_id, version_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT media_uuid, media_payload_json FROM entity_version_media
+             WHERE family_id = ?1 AND version_id = ?2 ORDER BY media_uuid COLLATE BINARY",
+        )
+        .unwrap();
+    let media = statement
+        .query_map(params![fx.family_id, version_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut parts = vec![
+        updated_at.to_string(),
+        deleted_at
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        payload,
+    ];
+    for (id, payload) in media {
+        parts.extend([id, payload]);
+    }
+    let refs = parts.iter().map(String::as_str).collect::<Vec<_>>();
+    connection
+        .execute(
+            "UPDATE entity_versions SET origin = 'migration_base', mutation_id = NULL,
+                    content_hash = ?1 WHERE family_id = ?2 AND version_id = ?3",
+            params![migration_content_hash(&refs), fx.family_id, version_id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn conflict_detail_returns_complete_ordered_heads_bases_media_and_provenance() {
+    let (fx, conflict_id, _, _) = seed_media_conflict(true);
+    let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+
+    assert_eq!(detail.branches.len(), 1);
+    let branch = &detail.branches[0];
+    assert!(branch.media.is_empty());
+    assert!(branch
+        .mutation_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty()));
+}
+
+#[test]
+fn conflict_detail_fails_closed_for_incomplete_persisted_projection() {
+    for damage in [
+        "root",
+        "parent",
+        "base",
+        "media",
+        "provenance",
+        "legacy_root",
+        "legacy_media",
+        "legacy_hash",
+    ] {
+        let (fx, conflict_id, base, branch) = seed_media_conflict(false);
+        if damage.starts_with("legacy_") {
+            mark_migration_base(&fx, &base);
+            fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+        }
+        let connection = fx.store.connect().unwrap();
+        match damage {
+            "root" => {
+                connection
+                    .execute(
+                        "UPDATE entity_versions SET payload_json = '{}'
+                         WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, branch],
+                    )
+                    .unwrap();
+            }
+            "parent" => {
+                connection
+                    .execute(
+                        "DELETE FROM entity_version_parents
+                         WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, branch],
+                    )
+                    .unwrap();
+            }
+            "base" => {
+                connection
+                    .execute_batch("PRAGMA foreign_keys = OFF")
+                    .unwrap();
+                connection
+                    .execute(
+                        "DELETE FROM entity_versions WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, base],
+                    )
+                    .unwrap();
+            }
+            "media" => {
+                connection
+                    .execute(
+                        "DELETE FROM entity_version_media
+                         WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, branch],
+                    )
+                    .unwrap();
+            }
+            "provenance" => {
+                connection
+                    .execute(
+                        "UPDATE entity_versions SET mutation_id = NULL
+                         WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, branch],
+                    )
+                    .unwrap();
+            }
+            "legacy_root" => {
+                connection
+                    .execute(
+                        "UPDATE entity_versions SET payload_json = json_set(payload_json, '$.note', 'drift')
+                         WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, base],
+                    )
+                    .unwrap();
+            }
+            "legacy_media" => {
+                connection
+                    .execute(
+                        "DELETE FROM entity_version_media WHERE family_id = ?1 AND version_id = ?2",
+                        params![fx.family_id, base],
+                    )
+                    .unwrap();
+            }
+            "legacy_hash" => {
+                connection
+                    .execute(
+                        "UPDATE entity_versions SET content_hash = ?1
+                         WHERE family_id = ?2 AND version_id = ?3",
+                        params!["0".repeat(64), fx.family_id, base],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+        let outcome = fx.store.conflict_detail(&fx.owner, &conflict_id);
+        assert!(
+            matches!(&outcome, Err(StoreError::InvalidStoredPayload)),
+            "damage={damage}, outcome={outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn conflict_detail_reads_one_transaction_snapshot_during_branch_arrival() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let first = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-before-detail"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = first.results[0].conflict_id.clone().unwrap();
+    begin_statement_pause(&fx.family_id, 2);
+    let reader = {
+        let store = fx.store.clone();
+        let principal = fx.owner.clone();
+        let conflict_id = conflict_id.clone();
+        thread::spawn(move || store.conflict_detail(&principal, &conflict_id))
+    };
+    wait_for_statement_pause();
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(record_id, Some(&base), "branch-during-detail"),
+        1_700_000_003,
+    )
+    .unwrap();
+    release_statement_pause();
+
+    assert_eq!(reader.join().unwrap().unwrap().branches.len(), 1);
+    assert_eq!(
+        fx.store
+            .conflict_detail(&fx.owner, &conflict_id)
+            .unwrap()
+            .branches
+            .len(),
+        2,
+    );
 }
 
 #[test]

@@ -926,7 +926,7 @@ fn owner_resolve_statement_budget_is_constant_at_the_member_limit() {
             versions.push(fx.commit_record(principal, uuid, &format!("record-{index}"), 100));
             members.push(uuid);
         }
-        begin_pull_statement_count(&fx.family_id);
+        begin_statement_count(&fx.family_id);
         let receipt = owner_resolve(
             &fx,
             &format!("mut-query-budget-{member_count}"),
@@ -934,7 +934,7 @@ fn owner_resolve_statement_budget_is_constant_at_the_member_limit() {
             members[0],
             &versions,
         );
-        let statements = finish_pull_statement_count(&fx.family_id);
+        let statements = finish_statement_count(&fx.family_id);
         assert_eq!(receipt.status, "accepted");
         statements
     }

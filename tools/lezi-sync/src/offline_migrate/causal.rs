@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::inventory::AuthoritativeFailure;
 use super::migrator::{MigrateError, MigrateReport};
-use crate::store::VERSIONED_ENTITY_TYPES;
+use crate::store::{migration_content_hash, VERSIONED_ENTITY_TYPES};
 
 /// Frozen namespace for historical closed-sleep → WakeObservation IDs (wire §11).
 pub(crate) const WAKE_MIGRATION_NAMESPACE: Uuid = Uuid::from_bytes([
@@ -58,15 +58,6 @@ pub(crate) fn migration_base_version_id(
     let name =
         format!("entity_version_v12:{family_id}:{entity_type}:{client_uuid}:{rev}:{content_hash}");
     Uuid::new_v5(&VERSION_MIGRATION_NAMESPACE, name.as_bytes())
-}
-
-fn content_hash_hex(parts: &[&str]) -> String {
-    let mut hasher = Sha256::new();
-    for part in parts {
-        hasher.update(part.as_bytes());
-        hasher.update([0xff]);
-    }
-    hex::encode(hasher.finalize())
 }
 
 /// After entities (and optional media files) are on the dest DB, mint base versions
@@ -423,7 +414,7 @@ fn mint_base_versions(dest: &Connection, report: &mut MigrateReport) -> Result<(
             hash_parts.push(media_payload.clone());
         }
         let refs: Vec<&str> = hash_parts.iter().map(String::as_str).collect();
-        let content_hash = content_hash_hex(&refs);
+        let content_hash = migration_content_hash(&refs);
         let version_id =
             migration_base_version_id(&family_id, &entity_type, &client_uuid, rev, &content_hash)
                 .to_string();
@@ -495,7 +486,7 @@ fn load_media_index(dest: &Connection) -> Result<MediaIndex, MigrateError> {
         let (family_id, media_uuid, payload_json) = row?;
         let payload: Map<String, Value> = serde_json::from_str(&payload_json)?;
         let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
-        let media_hash = content_hash_hex(&[&media_uuid, &payload_json]);
+        let media_hash = migration_content_hash(&[&media_uuid, &payload_json]);
         let association = match kind {
             "avatar" => payload
                 .get("baby_client_uuid")
