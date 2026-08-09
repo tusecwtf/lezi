@@ -19,6 +19,7 @@ import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
@@ -608,6 +609,24 @@ class CareLogRecordWriteTest {
                 payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
                 updatedAt = 1_500L,
                 effectiveWakeObservationClientUuid = "wake-denorm",
+            ),
+        )
+        fakes.wakeObservations.upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-a",
+                sleepRecordClientUuid = "closed-a",
+                wakeTimestamp = 1_500L,
+                observerMembershipId = "member-a",
+                updatedAt = 1_500L,
+            ),
+        )
+        fakes.wakeObservations.upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-b",
+                sleepRecordClientUuid = "closed-b",
+                wakeTimestamp = 2_500L,
+                observerMembershipId = "member-b",
+                updatedAt = 2_500L,
             ),
         )
 

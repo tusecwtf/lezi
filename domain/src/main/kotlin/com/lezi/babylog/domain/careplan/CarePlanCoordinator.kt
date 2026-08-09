@@ -101,6 +101,7 @@ internal class CarePlanCoordinator(
     private val recordMutations: RecordMutationCoordinator,
     private val nextFeedPlanMutationMutex: Mutex,
     private val sleepMutationMutex: Mutex,
+    private val hasOpenSleep: suspend (Long) -> Boolean,
     private val requireActiveBaby: suspend (Long) -> BabyEntity,
     private val listRecordPhotoPaths: suspend (Long) -> List<String>,
     private val requestLocalSync: () -> Unit,
@@ -429,10 +430,9 @@ internal class CarePlanCoordinator(
                 val resolvedEnd = endTimestamp
                 if (type == RecordType.SLEEP) {
                     validateSleepInterval(RecordType.SLEEP, actualTimestamp, resolvedEnd)
-                    val currentOpen = recordDao.findOpenSleep(plan.babyId)
                     // Open-interval fulfill and closed-interval fulfill both require
                     // no competing open sleep for a different interval.
-                    if (currentOpen != null) {
+                    if (hasOpenSleep(plan.babyId)) {
                         throw SleepStateChangedException()
                     }
                 } else if (resolvedEnd != null) {
@@ -790,7 +790,7 @@ internal class CarePlanCoordinator(
                 requireActiveBaby(source.babyId)
                 if (type == RecordType.SLEEP && source.endTimestamp == null) {
                     // Open sleep from a fulfill is unexpected; still guard open-sleep invariants.
-                    if (recordDao.findOpenSleep(source.babyId) != null) {
+                    if (hasOpenSleep(source.babyId)) {
                         throw SleepStateChangedException()
                     }
                 }

@@ -630,9 +630,9 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(wake.sleepRecordClientUuid).isEqualTo(CLOSED_SLEEP_UUID)
         // Closed-with-effective-wake must not appear as open (heal/UI contract).
         assertThat(
-            room.recordDao().listOpenSleeps(
+            room.timelineWindowDao().loadOpenSleepProjection(
                 room.babyDao().getByClientUuid(BABY_UUID)!!.id,
-            ).map { it.clientUuid },
+            ).map { it.root.clientUuid },
         ).containsExactly(OPEN_SLEEP_UUID)
 
         // Open sleep stays open — no wake, no auto-close.

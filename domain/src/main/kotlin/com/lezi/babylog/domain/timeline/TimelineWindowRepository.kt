@@ -1,9 +1,8 @@
 package com.lezi.babylog.domain.timeline
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.ProjectedRecordEntity
 import com.lezi.babylog.core.database.TimelineWindowDao
 import com.lezi.babylog.core.database.TimelineWindowDbSnapshot
-import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
@@ -11,9 +10,7 @@ import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SleepIntervalProjection
-import com.lezi.babylog.core.model.WakeObservationFact
 import com.lezi.babylog.core.model.isWakeShortcutTarget
-import com.lezi.babylog.core.model.projectSleepInterval
 import com.lezi.babylog.core.model.rootPublicationState
 import com.lezi.babylog.domain.canManageCreatorOwnedFamilyEntity
 import com.lezi.babylog.domain.carelog.SleepPresentation
@@ -149,7 +146,6 @@ data class TimelineWindowSnapshot(
 class TimelineWindowRepository @Inject constructor(
     private val timelineWindowDao: TimelineWindowDao,
     private val syncPort: SyncPort,
-    private val wakeObservationDao: WakeObservationDao,
 ) {
     private val revisions = AtomicLong(0L)
 
@@ -206,9 +202,6 @@ class TimelineWindowRepository @Inject constructor(
         val planMedia = database.media
             .filter { it.carePlanId != null }
             .groupBy { requireNotNull(it.carePlanId) }
-        val wakeMedia = database.media
-            .filter { it.wakeObservationId != null && it.deletedAt == null }
-            .groupBy { requireNotNull(it.wakeObservationId) }
         val audience = TimelineAudienceSnapshot(
             revision = revision,
             isFamilyJoined = audienceSeed.key.isFamilyJoined,
@@ -218,37 +211,10 @@ class TimelineWindowRepository @Inject constructor(
             members = audienceSeed.members,
         )
 
-        // Load wakes for every sleep root in the window so projection matches CareLogQueries.
-        val sleepEntities = database.records.filter { it.type == RecordType.SLEEP.key }
-        val wakesBySleep = linkedMapOf<String, List<WakeObservationEntity>>()
-        for (sleep in sleepEntities) {
+        val allRecordRows = database.records.map { projection ->
             context.ensureActive()
-            wakesBySleep[sleep.clientUuid] = wakeObservationDao.listForSleep(sleep.clientUuid)
-        }
-        val openPeerStarts = sleepEntities
-            .asSequence()
-            .map { entity ->
-                entity to projectEntity(
-                    entity = entity,
-                    observations = wakesBySleep[entity.clientUuid].orEmpty(),
-                    peerOpenSleepStarts = emptyList(),
-                )
-            }
-            .filter { (_, interval) -> interval.isOpen }
-            .map { (entity, interval) -> entity.clientUuid to interval.startTimestamp }
-            .toList()
-
-        val allRecordRows = database.records.map { entity ->
-            context.ensureActive()
-            val sleepInterval = if (entity.type == RecordType.SLEEP.key) {
-                projectEntity(
-                    entity = entity,
-                    observations = wakesBySleep[entity.clientUuid].orEmpty(),
-                    peerOpenSleepStarts = openPeerStarts.filter { it.first != entity.clientUuid },
-                )
-            } else {
-                null
-            }
+            val entity = projection.root
+            val sleepInterval = projection.sleepInterval
             val record = if (sleepInterval != null) {
                 entity.toProjectedSleepRecord(sleepInterval)
             } else {
@@ -262,10 +228,10 @@ class TimelineWindowRepository @Inject constructor(
                     .contains(CreatorAcknowledgementRef("record", record.clientUuid)),
             )
             val legalWakeUuids = sleepInterval?.visibleObservations
-                ?.mapTo(linkedSetOf(), WakeObservationFact::clientUuid)
+                ?.mapTo(linkedSetOf()) { it.clientUuid }
                 .orEmpty()
-            val timelineWakes = wakesBySleep[entity.clientUuid]
-                .orEmpty()
+            val wakeMedia = projection.wakeMedia.groupBy { requireNotNull(it.wakeObservationId) }
+            val timelineWakes = projection.wakeObservations
                 .filter { it.clientUuid in legalWakeUuids }
                 .sortedWith(compareBy(WakeObservationEntity::wakeTimestamp, WakeObservationEntity::clientUuid))
                 .map { wake ->
@@ -388,28 +354,6 @@ class TimelineWindowRepository @Inject constructor(
         )
     }
 }
-
-private fun projectEntity(
-    entity: RecordEntity,
-    observations: List<WakeObservationEntity>,
-    peerOpenSleepStarts: Collection<Pair<String, Long>>,
-): SleepIntervalProjection = projectSleepInterval(
-    sleepClientUuid = entity.clientUuid,
-    startTimestamp = entity.timestamp,
-    effectiveWakeObservationClientUuid = entity.effectiveWakeObservationClientUuid,
-    observations = observations.map { wake ->
-        WakeObservationFact(
-            clientUuid = wake.clientUuid,
-            wakeTimestamp = wake.wakeTimestamp,
-            withdrawn = wake.withdrawn,
-            observerMembershipId = wake.observerMembershipId,
-            note = wake.note,
-            deleted = wake.deletedAt != null,
-        )
-    },
-    legacyEndTimestamp = entity.endTimestamp,
-    peerOpenSleepStarts = peerOpenSleepStarts,
-)
 
 private data class TimelineAudienceKey(
     val isFamilyJoined: Boolean,

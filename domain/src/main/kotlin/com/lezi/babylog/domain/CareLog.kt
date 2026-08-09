@@ -16,6 +16,7 @@ import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.RecordWakeProjectionDao
 import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.SourceRelationDao
@@ -53,6 +54,7 @@ import com.lezi.babylog.domain.carelog.DailySummary
 import com.lezi.babylog.domain.carelog.PhotoAttachmentReconciler
 import com.lezi.babylog.domain.carelog.RecordMutationCoordinator
 import com.lezi.babylog.domain.carelog.SleepRecordProjection
+import com.lezi.babylog.domain.carelog.toSleepRecordProjection
 import com.lezi.babylog.domain.carelog.SourceRelationCoordinator
 import com.lezi.babylog.domain.carelog.SourceRelationOutcome
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateBounds
@@ -176,6 +178,7 @@ class CareLog @Inject constructor(
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictDetailCacheDao: ConflictDetailCacheDao,
     private val sourceRelationDao: SourceRelationDao,
+    private val recordWakeProjectionDao: RecordWakeProjectionDao,
 ) {
     private val photoAttachmentReconciler = PhotoAttachmentReconciler(
         mediaAssetDao = mediaAssetDao,
@@ -194,6 +197,7 @@ class CareLog @Inject constructor(
         transactionRunner = transactionRunner,
         syncPort = syncPort,
         sleepMutationMutex = sleepMutationMutex,
+        recordWakeProjectionDao = recordWakeProjectionDao,
         currentMembershipActorId = { carePlans.currentMembershipActorId() },
         requestLocalSync = ::requestLocalSync,
         pathGate = mediaPathGate,
@@ -222,7 +226,7 @@ class CareLog @Inject constructor(
         recordDao = recordDao,
         carePlanDao = carePlanDao,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
-        wakeObservationCoordinator = wakeObservationCoordinator,
+        recordWakeProjectionDao = recordWakeProjectionDao,
     )
     private val reminderProjection = CarePlanReminderProjection(
         carePlanDao = carePlanDao,
@@ -275,6 +279,9 @@ class CareLog @Inject constructor(
         syncPort = syncPort,
         clock = clock,
         sleepMutationMutex = sleepMutationMutex,
+        hasOpenSleep = { babyId ->
+            recordWakeProjectionDao.loadOpenSleepProjection(babyId).isNotEmpty()
+        },
         requireActiveBaby = { babyId -> babyProfiles.requireActiveBaby(babyId) },
         currentMembershipActorId = { carePlans.currentMembershipActorId() },
         completeOpenCarePlanWithRecord = {
@@ -334,6 +341,9 @@ class CareLog @Inject constructor(
             recordMutations = recordMutations,
             nextFeedPlanMutationMutex = nextFeedPlanMutationMutex,
             sleepMutationMutex = sleepMutationMutex,
+            hasOpenSleep = { babyId ->
+                recordWakeProjectionDao.loadOpenSleepProjection(babyId).isNotEmpty()
+            },
             requireActiveBaby = { babyId -> babyProfiles.requireActiveBaby(babyId) },
             listRecordPhotoPaths = ::listRecordPhotoPaths,
             requestLocalSync = ::requestLocalSync,
@@ -676,7 +686,9 @@ class CareLog @Inject constructor(
     suspend fun projectSleepRecord(recordId: Long): SleepRecordProjection? {
         val entity = recordDao.get(recordId) ?: return null
         if (entity.type != RecordType.SLEEP.key) return null
-        return wakeObservationCoordinator.projectSleep(entity)
+        return recordWakeProjectionDao.loadRecordProjectionForRoots(listOf(entity.clientUuid))
+            .singleOrNull()
+            ?.toSleepRecordProjection()
     }
 
     suspend fun recordWakeObservation(

@@ -49,6 +49,8 @@ object DatabaseModule {
     @Provides fun fulfillmentCandidateDao(db: LeziDatabase): FulfillmentCandidateDao =
         db.fulfillmentCandidateDao()
     @Provides fun mediaAssetDao(db: LeziDatabase): MediaAssetDao = db.mediaAssetDao()
+    @Provides
+    fun recordWakeProjectionDao(db: LeziDatabase): RecordWakeProjectionDao = db.timelineWindowDao()
     @Provides fun timelineWindowDao(db: LeziDatabase): TimelineWindowDao = db.timelineWindowDao()
     @Provides fun pendingPublishDao(db: LeziDatabase): PendingPublishDao = db.pendingPublishDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()

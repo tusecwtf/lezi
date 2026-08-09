@@ -1,16 +1,22 @@
 package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepEndSource
 import com.lezi.babylog.core.model.projectSleepInterval
 import com.lezi.babylog.domain.carelog.conflictResolverSelectablePaths
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import java.time.ZoneId
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class CareLogWakeObservationTest {
     private val zone: ZoneId = ZoneId.of("Asia/Shanghai")
 
@@ -38,6 +44,91 @@ class CareLogWakeObservationTest {
         assertThat(care.observeOpenSleep(babyId).first()).isNull()
         val day = java.time.Instant.ofEpochMilli(start).atZone(zone).toLocalDate()
         assertThat(care.daySummary(babyId, day, zone, now = wakeAt + 1).sleepMinutes).isEqualTo(90)
+    }
+
+    @Test
+    fun wakeOnlyCreateEditSelectAndWithdrawReemitSummaryProjection() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val start = 1_700_000_000_000L
+        val sleepId = care.sleepDown(babyId, start)
+        val sleepUuid = fakes.records.get(sleepId)!!.clientUuid
+        val day = java.time.Instant.ofEpochMilli(start).atZone(zone).toLocalDate()
+
+        suspend fun awaitEnd(expected: Long, mutate: suspend () -> Unit) {
+            val emission = async(start = CoroutineStart.UNDISPATCHED) {
+                care.observeDayRecords(babyId, day, zone)
+                    .first { rows -> rows.singleOrNull()?.endTimestamp == expected }
+            }
+            runCurrent()
+            mutate()
+            assertThat(emission.await().single().endTimestamp).isEqualTo(expected)
+        }
+
+        awaitEnd(start + 60_000L) {
+            care.recordWakeObservation(
+                babyId = babyId,
+                at = start + 60_000L,
+                nowMillis = start + 60_000L,
+                sleepRecordId = sleepId,
+                clientUuid = "wake-primary",
+            )
+        }
+        awaitEnd(start + 90_000L) {
+            care.updateWakeObservation(
+                clientUuid = "wake-primary",
+                wakeTimestamp = start + 90_000L,
+                note = "edited",
+                nowMillis = start + 90_000L,
+            )
+        }
+        awaitEnd(start + 30_000L) {
+            care.recordWakeObservation(
+                babyId = babyId,
+                at = start + 30_000L,
+                nowMillis = start + 90_000L,
+                sleepRecordId = sleepId,
+                clientUuid = "wake-earlier",
+            )
+        }
+        awaitEnd(start + 90_000L) {
+            care.selectEffectiveWakeObservation(sleepUuid, "wake-primary")
+        }
+        awaitEnd(start + 30_000L) {
+            care.withdrawWakeObservation("wake-primary")
+        }
+    }
+
+    @Test
+    fun conflictNotAdoptedOpenSleepIsExcludedFromCanonicalOpenSurface() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "sleep-not-adopted",
+                babyId = babyId,
+                type = RecordType.SLEEP.key,
+                timestamp = 1_000L,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                updatedAt = 1_000L,
+            ),
+        )
+        fakes.fulfillmentCandidates.upsert(
+            FulfillmentCandidateEntity(
+                clientUuid = "candidate-not-adopted",
+                carePlanClientUuid = "plan-conflict",
+                recordClientUuid = "sleep-not-adopted",
+                confirmedAt = 1_000L,
+                adoptionStatus = "conflict_not_adopted",
+                updatedAt = 1_000L,
+            ),
+        )
+
+        assertThat(care.observeOpenSleep(babyId).first()).isNull()
+        val accepted = care.sleepDown(babyId, at = 2_000L)
+        assertThat(fakes.records.get(accepted)?.clientUuid).isNotEqualTo("sleep-not-adopted")
     }
 
     @Test

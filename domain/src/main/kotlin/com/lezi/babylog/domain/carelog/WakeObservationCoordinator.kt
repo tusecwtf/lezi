@@ -4,17 +4,16 @@ import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.ProjectedRecordEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.RecordWakeProjectionDao
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepIntervalProjection
-import com.lezi.babylog.core.model.WakeObservationFact
-import com.lezi.babylog.core.model.isWakeShortcutTarget
-import com.lezi.babylog.core.model.projectSleepInterval
 import com.lezi.babylog.core.model.validateWakeTimestamp
 import com.lezi.babylog.domain.RecordPermissionException
 import com.lezi.babylog.domain.nextSyncUpdatedAt
@@ -67,6 +66,7 @@ internal class WakeObservationCoordinator(
     private val transactionRunner: DatabaseTransactionRunner,
     private val syncPort: SyncPort,
     private val sleepMutationMutex: Mutex,
+    private val recordWakeProjectionDao: RecordWakeProjectionDao,
     private val currentMembershipActorId: suspend () -> String,
     private val requestLocalSync: () -> Unit,
     private val pathGate: com.lezi.babylog.core.database.MediaLocalPathGate,
@@ -83,59 +83,16 @@ internal class WakeObservationCoordinator(
         return row.toDomain(photoPaths = listWakePhotoPaths(row.id))
     }
 
-    suspend fun projectSleep(record: RecordEntity): SleepRecordProjection {
-        val observations = wakeObservationDao.listForSleep(record.clientUuid)
-        val peers = if (record.endTimestamp == null &&
-            record.effectiveWakeObservationClientUuid == null
-        ) {
-            recordDao.listOpenSleeps(record.babyId)
-                .filter { it.clientUuid != record.clientUuid }
-                .map { it.clientUuid to it.timestamp }
-        } else {
-            emptyList()
-        }
-        val interval = projectSleepInterval(
-            sleepClientUuid = record.clientUuid,
-            startTimestamp = record.timestamp,
-            effectiveWakeObservationClientUuid = record.effectiveWakeObservationClientUuid,
-            observations = observations.map { it.toFact() },
-            legacyEndTimestamp = record.endTimestamp,
-            peerOpenSleepStarts = peers,
-        )
-        val live = observations.filter { it.deletedAt == null }
-        return SleepRecordProjection(
-            sleepClientUuid = record.clientUuid,
-            babyId = record.babyId,
-            recordId = record.id,
-            interval = interval,
-            observations = live.map { it.toDomain(photoPaths = listWakePhotoPaths(it.id)) },
-            openConflictId = record.openConflictId,
-        )
-    }
-
     /**
      * Latest open SleepStart for the dock wake shortcut (excludes provisional/effective/
      * legacy-closed and older overlaps).
      */
     suspend fun findWakeShortcutTarget(babyId: Long): RecordEntity? {
-        val opens = recordDao.listOpenSleeps(babyId)
-        if (opens.isEmpty()) return null
-        val withProjection = opens.map { entity ->
-            entity to projectSleep(entity).interval
-        }
-        return withProjection
-            .filter { (_, interval) -> isWakeShortcutTarget(interval) }
-            .maxWithOrNull(
-                compareBy<Pair<RecordEntity, SleepIntervalProjection>> { it.second.startTimestamp }
-                    .thenBy { it.first.clientUuid },
-            )
-            ?.first
+        return recordWakeProjectionDao.loadWakeShortcutTarget(babyId)?.root
     }
 
     suspend fun listTrulyOpenSleeps(babyId: Long): List<RecordEntity> {
-        return recordDao.listOpenSleeps(babyId).filter { entity ->
-            projectSleep(entity).interval.isOpen
-        }
+        return recordWakeProjectionDao.loadOpenSleepProjection(babyId).map { it.root }
     }
 
     /**
@@ -428,16 +385,6 @@ internal class WakeObservationCoordinator(
     }
 }
 
-internal fun WakeObservationEntity.toFact(): WakeObservationFact =
-    WakeObservationFact(
-        clientUuid = clientUuid,
-        wakeTimestamp = wakeTimestamp,
-        withdrawn = withdrawn,
-        observerMembershipId = observerMembershipId,
-        note = note,
-        deleted = deletedAt != null,
-    )
-
 internal fun WakeObservationEntity.toDomain(photoPaths: List<String> = emptyList()): WakeObservation =
     WakeObservation(
         id = id,
@@ -454,6 +401,27 @@ internal fun WakeObservationEntity.toDomain(photoPaths: List<String> = emptyList
         photoLocalPaths = photoPaths,
     )
 
+internal fun ProjectedRecordEntity.toSleepRecordProjection(): SleepRecordProjection? {
+    val interval = sleepInterval ?: return null
+    val mediaByWake = wakeMedia.groupBy { requireNotNull(it.wakeObservationId) }
+    return SleepRecordProjection(
+        sleepClientUuid = root.clientUuid,
+        babyId = root.babyId,
+        recordId = root.id,
+        interval = interval,
+        observations = wakeObservations
+            .filter { it.deletedAt == null }
+            .map { wake ->
+                wake.toDomain(
+                    photoPaths = mediaByWake[wake.id].orEmpty()
+                        .map(MediaAssetEntity::localUri)
+                        .filter(String::isNotBlank),
+                )
+            },
+        openConflictId = root.openConflictId,
+    )
+}
+
 /**
  * Map a Sleep [RecordEntity] to domain [com.lezi.babylog.core.model.Record] with
  * projected display end filled into [com.lezi.babylog.core.model.Record.endTimestamp].
@@ -467,4 +435,3 @@ internal fun RecordEntity.toProjectedSleepRecord(
         endTimestamp = interval.endTimestamp,
     )
 }
-

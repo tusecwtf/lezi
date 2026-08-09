@@ -800,9 +800,11 @@ avatar-only Baby 包仍发布完整 atomic root 并可能抬高 root 修订：�
 须 CAS 写入精确 `rootUpdatedAt` 回执并在内容未并发编辑时对齐本地 `updated_at`；Baby
 以 CAS 前进的 `updated_at` 作为等价水印。较旧回执不得倒退较新水印。
 
-记录页通过一个不可变的 timeline window snapshot 消费这些状态。每次 Room invalidation
-固定执行 1 次根记录读取、1 次计划读取和 1 次活跃日志媒体读取；根与媒体读取位于同一
-Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot 同时携带一个家庭成员/角色
+记录页通过一个不可变的 timeline window snapshot 消费这些状态。共享的 Record + Wake
+投影固定执行 1 次根记录读取、1 次 WakeObservation 读取和 1 次 wake 媒体读取；完整 timeline
+snapshot 再执行 1 次计划读取和 1 次活跃日志媒体读取，共 5 次 batch read。所有读取位于
+同一 Room 事务，查询数不随 Sleep/Wake 行数或每行 0–3 张照片增长。轻量 invalidation signal
+只负责触发该 snapshot，不通过 JOIN、COUNT 或 payload 扫描拼装数据。snapshot 同时携带一个家庭成员/角色
 快照，并为根发布状态、媒体本机齐备状态、作者称呼和行级编辑/删除/履行/跳过能力标记
 同一 revision。UI 只消费该 revision，不把新根与旧媒体或旧权限拼接；成员/家庭、宝宝、
 窗口或 refresh 改变时取消旧装配，旧结果不得覆盖新结果。该批量投影只复用既有 ACL，

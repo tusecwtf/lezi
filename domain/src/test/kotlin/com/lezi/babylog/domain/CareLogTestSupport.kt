@@ -19,6 +19,8 @@ import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.TimelineWindowDao
+import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
@@ -286,6 +288,7 @@ internal class Fakes(
     val carePlans = FakeCarePlanDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
+    val timelineWindow = FakeCareReadProjectionDao(records, media, wakeObservations)
     val conflictSummaries = FakeConflictSummaryDao()
     val conflictDetailCache = FakeConflictDetailCacheDao()
     val suspectedDuplicates = FakeSuspectedDuplicateGroupDao()
@@ -301,7 +304,11 @@ internal class Fakes(
 
     init {
         // Wake mutations must re-emit open-sleep observers (Room joins both tables).
-        wakeObservations.onMutation = { records.touch() }
+        wakeObservations.onMutation = {
+            records.touch()
+            timelineWindow.invalidate()
+        }
+        records.onMutation = timelineWindow::invalidate
     }
 
     fun wireTransactionalSnapshots() {
@@ -385,6 +392,7 @@ internal class Fakes(
         conflictSummaryDao = conflictSummaries,
         conflictDetailCacheDao = conflictDetailCache,
         sourceRelationDao = sourceRelations,
+        recordWakeProjectionDao = timelineWindow,
     )
 
     fun reminderProjection() = CarePlanReminderProjection(
@@ -396,6 +404,144 @@ internal class Fakes(
         systemCalendar = systemCalendar,
         calendarReminderMutationGuard = calendarReminderMutationGuard,
     )
+}
+
+internal class FakeCareReadProjectionDao(
+    private val records: FakeRecordDao,
+    private val media: FakeMediaAssetDao,
+    private val wakes: FakeWakeObservationDao,
+) : TimelineWindowDao {
+    private val invalidations = MutableStateFlow(0L)
+
+    override fun observeInvalidations(): Flow<Long> = invalidations
+
+    fun invalidate() {
+        invalidations.value += 1L
+    }
+
+    override suspend fun listRecordRoots(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<RecordEntity> = records.listForBaby(babyId).filter { root ->
+        root.timestamp < endExclusive &&
+            (
+                root.timestamp >= startInclusive ||
+                    root.type == RecordType.SLEEP.key &&
+                    projectedEnd(root) > startInclusive
+                )
+    }
+
+    override suspend fun listWakeObservationRoots(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<WakeObservationEntity> {
+        val roots = listRecordRoots(babyId, startInclusive, endExclusive)
+            .mapTo(hashSetOf(), RecordEntity::clientUuid)
+        return wakes.itemsSnapshot().filter { it.sleepRecordClientUuid in roots }
+    }
+
+    override suspend fun listActiveWakeMedia(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<MediaAssetEntity> {
+        val wakeIds = listWakeObservationRoots(babyId, startInclusive, endExclusive)
+            .mapTo(hashSetOf(), WakeObservationEntity::id)
+        return media.listAllIncludingDeleted().filter {
+            it.wakeObservationId in wakeIds && it.deletedAt == null && it.kind == "wake"
+        }
+    }
+
+    override suspend fun listRecordRootsByClientUuids(
+        rootClientUuids: List<String>,
+    ): List<RecordEntity> {
+        val requested = records.listAllIncludingDeleted()
+            .filter { it.clientUuid in rootClientUuids }
+        val babyIds = requested.mapTo(hashSetOf(), RecordEntity::babyId)
+        val peers = babyIds.flatMap { babyId -> listOpenSleepCandidateRoots(babyId) }
+        return (requested + peers).distinctBy(RecordEntity::clientUuid)
+    }
+
+    override suspend fun listOpenSleepCandidateRoots(babyId: Long): List<RecordEntity> =
+        records.listForBaby(babyId).filter { root ->
+            root.type == RecordType.SLEEP.key && root.endTimestamp == null
+        }.sortedWith(compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.clientUuid })
+
+    override suspend fun listWakesForOpenSleepCandidates(babyId: Long): List<WakeObservationEntity> {
+        val roots = listOpenSleepCandidateRoots(babyId)
+            .mapTo(hashSetOf(), RecordEntity::clientUuid)
+        return wakes.itemsSnapshot().filter { it.sleepRecordClientUuid in roots }
+    }
+
+    override suspend fun listWakeMediaForOpenSleepCandidates(babyId: Long): List<MediaAssetEntity> {
+        val wakeIds = listWakesForOpenSleepCandidates(babyId)
+            .mapTo(hashSetOf(), WakeObservationEntity::id)
+        return media.listAllIncludingDeleted().filter {
+            it.wakeObservationId in wakeIds && it.deletedAt == null && it.kind == "wake"
+        }
+    }
+
+    override suspend fun listWakeObservationsForRoots(
+        sleepRootClientUuids: List<String>,
+    ): List<WakeObservationEntity> {
+        val projectedRoots = listRecordRootsByClientUuids(sleepRootClientUuids)
+            .mapTo(hashSetOf(), RecordEntity::clientUuid)
+        return wakes.itemsSnapshot().filter { it.sleepRecordClientUuid in projectedRoots }
+    }
+
+    override suspend fun listActiveWakeMediaForRoots(
+        sleepRootClientUuids: List<String>,
+    ): List<MediaAssetEntity> {
+        val wakeIds = listWakeObservationsForRoots(sleepRootClientUuids)
+            .mapTo(hashSetOf(), WakeObservationEntity::id)
+        return media.listAllIncludingDeleted().filter {
+            it.wakeObservationId in wakeIds && it.deletedAt == null && it.kind == "wake"
+        }
+    }
+
+    override suspend fun listPlanRoots(
+        babyId: Long,
+        dayStart: Long,
+        dayEnd: Long,
+        nowMillis: Long,
+        includeOverdue: Boolean,
+    ): List<CarePlanEntity> = emptyList()
+
+    override suspend fun listActiveLogMedia(
+        babyId: Long,
+        recordStartInclusive: Long,
+        recordEndExclusive: Long,
+        planDayStart: Long,
+        planDayEnd: Long,
+        nowMillis: Long,
+        includeOverdue: Boolean,
+    ): List<MediaAssetEntity> = emptyList()
+
+    private fun projectedEnd(root: RecordEntity): Long =
+        if (root.type != RecordType.SLEEP.key) {
+            root.endTimestamp ?: root.timestamp
+        } else {
+            com.lezi.babylog.core.model.projectSleepInterval(
+                sleepClientUuid = root.clientUuid,
+                startTimestamp = root.timestamp,
+                effectiveWakeObservationClientUuid = root.effectiveWakeObservationClientUuid,
+                observations = wakes.itemsSnapshot()
+                    .filter { it.sleepRecordClientUuid == root.clientUuid }
+                    .map { wake ->
+                        com.lezi.babylog.core.model.WakeObservationFact(
+                            clientUuid = wake.clientUuid,
+                            wakeTimestamp = wake.wakeTimestamp,
+                            withdrawn = wake.withdrawn,
+                            observerMembershipId = wake.observerMembershipId,
+                            note = wake.note,
+                            deleted = wake.deletedAt != null,
+                        )
+                    },
+                legacyEndTimestamp = root.endTimestamp,
+            ).endTimestamp ?: Long.MAX_VALUE
+        }
 }
 
 internal class FakePolicyClock(var now: Long = 1_000L) : com.lezi.babylog.sync.session.PolicyClock {
@@ -1439,6 +1585,7 @@ internal class FakeRecordDao(
     private val seq = AtomicLong(1)
     private var txSnapshot: List<RecordEntity>? = null
     private var txSeq: Long? = null
+    var onMutation: (() -> Unit)? = null
 
     private fun RecordEntity.isSurfaceRecord(): Boolean =
         clientUuid !in conflictExcluded()
@@ -1644,11 +1791,13 @@ internal class FakeRecordDao(
         val id = if (record.id == 0L) seq.getAndIncrement() else record.id
         val next = record.copy(id = id)
         items.update { cur -> cur.filterNot { it.id == id } + next }
+        onMutation?.invoke()
         return id
     }
 
     override suspend fun update(record: RecordEntity) {
         items.update { cur -> cur.map { if (it.id == record.id) record else it } }
+        onMutation?.invoke()
     }
 
     override suspend fun softDelete(id: Long, deletedAt: Long) {
@@ -1661,10 +1810,12 @@ internal class FakeRecordDao(
                 }
             }
         }
+        onMutation?.invoke()
     }
 
     override suspend fun deleteAll() {
         items.value = emptyList()
+        onMutation?.invoke()
     }
 
     private fun RecordEntity.overlapsRange(

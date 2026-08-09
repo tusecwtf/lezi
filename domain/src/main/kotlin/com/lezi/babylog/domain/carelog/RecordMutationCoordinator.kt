@@ -60,6 +60,7 @@ internal class RecordMutationCoordinator(
     private val syncPort: SyncPort,
     private val clock: PolicyClock,
     private val sleepMutationMutex: Mutex,
+    private val hasOpenSleep: suspend (Long) -> Boolean,
     private val requireActiveBaby: suspend (Long) -> BabyEntity,
     private val currentMembershipActorId: suspend () -> String,
     private val completeOpenCarePlanWithRecord: suspend (
@@ -133,7 +134,7 @@ internal class RecordMutationCoordinator(
                             return@run existing.id
                         }
                         requireActiveBaby(babyId)
-                        if (recordDao.findOpenSleep(babyId) != null) {
+                        if (hasOpenSleep(babyId)) {
                             throw SleepStateChangedException()
                         }
                         val inserted = insertRecord(record)

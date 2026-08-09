@@ -4,6 +4,8 @@ import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.ProjectedRecordEntity
+import com.lezi.babylog.core.database.RecordWakeProjectionDao
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.MilkPayload
@@ -29,7 +31,7 @@ internal class CareLogQueries(
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
     fulfillmentCandidateDao: FulfillmentCandidateDao,
-    private val wakeObservationCoordinator: WakeObservationCoordinator? = null,
+    private val recordWakeProjectionDao: RecordWakeProjectionDao,
 ) {
     private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
 
@@ -46,8 +48,11 @@ internal class CareLogQueries(
         val end = endDayExclusive.atStartOfDay(zone).toInstant().toEpochMilli()
         // DAO ordinary queries already exclude conflict-not-adopted fulfillment records.
         // transform (not mapLatest) so rapid StateFlow updates do not drop emissions.
-        return recordDao.observeRange(babyId, start, end).transform { rows ->
-            emit(rows.map { projectRecord(it) })
+        return recordWakeProjectionDao.observeInvalidations().transform {
+            emit(
+                recordWakeProjectionDao.loadRecordProjection(babyId, start, end)
+                    .map(ProjectedRecordEntity::toDomainRecord),
+            )
         }
     }
 
@@ -58,9 +63,11 @@ internal class CareLogQueries(
     ): Flow<List<Record>> = observeRecords(babyId, day, day.plusDays(1), zone)
 
     fun observeOpenSleep(babyId: Long): Flow<Record?> =
-        // SQL already excludes sleeps with active legal WakeObservations (ticket 06).
-        recordDao.observeOpenSleep(babyId).transform { entity ->
-            emit(entity?.let { projectRecord(it) })
+        recordWakeProjectionDao.observeInvalidations().transform {
+            emit(
+                recordWakeProjectionDao.loadWakeShortcutTarget(babyId)
+                    ?.toDomainRecord(),
+            )
         }
 
     fun observeCarePlansInRange(
@@ -82,7 +89,8 @@ internal class CareLogQueries(
     ): List<Record> {
         val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return recordDao.listDay(babyId, start, end).map { projectRecord(it) }
+        return recordWakeProjectionDao.loadRecordProjection(babyId, start, end)
+            .map(ProjectedRecordEntity::toDomainRecord)
     }
 
     suspend fun daySummary(
@@ -97,15 +105,12 @@ internal class CareLogQueries(
         now = now,
     ).toDailySummary()
 
-    suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.let { projectRecord(it) }
-
-    private suspend fun projectRecord(entity: RecordEntity): Record {
-        val wake = wakeObservationCoordinator
-        if (wake == null || entity.type != RecordType.SLEEP.key) {
-            return entity.toModel()
-        }
-        val interval = wake.projectSleep(entity).interval
-        return entity.toProjectedSleepRecord(interval)
+    suspend fun getRecord(id: Long): Record? {
+        val root = recordDao.get(id) ?: return null
+        if (root.type != RecordType.SLEEP.key) return root.toModel()
+        return recordWakeProjectionDao.loadRecordProjectionForRoots(listOf(root.clientUuid))
+            .singleOrNull()
+            ?.toDomainRecord()
     }
 
     suspend fun getCarePlan(id: Long): CarePlan? = carePlanDao.get(id)?.toModel()
@@ -160,7 +165,8 @@ internal class CareLogQueries(
     ): WeekSummary {
         val start = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = weekStart.plusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
-        val records = recordDao.listRange(babyId, start, end).map { it.toModel() }
+        val records = recordWakeProjectionDao.loadRecordProjection(babyId, start, end)
+            .map(ProjectedRecordEntity::toDomainRecord)
         return CareAggregation.week(records, weekStart, zone, now)
     }
 
@@ -246,3 +252,7 @@ internal class CareLogQueries(
         .take(limit)
         .toList()
 }
+
+private fun ProjectedRecordEntity.toDomainRecord(): Record = sleepInterval?.let {
+    root.toProjectedSleepRecord(it)
+} ?: root.toModel()

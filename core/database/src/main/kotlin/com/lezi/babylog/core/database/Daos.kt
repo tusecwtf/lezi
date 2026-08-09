@@ -501,11 +501,7 @@ interface RecordDao {
     @Query("UPDATE records SET syncDirty = 1")
     suspend fun markAllPendingSync()
 
-    /**
-     * Latest truly open SleepStart: no effective wake, no legacy end, and no
-     * non-withdrawn legal WakeObservation (ticket 06 provisional close).
-     * Observes both `records` and `wake_observations` for live invalidation.
-     */
+    /** Legacy raw end-null candidate access; domain code must use RecordWakeProjectionDao. */
     @Query(
         """
         SELECT r.* FROM records r
@@ -513,14 +509,6 @@ interface RecordDao {
           AND r.type = 'sleep'
           AND r.deletedAt IS NULL
           AND r.endTimestamp IS NULL
-          AND r.effectiveWakeObservationClientUuid IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM wake_observations w
-            WHERE w.sleepRecordClientUuid = r.clientUuid
-              AND w.deletedAt IS NULL
-              AND w.withdrawn = 0
-              AND w.wakeTimestamp >= r.timestamp
-          )
         ORDER BY r.timestamp DESC, r.clientUuid DESC
         LIMIT 1
         """,
@@ -534,14 +522,6 @@ interface RecordDao {
           AND r.type = 'sleep'
           AND r.deletedAt IS NULL
           AND r.endTimestamp IS NULL
-          AND r.effectiveWakeObservationClientUuid IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM wake_observations w
-            WHERE w.sleepRecordClientUuid = r.clientUuid
-              AND w.deletedAt IS NULL
-              AND w.withdrawn = 0
-              AND w.wakeTimestamp >= r.timestamp
-          )
         ORDER BY r.timestamp DESC, r.clientUuid DESC
         """,
     )
@@ -554,14 +534,6 @@ interface RecordDao {
           AND r.type = 'sleep'
           AND r.deletedAt IS NULL
           AND r.endTimestamp IS NULL
-          AND r.effectiveWakeObservationClientUuid IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM wake_observations w
-            WHERE w.sleepRecordClientUuid = r.clientUuid
-              AND w.deletedAt IS NULL
-              AND w.withdrawn = 0
-              AND w.wakeTimestamp >= r.timestamp
-          )
         ORDER BY r.timestamp DESC, r.clientUuid DESC
         LIMIT 1
         """,
