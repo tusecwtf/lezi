@@ -372,9 +372,9 @@ interface SyncPort {
      * On-demand conflict detail for the resolver (wire §8.1). Default: unavailable.
      * Must not block ordinary CareLog local saves.
      */
-    suspend fun fetchConflictDetail(
+    suspend fun fetchConflictSnapshot(
         conflictId: String,
-    ): com.lezi.babylog.sync.backend.ConflictDetail =
+    ): com.lezi.babylog.sync.conflict.ConflictSnapshot =
         throw UnsupportedOperationException("Conflict detail is not implemented")
 
     /**
@@ -618,9 +618,9 @@ class NoOpSyncPort : SyncPort {
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
-    override suspend fun fetchConflictDetail(
+    override suspend fun fetchConflictSnapshot(
         conflictId: String,
-    ): com.lezi.babylog.sync.backend.ConflictDetail =
+    ): com.lezi.babylog.sync.conflict.ConflictSnapshot =
         throw UnsupportedOperationException("Conflict detail is not implemented")
     override suspend fun resolveConflict(
         conflictId: String,

@@ -2,8 +2,8 @@ package com.lezi.babylog.core.database
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.MediaReferenceDao
@@ -32,7 +32,7 @@ import com.lezi.babylog.core.database.causal.WakeObservationEntity
         PendingReplicaCleanupEntity::class,
         WakeObservationEntity::class,
         ConflictSummaryEntity::class,
-        ConflictDetailCacheEntity::class,
+        ConflictSnapshotCacheEntity::class,
         SuspectedDuplicateGroupEntity::class,
         SourceRelationEntity::class,
         SourceRelationMemberEntity::class,
@@ -58,7 +58,7 @@ abstract class LeziDatabase : RoomDatabase() {
     abstract fun pendingReplicaCleanupDao(): PendingReplicaCleanupDao
     abstract fun wakeObservationDao(): WakeObservationDao
     abstract fun conflictSummaryDao(): ConflictSummaryDao
-    abstract fun conflictDetailCacheDao(): ConflictDetailCacheDao
+    abstract fun conflictSnapshotCacheDao(): ConflictSnapshotCacheDao
     abstract fun suspectedDuplicateGroupDao(): SuspectedDuplicateGroupDao
     abstract fun sourceRelationDao(): SourceRelationDao
     abstract fun mediaReferenceDao(): MediaReferenceDao

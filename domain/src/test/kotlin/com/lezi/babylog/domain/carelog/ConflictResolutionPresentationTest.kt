@@ -2,7 +2,7 @@ package com.lezi.babylog.domain.carelog
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.domain.FakeBabyDao
@@ -11,12 +11,22 @@ import com.lezi.babylog.domain.FakeCustomItemDao
 import com.lezi.babylog.domain.FakeRecordDao
 import com.lezi.babylog.domain.RecordingTransactionRunner
 import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.backend.ConflictDetail
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.ConflictResolveResult
 import com.lezi.babylog.sync.backend.ConflictResolveSummary
+import com.lezi.babylog.sync.conflict.ConflictSnapshotCodec
+import com.lezi.babylog.sync.conflict.ConflictCandidate
+import com.lezi.babylog.sync.conflict.ConflictOutcome
+import com.lezi.babylog.sync.conflict.ConflictRoot
+import com.lezi.babylog.sync.conflict.ConflictRootType
+import com.lezi.babylog.sync.conflict.ConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSource
+import com.lezi.babylog.sync.conflict.ConflictVersionSnapshot
+import com.lezi.babylog.sync.conflict.ConflictingPath
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import org.junit.Test
 
 class ConflictResolutionPresentationTest {
@@ -35,12 +45,12 @@ class ConflictResolutionPresentationTest {
     @Test
     fun resolveCasMismatch_keepsDraftAndRefreshesDetail() = runTest {
         val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictDetailCacheDao()
+        val details = FakeConflictSnapshotCacheDao()
         summaries.upsert(
             ConflictSummaryEntity(
-                conflictId = "c1",
+                conflictId = TEST_CONFLICT_UUID,
                 entityType = "record",
-                clientUuid = "r1",
+                clientUuid = TEST_ROOT_UUID,
                 stableVersionId = "v-stable-1",
                 status = "open",
                 kind = "concurrent",
@@ -49,53 +59,39 @@ class ConflictResolutionPresentationTest {
             ),
         )
         details.upsert(
-            ConflictDetailCacheEntity(
-                conflictId = "c1",
-                stableRootJson = """{"note":"old"}""",
-                branchesJson = "[]",
-                conflictPathsJson = """["/note"]""",
+            ConflictSnapshotCacheEntity(
+                conflictId = TEST_CONFLICT_UUID,
+                snapshotJson = "{}",
                 cachedAt = 1L,
             ),
         )
         val base = com.lezi.babylog.sync.NoOpSyncPort()
         val sync = object : com.lezi.babylog.sync.SyncPort by base {
-            override suspend fun fetchConflictDetail(conflictId: String): ConflictDetail =
-                ConflictDetail(
-                    conflictId = "c1",
-                    entityType = "record",
-                    clientUuid = "r1",
-                    stableVersionId = "v-stable-2",
-                    stableRootJson = """{"note":"stable"}""",
-                    conflictingPaths = listOf("/note", "/timestamp"),
-                    branchVersionIds = listOf("b1", "b3"),
-                )
+            override suspend fun fetchConflictSnapshot(conflictId: String): ConflictSnapshot =
+                recordConflictSnapshot("stable", "v-stable-2", listOf("/note", "/timestamp"))
 
             override suspend fun resolveConflict(
                 conflictId: String,
                 request: ConflictResolveRequest,
             ): ConflictResolveResult = ConflictResolveResult.CasMismatch(
-                detail = ConflictDetail(
-                    conflictId = "c1",
-                    entityType = "record",
-                    clientUuid = "r1",
-                    stableVersionId = "v-stable-2",
-                    stableRootJson = """{"note":"newer"}""",
-                    conflictingPaths = listOf("/note", "/timestamp"),
-                    branchVersionIds = listOf("b1", "b3"),
+                detail = recordConflictSnapshot(
+                    "newer",
+                    "v-stable-2",
+                    listOf("/note", "/timestamp"),
                 ),
                 summary = ConflictResolveSummary(
-                    conflictId = "c1",
+                    conflictId = TEST_CONFLICT_UUID,
                     entityType = "record",
-                    clientUuid = "r1",
+                    clientUuid = TEST_ROOT_UUID,
                     stableVersionId = "v-stable-2",
                     branchVersionIds = listOf("b1", "b3"),
-                    updatedAt = 2L,
+                    updatedAt = 120L,
                 ),
             )
         }
         val coordinator = ConflictResolutionCoordinator(
             conflictSummaryDao = summaries,
-            conflictDetailCacheDao = details,
+            conflictSnapshotCacheDao = details,
             syncPort = sync,
             recordDao = FakeRecordDao(),
             wakeObservationDao = FakeWakeObservationDao(),
@@ -107,7 +103,7 @@ class ConflictResolutionPresentationTest {
         // User draft choices are held by the caller; CAS returns refreshed detail.
         val draftChoices = mapOf("/note" to JsonPrimitive("user-draft"))
         val outcome = coordinator.resolve(
-            conflictId = "c1",
+            conflictId = TEST_CONFLICT_UUID,
             expectedStableVersion = "v-stable-1",
             expectedBranchVersions = listOf("b1", "b2"),
             resolvedRootJson = """{"note":"user-draft"}""",
@@ -122,13 +118,93 @@ class ConflictResolutionPresentationTest {
         // Draft map is still held by caller — coordinator never mutates it.
         assertThat(draftChoices["/note"]).isEqualTo(JsonPrimitive("user-draft"))
         // Offline cache refreshed for reopen.
-        assertThat(details.get("c1")!!.stableRootJson).contains("newer")
+        assertThat(
+            ConflictSnapshotCodec.decode(details.get(TEST_CONFLICT_UUID)!!.snapshotJson)
+                .stable.root.canonical.toString(),
+        ).contains("newer")
+    }
+
+    @Test
+    fun resolveCasMismatch_rejectsDriftingDetailAndSummaryBeforeEitherProjectionWrites() = runTest {
+        val summaries = FakeConflictSummaryDao()
+        val details = FakeConflictSnapshotCacheDao()
+        val detail = recordConflictSnapshot("newer", "v-detail", listOf("/note"))
+        val sync = object : com.lezi.babylog.sync.SyncPort by com.lezi.babylog.sync.NoOpSyncPort() {
+            override suspend fun resolveConflict(
+                conflictId: String,
+                request: ConflictResolveRequest,
+            ): ConflictResolveResult = ConflictResolveResult.CasMismatch(
+                detail = detail,
+                summary = ConflictResolveSummary(
+                    conflictId = detail.conflictId,
+                    entityType = detail.entityType.wireName,
+                    clientUuid = detail.clientUuid,
+                    stableVersionId = "v-summary-drift",
+                    branchVersionIds = detail.branchVersionIds,
+                    updatedAt = 120,
+                ),
+            )
+        }
+        val coordinator = ConflictResolutionCoordinator(
+            conflictSummaryDao = summaries,
+            conflictSnapshotCacheDao = details,
+            syncPort = sync,
+            recordDao = FakeRecordDao(),
+            wakeObservationDao = FakeWakeObservationDao(),
+            babyDao = FakeBabyDao(),
+            carePlanDao = FakeCarePlanDao(),
+            customItemDao = FakeCustomItemDao(),
+            transactionRunner = RecordingTransactionRunner(),
+        )
+
+        val outcome = coordinator.resolve(
+            conflictId = detail.conflictId,
+            expectedStableVersion = "v-old",
+            expectedBranchVersions = emptyList(),
+            resolvedRootJson = "{}",
+            resolvedMedia = emptyList(),
+            conflictChoices = emptyMap(),
+        )
+
+        assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Rejected::class.java)
+        assertThat(summaries.get(detail.conflictId)).isNull()
+        assertThat(details.get(detail.conflictId)).isNull()
+    }
+
+    @Test
+    fun loadDetail_rejectsCrossConflictResponseBeforeProjection() = runTest {
+        val summaries = FakeConflictSummaryDao()
+        val details = FakeConflictSnapshotCacheDao()
+        val fetched = recordConflictSnapshot("foreign", "v-foreign", listOf("/note"))
+        val sync = object : com.lezi.babylog.sync.SyncPort by com.lezi.babylog.sync.NoOpSyncPort() {
+            override suspend fun fetchConflictSnapshot(conflictId: String): ConflictSnapshot = fetched
+        }
+        val coordinator = ConflictResolutionCoordinator(
+            conflictSummaryDao = summaries,
+            conflictSnapshotCacheDao = details,
+            syncPort = sync,
+            recordDao = FakeRecordDao(),
+            wakeObservationDao = FakeWakeObservationDao(),
+            babyDao = FakeBabyDao(),
+            carePlanDao = FakeCarePlanDao(),
+            customItemDao = FakeCustomItemDao(),
+            transactionRunner = RecordingTransactionRunner(),
+        )
+
+        val loaded = coordinator.loadDetail(
+            "00000000-0000-0000-0000-000000000099",
+            forceRefresh = true,
+        )
+
+        assertThat(loaded).isNull()
+        assertThat(details.get(fetched.conflictId)).isNull()
+        assertThat(summaries.get(fetched.conflictId)).isNull()
     }
 
     @Test
     fun resolveAccepted_clearsOpenConflictAppliesStableAndRequestsForeground() = runTest {
         val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictDetailCacheDao()
+        val details = FakeConflictSnapshotCacheDao()
         val records = FakeRecordDao()
         val wakes = FakeWakeObservationDao()
         val syncTriggers = mutableListOf<SyncTrigger>()
@@ -145,11 +221,9 @@ class ConflictResolutionPresentationTest {
             ),
         )
         details.upsert(
-            ConflictDetailCacheEntity(
+            ConflictSnapshotCacheEntity(
                 conflictId = "c-record",
-                stableRootJson = """{"note":"old"}""",
-                branchesJson = "[]",
-                conflictPathsJson = """["/note"]""",
+                snapshotJson = "{}",
                 cachedAt = 1L,
             ),
         )
@@ -187,7 +261,7 @@ class ConflictResolutionPresentationTest {
         }
         val coordinator = ConflictResolutionCoordinator(
             conflictSummaryDao = summaries,
-            conflictDetailCacheDao = details,
+            conflictSnapshotCacheDao = details,
             syncPort = sync,
             recordDao = records,
             wakeObservationDao = wakes,
@@ -265,7 +339,7 @@ class ConflictResolutionPresentationTest {
         }
         val coordinator = ConflictResolutionCoordinator(
             conflictSummaryDao = summaries,
-            conflictDetailCacheDao = FakeConflictDetailCacheDao(),
+            conflictSnapshotCacheDao = FakeConflictSnapshotCacheDao(),
             syncPort = sync,
             recordDao = records,
             wakeObservationDao = FakeWakeObservationDao(),
@@ -293,7 +367,7 @@ class ConflictResolutionPresentationTest {
     @Test
     fun resolveAccepted_clearsWakeOpenConflict() = runTest {
         val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictDetailCacheDao()
+        val details = FakeConflictSnapshotCacheDao()
         val wakes = FakeWakeObservationDao()
         summaries.upsert(
             ConflictSummaryEntity(
@@ -336,7 +410,7 @@ class ConflictResolutionPresentationTest {
         }
         val coordinator = ConflictResolutionCoordinator(
             conflictSummaryDao = summaries,
-            conflictDetailCacheDao = details,
+            conflictSnapshotCacheDao = details,
             syncPort = sync,
             recordDao = FakeRecordDao(),
             wakeObservationDao = wakes,
@@ -363,3 +437,101 @@ class ConflictResolutionPresentationTest {
         assertThat(wake.wakeTimestamp).isEqualTo(210L)
     }
 }
+
+private fun recordConflictSnapshot(
+    note: String,
+    stableVersion: String,
+    paths: List<String>,
+): ConflictSnapshot {
+    fun root(value: String) = ConflictRoot.Record(
+        babyClientUuid = TEST_BABY_UUID,
+        type = "formula",
+        customItemClientUuid = null,
+        timestamp = 100,
+        endTimestamp = null,
+        note = value,
+        payload = Json.parseToJsonElement("""{"amount_ml":60}""") as kotlinx.serialization.json.JsonObject,
+        schemaVersion = 2,
+        effectiveWakeObservationClientUuid = null,
+        createdByMembershipId = "member-a",
+        updatedAt = 100,
+        canonical = Json.parseToJsonElement(
+            """{"baby_client_uuid":"$TEST_BABY_UUID","type":"formula","custom_item_client_uuid":null,"timestamp":100,"end_timestamp":null,"note":"$value","payload_json":{"amount_ml":60},"schema_version":2,"updated_at":100,"created_by_membership_id":"member-a"}""",
+        ) as kotlinx.serialization.json.JsonObject,
+    )
+    val source = ConflictSource("b1", TEST_MUTATION_ONE, "member-a", "device-a", 110)
+    return ConflictSnapshot(
+        conflictId = TEST_CONFLICT_UUID,
+        entityType = ConflictRootType.Record,
+        clientUuid = TEST_ROOT_UUID,
+        snapshotToken = "a".repeat(43),
+        expiresAt = 2_000_000,
+        stable = ConflictVersionSnapshot(
+            versionId = stableVersion,
+            baseVersion = null,
+            root = root(note),
+            media = emptyList(),
+            deleted = false,
+            mutationId = TEST_MUTATION_STABLE,
+            actorId = "member-a",
+            deviceId = "device-a",
+            receivedAt = 100,
+        ),
+        branches = listOf(
+            ConflictVersionSnapshot(
+                versionId = "b1",
+                baseVersion = stableVersion,
+                root = root("branch-1"),
+                media = emptyList(),
+                deleted = false,
+                mutationId = TEST_MUTATION_ONE,
+                actorId = "member-a",
+                deviceId = "device-a",
+                receivedAt = 110,
+            ),
+            ConflictVersionSnapshot(
+                versionId = "b3",
+                baseVersion = stableVersion,
+                root = root("branch-3"),
+                media = emptyList(),
+                deleted = false,
+                mutationId = TEST_MUTATION_THREE,
+                actorId = "member-b",
+                deviceId = "device-b",
+                receivedAt = 120,
+            ),
+        ),
+        conflicting = paths.map { path ->
+            ConflictingPath(
+                path = path,
+                candidates = listOf(
+                    ConflictCandidate(
+                        choiceId = "choice-${path.substringAfterLast('/').padEnd(10, 'a')}",
+                        outcome = ConflictOutcome.Set(
+                            if (path == "/timestamp") JsonPrimitive(100) else JsonNull,
+                        ),
+                        sources = listOf(source),
+                    ),
+                    ConflictCandidate(
+                        choiceId = "other-${path.substringAfterLast('/').padEnd(11, 'b')}",
+                        outcome = ConflictOutcome.Set(
+                            if (path == "/timestamp") JsonPrimitive(101) else JsonPrimitive("other"),
+                        ),
+                        sources = listOf(source),
+                    ),
+                ),
+            )
+        },
+        autoMerged = emptyList(),
+        pageIndex = 0,
+        continuation = null,
+        complete = true,
+    )
+}
+
+private const val TEST_CONFLICT_UUID = "00000000-0000-0000-0000-000000000031"
+private const val TEST_ROOT_UUID = "00000000-0000-0000-0000-000000000032"
+private const val TEST_BABY_UUID = "00000000-0000-0000-0000-000000000033"
+private const val TEST_MUTATION_STABLE = "00000000-0000-0000-0000-000000000034"
+private const val TEST_MUTATION_ONE = "00000000-0000-0000-0000-000000000035"
+private const val TEST_MUTATION_THREE = "00000000-0000-0000-0000-000000000036"

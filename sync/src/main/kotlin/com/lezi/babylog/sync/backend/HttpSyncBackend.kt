@@ -1,5 +1,7 @@
 package com.lezi.babylog.sync.backend
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
+import com.lezi.babylog.sync.conflict.ConflictSnapshot
+import com.lezi.babylog.sync.conflict.toConflictSnapshot
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -875,10 +877,10 @@ class HttpSyncBackend internal constructor(
         return json.toSourceRelationResult("source relation resolve-group")
     }
 
-    override suspend fun fetchConflictDetail(
+    override suspend fun fetchConflictSnapshot(
         session: SyncSession,
         conflictId: String,
-    ): ConflictDetail {
+    ): ConflictSnapshot {
         session.requireCurrentReplicaTransport()
         val id = conflictId.trim()
         require(id.isNotEmpty()) { "conflict_id 无效" }
@@ -888,7 +890,9 @@ class HttpSyncBackend internal constructor(
             "/v1/conflicts/$encoded",
             session.accessToken,
         )
-        return json.toConflictDetail("conflict detail")
+        return json.toConflictSnapshot("conflict snapshot").also { snapshot ->
+            require(snapshot.conflictId == id) { "conflict snapshot.conflict_id 与请求不一致" }
+        }
     }
 
     override suspend fun resolveConflict(
@@ -2041,75 +2045,6 @@ private fun JsonObject.optionalSourceRelationSummary(context: String): PullSourc
     )
 }
 
-/**
- * Wire §8.1 conflict detail. Server omits entity_type/client_uuid (lookup by
- * conflict_id); optional fields default so summary pairing can fill CAS roots.
- */
-private fun JsonObject.toConflictDetail(context: String): ConflictDetail {
-    val stableRoot = when (val root = get("stable_root")) {
-        null, JsonNull -> "{}"
-        is JsonObject -> root.toString()
-        else -> throw IllegalArgumentException("$context.stable_root 无效")
-    }
-    val media = when (val raw = get("stable_media")) {
-        null, JsonNull -> emptyList()
-        is JsonArray -> raw.mapIndexed { index, element ->
-            (element as? JsonObject)?.toCausalMediaItem("$context.stable_media[$index]")
-                ?: throw IllegalArgumentException("$context.stable_media[$index] 不是对象")
-        }
-        else -> throw IllegalArgumentException("$context.stable_media 无效")
-    }
-    val branchesElement = get("branches")
-        ?: throw IllegalArgumentException("$context.branches 缺失")
-    val branchesJson = when (branchesElement) {
-        is JsonArray -> branchesElement.toString()
-        JsonNull -> "[]"
-        else -> throw IllegalArgumentException("$context.branches 无效")
-    }
-    val branchVersionIds = when (branchesElement) {
-        is JsonArray -> branchesElement.mapIndexed { index, element ->
-            val branch = element as? JsonObject
-                ?: throw IllegalArgumentException("$context.branches[$index] 不是对象")
-            branch.requiredNonBlankString("branch_version_id", "$context.branches[$index]")
-        }
-        else -> emptyList()
-    }
-    val conflictingPaths = when (val raw = get("conflicting_paths")) {
-        null, JsonNull -> emptyList()
-        is JsonArray -> raw.mapIndexed { index, element ->
-            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
-                ?: throw IllegalArgumentException("$context.conflicting_paths[$index] 无效")
-        }
-        else -> throw IllegalArgumentException("$context.conflicting_paths 无效")
-    }
-    val autoMerged = when (val raw = get("auto_merged")) {
-        null, JsonNull -> "{}"
-        is JsonObject -> raw.toString()
-        else -> throw IllegalArgumentException("$context.auto_merged 无效")
-    }
-    val baseRoot = when (val raw = get("base_root")) {
-        null, JsonNull -> null
-        is JsonObject -> raw.toString()
-        else -> throw IllegalArgumentException("$context.base_root 无效")
-    }
-    return ConflictDetail(
-        conflictId = requiredNonBlankString("conflict_id", context),
-        entityType = optionalNonBlankString("entity_type", context).orEmpty(),
-        clientUuid = optionalNonBlankString("client_uuid", context).orEmpty(),
-        stableVersionId = requiredNonBlankString("stable_version_id", context),
-        stableRootJson = stableRoot,
-        stableMedia = media,
-        baseRootJson = baseRoot,
-        branchesJson = branchesJson,
-        conflictingPaths = conflictingPaths,
-        autoMergedJson = autoMerged,
-        branchVersionIds = branchVersionIds,
-        kind = optionalNonBlankString("kind", context) ?: "concurrent",
-        baseVersionId = optionalNonBlankString("base_version_id", context),
-        updatedAt = optionalLong("updated_at", context) ?: 0L,
-    )
-}
-
 /** Wire §8.2 resolve result: resolved | cas_mismatch | rejected. */
 private fun JsonObject.toConflictResolveResult(context: String): ConflictResolveResult {
     val status = requiredNonBlankString("status", context)
@@ -2141,7 +2076,7 @@ private fun JsonObject.toConflictResolveResult(context: String): ConflictResolve
         "cas_mismatch" -> {
             val detail = when (val raw = get("detail")) {
                 null, JsonNull -> null
-                is JsonObject -> raw.toConflictDetail("$context.detail")
+                is JsonObject -> raw.toConflictSnapshot("$context.detail")
                 else -> throw IllegalArgumentException("$context.detail 无效")
             }
             val summary = when (val raw = get("conflict_summary")) {

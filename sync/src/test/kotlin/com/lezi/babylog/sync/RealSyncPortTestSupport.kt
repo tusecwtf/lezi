@@ -1619,7 +1619,7 @@ internal class SyncRig(
     }
     val wakeObservations = MemoryWakeObservationDao()
     val conflictSummaries = MemoryConflictSummaryDao()
-    val conflictDetails = MemoryConflictDetailCacheDao()
+    val conflictDetails = MemoryConflictSnapshotCacheDao()
     val clock = MutablePolicyClock()
     val foreground = TestForegroundState()
     val port = RealSyncPort(
@@ -1647,7 +1647,7 @@ internal class SyncRig(
         fulfillmentAuthoritySettlement = fulfillmentAuthoritySettlement,
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
-        conflictDetailCacheDao = conflictDetails,
+        conflictSnapshotCacheDao = conflictDetails,
         clientAppVersion = clientAppVersion,
         appUpdateInstaller = appUpdateInstaller,
         apkIdentityReader = apkIdentityReader,
@@ -2767,18 +2767,18 @@ internal class MemoryConflictSummaryDao :
     }
 }
 
-internal class MemoryConflictDetailCacheDao :
-    com.lezi.babylog.core.database.causal.ConflictDetailCacheDao {
+internal class MemoryConflictSnapshotCacheDao :
+    com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao {
     private val items =
-        mutableListOf<com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity>()
+        mutableListOf<com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity>()
 
     override suspend fun get(
         conflictId: String,
-    ): com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity? =
+    ): com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity? =
         items.find { it.conflictId == conflictId }
 
     override suspend fun upsert(
-        entity: com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity,
+        entity: com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity,
     ) {
         items.removeAll { it.conflictId == entity.conflictId }
         items += entity

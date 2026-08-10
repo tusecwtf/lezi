@@ -56,7 +56,7 @@ object DatabaseModule {
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
     @Provides fun wakeObservationDao(db: LeziDatabase) = db.wakeObservationDao()
     @Provides fun conflictSummaryDao(db: LeziDatabase) = db.conflictSummaryDao()
-    @Provides fun conflictDetailCacheDao(db: LeziDatabase) = db.conflictDetailCacheDao()
+    @Provides fun conflictSnapshotCacheDao(db: LeziDatabase) = db.conflictSnapshotCacheDao()
     @Provides fun suspectedDuplicateGroupDao(db: LeziDatabase) = db.suspectedDuplicateGroupDao()
     @Provides fun sourceRelationDao(db: LeziDatabase) = db.sourceRelationDao()
     @Provides fun mediaReferenceDao(db: LeziDatabase) = db.mediaReferenceDao()

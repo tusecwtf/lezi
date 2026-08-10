@@ -13,7 +13,7 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.SourceRelationDao
 import com.lezi.babylog.core.database.causal.WakeObservationDao
@@ -154,7 +154,7 @@ class RealSyncPort @Inject constructor(
     private val fulfillmentAuthoritySettlement: FulfillmentAuthoritySettlement,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
-    private val conflictDetailCacheDao: ConflictDetailCacheDao,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
     private val sourceRelationDao: SourceRelationDao? = null,
     /** Historical non-causal contract fixtures only; production DI binds this to false. */
     @Named("allowHistoricalMutableRootEvidence")
@@ -224,7 +224,7 @@ class RealSyncPort @Inject constructor(
         },
         wakeObservationDao = wakeObservationDao,
         conflictSummaryDao = conflictSummaryDao,
-        conflictDetailCacheDao = conflictDetailCacheDao,
+        conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         sourceRelationDao = sourceRelationDao,
         allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
@@ -666,12 +666,12 @@ class RealSyncPort @Inject constructor(
             }
         }
 
-    override suspend fun fetchConflictDetail(
+    override suspend fun fetchConflictSnapshot(
         conflictId: String,
-    ): com.lezi.babylog.sync.backend.ConflictDetail {
+    ): com.lezi.babylog.sync.conflict.ConflictSnapshot {
         val session = preferences.session.first()
         check(session.isJoined) { "未加入家庭，无法加载冲突详情" }
-        return backend.fetchConflictDetail(session, conflictId)
+        return backend.fetchConflictSnapshot(session, conflictId)
     }
 
     override suspend fun resolveConflict(

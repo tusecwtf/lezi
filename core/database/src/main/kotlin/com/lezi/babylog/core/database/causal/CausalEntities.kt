@@ -74,18 +74,21 @@ data class ConflictSummaryEntity(
     val updatedAt: Long,
 )
 
-/**
- * On-demand conflict detail cache. Must never be treated as authoritative stable projection.
- */
+/** Complete H05 snapshot receipt stored in the existing Room 27 cache table. */
 @Entity(tableName = "conflict_detail_cache")
-data class ConflictDetailCacheEntity(
+data class ConflictSnapshotCacheEntity(
     @PrimaryKey val conflictId: String,
-    val stableRootJson: String,
-    val baseRootJson: String? = null,
-    /** Branch identities + root/media payloads for resolution UI. */
-    val branchesJson: String,
-    /** Real conflicting canonical paths only. */
-    val conflictPathsJson: String,
+    /** Fixed sentinel: the canonical snapshot lives only in [snapshotJson]. */
+    @ColumnInfo(name = "stableRootJson")
+    val legacyStableRootSentinel: String = "{}",
+    @ColumnInfo(name = "baseRootJson")
+    val legacyBaseRootSentinel: String? = null,
+    /** Canonical closed `conflict_snapshot_v2` page; the single persisted owner. */
+    @ColumnInfo(name = "branchesJson")
+    val snapshotJson: String,
+    /** Fixed sentinel; H08 owns staged multi-page schema changes, not this legacy column. */
+    @ColumnInfo(name = "conflictPathsJson")
+    val legacyConflictPathsSentinel: String = "[]",
     val cachedAt: Long,
 )
 

@@ -11,8 +11,7 @@ import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.WakeObservationDao
@@ -90,7 +89,7 @@ internal class CausalSettlement(
     private val customItemDao: CustomItemDao,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
-    private val conflictDetailCacheDao: ConflictDetailCacheDao? = null,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao? = null,
     private val mediaFiles: SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
@@ -292,7 +291,18 @@ internal class CausalSettlement(
         summary: com.lezi.babylog.sync.backend.PullConflictSummary?,
         updatedAt: Long,
     ) {
-        if (summary == null) return
+        val prior = conflictSummaryDao.listForRoot(entityType, clientUuid)
+        if (summary == null) {
+            prior.forEach { stale ->
+                conflictSnapshotCacheDao?.delete(stale.conflictId)
+                conflictSummaryDao.delete(stale.conflictId)
+            }
+            return
+        }
+        prior.filter { it.conflictId != summary.conflictId }.forEach { stale ->
+            conflictSnapshotCacheDao?.delete(stale.conflictId)
+            conflictSummaryDao.delete(stale.conflictId)
+        }
         conflictSummaryDao.upsert(
             ConflictSummaryEntity(
                 conflictId = summary.conflictId,
@@ -749,42 +759,8 @@ internal class CausalSettlement(
                 updatedAt = unit.contentEpoch,
             ),
         )
-        conflictDetailCacheDao?.upsert(
-            ConflictDetailCacheEntity(
-                conflictId = conflictId,
-                stableRootJson = result.stableRootJson,
-                baseRootJson = unit.mutation.rootJson,
-                branchesJson = buildJsonArray {
-                    add(
-                        buildJsonObject {
-                            put("branch_version_id", branchVersionId)
-                            put("mutation_id", unit.mutation.mutationId)
-                            put("root", Json.parseToJsonElement(unit.mutation.rootJson))
-                            put(
-                                "media",
-                                buildJsonArray {
-                                    unit.mutation.media.forEach { m ->
-                                        add(
-                                            buildJsonObject {
-                                                put("media_uuid", m.mediaUuid)
-                                                put("role", m.role)
-                                                put("sha256", m.sha256)
-                                                put("byte_size", m.byteSize)
-                                                put("mime", m.mime)
-                                            },
-                                        )
-                                    }
-                                },
-                            )
-                        },
-                    )
-                }.toString(),
-                conflictPathsJson = result.conflictingPaths.let { paths ->
-                    buildJsonArray { paths.forEach { add(JsonPrimitive(it)) } }.toString()
-                },
-                cachedAt = unit.contentEpoch,
-            ),
-        )
+        // A commit response is not a complete ConflictSnapshot receipt. Persist
+        // only the pull/list summary; detail is fetched and projected losslessly.
     }
 
     private suspend fun acknowledgeAccepted(unit: FrozenCausalUnit, stableVersion: String): Boolean =

@@ -2,6 +2,7 @@ package com.lezi.babylog.sync.backend
 
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.conflict.ConflictSnapshot
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
@@ -129,26 +130,6 @@ data class CausalBatchResult(
     val results: List<CausalUnitResult>,
 )
 
-/** Wire §8.1 conflict detail payload (closed keys). */
-data class ConflictDetail(
-    val conflictId: String,
-    val entityType: String,
-    val clientUuid: String,
-    val stableVersionId: String,
-    val stableRootJson: String,
-    val stableMedia: List<CausalMediaItem> = emptyList(),
-    val baseRootJson: String? = null,
-    /** JSON array of branch objects (branch_version_id, root, media, mutation_id?). */
-    val branchesJson: String = "[]",
-    val conflictingPaths: List<String> = emptyList(),
-    /** JSON object of path → frozen auto-merged value. */
-    val autoMergedJson: String = "{}",
-    val branchVersionIds: List<String> = emptyList(),
-    val kind: String = "concurrent",
-    val baseVersionId: String? = null,
-    val updatedAt: Long = 0L,
-)
-
 /** Wire §8.2 resolve request. */
 data class ConflictResolveRequest(
     val expectedStableVersion: String,
@@ -172,7 +153,7 @@ sealed class ConflictResolveResult {
     ) : ConflictResolveResult()
 
     data class CasMismatch(
-        val detail: ConflictDetail? = null,
+        val detail: ConflictSnapshot? = null,
         val summary: ConflictResolveSummary? = null,
     ) : ConflictResolveResult()
 
@@ -671,10 +652,10 @@ interface SyncBackend {
     /**
      * On-demand conflict detail (wire §8.1). Not included in ordinary pull pages.
      */
-    suspend fun fetchConflictDetail(
+    suspend fun fetchConflictSnapshot(
         session: SyncSession,
         conflictId: String,
-    ): ConflictDetail = throw UnsupportedOperationException("Conflict detail is not implemented")
+    ): ConflictSnapshot = throw UnsupportedOperationException("Conflict detail is not implemented")
 
     /**
      * CAS conflict resolution (wire §8.2). Expected stable + complete branch set required.

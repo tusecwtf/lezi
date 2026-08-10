@@ -71,7 +71,7 @@ import com.lezi.babylog.domain.calendar.SystemCalendarUpsertResult
 import com.lezi.babylog.domain.calendar.encodeSystemCalendarEventMap
 import com.lezi.babylog.domain.calendar.parseSystemCalendarEventMap
 import com.lezi.babylog.domain.carelog.CareAggregation
-import com.lezi.babylog.domain.carelog.FakeConflictDetailCacheDao
+import com.lezi.babylog.domain.carelog.FakeConflictSnapshotCacheDao
 import com.lezi.babylog.domain.carelog.FakeConflictSummaryDao
 import com.lezi.babylog.domain.carelog.FakeMediaAssetDao
 import com.lezi.babylog.domain.carelog.FakeMediaReferenceDao
@@ -290,7 +290,7 @@ internal class Fakes(
     val media = FakeMediaAssetDao()
     val timelineWindow = FakeCareReadProjectionDao(records, media, wakeObservations)
     val conflictSummaries = FakeConflictSummaryDao()
-    val conflictDetailCache = FakeConflictDetailCacheDao()
+    val conflictSnapshotCache = FakeConflictSnapshotCacheDao()
     val suspectedDuplicates = FakeSuspectedDuplicateGroupDao()
     val sourceRelations = FakeSourceRelationDao()
     val mediaReferences = FakeMediaReferenceDao()
@@ -355,7 +355,7 @@ internal class Fakes(
             fulfillmentCandidateDao = fulfillmentCandidates,
             wakeObservationDao = wakeObservations,
             conflictSummaryDao = conflictSummaries,
-            conflictDetailCacheDao = conflictDetailCache,
+            conflictSnapshotCacheDao = conflictSnapshotCache,
             suspectedDuplicateGroupDao = suspectedDuplicates,
             sourceRelationDao = sourceRelations,
             mediaReferenceDao = mediaReferences,
@@ -397,7 +397,7 @@ internal class Fakes(
         localDataMutationEpoch = localDataMutationEpoch,
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
-        conflictDetailCacheDao = conflictDetailCache,
+        conflictSnapshotCacheDao = conflictSnapshotCache,
         sourceRelationDao = sourceRelations,
         recordWakeProjectionDao = timelineWindow,
     )

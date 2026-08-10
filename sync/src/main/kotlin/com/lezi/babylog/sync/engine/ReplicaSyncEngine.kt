@@ -150,8 +150,8 @@ internal class ReplicaSyncEngine(
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
-    private val conflictDetailCacheDao:
-        com.lezi.babylog.core.database.causal.ConflictDetailCacheDao? = null,
+    private val conflictSnapshotCacheDao:
+        com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao? = null,
     private val sourceRelationDao:
         com.lezi.babylog.core.database.causal.SourceRelationDao? = null,
     /** Historical non-causal contract fixtures only; production callers must use the default. */
@@ -177,7 +177,7 @@ internal class ReplicaSyncEngine(
         customItemDao = customItemDao,
         wakeObservationDao = wakeObservationDao,
         conflictSummaryDao = conflictSummaryDao,
-        conflictDetailCacheDao = conflictDetailCacheDao,
+        conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         mediaFiles = mediaFiles,
         transactionRunner = transactionRunner,
         requireRemoteAllowed = requireRemoteAllowed,
@@ -455,6 +455,17 @@ internal class ReplicaSyncEngine(
             require(unresolved.isEmpty()) {
                 "同步数据引用尚未就绪，保留 cursor 以便重试"
             }
+            // Root projection and conflict receipt converge in this same page
+            // transaction. An explicit no-conflict entity removes every stale
+            // summary/snapshot for that root instead of leaving a ghost badge.
+            entities.filter { it.type in CAUSAL_ROOT_TYPES }.forEach { entity ->
+                causalSettlement.applyPullConflictSummary(
+                    entityType = entity.type,
+                    clientUuid = entity.clientUuid,
+                    summary = entity.conflictSummary,
+                    updatedAt = entity.updatedAt,
+                )
+            }
             // Full page applied: re-link each affected plan to the deterministic
             // authority (independent of care_plan LWW / push arrival order).
             val planUuidsForResolve = buildSet {
@@ -542,14 +553,6 @@ internal class ReplicaSyncEngine(
                 forceAuthority = false,
             )
         ) {
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "care_plan",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         val concurrentNextFeedCreate = !forceAuthority && existing != null &&
@@ -580,14 +583,6 @@ internal class ReplicaSyncEngine(
                 carePlanDao.update(existing.copy(createdByMembershipId = creator))
             }
             carePlanDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "care_plan",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         // A deterministic next-feed UUID lets the NAS choose one creator when two
@@ -719,14 +714,6 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
-        entity.conflictSummary?.let {
-            causalSettlement.applyPullConflictSummary(
-                "care_plan",
-                entity.clientUuid,
-                it,
-                entity.updatedAt,
-            )
-        }
         return true
     }
 
@@ -877,14 +864,6 @@ internal class ReplicaSyncEngine(
                 forceAuthority = false,
             )
         ) {
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "wake_observation",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         val causalVersionAdvance = !forceAuthority &&
@@ -898,14 +877,6 @@ internal class ReplicaSyncEngine(
             entity.versionId != null &&
             entity.versionId == existing.baseVersion
         if (causalSameVersion) {
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "wake_observation",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         if (!forceAuthority && !causalVersionAdvance && existing != null &&
@@ -961,14 +932,6 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
-        entity.conflictSummary?.let {
-            causalSettlement.applyPullConflictSummary(
-                "wake_observation",
-                entity.clientUuid,
-                it,
-                entity.updatedAt,
-            )
-        }
         return true
     }
 
@@ -989,14 +952,6 @@ internal class ReplicaSyncEngine(
                 forceAuthority = false,
             )
         ) {
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "custom_item",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         val causalVersionAdvance = !forceAuthority &&
@@ -1010,14 +965,6 @@ internal class ReplicaSyncEngine(
             entity.versionId != null &&
             entity.versionId == existing.baseVersion
         if (causalSameVersion) {
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "custom_item",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         // Pre-causal residual LWW only when version_id is absent or unchanged.
@@ -1058,14 +1005,6 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
-        entity.conflictSummary?.let {
-            causalSettlement.applyPullConflictSummary(
-                "custom_item",
-                entity.clientUuid,
-                it,
-                entity.updatedAt,
-            )
-        }
         return true
     }
 
@@ -1121,14 +1060,6 @@ internal class ReplicaSyncEngine(
                     forceAuthority = false,
                 )
             ) {
-                entity.conflictSummary?.let {
-                    causalSettlement.applyPullConflictSummary(
-                        "baby",
-                        entity.clientUuid,
-                        it,
-                        entity.updatedAt,
-                    )
-                }
                 return true
             }
             val causalVersionAdvance = backend.supportsCausalWire() &&
@@ -1138,14 +1069,6 @@ internal class ReplicaSyncEngine(
                 entity.versionId != null &&
                 entity.versionId == existing.baseVersion
             if (causalSameVersion) {
-                entity.conflictSummary?.let {
-                    causalSettlement.applyPullConflictSummary(
-                        "baby",
-                        entity.clientUuid,
-                        it,
-                        entity.updatedAt,
-                    )
-                }
                 return true
             }
             if (!causalVersionAdvance) {
@@ -1203,14 +1126,6 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
-        entity.conflictSummary?.let {
-            causalSettlement.applyPullConflictSummary(
-                "baby",
-                entity.clientUuid,
-                it,
-                entity.updatedAt,
-            )
-        }
         return true
     }
 
@@ -1234,14 +1149,6 @@ internal class ReplicaSyncEngine(
                 forceAuthority = false,
             )
         ) {
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "record",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         // Causal stable projection is version_id-addressed. When version_id advanced,
@@ -1264,14 +1171,6 @@ internal class ReplicaSyncEngine(
                 membershipId = wire.createdByMembershipId,
             )
             recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
-            entity.conflictSummary?.let {
-                causalSettlement.applyPullConflictSummary(
-                    "record",
-                    entity.clientUuid,
-                    it,
-                    entity.updatedAt,
-                )
-            }
             return true
         }
         if (!causalVersionAdvance) {
@@ -1331,14 +1230,6 @@ internal class ReplicaSyncEngine(
                     },
             ),
         )
-        entity.conflictSummary?.let {
-            causalSettlement.applyPullConflictSummary(
-                "record",
-                entity.clientUuid,
-                it,
-                entity.updatedAt,
-            )
-        }
         return true
     }
 

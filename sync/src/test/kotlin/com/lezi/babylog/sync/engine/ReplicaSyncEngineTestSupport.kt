@@ -34,7 +34,7 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.receiptFor
 import com.lezi.babylog.sync.MemoryBabyDao
 import com.lezi.babylog.sync.MemoryCarePlanDao
-import com.lezi.babylog.sync.MemoryConflictDetailCacheDao
+import com.lezi.babylog.sync.MemoryConflictSnapshotCacheDao
 import com.lezi.babylog.sync.MemoryConflictSummaryDao
 import com.lezi.babylog.sync.MemoryCustomItemDao
 import com.lezi.babylog.sync.MemoryFamilyDao
@@ -80,7 +80,7 @@ internal class ReplicaEngineRig(
     }
     val wakeObservations = MemoryWakeObservationDao()
     val conflictSummaries = MemoryConflictSummaryDao()
-    val conflictDetails = MemoryConflictDetailCacheDao()
+    val conflictDetails = MemoryConflictSnapshotCacheDao()
     val sourceRelations = MemorySourceRelationDao()
     var familyBabyAppliedCalls = 0
     var authorityVisibleAtCallback = false
@@ -112,7 +112,7 @@ internal class ReplicaEngineRig(
         requireRemoteAllowed = {},
         wakeObservationDao = wakeObservations,
         conflictSummaryDao = conflictSummaries,
-        conflictDetailCacheDao = conflictDetails,
+        conflictSnapshotCacheDao = conflictDetails,
         sourceRelationDao = sourceRelations,
         allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )

@@ -1451,7 +1451,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
             customItemDao = rig.customItems,
             wakeObservationDao = rig.wakeObservations,
             conflictSummaryDao = rig.conflictSummaries,
-            conflictDetailCacheDao = rig.conflictDetails,
+            conflictSnapshotCacheDao = rig.conflictDetails,
             mediaFiles = rig.mediaFiles,
             transactionRunner = rig.transactions,
             requireRemoteAllowed = {},

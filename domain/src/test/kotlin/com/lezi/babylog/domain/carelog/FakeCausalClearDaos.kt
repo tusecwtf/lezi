@@ -1,7 +1,7 @@
 package com.lezi.babylog.domain.carelog
 
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.MediaReferenceDao
@@ -112,13 +112,13 @@ internal class FakeConflictSummaryDao : ConflictSummaryDao {
     }
 }
 
-internal class FakeConflictDetailCacheDao : ConflictDetailCacheDao {
-    private val items = mutableListOf<ConflictDetailCacheEntity>()
+internal class FakeConflictSnapshotCacheDao : ConflictSnapshotCacheDao {
+    private val items = mutableListOf<ConflictSnapshotCacheEntity>()
 
-    override suspend fun get(conflictId: String): ConflictDetailCacheEntity? =
+    override suspend fun get(conflictId: String): ConflictSnapshotCacheEntity? =
         items.find { it.conflictId == conflictId }
 
-    override suspend fun upsert(entity: ConflictDetailCacheEntity) {
+    override suspend fun upsert(entity: ConflictSnapshotCacheEntity) {
         items.removeAll { it.conflictId == entity.conflictId }
         items += entity
     }

@@ -12,7 +12,7 @@ import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.MediaReferenceDao
 import com.lezi.babylog.core.database.causal.SourceRelationDao
@@ -92,7 +92,7 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
-    private val conflictDetailCacheDao: ConflictDetailCacheDao,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
     private val suspectedDuplicateGroupDao: SuspectedDuplicateGroupDao,
     private val sourceRelationDao: SourceRelationDao,
     private val mediaReferenceDao: MediaReferenceDao,
@@ -123,7 +123,7 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         // Room 27 causal care graph: always leave with records/plans.
         wakeObservationDao.deleteAll()
         conflictSummaryDao.deleteAll()
-        conflictDetailCacheDao.deleteAll()
+        conflictSnapshotCacheDao.deleteAll()
         suspectedDuplicateGroupDao.deleteAll()
         sourceRelationDao.deleteAllMembers()
         sourceRelationDao.deleteAllDeclarations()

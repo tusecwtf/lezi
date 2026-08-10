@@ -204,12 +204,12 @@ interface ConflictSummaryDao {
 }
 
 @Dao
-interface ConflictDetailCacheDao {
+interface ConflictSnapshotCacheDao {
     @Query("SELECT * FROM conflict_detail_cache WHERE conflictId = :conflictId LIMIT 1")
-    suspend fun get(conflictId: String): ConflictDetailCacheEntity?
+    suspend fun get(conflictId: String): ConflictSnapshotCacheEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(entity: ConflictDetailCacheEntity)
+    suspend fun upsert(entity: ConflictSnapshotCacheEntity)
 
     @Query("DELETE FROM conflict_detail_cache WHERE conflictId = :conflictId")
     suspend fun delete(conflictId: String)

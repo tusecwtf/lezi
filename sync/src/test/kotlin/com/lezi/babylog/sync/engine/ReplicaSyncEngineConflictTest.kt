@@ -8,6 +8,8 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -44,6 +46,45 @@ import com.lezi.babylog.sync.RecordingTransactionRunner
 import com.lezi.babylog.sync.TestMediaFileStore
 
 class ReplicaSyncEngineConflictTest {
+    @Test
+    fun recordPullWithoutConflictAtomicallyClearsSnapshotAndSummary() = runTest {
+        val session = joinedReplicaSession()
+        val rig = ReplicaEngineRig(session)
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.conflictSummaries.upsert(
+            ConflictSummaryEntity(
+                conflictId = "conflict-stale",
+                entityType = "record",
+                clientUuid = "record-clear-conflict",
+                stableVersionId = "v-old",
+                status = "open",
+                kind = "concurrent",
+                updatedAt = 100,
+            ),
+        )
+        rig.conflictDetails.upsert(
+            ConflictSnapshotCacheEntity(
+                conflictId = "conflict-stale",
+                snapshotJson = "{}",
+                cachedAt = 100,
+            ),
+        )
+
+        rig.engine.applyInitialEntities(
+            session,
+            listOf(
+                remoteReplicaRecord("record-clear-conflict").copy(
+                    versionId = "v-resolved",
+                    conflictSummary = null,
+                ),
+            ),
+        )
+
+        assertThat(rig.conflictSummaries.get("conflict-stale")).isNull()
+        assertThat(rig.conflictDetails.get("conflict-stale")).isNull()
+        assertThat(rig.records.getByClientUuid("record-clear-conflict")!!.openConflictId).isNull()
+    }
+
     @Test
     fun divergentNextFeedPlansHealToOneOpenAndReconcileBothAlarms() = runTest {
         val session = joinedReplicaSession().copy(

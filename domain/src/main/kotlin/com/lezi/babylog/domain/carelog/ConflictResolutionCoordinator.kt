@@ -6,17 +6,19 @@ import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.RecordDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.CausalMediaItem
-import com.lezi.babylog.sync.backend.ConflictDetail
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.ConflictResolveResult
+import com.lezi.babylog.sync.backend.ConflictResolveSummary
+import com.lezi.babylog.sync.conflict.ConflictOutcome
+import com.lezi.babylog.sync.conflict.ConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSnapshotProjection
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
@@ -25,11 +27,13 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 /**
  * Offline-capable conflict summary for timeline badge/list.
@@ -94,7 +98,7 @@ sealed class ConflictResolveOutcome {
  */
 internal class ConflictResolutionCoordinator(
     private val conflictSummaryDao: ConflictSummaryDao,
-    private val conflictDetailCacheDao: ConflictDetailCacheDao,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
     private val syncPort: SyncPort,
     private val recordDao: RecordDao,
     private val wakeObservationDao: WakeObservationDao,
@@ -104,6 +108,12 @@ internal class ConflictResolutionCoordinator(
     private val transactionRunner: DatabaseTransactionRunner,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
+    private val snapshotProjection = ConflictSnapshotProjection(
+        summaries = conflictSummaryDao,
+        snapshots = conflictSnapshotCacheDao,
+        transactions = transactionRunner,
+    )
+
     fun observeOpenSummaries(): Flow<List<OpenConflictSummary>> =
         conflictSummaryDao.observeOpen().map { rows -> rows.map { it.toSummary(json) } }
 
@@ -117,18 +127,17 @@ internal class ConflictResolutionCoordinator(
 
     /**
      * Load detail for resolver. Prefers fresh network detail when available;
-     * falls back to offline cache paired with [ConflictSummaryEntity] for CAS
-     * identities (stableVersionId + full branch set). Refuse empty CAS inputs.
+     * falls back to the same typed, complete snapshot persisted below the UI seam.
      */
     suspend fun loadDetail(conflictId: String, forceRefresh: Boolean = true): ConflictResolverDetail? {
         if (forceRefresh) {
-            val fetched = runCatching { syncPort.fetchConflictDetail(conflictId) }.getOrNull()
-            if (fetched != null) {
-                cacheDetail(fetched)
+            val fetched = runCatching { syncPort.fetchConflictSnapshot(conflictId) }.getOrNull()
+            if (fetched?.conflictId == conflictId) {
+                snapshotProjection.replaceComplete(fetched)
                 return fetched.toResolverDetail()
             }
         }
-        return loadCachedDetailWithSummary(conflictId)
+        return snapshotProjection.read(conflictId)?.toResolverDetail()
     }
 
     /**
@@ -188,7 +197,7 @@ internal class ConflictResolutionCoordinator(
                     }
                     // Server closed this conflict_id — drop local open rows either way.
                     conflictSummaryDao.delete(conflictId)
-                    conflictDetailCacheDao.delete(conflictId)
+                    conflictSnapshotCacheDao.delete(conflictId)
                     cleared
                 }
                 // Peers and residual projection need a full cycle (LocalWrite skips pull).
@@ -202,26 +211,41 @@ internal class ConflictResolutionCoordinator(
                 ConflictResolveOutcome.Accepted(result.stableVersionId)
             }
             is ConflictResolveResult.CasMismatch -> {
-                result.detail?.let { cacheDetail(it) }
-                result.summary?.let { summary ->
-                    conflictSummaryDao.upsert(
-                        ConflictSummaryEntity(
-                            conflictId = summary.conflictId,
-                            entityType = summary.entityType,
-                            clientUuid = summary.clientUuid,
-                            baseVersionId = summary.baseVersionId,
-                            stableVersionId = summary.stableVersionId,
-                            status = "open",
-                            kind = summary.kind,
-                            branchVersionIdsJson = encodeStringArray(summary.branchVersionIds),
-                            updatedAt = summary.updatedAt,
-                        ),
+                val detail = result.detail
+                val summary = result.summary
+                if (detail?.conflictId?.let { it != conflictId } == true ||
+                    summary?.conflictId?.let { it != conflictId } == true ||
+                    (detail != null && summary != null && !detail.matches(summary))
+                ) {
+                    return ConflictResolveOutcome.Rejected(
+                        code = "transport_mismatch",
+                        message = "服务器冲突详情与摘要不一致，请稍后重试",
                     )
                 }
+                if (detail != null) {
+                    // The projection owns both the snapshot and its derived summary atomically.
+                    snapshotProjection.replaceComplete(detail)
+                } else {
+                    summary?.let {
+                        conflictSummaryDao.upsert(
+                            ConflictSummaryEntity(
+                                conflictId = it.conflictId,
+                                entityType = it.entityType,
+                                clientUuid = it.clientUuid,
+                                baseVersionId = it.baseVersionId,
+                                stableVersionId = it.stableVersionId,
+                                status = "open",
+                                kind = it.kind,
+                                branchVersionIdsJson = encodeStringArray(it.branchVersionIds),
+                                updatedAt = it.updatedAt,
+                            ),
+                        )
+                    }
+                }
                 ConflictResolveOutcome.CasMismatch(
-                    refreshed = result.detail?.toResolverDetail()
-                        ?: loadCachedDetailWithSummary(conflictId),
-                    summary = result.summary?.let {
+                    refreshed = detail?.toResolverDetail()
+                        ?: snapshotProjection.read(conflictId)?.toResolverDetail(),
+                    summary = summary?.let {
                         OpenConflictSummary(
                             conflictId = it.conflictId,
                             entityType = it.entityType,
@@ -426,65 +450,20 @@ internal class ConflictResolutionCoordinator(
         }
     }
 
-    private suspend fun cacheDetail(detail: ConflictDetail) {
-        conflictDetailCacheDao.upsert(
-            ConflictDetailCacheEntity(
-                conflictId = detail.conflictId,
-                stableRootJson = detail.stableRootJson,
-                baseRootJson = detail.baseRootJson,
-                branchesJson = detail.branchesJson,
-                conflictPathsJson = encodeStringArray(detail.conflictingPaths),
-                cachedAt = System.currentTimeMillis(),
-            ),
-        )
-        // Keep summary CAS identities in lockstep with cached roots/paths.
-        // Wire §8.1 may omit entity_type/client_uuid; preserve prior summary when blank.
-        val prior = conflictSummaryDao.get(detail.conflictId)
-        val entityType = detail.entityType.ifBlank { prior?.entityType.orEmpty() }
-        val clientUuid = detail.clientUuid.ifBlank { prior?.clientUuid.orEmpty() }
-        if (entityType.isBlank() || clientUuid.isBlank()) {
-            return
-        }
-        conflictSummaryDao.upsert(
-            ConflictSummaryEntity(
-                conflictId = detail.conflictId,
-                entityType = entityType,
-                clientUuid = clientUuid,
-                baseVersionId = detail.baseVersionId ?: prior?.baseVersionId,
-                stableVersionId = detail.stableVersionId,
-                status = "open",
-                kind = detail.kind.ifBlank { prior?.kind ?: "concurrent" },
-                branchVersionIdsJson = encodeStringArray(detail.branchVersionIds),
-                updatedAt = detail.updatedAt.takeIf { it > 0L }
-                    ?: System.currentTimeMillis(),
-            ),
-        )
-    }
-
-    /**
-     * Pair offline cache roots with open [ConflictSummaryEntity] so resolve CAS
-     * still has stableVersionId + full branch set without Room schema migration.
-     */
-    private suspend fun loadCachedDetailWithSummary(conflictId: String): ConflictResolverDetail? {
-        val cache = conflictDetailCacheDao.get(conflictId) ?: return null
-        val summary = conflictSummaryDao.get(conflictId)?.takeIf { it.status == "open" }
-        if (summary == null || summary.stableVersionId.isBlank()) {
-            // Roots alone cannot drive wire §8.2 CAS — force a network refresh.
-            return null
-        }
-        return ConflictResolverDetail(
-            conflictId = conflictId,
-            stableVersionId = summary.stableVersionId,
-            stableRootJson = cache.stableRootJson,
-            baseRootJson = cache.baseRootJson,
-            branchesJson = cache.branchesJson,
-            conflictingPaths = decodeStringArray(cache.conflictPathsJson, json),
-            autoMergedJson = "{}",
-            branchVersionIds = decodeStringArray(summary.branchVersionIdsJson, json),
-            cachedAt = cache.cachedAt,
-        )
-    }
 }
+
+private fun ConflictSnapshot.matches(summary: ConflictResolveSummary): Boolean =
+    conflictId == summary.conflictId &&
+        entityType.wireName == summary.entityType &&
+        clientUuid == summary.clientUuid &&
+        stable.versionId == summary.stableVersionId &&
+        stable.baseVersion == summary.baseVersionId &&
+        (if (branches.isEmpty()) "tombstone_restore" else "concurrent") == summary.kind &&
+        branchVersionIds == summary.branchVersionIds &&
+        maxOf(
+            stable.receivedAt,
+            branches.maxOfOrNull { it.receivedAt } ?: Long.MIN_VALUE,
+        ) == summary.updatedAt
 
 private fun ConflictSummaryEntity.toSummary(json: Json): OpenConflictSummary =
     OpenConflictSummary(
@@ -498,18 +477,51 @@ private fun ConflictSummaryEntity.toSummary(json: Json): OpenConflictSummary =
         updatedAt = updatedAt,
     )
 
-private fun ConflictDetail.toResolverDetail(): ConflictResolverDetail =
+private fun ConflictSnapshot.toResolverDetail(): ConflictResolverDetail =
     ConflictResolverDetail(
         conflictId = conflictId,
-        stableVersionId = stableVersionId,
-        stableRootJson = stableRootJson,
-        stableMedia = stableMedia,
-        baseRootJson = baseRootJson,
-        branchesJson = branchesJson,
+        stableVersionId = stable.versionId,
+        stableRootJson = stable.root.canonical.toString(),
+        stableMedia = stable.media,
+        baseRootJson = null,
+        branchesJson = buildJsonArray {
+            branches.forEach { branch ->
+                add(
+                    buildJsonObject {
+                        put("branch_version_id", branch.versionId)
+                        put("root", branch.root.canonical)
+                        put(
+                            "media",
+                            buildJsonArray {
+                                branch.media.forEach { add(it.toJsonElement()) }
+                            },
+                        )
+                        put("deleted", branch.deleted)
+                        put("mutation_id", branch.mutationId)
+                        put("actor_id", branch.actorId)
+                        put("device_id", branch.deviceId)
+                        put("received_at", branch.receivedAt)
+                    },
+                )
+            }
+        }.toString(),
         conflictingPaths = conflictingPaths,
-        autoMergedJson = autoMergedJson,
+        autoMergedJson = buildJsonObject {
+            autoMerged.forEach { merged ->
+                put(
+                    merged.path,
+                    when (val outcome = merged.outcome) {
+                        is ConflictOutcome.Set -> outcome.value
+                        ConflictOutcome.Remove -> JsonNull
+                    },
+                )
+            }
+        }.toString(),
         branchVersionIds = branchVersionIds,
-        cachedAt = System.currentTimeMillis(),
+        cachedAt = maxOf(
+            stable.receivedAt,
+            branches.maxOfOrNull { it.receivedAt } ?: Long.MIN_VALUE,
+        ),
     )
 
 private fun encodeStringArray(values: List<String>): String =

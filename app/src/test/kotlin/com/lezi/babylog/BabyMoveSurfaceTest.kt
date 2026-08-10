@@ -14,7 +14,7 @@ import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordWakeProjectionDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.SourceRelationDao
 import com.lezi.babylog.core.database.causal.WakeObservationDao
@@ -149,7 +149,7 @@ private fun careLogWithOneVisibleBaby(babyId: Long): CareLog {
         localDataMutationEpoch = LocalDataMutationEpoch(),
         wakeObservationDao = mock(WakeObservationDao::class.java),
         conflictSummaryDao = mock(ConflictSummaryDao::class.java),
-        conflictDetailCacheDao = mock(ConflictDetailCacheDao::class.java),
+        conflictSnapshotCacheDao = mock(ConflictSnapshotCacheDao::class.java),
         sourceRelationDao = mock(SourceRelationDao::class.java),
         recordWakeProjectionDao = mock(RecordWakeProjectionDao::class.java),
     )

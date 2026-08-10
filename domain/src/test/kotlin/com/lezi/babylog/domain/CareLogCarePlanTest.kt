@@ -885,7 +885,7 @@ class CareLogCarePlanTest {
             localDataMutationEpoch = memberFakes.localDataMutationEpoch,
             wakeObservationDao = memberFakes.wakeObservations,
             conflictSummaryDao = memberFakes.conflictSummaries,
-            conflictDetailCacheDao = memberFakes.conflictDetailCache,
+            conflictSnapshotCacheDao = memberFakes.conflictSnapshotCache,
             sourceRelationDao = memberFakes.sourceRelations,
             recordWakeProjectionDao = memberFakes.timelineWindow,
         )

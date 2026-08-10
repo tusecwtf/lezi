@@ -18,7 +18,7 @@ import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.RecordWakeProjectionDao
-import com.lezi.babylog.core.database.causal.ConflictDetailCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.SourceRelationDao
 import com.lezi.babylog.core.database.causal.WakeObservationDao
@@ -179,7 +179,7 @@ class CareLog @Inject constructor(
     private val localDataMutationEpoch: LocalDataMutationEpoch,
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
-    private val conflictDetailCacheDao: ConflictDetailCacheDao,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
     private val sourceRelationDao: SourceRelationDao,
     private val recordWakeProjectionDao: RecordWakeProjectionDao,
 ) {
@@ -207,7 +207,7 @@ class CareLog @Inject constructor(
     )
     private val conflictResolutionCoordinator = ConflictResolutionCoordinator(
         conflictSummaryDao = conflictSummaryDao,
-        conflictDetailCacheDao = conflictDetailCacheDao,
+        conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         syncPort = syncPort,
         recordDao = recordDao,
         wakeObservationDao = wakeObservationDao,

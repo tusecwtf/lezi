@@ -4,7 +4,7 @@
 
 **Blocked by:** 03、04；[`external 19`](../../repository-dedup-algorithm-audit-20260809/issues/19-resolution-metadata-retention.md)
 
-**Status:** ready-for-agent
+**Status:** implemented (review/local gates pass; real-device Room acceptance residual)
 
 ## Contract slice
 
@@ -19,15 +19,37 @@
 
 ## Acceptance
 
-- [ ] scalar、`set(null)`、nested、delete/restore 与 media 无损
-- [ ] unknown/missing/type/foreign root fail closed
-- [ ] 五类 root process restart 后 domain snapshot 等价
-- [ ] cleanup 不留幽灵 conflict state
+- [x] scalar、`set(null)`、nested、delete/restore 与 media 无损
+- [x] unknown/missing/type/foreign root fail closed
+- [x] 五类 root process restart 后 domain snapshot 等价
+- [x] cleanup 不留幽灵 conflict state
 
 ## Validation
 
-- [ ] parser corpus、migration、DAO transaction 与 restart tests 通过
-- [ ] Android JVM module tests 通过
+- [x] parser corpus、production projection transaction 与 repository-restart JVM tests 通过
+- [ ] real Room instrumentation reopen/rollback test 执行（已 compile；当前无 device）
+- [x] Android JVM module tests 通过
+
+## Evidence
+
+- Base: `a5b257d2e529206e5bf42eae18d38bc22efdaa2d`; implementation is isolated in
+  `/var/tmp/zhangtianshu-tmp/lezi-causal-h05` until its single-ticket commit is integrated.
+- `sync.conflict` owns the closed codec, typed five-root model and atomic projection. HTTP binds the
+  response `conflict_id` to the requested route; Room stores one canonical `snapshotJson` while the
+  Room 27 legacy columns carry fixed sentinels. H27 still exclusively owns Room 28/schema activation.
+- Public-seam TDD: identifier/token/pointer/cardinality/domain and CAS drift tests failed first, then
+  passed after fail-closed validation and single-owner projection. The executed JVM projection test
+  round-trips exact base/provenance, scalar/nested/`set(null)`, deleted branch, `remove`, and media
+  dimensions; the real Room instrumentation test repeats exact replace/read/reopen/clear/rollback.
+- Current-tree Android gates: `./gradlew test` (872 tasks), `lintDebug`, Debug/Release assembly, and
+  app/core-database/sync/domain debug androidTest Kotlin compilation all passed.
+- Current-tree Rust gates: `cargo fmt --all -- --check`, `cargo test --locked`, and clippy with
+  `-D warnings` passed. Rust production code was not changed by H05.
+- `adb devices -l` returned no devices. The real Room instrumentation test compiled but was not
+  executed; no connected/device result is claimed. No NAS, image, package, push, CD, or live smoke was run.
+- Review: Standards fixed point `Hard 0 / Judgement 0`; Spec fixed point
+  `Hard 0 / Scope 0 / Judgement 0`. Real Room execution remains an explicit device residual rather
+  than a local pass claim.
 
 ## Out of scope
 
