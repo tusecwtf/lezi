@@ -102,6 +102,7 @@ private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
  */
 @Composable
 fun FamilyRoute(
+    onOpenConflictInbox: () -> Unit = {},
     overviewHost: AccountOverviewHost = hiltViewModel(),
     membersHost: MembersDevicesHost = hiltViewModel(),
     wizardHost: AccountFamilyWizardHost = hiltViewModel(),
@@ -416,6 +417,7 @@ fun FamilyRoute(
                         connect = ::openEndpointConnection,
                         openOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
                         dismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
+                        openConflictInbox = onOpenConflictInbox,
                     ),
                     bottomActions = AccountBottomActions(
                         openNetworkSettings = { showNetworkSettings = true },

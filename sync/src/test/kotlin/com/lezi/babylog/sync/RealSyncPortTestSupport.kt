@@ -1558,10 +1558,8 @@ internal const val TEST_APP_UPDATE_CERT_SHA256 =
 
 internal class TestPendingPublishDao(
     private val count: suspend () -> Int,
-    private val conflictCount: suspend () -> Int = { 0 },
 ) : PendingPublishDao {
     override fun observeCount(): Flow<Int> = flow { emit(count()) }
-    override fun observeOpenConflictCount(): Flow<Int> = flow { emit(conflictCount()) }
 }
 
 internal class SyncRig(
@@ -2730,15 +2728,10 @@ internal class MemoryConflictSummaryDao :
     private val items =
         mutableListOf<com.lezi.babylog.core.database.causal.ConflictSummaryEntity>()
 
-    override fun observeOpen():
+    override fun observeInboxProjection():
         kotlinx.coroutines.flow.Flow<
-            List<com.lezi.babylog.core.database.causal.ConflictSummaryEntity>,
-            > =
-        kotlinx.coroutines.flow.flowOf(items.filter { it.status == "open" })
-
-    override suspend fun listOpen():
-        List<com.lezi.babylog.core.database.causal.ConflictSummaryEntity> =
-        items.filter { it.status == "open" }
+            List<com.lezi.babylog.core.database.causal.ConflictInboxProjectionRow>,
+            > = kotlinx.coroutines.flow.flowOf(emptyList())
 
     override suspend fun get(
         conflictId: String,

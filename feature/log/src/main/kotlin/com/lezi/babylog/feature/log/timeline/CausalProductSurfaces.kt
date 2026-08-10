@@ -13,7 +13,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,9 +36,6 @@ import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.designsystem.LeziTextButtonTone
 import com.lezi.babylog.designsystem.LeziTextField
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.domain.carelog.ConflictResolverDraft
-import com.lezi.babylog.domain.carelog.ConflictResolverChoiceResult
-import com.lezi.babylog.domain.carelog.ConflictResolverPath
 import com.lezi.babylog.domain.carelog.DuplicateGroupAction
 import com.lezi.babylog.domain.carelog.SuspectedDuplicateGroup
 import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
@@ -242,138 +238,6 @@ private fun WakeObservationEditSheet(
                 modifier = Modifier.fillMaxWidth().testTag("wake_edit_confirm"),
             )
             Spacer(Modifier.height(LeziSpacing.Lg))
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-internal fun ConflictResolverSheet(
-    loading: Boolean,
-    draft: ConflictResolverDraft?,
-    error: String?,
-    submitting: Boolean,
-    onDismiss: () -> Unit,
-    onDraftChanged: (ConflictResolverDraft) -> Unit,
-    onSubmit: () -> Unit,
-) {
-    var interactionReadOnlyReason by remember(
-        draft?.model?.conflictId,
-        draft?.resolutionMutationId,
-    ) { mutableStateOf<String?>(null) }
-    ModalBottomSheet(onDismissRequest = onDismiss, modifier = Modifier.testTag("conflict_resolver_sheet")) {
-        Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(LeziSpacing.Page),
-            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-        ) {
-            Text(
-                "解决${draft?.model?.entityLabel ?: "事实"}冲突",
-                style = LeziTypography.Title,
-            )
-            Text("只列出真实冲突字段；已自动合并的内容保持不变。")
-            if (loading) Text("正在取得最新差异…", modifier = Modifier.testTag("conflict_loading"))
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("conflict_error")) }
-            draft?.let { current ->
-                (interactionReadOnlyReason ?: current.model.readOnlyReason)?.let { reason ->
-                    Text(
-                        reason,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.testTag("conflict_read_only"),
-                    )
-                }
-                current.model.versions.forEachIndexed { index, version ->
-                    LeziSurfacePanel(
-                        Modifier.fillMaxWidth()
-                            .testTag("conflict_version_$index")
-                            .semantics {
-                                contentDescription = buildString {
-                                    append(version.label)
-                                    append(if (version.deleted) "，已删除" else "，保留")
-                                    append("，${version.media.size}张照片，")
-                                    append(version.provenance)
-                                }
-                            },
-                    ) {
-                        Text(version.label, style = LeziTypography.TitleSm)
-                        Text(if (version.deleted) "已删除" else "保留", style = LeziTypography.Meta)
-                        Text("${version.media.size} 张照片 · ${version.provenance}", style = LeziTypography.Meta)
-                    }
-                }
-                if (current.model.autoMerged.isNotEmpty()) {
-                    Text("已自动合并", style = LeziTypography.TitleSm)
-                    current.model.autoMerged.forEach { outcome ->
-                        Text(
-                            "${outcome.label}：${outcome.value} · ${outcome.provenance}",
-                            style = LeziTypography.Meta,
-                            modifier = Modifier.testTag("conflict_auto_${outcome.path}"),
-                        )
-                    }
-                }
-                current.model.paths.forEach { path ->
-                    ConflictPathChooser(
-                        path = path,
-                        selected = current.selectedChoiceIds[path.path],
-                        enabled = current.canChoose,
-                        onChoose = { selectedPath, choiceId ->
-                            when (val result = current.select(selectedPath, choiceId)) {
-                                is ConflictResolverChoiceResult.Selected -> {
-                                    interactionReadOnlyReason = null
-                                    onDraftChanged(result.draft)
-                                }
-                                is ConflictResolverChoiceResult.ReadOnly -> {
-                                    interactionReadOnlyReason = result.reason
-                                }
-                            }
-                        },
-                    )
-                }
-            }
-            if (draft != null) {
-                LeziPrimaryButton(
-                    label = when {
-                        submitting -> "正在提交…"
-                        draft.submitted -> "重试同一次提交"
-                        else -> "确认解决"
-                    },
-                    enabled = draft.canSubmit && !submitting,
-                    busy = submitting,
-                    onClick = onSubmit,
-                    modifier = Modifier.fillMaxWidth().testTag("conflict_submit"),
-                )
-            }
-            Spacer(Modifier.height(LeziSpacing.Lg))
-        }
-    }
-}
-
-@Composable
-private fun ConflictPathChooser(
-    path: ConflictResolverPath,
-    selected: String?,
-    enabled: Boolean,
-    onChoose: (String, String) -> Unit,
-) {
-    LeziSurfacePanel(Modifier.fillMaxWidth().testTag("conflict_path_${path.path}")) {
-        Text(path.label, style = LeziTypography.TitleSm)
-        path.options.forEach { option ->
-            Row(
-                Modifier.fillMaxWidth().clickable(enabled = enabled) {
-                    onChoose(path.path, option.choiceId)
-                }
-                    .padding(vertical = 4.dp)
-                    .testTag("conflict_option_${path.path}_${option.choiceId}")
-                    .semantics {
-                        contentDescription =
-                            "${path.label}，${option.value}，${option.provenance}"
-                    },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(selected = selected == option.choiceId, onClick = null)
-                Column {
-                    Text(option.value)
-                    Text(option.provenance, style = LeziTypography.Meta)
-                }
-            }
         }
     }
 }

@@ -84,8 +84,6 @@ import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.carelog.DayChartCategories
 import com.lezi.babylog.domain.carelog.DayChartCategory
-import com.lezi.babylog.domain.carelog.ConflictResolveOutcome
-import com.lezi.babylog.domain.carelog.ConflictResolverDraft
 import com.lezi.babylog.domain.carelog.DuplicateGroupAction
 import com.lezi.babylog.domain.carelog.SourceRelationOutcome
 import java.time.LocalDate
@@ -106,6 +104,7 @@ fun LogRoute(
     onSelectedDayChange: (LocalDate) -> Unit,
     onMessage: (String) -> Unit = {},
     onLayoutEditModeChanged: (Boolean) -> Unit = {},
+    onOpenConflictResolver: (String) -> Unit = {},
     externalDay: LocalDate? = null,
     clock: RecordScreenClock = SystemRecordScreenClock,
     vm: LogViewModel = hiltViewModel(),
@@ -127,10 +126,6 @@ fun LogRoute(
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
     var causalDetailRecord by remember { mutableStateOf<Record?>(null) }
-    var conflictDraft by remember { mutableStateOf<ConflictResolverDraft?>(null) }
-    var conflictLoading by remember { mutableStateOf(false) }
-    var conflictSubmitting by remember { mutableStateOf(false) }
-    var conflictError by remember { mutableStateOf<String?>(null) }
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
     val timelineListState = rememberLogTimelineListState()
@@ -221,23 +216,7 @@ fun LogRoute(
     }
 
     fun openCausalDetails(record: Record) {
-        causalDetailRecord = record
-        val conflictId = record.openConflictId ?: return
-        conflictLoading = true
-        conflictError = null
-        vm.loadConflictDetail(conflictId) { load, error ->
-            conflictLoading = false
-            conflictDraft = load?.let {
-                vm.openConflictDraft(
-                    load = it,
-                    membershipId = state.currentMembershipId,
-                    isOwner = state.familyOwner,
-                    nowMillis = nowMs,
-                )
-            }
-            conflictError = error ?: "暂时无法取得冲突详情，请联网后重试"
-                .takeIf { load == null }
-        }
+        record.openConflictId?.let(onOpenConflictResolver) ?: run { causalDetailRecord = record }
     }
 
     fun duplicateOutcomeMessage(outcome: SourceRelationOutcome): String = when (outcome) {
@@ -586,62 +565,7 @@ fun LogRoute(
 
     val causalRecord = causalDetailRecord
     val causalRow = causalRecord?.let { state.recordMetadata[it.id] }
-    if (causalRecord != null && causalRecord.openConflictId != null) {
-        ConflictResolverSheet(
-            loading = conflictLoading,
-            draft = conflictDraft,
-            error = conflictError,
-            submitting = conflictSubmitting,
-            onDismiss = {
-                vm.clearConflictDraft()
-                causalDetailRecord = null
-                conflictDraft = null
-                conflictError = null
-            },
-            onDraftChanged = { draft ->
-                conflictDraft = vm.rememberConflictDraft(draft)
-            },
-            onSubmit = {
-                val draft = conflictDraft ?: return@ConflictResolverSheet
-                val frozen = runCatching { vm.freezeConflict(draft) }.getOrElse { error ->
-                    conflictError = error.message ?: "选择不完整"
-                    return@ConflictResolverSheet
-                }
-                conflictDraft = frozen
-                conflictSubmitting = true
-                conflictError = null
-                vm.resolveConflict(
-                    conflictId = frozen.model.conflictId,
-                    request = frozen.command(),
-                ) { outcome ->
-                    conflictSubmitting = false
-                    when (outcome) {
-                        is ConflictResolveOutcome.Accepted -> {
-                            causalDetailRecord = null
-                            conflictDraft = null
-                            onMessage("冲突已解决")
-                        }
-                        is ConflictResolveOutcome.RefreshRequired -> {
-                            conflictDraft = null
-                            conflictError = outcome.message
-                        }
-                        is ConflictResolveOutcome.Forbidden -> {
-                            conflictDraft = null
-                            conflictError = outcome.message
-                        }
-                        is ConflictResolveOutcome.TransportFailure -> {
-                            conflictDraft = frozen
-                            conflictError = outcome.message
-                        }
-                        is ConflictResolveOutcome.Rejected -> {
-                            conflictDraft = null
-                            conflictError = outcome.message
-                        }
-                    }
-                }
-            },
-        )
-    } else if (causalRecord != null && causalRow != null && causalRow.sleepInterval != null) {
+    if (causalRecord != null && causalRow != null && causalRow.sleepInterval != null) {
         SleepObservationSheet(
             row = causalRow,
             zone = zone,

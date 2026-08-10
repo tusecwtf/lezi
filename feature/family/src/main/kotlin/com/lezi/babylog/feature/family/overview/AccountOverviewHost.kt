@@ -64,6 +64,8 @@ data class AccountOverviewUi(
      * Null when none, not joined, up-to-date, or dismissed for this process session.
      */
     val optionalAppUpdate: AppUpdateMetadata? = null,
+    /** One item per open causal root conflict; branch count never inflates this badge. */
+    val openConflictCount: Int = 0,
 ) {
     val displayName: String get() = identity.displayName
     val enabled: Boolean get() = identity.enabled
@@ -152,10 +154,12 @@ class AccountOverviewHost @Inject constructor(
     val ui: StateFlow<AccountOverviewUi> = combine(
         baseUi,
         sync.availableOptionalAppUpdate(),
-    ) { family, optionalUpdate ->
+        careLog.observeOpenConflictInbox(),
+    ) { family, optionalUpdate, inbox ->
         // Only show the banner when the account is joined; never for offline/unjoined.
         family.copy(
             optionalAppUpdate = optionalUpdate.takeIf { family.enabled },
+            openConflictCount = inbox.count.takeIf { family.enabled } ?: 0,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AccountOverviewUi())
 

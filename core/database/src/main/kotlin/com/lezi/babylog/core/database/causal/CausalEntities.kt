@@ -74,6 +74,20 @@ data class ConflictSummaryEntity(
     val updatedAt: Long,
 )
 
+/** One bounded Room query owns the observable cross-root conflict inbox projection. */
+data class ConflictInboxProjectionRow(
+    val conflictId: String,
+    val entityType: String,
+    val clientUuid: String,
+    val updatedAt: Long,
+    val localTitle: String?,
+    val babyLabel: String?,
+    val localActorId: String?,
+    val localTombstone: Boolean?,
+    val localMediaCount: Int,
+    val snapshotJson: String?,
+)
+
 /** Complete H05 snapshot receipt stored in the existing Room 27 cache table. */
 @Entity(tableName = "conflict_detail_cache")
 data class ConflictSnapshotCacheEntity(

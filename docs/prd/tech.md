@@ -99,7 +99,7 @@ sideways seam（非分层违规；完整边表见 §2.2）。feature 之间无 `
 | 模块 | 根 façade / 壳 | 已落地子包 |
 |------|----------------|------------|
 | `:feature:log` | `LogScreen` / `LogViewModel` / `LogDialogHost` | `timeline/`、`dock/`、`composer/`、`layout/`、`photo/` |
-| `:feature:family` | `FamilyScreen` 导航壳 | `overview/`、`members/`、`wizard/`、`baby/`、`components/` |
+| `:feature:family` | `FamilyScreen` 导航壳 | `overview/`、`members/`、`wizard/`、`baby/`、`components/`、`conflict/`（app-shell 共享 inbox/resolver route） |
 | `:feature:onboarding` | 导航壳 | wizard 步态与 QR UI 与 Family 向导逻辑对齐（薄壳 + 步态包） |
 | `:feature:settings` | Settings 入口 | `calendar/`、`record/` |
 | `:core:database` | `LeziDatabase` / DAO / DI 入口 | `causal/`、`fulfillment/`（事务自持的履行权威派生结算） |
@@ -119,7 +119,7 @@ seam）。**不得**为迎合文档而静默删改 Gradle 边；亦不得在文�
 | `app → sync` | composition root：前台生命周期 / `ForegroundState`、强制更新壳、`SyncPort` 注入、本地数据升级相关凭证存储 |
 | `domain → sync` | CareLog 与协调器：本地写后的同步触发、家庭向导网关、会话/角色、本机清空与家庭权威回调 |
 | `feature:log → sync` | 时间轴下拉刷新触发 sync；记录/计划本地发布文案 |
-| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理、可选更新横幅与退出 |
+| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理、可选更新横幅与退出；共享冲突 resolver 会话/ACL |
 | `feature:onboarding → sync` | 引导内连接家庭服务器、TOFU / 成员登录 QR、setup probe |
 | `feature:growth → sync` | 成长页下拉刷新触发 sync |
 | `feature:settings → sync` | 关于区检查更新 / 安装更新与相关文案 |

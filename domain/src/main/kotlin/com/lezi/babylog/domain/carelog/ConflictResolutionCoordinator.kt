@@ -3,7 +3,6 @@ package com.lezi.babylog.domain.carelog
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
-import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
@@ -12,27 +11,9 @@ import com.lezi.babylog.sync.conflict.ConflictSnapshot
 import com.lezi.babylog.sync.conflict.ConflictSnapshotCodec
 import com.lezi.babylog.sync.conflict.ConflictSnapshotProjection
 import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
+import com.lezi.babylog.sync.conflict.ConflictRootType
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonPrimitive
-
-/**
- * Offline-capable conflict summary for timeline badge/list.
- * Not a second stable fact — only a presentation handle into detail/resolve.
- */
-data class OpenConflictSummary(
-    val conflictId: String,
-    val entityType: String,
-    val clientUuid: String,
-    val stableVersionId: String,
-    val baseVersionId: String? = null,
-    val kind: String,
-    val branchVersionIds: List<String> = emptyList(),
-    val updatedAt: Long,
-)
+import kotlinx.coroutines.flow.combine
 
 data class ConflictResolverLoad(
     val snapshot: ConflictSnapshot,
@@ -70,7 +51,6 @@ internal class ConflictResolutionCoordinator(
     private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
     private val syncPort: SyncPort,
     private val transactionRunner: DatabaseTransactionRunner,
-    private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     private val snapshotProjection = ConflictSnapshotProjection(
         summaries = conflictSummaryDao,
@@ -78,16 +58,61 @@ internal class ConflictResolutionCoordinator(
         transactions = transactionRunner,
     )
 
-    fun observeOpenSummaries(): Flow<List<OpenConflictSummary>> =
-        conflictSummaryDao.observeOpen().map { rows -> rows.map { it.toSummary(json) } }
-
-    suspend fun listOpenSummaries(): List<OpenConflictSummary> =
-        conflictSummaryDao.listOpen().map { it.toSummary(json) }
-
-    suspend fun summaryForRoot(entityType: String, clientUuid: String): OpenConflictSummary? =
-        conflictSummaryDao.listForRoot(entityType, clientUuid)
-            .firstOrNull { it.status == "open" }
-            ?.toSummary(json)
+    fun observeInbox(): Flow<ConflictInbox> = combine(
+        conflictSummaryDao.observeInboxProjection(),
+        syncPort.familyMemberDirectory(),
+    ) { rows, members ->
+        val actorNames = members.asSequence()
+            .map { it.membershipId.trim() to it.displayName.trim() }
+            .filter { (membershipId, displayName) -> membershipId.isNotEmpty() && displayName.isNotEmpty() }
+            .toMap()
+        val items = rows.mapNotNull { row ->
+            val rootType = runCatching { ConflictRootType.fromWire(row.entityType) }.getOrNull()
+                ?: return@mapNotNull null
+            val snapshot = row.snapshotJson
+                ?.let { runCatching { ConflictSnapshotCodec.decode(it) }.getOrNull() }
+                ?.takeIf {
+                    it.conflictId == row.conflictId &&
+                        it.entityType == rootType &&
+                        it.clientUuid == row.clientUuid
+                }
+            val stableRoot = snapshot?.stable?.root
+            val actorId = snapshot?.stable?.actorId?.ifBlank { stableRoot?.actorId().orEmpty() }
+                ?: row.localActorId.orEmpty()
+            val actor = actorId.takeIf(String::isNotBlank)?.let { membershipId ->
+                ConflictInboxActor.Known(
+                    membershipId = membershipId,
+                    label = actorNames[membershipId]
+                        ?.takeIf(String::isNotBlank)
+                        ?: membershipId,
+                )
+            } ?: ConflictInboxActor.RequiresDetail
+            val media = snapshot?.let { complete ->
+                ConflictInboxMedia.Known(
+                    totalCount = (complete.stable.media + complete.branches.flatMap { it.media })
+                        .distinctBy { it.mediaUuid }
+                        .size,
+                )
+            } ?: ConflictInboxMedia.RequiresDetail(row.localMediaCount)
+            ConflictInboxItem(
+                conflictId = row.conflictId,
+                rootType = rootType,
+                clientUuid = row.clientUuid,
+                rootLabel = rootType.presentationLabel(),
+                title = stableRoot?.presentationTitle(row.clientUuid)
+                    ?: localConflictTitle(rootType, row.localTitle, row.clientUuid),
+                babyLabel = row.babyLabel,
+                actor = actor,
+                stableTombstone = snapshot?.stable?.deleted ?: row.localTombstone,
+                branchTombstone = snapshot?.let {
+                    ConflictInboxBranchTombstone.Known(it.branches.any { branch -> branch.deleted })
+                } ?: ConflictInboxBranchTombstone.RequiresDetail,
+                media = media,
+                updatedAt = row.updatedAt,
+            )
+        }
+        ConflictInbox(items)
+    }
 
     /**
      * Load detail for resolver. Prefers fresh network detail when available;
@@ -210,27 +235,6 @@ internal class ConflictResolutionCoordinator(
         }
     }
 
-}
-
-private fun ConflictSummaryEntity.toSummary(json: Json): OpenConflictSummary =
-    OpenConflictSummary(
-        conflictId = conflictId,
-        entityType = entityType,
-        clientUuid = clientUuid,
-        stableVersionId = stableVersionId,
-        baseVersionId = baseVersionId,
-        kind = kind,
-        branchVersionIds = decodeStringArray(branchVersionIdsJson, json),
-        updatedAt = updatedAt,
-    )
-
-private fun decodeStringArray(raw: String, json: Json): List<String> {
-    if (raw.isBlank()) return emptyList()
-    return runCatching {
-        json.parseToJsonElement(raw).jsonArray.mapNotNull { el ->
-            el.jsonPrimitive.contentOrNull
-        }
-    }.getOrDefault(emptyList())
 }
 
 private fun terminalMessage(code: String): String = when (code) {

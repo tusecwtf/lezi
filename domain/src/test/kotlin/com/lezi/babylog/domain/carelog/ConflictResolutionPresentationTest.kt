@@ -325,7 +325,7 @@ private fun coordinator(
     transactionRunner = RecordingTransactionRunner(),
 )
 
-private fun recordConflictSnapshot(): ConflictSnapshot {
+internal fun recordConflictSnapshot(): ConflictSnapshot {
     fun root(note: String) = ConflictRoot.Record(
         babyClientUuid = TEST_BABY_UUID,
         type = "formula",

@@ -69,6 +69,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -110,6 +111,8 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.carelog.babyAgeLabel
 import com.lezi.babylog.feature.export.ExportRoute
+import com.lezi.babylog.feature.family.conflict.ConflictInboxRoute
+import com.lezi.babylog.feature.family.conflict.ConflictResolverRoute
 import com.lezi.babylog.feature.family.FamilyRoute
 import com.lezi.babylog.feature.growth.GrowthRoute
 import com.lezi.babylog.feature.log.composer.ComposerCreateIntent
@@ -765,6 +768,32 @@ private enum class TopDest(
     Settings("settings", "菜单", Icons.Filled.MoreHoriz, Icons.Outlined.MoreHoriz),
 }
 
+internal data class ConflictOverlayState(
+    val inboxVisible: Boolean = false,
+    val resolverConflictId: String? = null,
+) {
+    fun openInbox() = ConflictOverlayState(inboxVisible = true)
+
+    fun openResolver(conflictId: String): ConflictOverlayState {
+        require(conflictId.isNotBlank())
+        return ConflictOverlayState(resolverConflictId = conflictId)
+    }
+
+    fun dismissInbox() = copy(inboxVisible = false)
+
+    fun dismissResolver() = copy(resolverConflictId = null)
+}
+
+private val ConflictOverlayStateSaver = listSaver<ConflictOverlayState, String>(
+    save = { listOf(if (it.inboxVisible) "1" else "0", it.resolverConflictId.orEmpty()) },
+    restore = { values ->
+        ConflictOverlayState(
+            inboxVisible = values.firstOrNull() == "1",
+            resolverConflictId = values.getOrNull(1)?.ifEmpty { null },
+        )
+    },
+)
+
 internal data class RootChromeVisibility(
     val showTopBar: Boolean,
     val showBottomBar: Boolean,
@@ -926,6 +955,9 @@ private fun LeziMainScaffold(
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
+    var conflictOverlay by rememberSaveable(stateSaver = ConflictOverlayStateSaver) {
+        mutableStateOf(ConflictOverlayState())
+    }
     // Shell chrome / nav transitions — capture outside non-@Composable transitionSpec.
     val shellBaseMs = leziMotionMillis(LeziMotion.Base)
     val shellFastMs = leziMotionMillis(LeziMotion.Fast)
@@ -1218,12 +1250,13 @@ private fun LeziMainScaffold(
                     onMessage = { message ->
                         scope.launch { snackbar.showSnackbar(message) }
                     },
+                    onOpenConflictResolver = { conflictOverlay = conflictOverlay.openResolver(it) },
                 )
             }
             composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
             composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
             composable(TopDest.Family.route) {
-                FamilyRoute()
+                FamilyRoute(onOpenConflictInbox = { conflictOverlay = conflictOverlay.openInbox() })
             }
             composable(TopDest.Settings.route) {
                 SettingsRoute(
@@ -1395,6 +1428,26 @@ private fun LeziMainScaffold(
                 showHeaderCalendar = false
             },
             onDismiss = { showHeaderCalendar = false },
+        )
+    }
+
+    if (conflictOverlay.inboxVisible) {
+        ConflictInboxRoute(
+            onDismiss = { conflictOverlay = conflictOverlay.dismissInbox() },
+            onOpenConflict = { conflictId ->
+                conflictOverlay = conflictOverlay.openResolver(conflictId)
+            },
+        )
+    }
+
+    conflictOverlay.resolverConflictId?.let { conflictId ->
+        ConflictResolverRoute(
+            conflictId = conflictId,
+            onDismiss = { conflictOverlay = conflictOverlay.dismissResolver() },
+            onResolved = {
+                conflictOverlay = conflictOverlay.dismissResolver()
+                scope.launch { snackbar.showSnackbar("冲突已解决") }
+            },
         )
     }
 }

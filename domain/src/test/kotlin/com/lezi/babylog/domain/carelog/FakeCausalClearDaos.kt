@@ -2,6 +2,7 @@ package com.lezi.babylog.domain.carelog
 
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictInboxProjectionRow
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.MediaReferenceDao
@@ -82,12 +83,13 @@ internal class FakeWakeObservationDao : WakeObservationDao {
 
 internal class FakeConflictSummaryDao : ConflictSummaryDao {
     private val items = mutableListOf<ConflictSummaryEntity>()
+    private var inboxRows = emptyList<ConflictInboxProjectionRow>()
 
-    override fun observeOpen(): Flow<List<ConflictSummaryEntity>> =
-        flowOf(items.filter { it.status == "open" })
+    override fun observeInboxProjection(): Flow<List<ConflictInboxProjectionRow>> = flowOf(inboxRows)
 
-    override suspend fun listOpen(): List<ConflictSummaryEntity> =
-        items.filter { it.status == "open" }
+    fun setInboxRows(rows: List<ConflictInboxProjectionRow>) {
+        inboxRows = rows
+    }
 
     override suspend fun get(conflictId: String): ConflictSummaryEntity? =
         items.find { it.conflictId == conflictId }

@@ -67,6 +67,27 @@ class FamilyAccountAffordanceSemanticsTest {
     }
 
     @Test
+    fun joinedSyncEntryExposesConflictCountAndRoutesToSharedInbox() {
+        var opened = false
+        compose.setContent {
+            LeziTheme {
+                FamilySyncStatusEntry(
+                    statusLabel = "同步正常",
+                    isError = false,
+                    openConflictCount = 3,
+                    isJoined = true,
+                    onOpenConflictInbox = { opened = true },
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription("家庭同步冲突，3项待处理，打开冲突收件箱")
+            .assertTextContains("冲突 3")
+            .performClick()
+        compose.runOnIdle { assertThat(opened).isTrue() }
+    }
+
+    @Test
     fun accountPageOrdersFamilyBeforeBabiesAndKeepsAccountActionsAtTheBottom() {
         val baby = Baby(
             id = 1,

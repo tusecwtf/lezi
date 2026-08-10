@@ -390,14 +390,6 @@ private fun ConflictRoot.authorMembershipId(): String = when (this) {
     is ConflictRoot.WakeObservation -> observerMembershipId
 }
 
-private fun ConflictRootType.presentationLabel(): String = when (this) {
-    ConflictRootType.Baby -> "宝宝资料"
-    ConflictRootType.Record -> "护理记录"
-    ConflictRootType.CarePlan -> "护理计划"
-    ConflictRootType.CustomItem -> "自定义项目"
-    ConflictRootType.WakeObservation -> "醒来观察"
-}
-
 private class ConflictFieldLabels private constructor(
     private val labels: Map<String, String>,
 ) {

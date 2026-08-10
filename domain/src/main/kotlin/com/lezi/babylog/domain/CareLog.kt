@@ -743,16 +743,10 @@ class CareLog @Inject constructor(
     suspend fun canSelectEffectiveWakeObservation(sleepRecordClientUuid: String): Boolean =
         wakeObservationCoordinator.canSelectEffectiveWake(sleepRecordClientUuid)
 
-    // --- Causal conflict badge / resolver (ticket 06) ---
+    // --- Causal conflict inbox / resolver ---
 
-    fun observeOpenConflictSummaries(): Flow<List<com.lezi.babylog.domain.carelog.OpenConflictSummary>> =
-        conflictResolutionCoordinator.observeOpenSummaries()
-
-    suspend fun listOpenConflictSummaries(): List<com.lezi.babylog.domain.carelog.OpenConflictSummary> =
-        conflictResolutionCoordinator.listOpenSummaries()
-
-    suspend fun conflictSummaryForRecord(clientUuid: String): com.lezi.babylog.domain.carelog.OpenConflictSummary? =
-        conflictResolutionCoordinator.summaryForRoot("record", clientUuid)
+    fun observeOpenConflictInbox(): Flow<com.lezi.babylog.domain.carelog.ConflictInbox> =
+        conflictResolutionCoordinator.observeInbox()
 
     suspend fun loadConflictDetail(
         conflictId: String,

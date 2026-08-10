@@ -49,25 +49,4 @@ interface PendingPublishDao {
         """,
     )
     fun observeCount(): Flow<Int>
-
-    /**
-     * Unresolved conflicts are distinct from publish-pending dirty units.
-     * Product pending indicators must not treat these as infinite push work.
-     */
-    @Query(
-        """
-        SELECT COUNT(*) FROM (
-            SELECT openConflictId FROM babies WHERE openConflictId IS NOT NULL
-            UNION ALL
-            SELECT openConflictId FROM records WHERE openConflictId IS NOT NULL
-            UNION ALL
-            SELECT openConflictId FROM care_plans WHERE openConflictId IS NOT NULL
-            UNION ALL
-            SELECT openConflictId FROM custom_items WHERE openConflictId IS NOT NULL
-            UNION ALL
-            SELECT openConflictId FROM wake_observations WHERE openConflictId IS NOT NULL
-        )
-        """,
-    )
-    fun observeOpenConflictCount(): Flow<Int>
 }

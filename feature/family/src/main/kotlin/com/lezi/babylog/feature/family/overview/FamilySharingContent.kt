@@ -83,6 +83,7 @@ internal fun FamilySharingContent(
     onConnectFamily: () -> Unit,
     onOpenOptionalAppUpdate: (AppUpdateMetadata) -> Unit = {},
     onDismissOptionalAppUpdate: (versionCode: Int) -> Unit = {},
+    onOpenConflictInbox: () -> Unit = {},
 ) {
     val connection = familyAccountConnectionPresentation(
         isJoined = overview.enabled,
@@ -163,6 +164,9 @@ internal fun FamilySharingContent(
                 ShallowSyncState.ReauthRequired,
             ),
             modifier = Modifier.testTag("account_shallow_sync_status"),
+            openConflictCount = overview.openConflictCount,
+            isJoined = overview.enabled,
+            onOpenConflictInbox = onOpenConflictInbox,
         )
     }
 
@@ -309,16 +313,65 @@ internal fun FamilySyncStatusEntry(
     statusLabel: String,
     isError: Boolean,
     modifier: Modifier = Modifier,
+    openConflictCount: Int = 0,
+    isJoined: Boolean = false,
+    onOpenConflictInbox: () -> Unit = {},
 ) {
-    Text(
-        statusLabel,
-        style = LeziTypography.Meta,
-        color = if (isError) {
-            MaterialTheme.colorScheme.error
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        },
-        modifier = modifier.fillMaxWidth(),
+    val conflict = familyConflictBadgePresentation(isJoined, openConflictCount)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            statusLabel,
+            style = LeziTypography.Meta,
+            color = if (isError) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = modifier.weight(1f),
+        )
+        if (conflict.visible) {
+            Surface(
+                modifier = Modifier
+                    .heightIn(min = LeziSpacing.Touch)
+                    .clickable(
+                        role = Role.Button,
+                        onClickLabel = "打开冲突收件箱",
+                        onClick = onOpenConflictInbox,
+                    )
+                    .semantics { contentDescription = conflict.contentDescription }
+                    .testTag("family_conflict_inbox_badge"),
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ) {
+                Text(
+                    "冲突 ${conflict.badgeText}",
+                    style = LeziTypography.Label,
+                    modifier = Modifier.padding(horizontal = LeziSpacing.Sm),
+                )
+            }
+        }
+    }
+}
+
+internal data class FamilyConflictBadgePresentation(
+    val visible: Boolean,
+    val badgeText: String,
+    val contentDescription: String,
+)
+
+internal fun familyConflictBadgePresentation(
+    isJoined: Boolean,
+    openRootCount: Int,
+): FamilyConflictBadgePresentation {
+    val count = openRootCount.coerceAtLeast(0)
+    return FamilyConflictBadgePresentation(
+        visible = isJoined && count > 0,
+        badgeText = if (count > 99) "99+" else count.toString(),
+        contentDescription = "家庭同步冲突，${count}项待处理，打开冲突收件箱",
     )
 }
 
