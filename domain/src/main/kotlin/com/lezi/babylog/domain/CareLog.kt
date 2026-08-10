@@ -209,11 +209,6 @@ class CareLog @Inject constructor(
         conflictSummaryDao = conflictSummaryDao,
         conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         syncPort = syncPort,
-        recordDao = recordDao,
-        wakeObservationDao = wakeObservationDao,
-        babyDao = babyDao,
-        carePlanDao = carePlanDao,
-        customItemDao = customItemDao,
         transactionRunner = transactionRunner,
     )
     private val sourceRelationCoordinator = SourceRelationCoordinator(
@@ -762,26 +757,16 @@ class CareLog @Inject constructor(
     suspend fun loadConflictDetail(
         conflictId: String,
         forceRefresh: Boolean = true,
-    ): com.lezi.babylog.domain.carelog.ConflictResolverDetail? =
+    ): com.lezi.babylog.domain.carelog.ConflictResolverLoad? =
         conflictResolutionCoordinator.loadDetail(conflictId, forceRefresh)
 
     suspend fun resolveConflict(
         conflictId: String,
-        expectedStableVersion: String,
-        expectedBranchVersions: List<String>,
-        resolvedRootJson: String,
-        resolvedMedia: List<com.lezi.babylog.sync.backend.CausalMediaItem> = emptyList(),
-        conflictChoices: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
-        resolutionMutationId: String = newClientUuid(),
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
     ): com.lezi.babylog.domain.carelog.ConflictResolveOutcome =
         conflictResolutionCoordinator.resolve(
             conflictId = conflictId,
-            expectedStableVersion = expectedStableVersion,
-            expectedBranchVersions = expectedBranchVersions,
-            resolvedRootJson = resolvedRootJson,
-            resolvedMedia = resolvedMedia,
-            conflictChoices = conflictChoices,
-            resolutionMutationId = resolutionMutationId,
+            request = request,
         )
 
     // --- Suspected duplicates + source relations (ticket 07) ---

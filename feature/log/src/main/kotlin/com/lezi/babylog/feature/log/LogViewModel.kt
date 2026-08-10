@@ -1,6 +1,8 @@
 package com.lezi.babylog.feature.log
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
@@ -95,6 +97,7 @@ class LogViewModel @Inject constructor(
     private val settingsStore: SettingsStore,
     private val syncPort: SyncPort,
     private val timelineWindowRepository: TimelineWindowRepository,
+    savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
     private val initialScreenTime = SystemRecordScreenClock.snapshot()
     private val screenTimeFlow = MutableStateFlow(initialScreenTime)
@@ -113,6 +116,7 @@ class LogViewModel @Inject constructor(
     internal val timelineInteraction: StateFlow<TimelineInteractionState> =
         timelineInteractionState.asStateFlow()
     private val refreshing = MutableStateFlow(false)
+    private val conflictResolverSessionState = ConflictResolverSessionState(savedStateHandle)
     private val deviceLayoutWriter = DeviceLayoutSnapshotWriter(viewModelScope) { snapshot ->
         settingsStore.setDeviceLayoutSnapshot(snapshot)
     }
@@ -366,7 +370,7 @@ class LogViewModel @Inject constructor(
     fun loadConflictDetail(
         conflictId: String,
         forceRefresh: Boolean = true,
-        onDone: (com.lezi.babylog.domain.carelog.ConflictResolverDetail?, String?) -> Unit,
+        onDone: (com.lezi.babylog.domain.carelog.ConflictResolverLoad?, String?) -> Unit,
     ) {
         viewModelScope.launch {
             val result = runCatching { careLog.loadConflictDetail(conflictId, forceRefresh) }
@@ -377,26 +381,57 @@ class LogViewModel @Inject constructor(
         }
     }
 
+    fun openConflictDraft(
+        load: com.lezi.babylog.domain.carelog.ConflictResolverLoad,
+        membershipId: String,
+        isOwner: Boolean,
+        nowMillis: Long,
+    ): com.lezi.babylog.domain.carelog.ConflictResolverDraft {
+        val draft = com.lezi.babylog.domain.carelog.ConflictResolverDraft.open(
+            snapshot = load.snapshot,
+            audience = com.lezi.babylog.domain.carelog.ConflictResolverAudience(
+                membershipId = membershipId,
+                isOwner = isOwner,
+            ),
+            fetchedOnline = load.fetchedOnline,
+            nowMillis = nowMillis,
+            restored = conflictResolverSessionState.restore(load.snapshot.conflictId),
+            resolutionMutationId = newClientUuid(),
+            clock = System::currentTimeMillis,
+        )
+        conflictResolverSessionState.persist(draft.savedState())
+        return draft
+    }
+
+    fun rememberConflictDraft(
+        draft: com.lezi.babylog.domain.carelog.ConflictResolverDraft,
+    ): com.lezi.babylog.domain.carelog.ConflictResolverDraft =
+        draft.also {
+            conflictResolverSessionState.persist(it.savedState())
+        }
+
+    fun freezeConflict(
+        draft: com.lezi.babylog.domain.carelog.ConflictResolverDraft,
+    ): com.lezi.babylog.domain.carelog.ConflictResolverDraft =
+        (if (draft.submitted) draft else draft.freeze()).also {
+            conflictResolverSessionState.persist(it.savedState())
+        }
+
+    fun clearConflictDraft() {
+        conflictResolverSessionState.clear()
+    }
+
     fun resolveConflict(
         conflictId: String,
-        expectedStableVersion: String,
-        expectedBranchVersions: List<String>,
-        resolvedRootJson: String,
-        resolvedMedia: List<com.lezi.babylog.sync.backend.CausalMediaItem>,
-        conflictChoices: Map<String, kotlinx.serialization.json.JsonElement>,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
         onDone: (com.lezi.babylog.domain.carelog.ConflictResolveOutcome) -> Unit,
     ) {
         viewModelScope.launch {
-            onDone(
-                careLog.resolveConflict(
-                    conflictId = conflictId,
-                    expectedStableVersion = expectedStableVersion,
-                    expectedBranchVersions = expectedBranchVersions,
-                    resolvedRootJson = resolvedRootJson,
-                    resolvedMedia = resolvedMedia,
-                    conflictChoices = conflictChoices,
-                ),
-            )
+            val outcome = careLog.resolveConflict(conflictId, request)
+            if (outcome !is com.lezi.babylog.domain.carelog.ConflictResolveOutcome.TransportFailure) {
+                conflictResolverSessionState.clear()
+            }
+            onDone(outcome)
         }
     }
 

@@ -9,12 +9,11 @@ import java.net.ServerSocket
 import kotlin.concurrent.thread
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Test
 
 /**
  * Wire §8.1/§8.2 golden paths on [HttpSyncBackend]: GET detail and POST resolve
- * against closed keys (resolved + cas_mismatch), not only NoOp defaults.
+ * against the accepted/rejected closed terminals, not only NoOp defaults.
  */
 class HttpSyncBackendConflictWireTest {
     @Test
@@ -173,14 +172,26 @@ class HttpSyncBackendConflictWireTest {
     }
 
     @Test
-    fun resolveConflict_acceptedParsesStableRootAndMedia() = runTest {
+    fun resolveConflict_sendsChoiceOnlyCommandAndParsesAcceptedTerminal() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = mutableListOf<String>()
         val body = """
             {
-              "status":"resolved",
+              "status":"accepted",
+              "resolution_mutation_id":"00000000-0000-0000-0000-000000000020",
               "stable_version_id":"v-resolved",
-              "stable_root":{"note":"chosen","timestamp":100},
+              "stable_root":{
+                "baby_client_uuid":"00000000-0000-0000-0000-000000000002",
+                "type":"formula",
+                "custom_item_client_uuid":null,
+                "timestamp":100,
+                "end_timestamp":null,
+                "note":"chosen",
+                "payload_json":{"amount_ml":60},
+                "schema_version":2,
+                "updated_at":120,
+                "created_by_membership_id":"member-a"
+              },
               "stable_media":[
                 {
                   "media_uuid":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -191,7 +202,8 @@ class HttpSyncBackendConflictWireTest {
                   "width":1,
                   "height":1
                 }
-              ]
+              ],
+              "replay":false
             }
         """.trimIndent().toByteArray(Charsets.UTF_8)
         val responder = thread(name = "lezi-conflict-resolve-ok") {
@@ -215,12 +227,12 @@ class HttpSyncBackendConflictWireTest {
                 session = testSession(server),
                 conflictId = "c-1",
                 request = ConflictResolveRequest(
-                    expectedStableVersion = "v-stable",
-                    expectedBranchVersions = listOf("b-2", "b-1"),
-                    resolvedRootJson = """{"note":"chosen","timestamp":100}""",
-                    resolvedMedia = emptyList(),
-                    resolutionMutationId = "res-1",
-                    conflictChoices = mapOf("/note" to JsonPrimitive("chosen")),
+                    snapshotToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    resolutionMutationId = "00000000-0000-0000-0000-000000000020",
+                    choices = listOf(
+                        ConflictResolutionChoice("/note", NOTE_CHOICE_ID),
+                        ConflictResolutionChoice("/timestamp", TIMESTAMP_CHOICE_ID),
+                    ),
                 ),
             )
             assertThat(result).isInstanceOf(ConflictResolveResult.Accepted::class.java)
@@ -230,12 +242,26 @@ class HttpSyncBackendConflictWireTest {
             assertThat(accepted.stableMedia).hasSize(1)
             assertThat(accepted.stableMedia.single().mediaUuid)
                 .isEqualTo("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+            assertThat(accepted.resolutionMutationId)
+                .isEqualTo("00000000-0000-0000-0000-000000000020")
+            assertThat(accepted.replay).isFalse()
             val request = captured.single()
             assertThat(request.lineSequence().first())
                 .startsWith("POST /v1/conflicts/c-1/resolve ")
-            // Branch set is sorted on the wire.
-            assertThat(request).contains(""""expected_branch_versions":["b-1","b-2"]""")
-            assertThat(request).contains(""""resolution_mutation_id":"res-1"""")
+            assertThat(request).contains(
+                """"snapshot_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"""",
+            )
+            assertThat(request).contains(
+                """"resolution_mutation_id":"00000000-0000-0000-0000-000000000020"""",
+            )
+            assertThat(request).contains(
+                """"choices":[{"path":"/note","choice_id":"$NOTE_CHOICE_ID"},{"path":"/timestamp","choice_id":"$TIMESTAMP_CHOICE_ID"}]""",
+            )
+            assertThat(request).doesNotContain("expected_stable_version")
+            assertThat(request).doesNotContain("expected_branch_versions")
+            assertThat(request).doesNotContain("resolved_root")
+            assertThat(request).doesNotContain("resolved_media")
+            assertThat(request).doesNotContain("conflict_choices")
         } finally {
             server.close()
             responder.join(2_000)
@@ -243,19 +269,13 @@ class HttpSyncBackendConflictWireTest {
     }
 
     @Test
-    fun resolveConflict_casMismatchParsesSummary() = runTest {
+    fun resolveConflict_parsesClosedRejectedTerminal() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val body = """
             {
-              "status":"cas_mismatch",
-              "code":"cas_mismatch",
-              "conflict_summary":{
-                "conflict_id":"c-1",
-                "entity_type":"record",
-                "client_uuid":"r-1",
-                "stable_version_id":"v-new",
-                "branch_version_ids":["b-9"]
-              }
+              "status":"rejected",
+              "resolution_mutation_id":"00000000-0000-0000-0000-000000000021",
+              "error":{"code":"snapshot_stale","retryable":false}
             }
         """.trimIndent().toByteArray(Charsets.UTF_8)
         val responder = thread(name = "lezi-conflict-resolve-cas") {
@@ -279,20 +299,126 @@ class HttpSyncBackendConflictWireTest {
                 session = testSession(server),
                 conflictId = "c-1",
                 request = ConflictResolveRequest(
-                    expectedStableVersion = "v-old",
-                    expectedBranchVersions = listOf("b-1"),
-                    resolvedRootJson = """{"note":"x"}""",
-                    resolutionMutationId = "res-cas",
+                    snapshotToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    resolutionMutationId = "00000000-0000-0000-0000-000000000021",
+                    choices = listOf(ConflictResolutionChoice("/note", NOTE_CHOICE_ID)),
                 ),
             )
-            assertThat(result).isInstanceOf(ConflictResolveResult.CasMismatch::class.java)
-            val cas = result as ConflictResolveResult.CasMismatch
-            assertThat(cas.summary!!.stableVersionId).isEqualTo("v-new")
-            assertThat(cas.summary!!.branchVersionIds).containsExactly("b-9")
-            assertThat(cas.summary!!.entityType).isEqualTo("record")
+            assertThat(result).isInstanceOf(ConflictResolveResult.Rejected::class.java)
+            val rejected = result as ConflictResolveResult.Rejected
+            assertThat(rejected.code).isEqualTo("snapshot_stale")
+            assertThat(rejected.resolutionMutationId)
+                .isEqualTo("00000000-0000-0000-0000-000000000021")
+            assertThat(rejected.retryable).isFalse()
         } finally {
             server.close()
             responder.join(2_000)
         }
     }
+
+    @Test
+    fun resolveConflict_failsClosedForUnknownOrRetryableRejectedTerminal() = runTest {
+        val cases = listOf(
+            """{"code":"future_code","retryable":false}""",
+            """{"code":"snapshot_stale","retryable":true}""",
+        )
+        cases.forEach { errorJson ->
+            val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            val body = """
+                {
+                  "status":"rejected",
+                  "resolution_mutation_id":"00000000-0000-0000-0000-000000000021",
+                  "error":$errorJson
+                }
+            """.trimIndent().toByteArray(Charsets.UTF_8)
+            val responder = thread(name = "lezi-conflict-resolve-invalid-rejection") {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                                ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+            try {
+                val failure = runCatching {
+                    loopbackBackend().resolveConflict(
+                        session = testSession(server),
+                        conflictId = "c-1",
+                        request = ConflictResolveRequest(
+                            snapshotToken = "a".repeat(43),
+                            resolutionMutationId = "00000000-0000-0000-0000-000000000021",
+                            choices = listOf(
+                                ConflictResolutionChoice("/note", NOTE_CHOICE_ID),
+                            ),
+                        ),
+                    )
+                }.exceptionOrNull()
+                assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+            } finally {
+                server.close()
+                responder.join(2_000)
+            }
+        }
+    }
+
+    @Test
+    fun resolveConflict_rejectsNonCanonicalChoiceCommandBeforeNetwork() = runTest {
+        val valid = ConflictResolveRequest(
+            snapshotToken = "a".repeat(43),
+            resolutionMutationId = "00000000-0000-0000-0000-000000000021",
+            choices = listOf(ConflictResolutionChoice("/note", NOTE_CHOICE_ID)),
+        )
+        val cases = listOf(
+            valid.copy(snapshotToken = "a".repeat(42)),
+            valid.copy(snapshotToken = "f".repeat(64)),
+            valid.copy(resolutionMutationId = "00000000-0000-0000-0000-0000000000AB"),
+            valid.copy(choices = emptyList()),
+            valid.copy(
+                choices = (0..64).map { index ->
+                    ConflictResolutionChoice("/field${index.toString().padStart(2, '0')}", NOTE_CHOICE_ID)
+                },
+            ),
+            valid.copy(choices = listOf(ConflictResolutionChoice("note", NOTE_CHOICE_ID))),
+            valid.copy(choices = listOf(ConflictResolutionChoice("/bad~pointer", NOTE_CHOICE_ID))),
+            valid.copy(
+                choices = listOf(ConflictResolutionChoice("/${"界".repeat(342)}", NOTE_CHOICE_ID)),
+            ),
+            valid.copy(choices = listOf(ConflictResolutionChoice("/note", "choice-note"))),
+            valid.copy(
+                choices = listOf(
+                    ConflictResolutionChoice("/timestamp", TIMESTAMP_CHOICE_ID),
+                    ConflictResolutionChoice("/note", NOTE_CHOICE_ID),
+                ),
+            ),
+            valid.copy(
+                choices = listOf(
+                    ConflictResolutionChoice("/note", NOTE_CHOICE_ID),
+                    ConflictResolutionChoice("/note", TIMESTAMP_CHOICE_ID),
+                ),
+            ),
+        )
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        try {
+            cases.forEach { request ->
+                assertThat(
+                    runCatching {
+                        loopbackBackend().resolveConflict(testSession(server), "c-1", request)
+                    }.exceptionOrNull(),
+                ).isInstanceOf(IllegalArgumentException::class.java)
+            }
+        } finally {
+            server.close()
+        }
+    }
 }
+
+private val NOTE_CHOICE_ID = "b".repeat(43)
+private val TIMESTAMP_CHOICE_ID = "c".repeat(43)

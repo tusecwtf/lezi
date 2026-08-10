@@ -1,20 +1,12 @@
 package com.lezi.babylog.domain.carelog
 
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
-import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
-import com.lezi.babylog.core.database.causal.WakeObservationEntity
-import com.lezi.babylog.domain.FakeBabyDao
-import com.lezi.babylog.domain.FakeCarePlanDao
-import com.lezi.babylog.domain.FakeCustomItemDao
-import com.lezi.babylog.domain.FakeRecordDao
 import com.lezi.babylog.domain.RecordingTransactionRunner
+import com.lezi.babylog.sync.NoOpSyncPort
+import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.ConflictResolveResult
-import com.lezi.babylog.sync.backend.ConflictResolveSummary
-import com.lezi.babylog.sync.conflict.ConflictSnapshotCodec
 import com.lezi.babylog.sync.conflict.ConflictCandidate
 import com.lezi.babylog.sync.conflict.ConflictOutcome
 import com.lezi.babylog.sync.conflict.ConflictRoot
@@ -23,443 +15,347 @@ import com.lezi.babylog.sync.conflict.ConflictSnapshot
 import com.lezi.babylog.sync.conflict.ConflictSource
 import com.lezi.babylog.sync.conflict.ConflictVersionSnapshot
 import com.lezi.babylog.sync.conflict.ConflictingPath
+import java.io.IOException
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Test
 
 class ConflictResolutionPresentationTest {
     @Test
-    fun selectablePaths_excludeAutoMerged() {
-        assertThat(
-            conflictResolverSelectablePaths(
-                listOf("/note", "/timestamp", "/media/a"),
-                autoMergedPaths = setOf("/timestamp"),
-            ),
-        ).containsExactly("/media/a", "/note").inOrder()
-        assertThat(isMediaConflictPath("/media/uuid-1")).isTrue()
-        assertThat(isMediaConflictPath("/note")).isFalse()
+    fun loadUsesFreshAuthenticatedSnapshotOrReadOnlyCompleteCache() = runTest {
+        val snapshot = recordConflictSnapshot()
+        val summaries = FakeConflictSummaryDao()
+        val cache = FakeConflictSnapshotCacheDao()
+        val online = coordinator(
+            summaries = summaries,
+            cache = cache,
+            sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
+            },
+        )
+
+        val fresh = online.loadDetail(snapshot.conflictId)
+        assertThat(fresh!!.snapshot).isEqualTo(snapshot)
+        assertThat(fresh.fetchedOnline).isTrue()
+
+        val offline = coordinator(
+            summaries = summaries,
+            cache = cache,
+            sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun fetchConflictSnapshot(conflictId: String): ConflictSnapshot =
+                    throw IOException("offline")
+            },
+        ).loadDetail(snapshot.conflictId)
+        assertThat(offline!!.snapshot).isEqualTo(snapshot)
+        assertThat(offline.fetchedOnline).isFalse()
     }
 
     @Test
-    fun resolveCasMismatch_keepsDraftAndRefreshesDetail() = runTest {
+    fun loadRejectsCrossConflictResponseBeforeProjection() = runTest {
         val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictSnapshotCacheDao()
-        summaries.upsert(
-            ConflictSummaryEntity(
-                conflictId = TEST_CONFLICT_UUID,
-                entityType = "record",
-                clientUuid = TEST_ROOT_UUID,
-                stableVersionId = "v-stable-1",
-                status = "open",
-                kind = "concurrent",
-                branchVersionIdsJson = """["b1","b2"]""",
-                updatedAt = 1L,
-            ),
-        )
-        details.upsert(
-            ConflictSnapshotCacheEntity(
-                conflictId = TEST_CONFLICT_UUID,
-                snapshotJson = "{}",
-                cachedAt = 1L,
-            ),
-        )
-        val base = com.lezi.babylog.sync.NoOpSyncPort()
-        val sync = object : com.lezi.babylog.sync.SyncPort by base {
-            override suspend fun fetchConflictSnapshot(conflictId: String): ConflictSnapshot =
-                recordConflictSnapshot("stable", "v-stable-2", listOf("/note", "/timestamp"))
-
-            override suspend fun resolveConflict(
-                conflictId: String,
-                request: ConflictResolveRequest,
-            ): ConflictResolveResult = ConflictResolveResult.CasMismatch(
-                detail = recordConflictSnapshot(
-                    "newer",
-                    "v-stable-2",
-                    listOf("/note", "/timestamp"),
-                ),
-                summary = ConflictResolveSummary(
-                    conflictId = TEST_CONFLICT_UUID,
-                    entityType = "record",
-                    clientUuid = TEST_ROOT_UUID,
-                    stableVersionId = "v-stable-2",
-                    branchVersionIds = listOf("b1", "b3"),
-                    updatedAt = 120L,
-                ),
-            )
-        }
-        val coordinator = ConflictResolutionCoordinator(
-            conflictSummaryDao = summaries,
-            conflictSnapshotCacheDao = details,
-            syncPort = sync,
-            recordDao = FakeRecordDao(),
-            wakeObservationDao = FakeWakeObservationDao(),
-            babyDao = FakeBabyDao(),
-            carePlanDao = FakeCarePlanDao(),
-            customItemDao = FakeCustomItemDao(),
-            transactionRunner = RecordingTransactionRunner(),
-        )
-        // User draft choices are held by the caller; CAS returns refreshed detail.
-        val draftChoices = mapOf("/note" to JsonPrimitive("user-draft"))
-        val outcome = coordinator.resolve(
-            conflictId = TEST_CONFLICT_UUID,
-            expectedStableVersion = "v-stable-1",
-            expectedBranchVersions = listOf("b1", "b2"),
-            resolvedRootJson = """{"note":"user-draft"}""",
-            resolvedMedia = emptyList(),
-            conflictChoices = draftChoices,
-        )
-        assertThat(outcome).isInstanceOf(ConflictResolveOutcome.CasMismatch::class.java)
-        val cas = outcome as ConflictResolveOutcome.CasMismatch
-        assertThat(cas.refreshed!!.stableVersionId).isEqualTo("v-stable-2")
-        assertThat(cas.refreshed!!.conflictingPaths).containsExactly("/note", "/timestamp")
-        assertThat(cas.summary!!.branchVersionIds).containsExactly("b1", "b3")
-        // Draft map is still held by caller — coordinator never mutates it.
-        assertThat(draftChoices["/note"]).isEqualTo(JsonPrimitive("user-draft"))
-        // Offline cache refreshed for reopen.
-        assertThat(
-            ConflictSnapshotCodec.decode(details.get(TEST_CONFLICT_UUID)!!.snapshotJson)
-                .stable.root.canonical.toString(),
-        ).contains("newer")
-    }
-
-    @Test
-    fun resolveCasMismatch_rejectsDriftingDetailAndSummaryBeforeEitherProjectionWrites() = runTest {
-        val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictSnapshotCacheDao()
-        val detail = recordConflictSnapshot("newer", "v-detail", listOf("/note"))
-        val sync = object : com.lezi.babylog.sync.SyncPort by com.lezi.babylog.sync.NoOpSyncPort() {
-            override suspend fun resolveConflict(
-                conflictId: String,
-                request: ConflictResolveRequest,
-            ): ConflictResolveResult = ConflictResolveResult.CasMismatch(
-                detail = detail,
-                summary = ConflictResolveSummary(
-                    conflictId = detail.conflictId,
-                    entityType = detail.entityType.wireName,
-                    clientUuid = detail.clientUuid,
-                    stableVersionId = "v-summary-drift",
-                    branchVersionIds = detail.branchVersionIds,
-                    updatedAt = 120,
-                ),
-            )
-        }
-        val coordinator = ConflictResolutionCoordinator(
-            conflictSummaryDao = summaries,
-            conflictSnapshotCacheDao = details,
-            syncPort = sync,
-            recordDao = FakeRecordDao(),
-            wakeObservationDao = FakeWakeObservationDao(),
-            babyDao = FakeBabyDao(),
-            carePlanDao = FakeCarePlanDao(),
-            customItemDao = FakeCustomItemDao(),
-            transactionRunner = RecordingTransactionRunner(),
-        )
-
-        val outcome = coordinator.resolve(
-            conflictId = detail.conflictId,
-            expectedStableVersion = "v-old",
-            expectedBranchVersions = emptyList(),
-            resolvedRootJson = "{}",
-            resolvedMedia = emptyList(),
-            conflictChoices = emptyMap(),
-        )
-
-        assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Rejected::class.java)
-        assertThat(summaries.get(detail.conflictId)).isNull()
-        assertThat(details.get(detail.conflictId)).isNull()
-    }
-
-    @Test
-    fun loadDetail_rejectsCrossConflictResponseBeforeProjection() = runTest {
-        val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictSnapshotCacheDao()
-        val fetched = recordConflictSnapshot("foreign", "v-foreign", listOf("/note"))
-        val sync = object : com.lezi.babylog.sync.SyncPort by com.lezi.babylog.sync.NoOpSyncPort() {
-            override suspend fun fetchConflictSnapshot(conflictId: String): ConflictSnapshot = fetched
-        }
-        val coordinator = ConflictResolutionCoordinator(
-            conflictSummaryDao = summaries,
-            conflictSnapshotCacheDao = details,
-            syncPort = sync,
-            recordDao = FakeRecordDao(),
-            wakeObservationDao = FakeWakeObservationDao(),
-            babyDao = FakeBabyDao(),
-            carePlanDao = FakeCarePlanDao(),
-            customItemDao = FakeCustomItemDao(),
-            transactionRunner = RecordingTransactionRunner(),
-        )
-
-        val loaded = coordinator.loadDetail(
-            "00000000-0000-0000-0000-000000000099",
-            forceRefresh = true,
-        )
+        val cache = FakeConflictSnapshotCacheDao()
+        val foreign = recordConflictSnapshot().copy(conflictId = FOREIGN_CONFLICT_UUID)
+        val loaded = coordinator(
+            summaries = summaries,
+            cache = cache,
+            sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun fetchConflictSnapshot(conflictId: String) = foreign
+            },
+        ).loadDetail(TEST_CONFLICT_UUID)
 
         assertThat(loaded).isNull()
-        assertThat(details.get(fetched.conflictId)).isNull()
-        assertThat(summaries.get(fetched.conflictId)).isNull()
+        assertThat(cache.get(TEST_CONFLICT_UUID)).isNull()
+        assertThat(cache.get(FOREIGN_CONFLICT_UUID)).isNull()
     }
 
     @Test
-    fun resolveAccepted_clearsOpenConflictAppliesStableAndRequestsForeground() = runTest {
+    fun incompleteNetworkPageIsReadableButNeverPromotedAsSubmitReceipt() = runTest {
         val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictSnapshotCacheDao()
-        val records = FakeRecordDao()
-        val wakes = FakeWakeObservationDao()
-        val syncTriggers = mutableListOf<SyncTrigger>()
-        summaries.upsert(
-            ConflictSummaryEntity(
-                conflictId = "c-record",
-                entityType = "record",
-                clientUuid = "r-conflict",
-                stableVersionId = "v-old",
-                status = "open",
-                kind = "concurrent",
-                branchVersionIdsJson = """["b1"]""",
-                updatedAt = 1L,
-            ),
+        val cache = FakeConflictSnapshotCacheDao()
+        val partial = recordConflictSnapshot().copy(complete = false, continuation = "next")
+        val loaded = coordinator(
+            summaries = summaries,
+            cache = cache,
+            sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun fetchConflictSnapshot(conflictId: String) = partial
+            },
+        ).loadDetail(TEST_CONFLICT_UUID)
+
+        assertThat(loaded!!.snapshot).isEqualTo(partial)
+        assertThat(cache.get(TEST_CONFLICT_UUID)).isNull()
+        val draft = ConflictResolverDraft.open(
+            partial,
+            ConflictResolverAudience("member-author", false),
+            fetchedOnline = true,
+            nowMillis = 1_000,
+            resolutionMutationId = RESOLUTION_MUTATION_UUID,
         )
-        details.upsert(
-            ConflictSnapshotCacheEntity(
-                conflictId = "c-record",
-                snapshotJson = "{}",
-                cachedAt = 1L,
-            ),
-        )
-        records.upsert(
-            RecordEntity(
-                clientUuid = "r-conflict",
-                babyId = 1L,
-                type = "formula",
-                timestamp = 100,
-                note = "branch-note",
-                payloadJson = """{"amount_ml":90}""",
-                schemaVersion = 2,
-                updatedAt = 100,
-                syncDirty = false,
-                baseVersion = "v-old",
-                mutationId = "m-branch",
-                openConflictId = "c-record",
-                localBranchVersionId = "b1",
-            ),
-        )
-        val base = com.lezi.babylog.sync.NoOpSyncPort()
-        val sync = object : com.lezi.babylog.sync.SyncPort by base {
+        assertThat(draft.model.availability).isEqualTo(ConflictResolverAvailability.Incomplete)
+        assertThat(runCatching { draft.choose("/note", STABLE_CHOICE_ID) }.isFailure).isTrue()
+    }
+
+    @Test
+    fun lostResponseRetryReusesMutationAndChoicesThenDefersProjectionToPull() = runTest {
+        val snapshot = recordConflictSnapshot()
+        val summaries = FakeConflictSummaryDao()
+        val cache = FakeConflictSnapshotCacheDao()
+        val calls = mutableListOf<ConflictResolveRequest>()
+        val triggers = mutableListOf<SyncTrigger>()
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
+
             override suspend fun resolveConflict(
                 conflictId: String,
                 request: ConflictResolveRequest,
-            ): ConflictResolveResult = ConflictResolveResult.Accepted(
+            ): ConflictResolveResult {
+                calls += request
+                if (calls.size == 1) throw IOException("response lost")
+                return ConflictResolveResult.Accepted(
+                    stableVersionId = "v-resolved",
+                    resolutionMutationId = request.resolutionMutationId,
+                    stableRootJson = snapshot.stable.root.canonical.toString()
+                        .replace("stable", "chosen"),
+                    stableMedia = emptyList(),
+                    replay = true,
+                )
+            }
+
+            override fun requestSync(trigger: SyncTrigger) {
+                triggers += trigger
+            }
+        }
+        val coordinator = coordinator(summaries, cache, sync)
+        val loaded = requireNotNull(coordinator.loadDetail(TEST_CONFLICT_UUID))
+        val command = ConflictResolverDraft.open(
+            snapshot = loaded.snapshot,
+            audience = ConflictResolverAudience("member-author", false),
+            fetchedOnline = loaded.fetchedOnline,
+            nowMillis = 1_000,
+            resolutionMutationId = RESOLUTION_MUTATION_UUID,
+        ).choose("/note", BRANCH_CHOICE_ID).freeze().command()
+
+        val lost = coordinator.resolve(TEST_CONFLICT_UUID, command)
+        assertThat(lost).isInstanceOf(ConflictResolveOutcome.TransportFailure::class.java)
+        assertThat(cache.get(TEST_CONFLICT_UUID)).isNotNull()
+
+        val accepted = coordinator.resolve(TEST_CONFLICT_UUID, command)
+        assertThat(accepted).isInstanceOf(ConflictResolveOutcome.Accepted::class.java)
+        assertThat(calls.map { it.resolutionMutationId })
+            .containsExactly(RESOLUTION_MUTATION_UUID, RESOLUTION_MUTATION_UUID)
+        assertThat(calls[0].choices).isEqualTo(calls[1].choices)
+        assertThat(cache.get(TEST_CONFLICT_UUID)).isNotNull()
+        assertThat(summaries.get(TEST_CONFLICT_UUID)).isNotNull()
+        assertThat(triggers).containsExactly(SyncTrigger.Foreground)
+    }
+
+    @Test
+    fun staleAndForbiddenTerminalsKeepSnapshotAndReturnTypedOutcomes() = runTest {
+        val cases = listOf(
+            "snapshot_stale" to ConflictResolveOutcome.RefreshRequired::class.java,
+            "snapshot_expired" to ConflictResolveOutcome.RefreshRequired::class.java,
+            "cas_mismatch" to ConflictResolveOutcome.RefreshRequired::class.java,
+            "forbidden" to ConflictResolveOutcome.Forbidden::class.java,
+            "invalid_choice" to ConflictResolveOutcome.Rejected::class.java,
+        )
+        cases.forEach { (code, expectedType) ->
+            val snapshot = recordConflictSnapshot()
+            val summaries = FakeConflictSummaryDao()
+            val cache = FakeConflictSnapshotCacheDao()
+            val sync = object : SyncPort by NoOpSyncPort() {
+                override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
+                override suspend fun resolveConflict(
+                    conflictId: String,
+                    request: ConflictResolveRequest,
+                ) = ConflictResolveResult.Rejected(
+                    code = code,
+                    resolutionMutationId = request.resolutionMutationId,
+                    retryable = false,
+                )
+            }
+            val coordinator = coordinator(summaries, cache, sync)
+            val loaded = requireNotNull(coordinator.loadDetail(TEST_CONFLICT_UUID))
+            val command = ConflictResolverDraft.open(
+                loaded.snapshot,
+                ConflictResolverAudience("member-author", false),
+                loaded.fetchedOnline,
+                nowMillis = 1_000,
+                resolutionMutationId = RESOLUTION_MUTATION_UUID,
+            ).choose("/note", STABLE_CHOICE_ID).freeze().command()
+
+            assertThat(coordinator.resolve(TEST_CONFLICT_UUID, command))
+                .isInstanceOf(expectedType)
+            assertThat(cache.get(TEST_CONFLICT_UUID)).isNotNull()
+            assertThat(summaries.get(TEST_CONFLICT_UUID)).isNotNull()
+        }
+    }
+
+    @Test
+    fun malformedAcceptedProjectionFailsClosedAndKeepsH05Receipt() = runTest {
+        val snapshot = recordConflictSnapshot()
+        val summaries = FakeConflictSummaryDao()
+        val cache = FakeConflictSnapshotCacheDao()
+        val triggers = mutableListOf<SyncTrigger>()
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
+            override suspend fun resolveConflict(
+                conflictId: String,
+                request: ConflictResolveRequest,
+            ) = ConflictResolveResult.Accepted(
                 stableVersionId = "v-resolved",
-                stableRootJson =
-                    """{"note":"chosen","timestamp":100,"payload_json":{"amount_ml":90},"updated_at":150}""",
+                resolutionMutationId = request.resolutionMutationId,
+                stableRootJson = "{}",
+                stableMedia = emptyList(),
+                replay = false,
             )
 
             override fun requestSync(trigger: SyncTrigger) {
-                syncTriggers += trigger
+                triggers += trigger
             }
         }
-        val coordinator = ConflictResolutionCoordinator(
-            conflictSummaryDao = summaries,
-            conflictSnapshotCacheDao = details,
-            syncPort = sync,
-            recordDao = records,
-            wakeObservationDao = wakes,
-            babyDao = FakeBabyDao(),
-            carePlanDao = FakeCarePlanDao(),
-            customItemDao = FakeCustomItemDao(),
-            transactionRunner = RecordingTransactionRunner(),
+        val coordinator = coordinator(summaries, cache, sync)
+        coordinator.loadDetail(TEST_CONFLICT_UUID)
+        val request = ConflictResolveRequest(
+            snapshotToken = snapshot.snapshotToken,
+            resolutionMutationId = RESOLUTION_MUTATION_UUID,
+            choices = listOf(
+                com.lezi.babylog.sync.backend.ConflictResolutionChoice(
+                    "/note",
+                    STABLE_CHOICE_ID,
+                ),
+            ),
         )
-        val outcome = coordinator.resolve(
-            conflictId = "c-record",
-            expectedStableVersion = "v-old",
-            expectedBranchVersions = listOf("b1"),
-            resolvedRootJson =
-                """{"note":"chosen","timestamp":100,"payload_json":{"amount_ml":90}}""",
-            resolvedMedia = emptyList(),
-            conflictChoices = mapOf("/note" to JsonPrimitive("chosen")),
-        )
-        assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Accepted::class.java)
-        assertThat((outcome as ConflictResolveOutcome.Accepted).stableVersionId)
-            .isEqualTo("v-resolved")
-        val row = requireNotNull(records.getByClientUuid("r-conflict"))
-        assertThat(row.openConflictId).isNull()
-        assertThat(row.localBranchVersionId).isNull()
-        assertThat(row.baseVersion).isEqualTo("v-resolved")
-        assertThat(row.note).isEqualTo("chosen")
-        assertThat(row.mutationId).isNull()
-        assertThat(row.syncDirty).isFalse()
-        assertThat(summaries.get("c-record")).isNull()
-        assertThat(details.get("c-record")).isNull()
-        assertThat(syncTriggers).containsExactly(SyncTrigger.Foreground)
+
+        val outcome = coordinator.resolve(TEST_CONFLICT_UUID, request)
+
+        assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Rejected::class.java)
+        assertThat((outcome as ConflictResolveOutcome.Rejected).code)
+            .isEqualTo("transport_mismatch")
+        assertThat(cache.get(TEST_CONFLICT_UUID)).isNotNull()
+        assertThat(summaries.get(TEST_CONFLICT_UUID)).isNotNull()
+        assertThat(triggers).isEmpty()
     }
 
     @Test
-    fun resolveAccepted_appliesExplicitNullFieldsFromStableRoot() = runTest {
+    fun acceptedTombstoneSnapshotStaysCachedUntilPullCarriesDeletedState() = runTest {
+        val base = recordConflictSnapshot()
+        val snapshot = base.copy(stable = base.stable.copy(deleted = true))
         val summaries = FakeConflictSummaryDao()
-        val records = FakeRecordDao()
-        summaries.upsert(
-            ConflictSummaryEntity(
-                conflictId = "c-null",
-                entityType = "record",
-                clientUuid = "r-null",
-                stableVersionId = "v-old",
-                status = "open",
-                kind = "concurrent",
-                branchVersionIdsJson = """["b1"]""",
-                updatedAt = 1L,
-            ),
-        )
-        records.upsert(
-            RecordEntity(
-                clientUuid = "r-null",
-                babyId = 1L,
-                type = "sleep",
-                timestamp = 100,
-                endTimestamp = 200,
-                note = "must-clear",
-                payloadJson = """{"is_nap":false}""",
-                schemaVersion = 2,
-                updatedAt = 100,
-                baseVersion = "v-old",
-                openConflictId = "c-null",
-                effectiveWakeObservationClientUuid = "wake-old",
-            ),
-        )
-        val base = com.lezi.babylog.sync.NoOpSyncPort()
-        val sync = object : com.lezi.babylog.sync.SyncPort by base {
+        val cache = FakeConflictSnapshotCacheDao()
+        val triggers = mutableListOf<SyncTrigger>()
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
             override suspend fun resolveConflict(
                 conflictId: String,
                 request: ConflictResolveRequest,
-            ): ConflictResolveResult = ConflictResolveResult.Accepted(
-                stableVersionId = "v-new",
-                stableRootJson =
-                    """{"note":null,"timestamp":100,"end_timestamp":null,"effective_wake_observation_client_uuid":null,"updated_at":150}""",
+            ) = ConflictResolveResult.Accepted(
+                stableVersionId = "v-resolved",
+                resolutionMutationId = request.resolutionMutationId,
+                stableRootJson = snapshot.stable.root.canonical.toString(),
+                stableMedia = snapshot.stable.media,
+                replay = false,
             )
+
+            override fun requestSync(trigger: SyncTrigger) {
+                triggers += trigger
+            }
         }
-        val coordinator = ConflictResolutionCoordinator(
-            conflictSummaryDao = summaries,
-            conflictSnapshotCacheDao = FakeConflictSnapshotCacheDao(),
-            syncPort = sync,
-            recordDao = records,
-            wakeObservationDao = FakeWakeObservationDao(),
-            babyDao = FakeBabyDao(),
-            carePlanDao = FakeCarePlanDao(),
-            customItemDao = FakeCustomItemDao(),
-            transactionRunner = RecordingTransactionRunner(),
+        val coordinator = coordinator(summaries, cache, sync)
+        coordinator.loadDetail(TEST_CONFLICT_UUID)
+        val request = ConflictResolveRequest(
+            snapshotToken = snapshot.snapshotToken,
+            resolutionMutationId = RESOLUTION_MUTATION_UUID,
+            choices = listOf(
+                com.lezi.babylog.sync.backend.ConflictResolutionChoice(
+                    "/note",
+                    STABLE_CHOICE_ID,
+                ),
+            ),
         )
 
-        coordinator.resolve(
-            conflictId = "c-null",
-            expectedStableVersion = "v-old",
-            expectedBranchVersions = listOf("b1"),
-            resolvedRootJson = "{}",
-            resolvedMedia = emptyList(),
-            conflictChoices = emptyMap(),
-        )
-
-        val record = requireNotNull(records.getByClientUuid("r-null"))
-        assertThat(record.note).isNull()
-        assertThat(record.endTimestamp).isNull()
-        assertThat(record.effectiveWakeObservationClientUuid).isNull()
+        assertThat(coordinator.resolve(TEST_CONFLICT_UUID, request))
+            .isInstanceOf(ConflictResolveOutcome.Accepted::class.java)
+        assertThat(cache.get(TEST_CONFLICT_UUID)).isNotNull()
+        assertThat(summaries.get(TEST_CONFLICT_UUID)).isNotNull()
+        assertThat(triggers).containsExactly(SyncTrigger.Foreground)
     }
 
     @Test
-    fun resolveAccepted_clearsWakeOpenConflict() = runTest {
+    fun incompleteChoiceCommandFailsBeforeTransport() = runTest {
+        val snapshot = recordConflictSnapshot()
         val summaries = FakeConflictSummaryDao()
-        val details = FakeConflictSnapshotCacheDao()
-        val wakes = FakeWakeObservationDao()
-        summaries.upsert(
-            ConflictSummaryEntity(
-                conflictId = "c-wake",
-                entityType = "wake_observation",
-                clientUuid = "w1",
-                stableVersionId = "v-w0",
-                status = "open",
-                kind = "concurrent",
-                branchVersionIdsJson = """["bw"]""",
-                updatedAt = 1L,
-            ),
-        )
-        wakes.upsert(
-            WakeObservationEntity(
-                clientUuid = "w1",
-                sleepRecordClientUuid = "sleep-1",
-                wakeTimestamp = 200,
-                observerMembershipId = "m1",
-                note = "branch",
-                withdrawn = false,
-                updatedAt = 200,
-                syncDirty = false,
-                baseVersion = "v-w0",
-                mutationId = "mw",
-                openConflictId = "c-wake",
-                localBranchVersionId = "bw",
-            ),
-        )
-        val base = com.lezi.babylog.sync.NoOpSyncPort()
-        val sync = object : com.lezi.babylog.sync.SyncPort by base {
+        val cache = FakeConflictSnapshotCacheDao()
+        var submits = 0
+        val sync = object : SyncPort by NoOpSyncPort() {
+            override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
             override suspend fun resolveConflict(
                 conflictId: String,
                 request: ConflictResolveRequest,
-            ): ConflictResolveResult = ConflictResolveResult.Accepted(
-                stableVersionId = "v-w1",
-                stableRootJson =
-                    """{"wake_timestamp":210,"note":"picked","withdrawn":false,"updated_at":210}""",
-            )
+            ): ConflictResolveResult {
+                submits += 1
+                error("must not submit")
+            }
         }
-        val coordinator = ConflictResolutionCoordinator(
-            conflictSummaryDao = summaries,
-            conflictSnapshotCacheDao = details,
-            syncPort = sync,
-            recordDao = FakeRecordDao(),
-            wakeObservationDao = wakes,
-            babyDao = FakeBabyDao(),
-            carePlanDao = FakeCarePlanDao(),
-            customItemDao = FakeCustomItemDao(),
-            transactionRunner = RecordingTransactionRunner(),
+        val coordinator = coordinator(summaries, cache, sync)
+        coordinator.loadDetail(TEST_CONFLICT_UUID)
+        val request = ConflictResolveRequest(
+            snapshotToken = snapshot.snapshotToken,
+            resolutionMutationId = RESOLUTION_MUTATION_UUID,
+            choices = emptyList(),
         )
-        val outcome = coordinator.resolve(
-            conflictId = "c-wake",
-            expectedStableVersion = "v-w0",
-            expectedBranchVersions = listOf("bw"),
-            resolvedRootJson =
-                """{"wake_timestamp":210,"note":"picked","withdrawn":false}""",
-            resolvedMedia = emptyList(),
-            conflictChoices = mapOf("/note" to JsonPrimitive("picked")),
-        )
-        assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Accepted::class.java)
-        val wake = requireNotNull(wakes.getByClientUuid("w1"))
-        assertThat(wake.openConflictId).isNull()
-        assertThat(wake.localBranchVersionId).isNull()
-        assertThat(wake.baseVersion).isEqualTo("v-w1")
-        assertThat(wake.note).isEqualTo("picked")
-        assertThat(wake.wakeTimestamp).isEqualTo(210L)
+
+        val result = coordinator.resolve(TEST_CONFLICT_UUID, request)
+
+        assertThat(result).isInstanceOf(ConflictResolveOutcome.Rejected::class.java)
+        assertThat((result as ConflictResolveOutcome.Rejected).code)
+            .isEqualTo("incomplete_choices")
+        assertThat(submits).isEqualTo(0)
     }
 }
 
-private fun recordConflictSnapshot(
-    note: String,
-    stableVersion: String,
-    paths: List<String>,
-): ConflictSnapshot {
-    fun root(value: String) = ConflictRoot.Record(
+private fun coordinator(
+    summaries: FakeConflictSummaryDao,
+    cache: FakeConflictSnapshotCacheDao,
+    sync: SyncPort,
+) = ConflictResolutionCoordinator(
+    conflictSummaryDao = summaries,
+    conflictSnapshotCacheDao = cache,
+    syncPort = sync,
+    transactionRunner = RecordingTransactionRunner(),
+)
+
+private fun recordConflictSnapshot(): ConflictSnapshot {
+    fun root(note: String) = ConflictRoot.Record(
         babyClientUuid = TEST_BABY_UUID,
         type = "formula",
         customItemClientUuid = null,
         timestamp = 100,
         endTimestamp = null,
-        note = value,
-        payload = Json.parseToJsonElement("""{"amount_ml":60}""") as kotlinx.serialization.json.JsonObject,
+        note = note,
+        payload = Json.parseToJsonElement("""{"amount_ml":60}""").jsonObject,
         schemaVersion = 2,
         effectiveWakeObservationClientUuid = null,
-        createdByMembershipId = "member-a",
+        createdByMembershipId = "member-author",
         updatedAt = 100,
         canonical = Json.parseToJsonElement(
-            """{"baby_client_uuid":"$TEST_BABY_UUID","type":"formula","custom_item_client_uuid":null,"timestamp":100,"end_timestamp":null,"note":"$value","payload_json":{"amount_ml":60},"schema_version":2,"updated_at":100,"created_by_membership_id":"member-a"}""",
-        ) as kotlinx.serialization.json.JsonObject,
+            """{"baby_client_uuid":"$TEST_BABY_UUID","type":"formula","custom_item_client_uuid":null,"timestamp":100,"end_timestamp":null,"note":"$note","payload_json":{"amount_ml":60},"schema_version":2,"updated_at":100,"created_by_membership_id":"member-author"}""",
+        ).jsonObject,
     )
-    val source = ConflictSource("b1", TEST_MUTATION_ONE, "member-a", "device-a", 110)
+    val stableSource = ConflictSource(
+        "v-stable",
+        TEST_MUTATION_STABLE,
+        "member-author",
+        "device-a",
+        100,
+    )
+    val branchSource = ConflictSource(
+        "v-branch",
+        TEST_MUTATION_ONE,
+        "member-other",
+        "device-b",
+        110,
+    )
     return ConflictSnapshot(
         conflictId = TEST_CONFLICT_UUID,
         entityType = ConflictRootType.Record,
@@ -467,61 +363,46 @@ private fun recordConflictSnapshot(
         snapshotToken = "a".repeat(43),
         expiresAt = 2_000_000,
         stable = ConflictVersionSnapshot(
-            versionId = stableVersion,
-            baseVersion = null,
-            root = root(note),
-            media = emptyList(),
-            deleted = false,
-            mutationId = TEST_MUTATION_STABLE,
-            actorId = "member-a",
-            deviceId = "device-a",
-            receivedAt = 100,
+            "v-stable",
+            null,
+            root("stable"),
+            emptyList(),
+            false,
+            TEST_MUTATION_STABLE,
+            "member-author",
+            "device-a",
+            100,
         ),
         branches = listOf(
             ConflictVersionSnapshot(
-                versionId = "b1",
-                baseVersion = stableVersion,
-                root = root("branch-1"),
-                media = emptyList(),
-                deleted = false,
-                mutationId = TEST_MUTATION_ONE,
-                actorId = "member-a",
-                deviceId = "device-a",
-                receivedAt = 110,
-            ),
-            ConflictVersionSnapshot(
-                versionId = "b3",
-                baseVersion = stableVersion,
-                root = root("branch-3"),
-                media = emptyList(),
-                deleted = false,
-                mutationId = TEST_MUTATION_THREE,
-                actorId = "member-b",
-                deviceId = "device-b",
-                receivedAt = 120,
+                "v-branch",
+                "v-stable",
+                root("branch"),
+                emptyList(),
+                false,
+                TEST_MUTATION_ONE,
+                "member-other",
+                "device-b",
+                110,
             ),
         ),
-        conflicting = paths.map { path ->
+        conflicting = listOf(
             ConflictingPath(
-                path = path,
-                candidates = listOf(
+                "/note",
+                listOf(
                     ConflictCandidate(
-                        choiceId = "choice-${path.substringAfterLast('/').padEnd(10, 'a')}",
-                        outcome = ConflictOutcome.Set(
-                            if (path == "/timestamp") JsonPrimitive(100) else JsonNull,
-                        ),
-                        sources = listOf(source),
+                        STABLE_CHOICE_ID,
+                        ConflictOutcome.Set(JsonPrimitive("stable")),
+                        listOf(stableSource),
                     ),
                     ConflictCandidate(
-                        choiceId = "other-${path.substringAfterLast('/').padEnd(11, 'b')}",
-                        outcome = ConflictOutcome.Set(
-                            if (path == "/timestamp") JsonPrimitive(101) else JsonPrimitive("other"),
-                        ),
-                        sources = listOf(source),
+                        BRANCH_CHOICE_ID,
+                        ConflictOutcome.Set(JsonPrimitive("branch")),
+                        listOf(branchSource),
                     ),
                 ),
-            )
-        },
+            ),
+        ),
         autoMerged = emptyList(),
         pageIndex = 0,
         continuation = null,
@@ -530,8 +411,11 @@ private fun recordConflictSnapshot(
 }
 
 private const val TEST_CONFLICT_UUID = "00000000-0000-0000-0000-000000000031"
+private const val FOREIGN_CONFLICT_UUID = "00000000-0000-0000-0000-000000000039"
 private const val TEST_ROOT_UUID = "00000000-0000-0000-0000-000000000032"
 private const val TEST_BABY_UUID = "00000000-0000-0000-0000-000000000033"
 private const val TEST_MUTATION_STABLE = "00000000-0000-0000-0000-000000000034"
 private const val TEST_MUTATION_ONE = "00000000-0000-0000-0000-000000000035"
-private const val TEST_MUTATION_THREE = "00000000-0000-0000-0000-000000000036"
+private const val RESOLUTION_MUTATION_UUID = "00000000-0000-0000-0000-000000000036"
+private val STABLE_CHOICE_ID = "b".repeat(43)
+private val BRANCH_CHOICE_ID = "c".repeat(43)

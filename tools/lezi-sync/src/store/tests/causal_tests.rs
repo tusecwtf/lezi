@@ -3487,6 +3487,74 @@ fn causal_member_acl_rejects_baby_and_foreign_record_edit() {
 }
 
 #[test]
+fn choice_only_resolution_keeps_baby_owner_only_after_author_downgrade() {
+    let fx = CausalFx::new();
+    let baby_version = fx
+        .store
+        .pull(&fx.family_id, 0)
+        .unwrap()
+        .entities
+        .into_iter()
+        .find(|entity| entity.client_uuid == fx.baby_id.to_string())
+        .and_then(|entity| entity.version_id)
+        .unwrap();
+    let stable = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "baby",
+                fx.baby_id,
+                Some(&baby_version),
+                baby_root("stable-baby", 20),
+                false,
+            ),
+            1_700_000_001,
+        )
+        .unwrap();
+    assert_eq!(stable.results[0].status, "accepted");
+    let branched = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "baby",
+                fx.baby_id,
+                Some(&baby_version),
+                baby_root("branch-baby", 30),
+                false,
+            ),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let downgraded_author = Principal {
+        role: "member".to_owned(),
+        ..fx.owner.clone()
+    };
+    let result = fx
+        .store
+        .resolve_conflict(
+            &downgraded_author,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token.clone(),
+                resolution_mutation_id: Uuid::new_v4().to_string(),
+                choices: vec![resolution_choice(
+                    &detail,
+                    "/nickname",
+                    ConflictOutcome::Set {
+                        value: json!("branch-baby"),
+                    },
+                )],
+            },
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(result.status, "rejected");
+    assert_eq!(result.error.unwrap().code, "forbidden");
+}
+
+#[test]
 fn causal_pull_exposes_version_id_and_branch_conflict_summary() {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();

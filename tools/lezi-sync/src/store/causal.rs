@@ -1539,14 +1539,15 @@ fn authorize_resolve(
         return Ok(());
     }
     match entity_type {
-        "record" | "care_plan" | "custom_item" | "baby" => {
+        // Baby is an Owner-managed profile even when the present member was
+        // its historical creator before an ownership takeover/downgrade.
+        "baby" => Err(StoreError::ForbiddenBaby),
+        "record" | "care_plan" | "custom_item" => {
             let author = stable_root
                 .get("created_by_membership_id")
                 .and_then(Value::as_str);
             if author == Some(principal.membership_id.as_str()) {
                 Ok(())
-            } else if entity_type == "baby" {
-                Err(StoreError::ForbiddenBaby)
             } else if entity_type == "record" {
                 Err(StoreError::ForbiddenRecord)
             } else if entity_type == "care_plan" {

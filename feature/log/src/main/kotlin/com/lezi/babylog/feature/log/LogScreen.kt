@@ -225,11 +225,18 @@ fun LogRoute(
         val conflictId = record.openConflictId ?: return
         conflictLoading = true
         conflictError = null
-        vm.loadConflictDetail(conflictId) { detail, error ->
+        vm.loadConflictDetail(conflictId) { load, error ->
             conflictLoading = false
-            conflictDraft = detail?.let(ConflictResolverDraft::from)
+            conflictDraft = load?.let {
+                vm.openConflictDraft(
+                    load = it,
+                    membershipId = state.currentMembershipId,
+                    isOwner = state.familyOwner,
+                    nowMillis = nowMs,
+                )
+            }
             conflictError = error ?: "暂时无法取得冲突详情，请联网后重试"
-                .takeIf { detail == null }
+                .takeIf { load == null }
         }
     }
 
@@ -586,24 +593,26 @@ fun LogRoute(
             error = conflictError,
             submitting = conflictSubmitting,
             onDismiss = {
+                vm.clearConflictDraft()
                 causalDetailRecord = null
                 conflictDraft = null
                 conflictError = null
             },
-            onChoose = { path, value ->
-                conflictDraft = conflictDraft?.choose(path, value)
+            onDraftChanged = { draft ->
+                conflictDraft = vm.rememberConflictDraft(draft)
             },
             onSubmit = {
                 val draft = conflictDraft ?: return@ConflictResolverSheet
+                val frozen = runCatching { vm.freezeConflict(draft) }.getOrElse { error ->
+                    conflictError = error.message ?: "选择不完整"
+                    return@ConflictResolverSheet
+                }
+                conflictDraft = frozen
                 conflictSubmitting = true
                 conflictError = null
                 vm.resolveConflict(
-                    conflictId = draft.detail.conflictId,
-                    expectedStableVersion = draft.detail.stableVersionId,
-                    expectedBranchVersions = draft.detail.branchVersionIds,
-                    resolvedRootJson = draft.resolvedRootJson,
-                    resolvedMedia = draft.resolvedMedia,
-                    conflictChoices = draft.conflictChoices,
+                    conflictId = frozen.model.conflictId,
+                    request = frozen.command(),
                 ) { outcome ->
                     conflictSubmitting = false
                     when (outcome) {
@@ -612,13 +621,20 @@ fun LogRoute(
                             conflictDraft = null
                             onMessage("冲突已解决")
                         }
-                        is ConflictResolveOutcome.CasMismatch -> {
-                            conflictDraft = outcome.refreshed?.let { refreshed ->
-                                draft.refresh(refreshed)
-                            } ?: draft
+                        is ConflictResolveOutcome.RefreshRequired -> {
+                            conflictDraft = null
+                            conflictError = outcome.message
+                        }
+                        is ConflictResolveOutcome.Forbidden -> {
+                            conflictDraft = null
+                            conflictError = outcome.message
+                        }
+                        is ConflictResolveOutcome.TransportFailure -> {
+                            conflictDraft = frozen
                             conflictError = outcome.message
                         }
                         is ConflictResolveOutcome.Rejected -> {
+                            conflictDraft = null
                             conflictError = outcome.message
                         }
                     }

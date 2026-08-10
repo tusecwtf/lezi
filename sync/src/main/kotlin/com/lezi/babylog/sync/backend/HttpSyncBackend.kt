@@ -2,6 +2,7 @@ package com.lezi.babylog.sync.backend
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import com.lezi.babylog.sync.conflict.ConflictSnapshot
 import com.lezi.babylog.sync.conflict.toConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -903,42 +904,26 @@ class HttpSyncBackend internal constructor(
         session.requireCurrentReplicaTransport()
         val id = conflictId.trim()
         require(id.isNotEmpty()) { "conflict_id 无效" }
-        require(request.expectedStableVersion.isNotBlank()) {
-            "expected_stable_version 无效"
-        }
-        require(request.resolutionMutationId.isNotBlank()) {
-            "resolution_mutation_id 无效"
-        }
-        val resolvedRoot = runCatching {
-            Json.parseToJsonElement(request.resolvedRootJson)
-        }.getOrNull() as? JsonObject
-            ?: throw IllegalArgumentException("resolved_root 不是对象")
+        ConflictSnapshotValidation.requireResolutionChoices(
+            snapshotToken = request.snapshotToken,
+            resolutionMutationId = request.resolutionMutationId,
+            choices = request.choices.map { it.path to it.choiceId },
+            context = "conflict resolve request",
+        )
         val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
         val body = buildJsonObject {
-            put("expected_stable_version", request.expectedStableVersion)
-            put(
-                "expected_branch_versions",
-                buildJsonArray {
-                    request.expectedBranchVersions.sorted().forEach { version ->
-                        add(JsonPrimitive(version))
-                    }
-                },
-            )
-            put("resolved_root", resolvedRoot)
-            put(
-                "resolved_media",
-                buildJsonArray {
-                    request.resolvedMedia
-                        .sortedBy(CausalMediaItem::mediaUuid)
-                        .forEach { item -> add(item.toJson()) }
-                },
-            )
+            put("snapshot_token", request.snapshotToken)
             put("resolution_mutation_id", request.resolutionMutationId)
             put(
-                "conflict_choices",
-                buildJsonObject {
-                    request.conflictChoices.toSortedMap().forEach { (path, value) ->
-                        put(path, value)
+                "choices",
+                buildJsonArray {
+                    request.choices.forEach { choice ->
+                        add(
+                            buildJsonObject {
+                                put("path", choice.path)
+                                put("choice_id", choice.choiceId)
+                            },
+                        )
                     }
                 },
             )
@@ -949,7 +934,15 @@ class HttpSyncBackend internal constructor(
             session.accessToken,
             body,
         )
-        return json.toConflictResolveResult("conflict resolve")
+        return json.toConflictResolveResult("conflict resolve").also { result ->
+            val responseMutationId = when (result) {
+                is ConflictResolveResult.Accepted -> result.resolutionMutationId
+                is ConflictResolveResult.Rejected -> result.resolutionMutationId
+            }
+            require(responseMutationId == null || responseMutationId == request.resolutionMutationId) {
+                "conflict resolve.resolution_mutation_id 与请求不一致"
+            }
+        }
     }
 
     override suspend fun putCausalMediaPreimage(
@@ -2045,22 +2038,36 @@ private fun JsonObject.optionalSourceRelationSummary(context: String): PullSourc
     )
 }
 
-/** Wire §8.2 resolve result: resolved | cas_mismatch | rejected. */
+/** Wire §8.2 closed resolution terminal: accepted or rejected. */
 private fun JsonObject.toConflictResolveResult(context: String): ConflictResolveResult {
     val status = requiredNonBlankString("status", context)
     return when (status) {
-        "resolved" -> {
+        "accepted" -> {
+            val required = setOf(
+                "status",
+                "resolution_mutation_id",
+                "stable_version_id",
+                "stable_root",
+                "replay",
+            )
+            val allowed = required + "stable_media"
+            require(keys.containsAll(required) && keys.all(allowed::contains)) {
+                "$context accepted keys 非 closed shape"
+            }
+            val resolutionMutationId = requiredNonBlankString(
+                "resolution_mutation_id",
+                context,
+            )
             val stableVersionId = requiredNonBlankString("stable_version_id", context)
             val stableRoot = when (val root = get("stable_root")) {
-                null, JsonNull -> "{}"
                 is JsonObject -> root.toString()
                 else -> throw IllegalArgumentException("$context.stable_root 无效")
             }
             val media = when (val raw = get("stable_media")) {
-                null, JsonNull -> emptyList()
+                null -> emptyList()
                 is JsonArray -> raw.mapIndexed { index, element ->
                     (element as? JsonObject)
-                        ?.toCausalMediaItem("$context.stable_media[$index]")
+                        ?.toConflictAcceptedMedia("$context.stable_media[$index]")
                         ?: throw IllegalArgumentException(
                             "$context.stable_media[$index] 不是对象",
                         )
@@ -2069,58 +2076,46 @@ private fun JsonObject.toConflictResolveResult(context: String): ConflictResolve
             }
             ConflictResolveResult.Accepted(
                 stableVersionId = stableVersionId,
+                resolutionMutationId = resolutionMutationId,
                 stableRootJson = stableRoot,
                 stableMedia = media,
+                replay = requiredBoolean("replay", context),
             )
         }
-        "cas_mismatch" -> {
-            val detail = when (val raw = get("detail")) {
-                null, JsonNull -> null
-                is JsonObject -> raw.toConflictSnapshot("$context.detail")
-                else -> throw IllegalArgumentException("$context.detail 无效")
+        "rejected" -> {
+            require(keys == setOf("status", "error") ||
+                keys == setOf("status", "resolution_mutation_id", "error")) {
+                "$context rejected keys 非 closed shape"
             }
-            val summary = when (val raw = get("conflict_summary")) {
-                null, JsonNull -> null
-                is JsonObject -> raw.toConflictResolveSummary("$context.conflict_summary")
-                else -> throw IllegalArgumentException("$context.conflict_summary 无效")
+            val error = get("error") as? JsonObject
+                ?: throw IllegalArgumentException("$context.error 无效")
+            require(error.keys == setOf("code", "retryable")) {
+                "$context.error keys 非 closed shape"
             }
-            ConflictResolveResult.CasMismatch(detail = detail, summary = summary)
+            val code = error.requiredNonBlankString("code", "$context.error")
+            require(code in CONFLICT_TERMINAL_REJECTION_CODES) {
+                "$context.error.code 非 closed value: $code"
+            }
+            val retryable = error.requiredBoolean("retryable", "$context.error")
+            require(!retryable) { "$context.error.retryable 必须为 false" }
+            ConflictResolveResult.Rejected(
+                code = code,
+                resolutionMutationId = optionalNonBlankString(
+                    "resolution_mutation_id",
+                    context,
+                ),
+                retryable = retryable,
+            )
         }
-        "rejected" -> ConflictResolveResult.Rejected(
-            code = optionalNonBlankString("code", context) ?: "rejected",
-            message = optionalNonBlankString("reason", context)
-                ?: optionalNonBlankString("message", context)
-                ?: "冲突解决被拒绝",
-        )
-        else -> ConflictResolveResult.Rejected(
-            code = optionalNonBlankString("code", context) ?: status,
-            message = optionalNonBlankString("reason", context)
-                ?: optionalNonBlankString("message", context)
-                ?: "未知冲突解决状态: $status",
-        )
+        else -> throw IllegalArgumentException("$context.status 无效: $status")
     }
 }
 
-private fun JsonObject.toConflictResolveSummary(context: String): ConflictResolveSummary {
-    val branchIds = when (val branches = get("branch_version_ids")) {
-        null -> throw IllegalArgumentException("$context.branch_version_ids 缺失")
-        JsonNull -> emptyList()
-        is JsonArray -> branches.mapIndexed { index, element ->
-            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
-                ?: throw IllegalArgumentException("$context.branch_version_ids[$index] 无效")
-        }
-        else -> throw IllegalArgumentException("$context.branch_version_ids 无效")
+private fun JsonObject.toConflictAcceptedMedia(context: String): CausalMediaItem {
+    require(keys == setOf("media_uuid", "role", "sha256", "byte_size", "mime", "width", "height")) {
+        "$context keys 非 closed shape"
     }
-    return ConflictResolveSummary(
-        conflictId = requiredNonBlankString("conflict_id", context),
-        entityType = requiredNonBlankString("entity_type", context),
-        clientUuid = requiredNonBlankString("client_uuid", context),
-        stableVersionId = requiredNonBlankString("stable_version_id", context),
-        baseVersionId = optionalNonBlankString("base_version_id", context),
-        kind = optionalNonBlankString("kind", context) ?: "concurrent",
-        branchVersionIds = branchIds,
-        updatedAt = optionalLong("updated_at", context) ?: 0L,
-    )
+    return toCausalMediaItem(context)
 }
 
 private fun JsonObject.optionalLong(key: String, context: String): Long? =

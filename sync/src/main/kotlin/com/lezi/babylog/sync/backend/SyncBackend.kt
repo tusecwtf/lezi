@@ -130,46 +130,61 @@ data class CausalBatchResult(
     val results: List<CausalUnitResult>,
 )
 
-/** Wire §8.2 resolve request. */
+/** One opaque choice in the wire §8.2 resolution command. */
+data class ConflictResolutionChoice(
+    val path: String,
+    val choiceId: String,
+)
+
+/** Wire §8.2 choice-only resolve request. */
 data class ConflictResolveRequest(
-    val expectedStableVersion: String,
-    val expectedBranchVersions: List<String>,
-    val resolvedRootJson: String,
-    val resolvedMedia: List<CausalMediaItem> = emptyList(),
+    val snapshotToken: String,
     val resolutionMutationId: String,
-    /** path → chosen JSON value; only conflicting_paths keys. */
-    val conflictChoices: Map<String, kotlinx.serialization.json.JsonElement> = emptyMap(),
+    val choices: List<ConflictResolutionChoice>,
 )
 
 sealed class ConflictResolveResult {
     /**
-     * Wire §8.2 resolved: new stable version plus authoritative root/media so the
-     * resolver device can clear [openConflictId] and project without waiting for pull.
+     * Wire §8.2 accepted terminal. Root/media are validated against the H05 typed
+     * decoder, but local settlement waits for pull because this envelope omits
+     * authoritative deleted state.
      */
     data class Accepted(
         val stableVersionId: String,
+        val resolutionMutationId: String,
         val stableRootJson: String = "{}",
         val stableMedia: List<CausalMediaItem> = emptyList(),
+        val replay: Boolean,
     ) : ConflictResolveResult()
 
-    data class CasMismatch(
-        val detail: ConflictSnapshot? = null,
-        val summary: ConflictResolveSummary? = null,
+    data class Rejected(
+        val code: String,
+        val resolutionMutationId: String?,
+        val retryable: Boolean,
     ) : ConflictResolveResult()
-
-    data class Rejected(val code: String, val message: String) : ConflictResolveResult()
 }
 
-/** Bounded summary returned with CAS mismatch refresh. */
-data class ConflictResolveSummary(
-    val conflictId: String,
-    val entityType: String,
-    val clientUuid: String,
-    val stableVersionId: String,
-    val baseVersionId: String? = null,
-    val kind: String = "concurrent",
-    val branchVersionIds: List<String> = emptyList(),
-    val updatedAt: Long = 0L,
+/** Wire §9.5 closed rejection codes shared by conflict detail and resolution. */
+internal val CONFLICT_TERMINAL_REJECTION_CODES = setOf(
+    "unknown_field",
+    "missing_field",
+    "wrong_type",
+    "non_canonical_value",
+    "invalid_domain",
+    "content_drift",
+    "unauthenticated",
+    "forbidden",
+    "capability_mismatch",
+    "invalid_snapshot_token",
+    "snapshot_expired",
+    "snapshot_stale",
+    "invalid_choice",
+    "duplicate_choice",
+    "incomplete_choices",
+    "missing_restore_base",
+    "incomplete_restore_base",
+    "missing_restore_media",
+    "cas_mismatch",
 )
 
 /** Closed causal reconcile statuses (wire §5). */
@@ -657,9 +672,7 @@ interface SyncBackend {
         conflictId: String,
     ): ConflictSnapshot = throw UnsupportedOperationException("Conflict detail is not implemented")
 
-    /**
-     * CAS conflict resolution (wire §8.2). Expected stable + complete branch set required.
-     */
+    /** CAS conflict resolution (wire §8.2): receipt token + canonical opaque choices only. */
     suspend fun resolveConflict(
         session: SyncSession,
         conflictId: String,

@@ -6,7 +6,6 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepEndSource
 import com.lezi.babylog.core.model.projectSleepInterval
-import com.lezi.babylog.domain.carelog.conflictResolverSelectablePaths
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -373,16 +372,6 @@ class CareLogWakeObservationTest {
         )
         assertThat(dadCare.getWakeObservation("wake-dad")!!.observerMembershipId)
             .isEqualTo("m-dad")
-    }
-
-    @Test
-    fun conflictResolver_hidesAutoMergedPaths() {
-        assertThat(
-            conflictResolverSelectablePaths(
-                conflictingPaths = listOf("/note", "/timestamp", "/media/m1"),
-                autoMergedPaths = listOf("/timestamp"),
-            ),
-        ).containsExactly("/media/m1", "/note").inOrder()
     }
 
     @Test

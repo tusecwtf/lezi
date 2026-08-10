@@ -182,6 +182,30 @@ object ConflictSnapshotCodec {
         put("continuation", snapshot.continuation?.let(::JsonPrimitive) ?: JsonNull)
         put("complete", JsonPrimitive(snapshot.complete))
     }.toString()
+
+    /**
+     * Validate a resolve terminal through the same typed root/media decoder as
+     * ConflictSnapshot. H06 deliberately does not apply this projection locally:
+     * deleted state is authoritative only once the subsequent pull arrives.
+     */
+    fun validateAcceptedProjection(
+        entityType: ConflictRootType,
+        stableRootJson: String,
+        stableMedia: List<CausalMediaItem>,
+    ): ConflictRoot {
+        val rootObject = runCatching { json.parseToJsonElement(stableRootJson) }
+            .getOrElse { throw IllegalArgumentException("resolve accepted stable_root 不是 JSON", it) }
+            as? JsonObject
+            ?: throw IllegalArgumentException("resolve accepted stable_root 不是对象")
+        val root = rootObject.toRoot(entityType, "resolve accepted.stable_root")
+        validateCanonicalMedia(
+            entityType = entityType,
+            root = root,
+            media = stableMedia,
+            context = "resolve accepted.stable_media",
+        )
+        return root
+    }
 }
 
 private fun ConflictVersionSnapshot.toJson(): JsonObject = buildJsonObject {
@@ -243,19 +267,7 @@ private fun JsonObject.toVersion(
         (raw as? JsonObject)?.toSnapshotMedia("$context.media[$index]")
             ?: throw IllegalArgumentException("$context.media[$index] 不是对象")
     }
-    require(media.map { it.mediaUuid } == media.map { it.mediaUuid }.sorted()) {
-        "$context.media 必须按 media_uuid 排序"
-    }
-    require(media.map { it.mediaUuid }.distinct().size == media.size) {
-        "$context.media 包含重复 media_uuid"
-    }
-    require(media.size <= entityType.mediaLimit) { "$context.media 超出领域上限" }
-    require(media.all { it.role == entityType.mediaRole }) { "$context.media role 无效" }
-    if (root is ConflictRoot.Baby) {
-        require(root.avatarMediaUuid == null || media.any { it.mediaUuid == root.avatarMediaUuid }) {
-            "$context avatar_media_uuid 不在 media 清单"
-        }
-    }
+    validateCanonicalMedia(entityType, root, media, "$context.media")
     return ConflictVersionSnapshot(
         versionId = ConflictSnapshotValidation.requireBounded(
             requiredString("version_id", context), 1, 128, "$context.version_id",
@@ -279,6 +291,40 @@ private fun JsonObject.toVersion(
             requiredLong("received_at", context), "$context.received_at",
         ),
     )
+}
+
+private fun validateCanonicalMedia(
+    entityType: ConflictRootType,
+    root: ConflictRoot,
+    media: List<CausalMediaItem>,
+    context: String,
+) {
+    require(media.map { it.mediaUuid } == media.map { it.mediaUuid }.sorted()) {
+        "$context 必须按 media_uuid 排序"
+    }
+    require(media.map { it.mediaUuid }.distinct().size == media.size) {
+        "$context 包含重复 media_uuid"
+    }
+    require(media.size <= entityType.mediaLimit) { "$context 超出领域上限" }
+    media.forEachIndexed { index, item ->
+        val itemContext = "$context[$index]"
+        ConflictSnapshotValidation.requireUuid(item.mediaUuid, "$itemContext.media_uuid")
+        require(item.role == entityType.mediaRole) { "$itemContext.role 无效" }
+        require(LOWER_SHA.matches(item.sha256)) { "$itemContext.sha256 无效" }
+        require(item.byteSize > 0) { "$itemContext.byte_size 无效" }
+        ConflictSnapshotValidation.requireBounded(item.mime, 1, 255, "$itemContext.mime")
+        item.width?.also {
+            require(it in 1..Int.MAX_VALUE.toLong()) { "$itemContext.width 无效" }
+        }
+        item.height?.also {
+            require(it in 1..Int.MAX_VALUE.toLong()) { "$itemContext.height 无效" }
+        }
+    }
+    if (root is ConflictRoot.Baby) {
+        require(root.avatarMediaUuid == null || media.any { it.mediaUuid == root.avatarMediaUuid }) {
+            "$context 未包含 stable_root.avatar_media_uuid"
+        }
+    }
 }
 
 private fun JsonObject.toRoot(type: ConflictRootType, context: String): ConflictRoot = when (type) {

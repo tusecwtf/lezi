@@ -6,7 +6,14 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.util.UUID
 
-internal object ConflictSnapshotValidation {
+/**
+ * One validation owner for ConflictSnapshot receipts and choice-only commands.
+ *
+ * Snapshot parsing also accepts the frozen golden-corpus token shape. Runtime
+ * resolution commands are deliberately narrower and accept only 43-byte
+ * base64url receipt frames plus canonical UUID mutation identities.
+ */
+object ConflictSnapshotValidation {
     const val MAX_BRANCHES_PER_PAGE = 16
     const val MAX_RESOLUTION_PATHS = 64
     const val MAX_CANDIDATES_PER_PATH = 65
@@ -30,6 +37,10 @@ internal object ConflictSnapshotValidation {
         require(framedToken.matches(it) || goldenToken.matches(it)) { "$context 无效" }
     }
 
+    fun requireRuntimeToken(value: String, context: String): String = value.also {
+        require(framedToken.matches(it)) { "$context 不是 runtime receipt frame" }
+    }
+
     fun requireChoiceId(value: String, context: String): String = value.also {
         require(choiceId.matches(it)) { "$context 无效" }
     }
@@ -37,6 +48,29 @@ internal object ConflictSnapshotValidation {
     fun requirePointer(value: String, context: String): String = value.also {
         require(it.toByteArray().size <= MAX_PATH_BYTES && jsonPointer.matches(it)) {
             "$context 不是 canonical JSON Pointer"
+        }
+    }
+
+    fun requireResolutionChoices(
+        snapshotToken: String,
+        resolutionMutationId: String,
+        choices: List<Pair<String, String>>,
+        context: String,
+    ) {
+        requireRuntimeToken(snapshotToken, "$context.snapshot_token")
+        requireUuid(resolutionMutationId, "$context.resolution_mutation_id")
+        require(choices.size in 1..MAX_RESOLUTION_PATHS) {
+            "$context.choices 数量无效"
+        }
+        require(choices.map { it.first } == choices.map { it.first }.sorted()) {
+            "$context.choices 必须按 path 排序"
+        }
+        require(choices.map { it.first }.distinct().size == choices.size) {
+            "$context.choices path 重复"
+        }
+        choices.forEachIndexed { index, (path, choiceId) ->
+            requirePointer(path, "$context.choices[$index].path")
+            requireRuntimeToken(choiceId, "$context.choices[$index].choice_id")
         }
     }
 
