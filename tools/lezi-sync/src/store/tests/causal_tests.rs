@@ -1,7 +1,8 @@
 //! Causal reconcile / commit / pull summary / resolution — Store façade seams.
 
-use super::super::causal::MAX_CAUSAL_UNITS;
+use super::super::causal::{MAX_CAUSAL_UNITS, VERSION_PROVENANCE_PRINCIPAL};
 use super::super::causal_admission::MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT;
+use super::super::conflict_snapshots::ConflictOutcome;
 use super::super::*;
 use super::test_support::*;
 use rusqlite::params;
@@ -88,6 +89,20 @@ fn sleep_root(baby: Uuid, timestamp: i64, updated_at: i64) -> Map<String, Value>
         "schema_version": 2,
         "updated_at": updated_at,
         "effective_wake_observation_client_uuid": null,
+    }))
+}
+
+fn wake_observation_root(
+    sleep_record_id: Uuid,
+    wake_timestamp: i64,
+    updated_at: i64,
+) -> Map<String, Value> {
+    map(json!({
+        "sleep_record_client_uuid": sleep_record_id,
+        "wake_timestamp": wake_timestamp,
+        "note": null,
+        "withdrawn": false,
+        "updated_at": updated_at,
     }))
 }
 
@@ -221,6 +236,134 @@ fn admission(principal: u32, family: u32, branches: usize) -> CausalAdmissionCon
         window_seconds: 60,
         max_open_branches_per_root: branches,
     }
+}
+
+fn custom_item_root(name: &str, icon_slot: i64, updated_at: i64) -> Map<String, Value> {
+    map(json!({
+        "name": name,
+        "icon_slot": icon_slot,
+        "updated_at": updated_at,
+    }))
+}
+
+fn deterministic_snapshot_payload(page: &ConflictDetailPage) -> Value {
+    let mut value = serde_json::to_value(page).unwrap();
+    let root = value.as_object_mut().unwrap();
+    for key in [
+        "conflict_id",
+        "snapshot_token",
+        "expires_at",
+        "page_index",
+        "continuation",
+        "complete",
+    ] {
+        root.remove(key);
+    }
+    for key in ["stable", "branches"] {
+        let versions = if key == "stable" {
+            vec![root.get_mut(key).unwrap()]
+        } else {
+            root.get_mut(key)
+                .unwrap()
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .collect()
+        };
+        for version in versions {
+            let version = version.as_object_mut().unwrap();
+            version.remove("version_id");
+            version.remove("base_version");
+        }
+    }
+    root.get_mut("branches")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .sort_by_key(|version| version["mutation_id"].as_str().unwrap().to_owned());
+    for item in root.get_mut("conflicting").unwrap().as_array_mut().unwrap() {
+        for candidate in item["candidates"].as_array_mut().unwrap() {
+            candidate.as_object_mut().unwrap().remove("choice_id");
+            for source in candidate["sources"].as_array_mut().unwrap() {
+                source.as_object_mut().unwrap().remove("version_id");
+            }
+        }
+    }
+    for item in root.get_mut("auto_merged").unwrap().as_array_mut().unwrap() {
+        for source in item["sources"].as_array_mut().unwrap() {
+            source.as_object_mut().unwrap().remove("version_id");
+        }
+    }
+    value
+}
+
+fn three_branch_snapshot(order: [usize; 3]) -> ConflictDetailPage {
+    let fx = CausalFx::new();
+    let item_id = Uuid::parse_str("00000000-0000-0000-0000-000000000900").unwrap();
+    let mut base = mut_unit(
+        "custom_item",
+        item_id,
+        None,
+        custom_item_root("base", 0, 10),
+        false,
+    );
+    base.mutation_id = "00000000-0000-0000-0000-000000000901".to_owned();
+    let base_version = fx.commit(&fx.owner, base, 1_700_000_000).unwrap().results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let mut stable = mut_unit(
+        "custom_item",
+        item_id,
+        Some(&base_version),
+        custom_item_root("stable", 0, 20),
+        false,
+    );
+    stable.mutation_id = "00000000-0000-0000-0000-000000000902".to_owned();
+    assert_eq!(
+        fx.commit(&fx.owner, stable, 1_700_000_001).unwrap().results[0].status,
+        "accepted",
+    );
+
+    let candidates = [
+        (
+            "alpha",
+            "00000000-0000-0000-0000-000000000903",
+            "device-alpha",
+        ),
+        (
+            "beta",
+            "00000000-0000-0000-0000-000000000904",
+            "device-beta",
+        ),
+        (
+            "alpha",
+            "00000000-0000-0000-0000-000000000905",
+            "device-alpha-2",
+        ),
+    ];
+    let mut conflict_id = None;
+    for index in order {
+        let (name, mutation_id, device_id) = candidates[index];
+        let mut branch = mut_unit(
+            "custom_item",
+            item_id,
+            Some(&base_version),
+            custom_item_root(name, 1, 30 + index as i64),
+            false,
+        );
+        branch.mutation_id = mutation_id.to_owned();
+        let principal = Principal {
+            device_id: device_id.to_owned(),
+            ..fx.owner.clone()
+        };
+        let result = fx
+            .commit(&principal, branch, 1_700_000_010 + index as i64)
+            .unwrap();
+        assert_eq!(result.results[0].status, "branched");
+        conflict_id = result.results[0].conflict_id.clone().or(conflict_id);
+    }
+    first_conflict_detail(&fx.store, &fx.owner, &conflict_id.unwrap()).unwrap()
 }
 
 fn assert_principal_saturated(fx: &CausalFx, now: i64) {
@@ -577,9 +720,9 @@ fn causal_current_base_delete_accepted_with_tombstone_conflict_handle() {
     // Detail exposes tombstone restore handle.
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     assert!(detail
-        .conflicting_paths
+        .conflicting
         .iter()
-        .any(|p| p == "/_mutation.deleted"));
+        .any(|item| item.path == "/_mutation.deleted"));
     assert!(detail.branches.is_empty());
 }
 
@@ -772,7 +915,7 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
     let branch_id = branched.results[0].branch_version_id.clone().unwrap();
 
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
-    assert!(detail.conflicting_paths.iter().any(|p| p == "/note"));
+    assert!(detail.conflicting.iter().any(|item| item.path == "/note"));
     assert_eq!(detail.branches.len(), 1);
 
     // CAS mismatch returns latest summary without write.
@@ -1249,10 +1392,13 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
     ));
 
     let pages = conflict_detail_pages(&restarted, &fx.owner, &conflict_id, 1_700_000_102).unwrap();
+    assert!(pages.windows(2).all(|pair| {
+        pair[0].conflicting == pair[1].conflicting && pair[0].auto_merged == pair[1].auto_merged
+    }));
     let branch_ids = pages
         .iter()
         .flat_map(|page| &page.branches)
-        .map(|branch| branch.branch_version_id.clone())
+        .map(|branch| branch.version_id.clone())
         .collect::<Vec<_>>();
     assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
     let resolved = restarted
@@ -1260,7 +1406,7 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: pages[0].stable_version_id.clone(),
+                expected_stable_version: pages[0].stable.version_id.clone(),
                 expected_branch_versions: branch_ids,
                 resolved_root: record_root(fx.baby_id, "branch-0", 100, 50),
                 resolved_media: vec![],
@@ -1308,7 +1454,7 @@ fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles(
         first_conflict = result.results[0].conflict_id.clone().unwrap();
     }
     let first_detail = first_conflict_detail(&fx.store, &fx.owner, &first_conflict).unwrap();
-    let moved_branch = first_detail.branches[0].branch_version_id.clone();
+    let moved_branch = first_detail.branches[0].version_id.clone();
     let second_conflict = Uuid::new_v4().to_string();
     let empty_conflict = Uuid::new_v4().to_string();
     let connection = fx.store.connect().unwrap();
@@ -1326,7 +1472,7 @@ fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles(
                     fx.family_id,
                     conflict_id,
                     record_id.to_string(),
-                    first_detail.stable_version_id,
+                    first_detail.stable.version_id,
                     kind,
                     created_at,
                 ],
@@ -1606,17 +1752,417 @@ fn mark_migration_base(fx: &CausalFx, version_id: &str) {
 }
 
 #[test]
-fn conflict_detail_returns_complete_ordered_heads_bases_media_and_provenance() {
-    let (fx, conflict_id, _, _) = seed_media_conflict(true);
+fn conflict_detail_exposes_typed_candidates_with_complete_provenance() {
+    let (fx, conflict_id, _, branch_id) = seed_media_conflict(true);
+    let connection = fx.store.connect().unwrap();
+    let (client_uuid, mutation_id): (String, String) = connection
+        .query_row(
+            "SELECT client_uuid, mutation_id FROM entity_versions
+             WHERE family_id = ?1 AND version_id = ?2",
+            params![fx.family_id, branch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO mutation_receipts(
+               family_id, membership_id, entity_type, client_uuid, mutation_id,
+               content_hash, status, stable_version_id, branch_version_id,
+               conflict_id, receipt_json, created_at
+             ) VALUES (?1, 'decoy-cross-membership', 'record', ?2, ?3,
+                       'decoy', 'branched', NULL, NULL, ?4, '{}', 1700000002)",
+            params![fx.family_id, client_uuid, mutation_id, conflict_id],
+        )
+        .unwrap();
+    drop(connection);
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
 
+    assert_eq!(detail.contract, "conflict_snapshot_v2");
+    assert_eq!(detail.entity_type, "record");
+    assert!(!detail.stable.deleted);
+    assert!(detail.stable.base_version.is_some());
     assert_eq!(detail.branches.len(), 1);
     let branch = &detail.branches[0];
     assert!(branch.media.is_empty());
-    assert!(branch
-        .mutation_id
-        .as_deref()
-        .is_some_and(|id| !id.is_empty()));
+    assert!(branch.deleted);
+    assert!(!branch.mutation_id.is_empty());
+    assert_eq!(branch.actor_id, fx.owner.membership_id);
+    assert_eq!(branch.device_id, fx.owner.device_id);
+    assert_eq!(branch.received_at, 1_700_000_002);
+
+    let deleted = detail
+        .conflicting
+        .iter()
+        .find(|item| item.path == "/_mutation.deleted")
+        .expect("delete/edit is a typed conflict");
+    assert_eq!(deleted.candidates.len(), 2);
+    assert!(deleted
+        .candidates
+        .iter()
+        .all(|candidate| !candidate.choice_id.is_empty() && !candidate.sources.is_empty()));
+    assert!(detail
+        .auto_merged
+        .iter()
+        .all(|item| item.path != "/_mutation.deleted"));
+    let removed_media = detail
+        .auto_merged
+        .iter()
+        .find(|item| item.path.starts_with("/media/"))
+        .expect("media membership uses the same typed classifier");
+    assert_eq!(removed_media.outcome, ConflictOutcome::Remove);
+    assert_eq!(removed_media.sources.len(), 1);
+}
+
+#[test]
+fn conflict_snapshot_keeps_explicit_null_as_a_typed_candidate() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let base = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, None, "base"),
+            1_700_000_000,
+        )
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(record_id, Some(&base), "stable"),
+        1_700_000_001,
+    )
+    .unwrap();
+    let mut null_branch = fx.record_mutation(record_id, Some(&base), "ignored");
+    null_branch.root.insert("note".to_owned(), Value::Null);
+    let branched = fx.commit(&fx.owner, null_branch, 1_700_000_002).unwrap();
+    let detail = first_conflict_detail(
+        &fx.store,
+        &fx.owner,
+        branched.results[0].conflict_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    let note = detail
+        .conflicting
+        .iter()
+        .find(|item| item.path == "/note")
+        .unwrap();
+    assert!(note
+        .candidates
+        .iter()
+        .any(|candidate| { candidate.outcome == ConflictOutcome::Set { value: Value::Null } }));
+}
+
+#[test]
+fn conflict_snapshot_normalizes_type_dependent_subtree_replacement() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let base = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, None, "same"),
+            1_700_000_000,
+        )
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let root_for_type = |record_type: &str, updated_at: i64| {
+        let mut root = record_root(fx.baby_id, "same", 100, updated_at);
+        root.insert("type".to_owned(), Value::String(record_type.to_owned()));
+        root.insert("payload_json".to_owned(), json!({}));
+        root
+    };
+    fx.commit(
+        &fx.owner,
+        mut_unit(
+            "record",
+            record_id,
+            Some(&base),
+            root_for_type("walk", 30),
+            false,
+        ),
+        1_700_000_001,
+    )
+    .unwrap();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "record",
+                record_id,
+                Some(&base),
+                root_for_type("bath", 40),
+                false,
+            ),
+            1_700_000_002,
+        )
+        .unwrap();
+    assert_eq!(branched.results[0].status, "branched");
+    let detail = first_conflict_detail(
+        &fx.store,
+        &fx.owner,
+        branched.results[0].conflict_id.as_deref().unwrap(),
+    )
+    .expect("a canonical dependent subtree replacement must be classifiable");
+    assert!(detail.conflicting.iter().any(|item| item.path == "/type"));
+    let payload = detail
+        .auto_merged
+        .iter()
+        .find(|item| item.path == "/payload_json")
+        .unwrap();
+    assert_eq!(payload.outcome, ConflictOutcome::Set { value: json!({}) },);
+    assert_eq!(payload.sources.len(), 2);
+}
+
+#[test]
+fn conflict_snapshot_classifies_non_sleep_and_sleep_key_sets() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let base = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, None, "base"),
+            1_700_000_000,
+        )
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let mut walk = record_root(fx.baby_id, "walk", 100, 30);
+    walk.insert("type".to_owned(), json!("walk"));
+    walk.insert("payload_json".to_owned(), json!({}));
+    fx.commit(
+        &fx.owner,
+        mut_unit("record", record_id, Some(&base), walk, false),
+        1_700_000_001,
+    )
+    .unwrap();
+    let sleep = sleep_root(fx.baby_id, 100, 40);
+    let branched = fx
+        .commit(
+            &fx.owner,
+            mut_unit("record", record_id, Some(&base), sleep, false),
+            1_700_000_002,
+        )
+        .unwrap();
+    assert_eq!(branched.results[0].status, "branched");
+    let detail = first_conflict_detail(
+        &fx.store,
+        &fx.owner,
+        branched.results[0].conflict_id.as_deref().unwrap(),
+    )
+    .expect("conditional record keys are represented by their typed source views");
+    assert!(detail.conflicting.iter().any(|item| item.path == "/type"));
+    let is_conditional_key =
+        |path: &str| path == "/end_timestamp" || path == "/effective_wake_observation_client_uuid";
+    assert!(detail
+        .conflicting
+        .iter()
+        .all(|item| !is_conditional_key(&item.path)));
+    assert!(detail
+        .auto_merged
+        .iter()
+        .all(|item| !is_conditional_key(&item.path)));
+}
+
+#[test]
+fn conflict_snapshot_preserves_same_sleep_type_conditional_choices() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let base = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, None, "base"),
+            1_700_000_000,
+        )
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+
+    // Establish a valid sleep target before creating the observations. The
+    // parent relation below then models two offline type transitions whose
+    // direct causal base was the original non-sleep record.
+    let sleep = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "record",
+                record_id,
+                Some(&base),
+                sleep_root(fx.baby_id, 100, 30),
+                false,
+            ),
+            1_700_000_001,
+        )
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+
+    let wake_a = Uuid::new_v4();
+    let wake_b = Uuid::new_v4();
+    for (wake_id, wake_timestamp, now) in
+        [(wake_a, 120, 1_700_000_002), (wake_b, 130, 1_700_000_003)]
+    {
+        let accepted = fx
+            .commit(
+                &fx.owner,
+                mut_unit(
+                    "wake_observation",
+                    wake_id,
+                    None,
+                    wake_observation_root(record_id, wake_timestamp, wake_timestamp),
+                    false,
+                ),
+                now,
+            )
+            .unwrap();
+        assert_eq!(accepted.results[0].status, "accepted", "{accepted:?}");
+    }
+
+    let mut head_a = sleep_root(fx.baby_id, 100, 40);
+    head_a.insert(
+        "effective_wake_observation_client_uuid".to_owned(),
+        json!(wake_a),
+    );
+    let stable = fx
+        .commit(
+            &fx.owner,
+            mut_unit("record", record_id, Some(&sleep), head_a, false),
+            1_700_000_004,
+        )
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+
+    let connection = fx.store.connect().unwrap();
+    connection
+        .execute(
+            "DELETE FROM entity_version_parents
+             WHERE family_id = ?1 AND version_id = ?2",
+            params![fx.family_id, stable],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO entity_version_parents(
+               family_id, version_id, parent_version_id
+             ) VALUES (?1, ?2, ?3)",
+            params![fx.family_id, stable, base],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut head_b = sleep_root(fx.baby_id, 100, 50);
+    head_b.insert(
+        "effective_wake_observation_client_uuid".to_owned(),
+        json!(wake_b),
+    );
+    let branched = fx
+        .commit(
+            &fx.owner,
+            mut_unit("record", record_id, Some(&base), head_b, false),
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(branched.results[0].status, "branched", "{branched:?}");
+
+    let detail = first_conflict_detail(
+        &fx.store,
+        &fx.owner,
+        branched.results[0].conflict_id.as_deref().unwrap(),
+    )
+    .expect("same-type conditional values remain server-authoritative choices");
+    let effective = detail
+        .conflicting
+        .iter()
+        .find(|item| item.path == "/effective_wake_observation_client_uuid")
+        .expect("different effective wake observations conflict");
+    assert_eq!(effective.candidates.len(), 2);
+    assert!(effective
+        .candidates
+        .iter()
+        .all(|candidate| candidate.sources.len() == 1));
+    let mut choices = effective
+        .candidates
+        .iter()
+        .map(|candidate| match &candidate.outcome {
+            ConflictOutcome::Set { value } => value.as_str().unwrap().to_owned(),
+            ConflictOutcome::Remove => panic!("effective wake choice cannot be a removal"),
+        })
+        .collect::<Vec<_>>();
+    choices.sort();
+    let mut expected = vec![wake_a.to_string(), wake_b.to_string()];
+    expected.sort();
+    assert_eq!(choices, expected);
+
+    let record_type = detail
+        .auto_merged
+        .iter()
+        .find(|item| item.path == "/type")
+        .expect("the common sleep transition is auto-merged");
+    assert_eq!(
+        record_type.outcome,
+        ConflictOutcome::Set {
+            value: json!("sleep"),
+        }
+    );
+    assert_eq!(record_type.sources.len(), 2);
+    assert!(detail
+        .conflicting
+        .iter()
+        .all(|item| item.path != "/end_timestamp"));
+    assert!(detail
+        .auto_merged
+        .iter()
+        .all(|item| item.path != "/end_timestamp"));
+}
+
+#[test]
+fn conflict_snapshot_is_identical_for_every_three_branch_arrival_permutation() {
+    let permutations = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let snapshots = permutations.map(three_branch_snapshot);
+    let expected = deterministic_snapshot_payload(&snapshots[0]);
+    for (index, snapshot) in snapshots.iter().enumerate().skip(1) {
+        assert_eq!(
+            deterministic_snapshot_payload(snapshot),
+            expected,
+            "arrival permutation {index} changed semantic snapshot bytes",
+        );
+    }
+
+    let name = snapshots[0]
+        .conflicting
+        .iter()
+        .find(|item| item.path == "/name")
+        .unwrap();
+    assert_eq!(name.candidates.len(), 3);
+    let icon = snapshots[0]
+        .auto_merged
+        .iter()
+        .find(|item| item.path == "/icon_slot")
+        .unwrap();
+    assert_eq!(icon.sources.len(), 3);
+    assert!(snapshots[0].conflicting.iter().all(|conflict| snapshots[0]
+        .auto_merged
+        .iter()
+        .all(|auto| auto.path != conflict.path)));
 }
 
 #[test]
@@ -1829,11 +2375,11 @@ fn conflict_detail_pages_all_heads_with_count_and_encoded_byte_budgets() {
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: first.stable_version_id.clone(),
+                expected_stable_version: first.stable.version_id.clone(),
                 expected_branch_versions: first
                     .branches
                     .iter()
-                    .map(|branch| branch.branch_version_id.clone())
+                    .map(|branch| branch.version_id.clone())
                     .collect(),
                 resolved_root: record_root(fx.baby_id, "branch-00", 100, 50),
                 resolved_media: vec![],
@@ -1886,14 +2432,14 @@ fn conflict_detail_pages_all_heads_with_count_and_encoded_byte_budgets() {
         .branches
         .iter()
         .chain(&second.branches)
-        .map(|branch| branch.branch_version_id.as_str())
+        .map(|branch| branch.version_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(branch_ids.len(), 17);
     assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
 #[test]
-fn conflict_detail_encoded_budget_splits_before_the_count_limit() {
+fn conflict_detail_rejects_one_semantic_dependency_group_over_the_byte_budget() {
     let fx = CausalFx::new();
     let (record_id, base) = fx.seed_concurrent_record();
     let mut conflict_id = None;
@@ -1909,17 +2455,9 @@ fn conflict_detail_encoded_budget_splits_before_the_count_limit() {
         conflict_id = result.results[0].conflict_id.clone().or(conflict_id);
     }
 
-    let pages =
-        conflict_detail_pages(&fx.store, &fx.owner, &conflict_id.unwrap(), 1_700_000_003).unwrap();
-    assert!(pages.len() > 1);
-    assert!(pages[0].branches.len() < 10);
-    assert_eq!(
-        pages.iter().map(|page| page.branches.len()).sum::<usize>(),
-        10,
-    );
-    assert!(pages
-        .iter()
-        .all(|page| serde_json::to_vec(page).unwrap().len() <= 128 * 1024),);
+    let error = first_conflict_detail(&fx.store, &fx.owner, &conflict_id.unwrap())
+        .expect_err("one indivisible path candidate set cannot be silently truncated");
+    assert!(matches!(error, StoreError::ConflictSnapshotPageTooLarge));
 }
 
 #[test]
@@ -1960,7 +2498,13 @@ fn conflict_detail_receipt_authentication_rejects_plan_and_serializer_drift() {
     )
     .unwrap();
 
-    for damage in ["offset", "truncation", "continuation", "serializer"] {
+    for damage in [
+        "offset",
+        "truncation",
+        "continuation",
+        "choice",
+        "serializer",
+    ] {
         let mut damaged = original.clone();
         let receipt = &mut damaged.as_array_mut().unwrap()[0];
         match damage {
@@ -1969,6 +2513,11 @@ fn conflict_detail_receipt_authentication_rejects_plan_and_serializer_drift() {
                 receipt["page_ends"].as_array_mut().unwrap().pop();
             }
             "continuation" => receipt["continuation_nonces"][0] = json!("tampered"),
+            "choice" => {
+                let choice_ids = receipt["choice_ids"].as_object_mut().unwrap();
+                let first = choice_ids.values_mut().next().unwrap();
+                *first = json!("tampered-choice");
+            }
             "serializer" => receipt["page_digests"][0] = json!("00"),
             _ => unreachable!(),
         }
@@ -2019,7 +2568,7 @@ fn conflict_detail_receipt_history_is_bounded_without_evicting_the_latest() {
                 1_700_000_003 + index,
             )
             .unwrap();
-        current_stable = page.stable_version_id.clone();
+        current_stable = page.stable.version_id.clone();
         tokens.push(page.snapshot_token.clone());
         if index == 64 {
             latest_page_bytes = serde_json::to_vec(&page).unwrap();
@@ -2072,7 +2621,7 @@ fn conflict_detail_receipt_history_is_bounded_without_evicting_the_latest() {
             1_700_000_100,
         )
         .unwrap();
-    assert_eq!(latest.stable_version_id, current_stable);
+    assert_eq!(latest.stable.version_id, current_stable);
     assert_eq!(serde_json::to_vec(&latest).unwrap(), latest_page_bytes);
 }
 
@@ -2164,7 +2713,7 @@ fn conflict_detail_tokens_fail_closed_for_tamper_expiry_and_branch_drift() {
     let stable_changed = fx
         .commit(
             &fx.owner,
-            fx.record_mutation(record_id, Some(&refreshed.stable_version_id), "stable-v3"),
+            fx.record_mutation(record_id, Some(&refreshed.stable.version_id), "stable-v3"),
             1_700_000_006,
         )
         .unwrap();
@@ -2188,6 +2737,8 @@ fn conflict_detail_fails_closed_for_incomplete_persisted_projection() {
         "base",
         "media",
         "provenance",
+        "device_provenance",
+        "multi_parent",
         "legacy_root",
         "legacy_media",
         "legacy_hash",
@@ -2243,6 +2794,35 @@ fn conflict_detail_fails_closed_for_incomplete_persisted_projection() {
                         "UPDATE entity_versions SET mutation_id = NULL
                          WHERE family_id = ?1 AND version_id = ?2",
                         params![fx.family_id, branch],
+                    )
+                    .unwrap();
+            }
+            "device_provenance" => {
+                connection
+                    .execute(
+                        "UPDATE mutation_receipts
+                         SET receipt_json = json_remove(receipt_json, '$.device_id')
+                         WHERE family_id = ?1 AND membership_id = ?2
+                           AND mutation_id = ?3",
+                        params![fx.family_id, VERSION_PROVENANCE_PRINCIPAL, branch],
+                    )
+                    .unwrap();
+            }
+            "multi_parent" => {
+                let stable: String = connection
+                    .query_row(
+                        "SELECT stable_version_id FROM conflicts
+                         WHERE family_id = ?1 AND conflict_id = ?2",
+                        params![fx.family_id, conflict_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO entity_version_parents(
+                           family_id, version_id, parent_version_id
+                         ) VALUES (?1, ?2, ?3)",
+                        params![fx.family_id, branch, stable],
                     )
                     .unwrap();
             }

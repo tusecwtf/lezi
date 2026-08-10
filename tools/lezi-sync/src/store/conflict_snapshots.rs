@@ -11,8 +11,9 @@ use rusqlite::{params, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::causal::ConflictBranchDetail;
+use super::causal::{ConflictHeads, StableSnapshot};
 use super::{migration_content_hash, CausalMediaItem, StoreError};
 
 const SYSTEM_RECEIPT_PRINCIPAL: &str = "__conflict_snapshot_v2__";
@@ -21,7 +22,7 @@ const MAX_BRANCHES_PER_PAGE: usize = 16;
 const MAX_ENCODED_PAGE_BYTES: usize = 128 * 1024;
 const MAX_RECEIPTS_PER_CONFLICT: usize = 64;
 const CREDENTIAL_BYTES: usize = 32;
-const SERIALIZER_CONTRACT: &str = "conflict-detail-page-serde-v1";
+const SERIALIZER_CONTRACT: &str = "conflict-detail-page-serde-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictDetailPageRequest {
@@ -35,28 +36,78 @@ pub enum ConflictDetailPageRequest {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ConflictDetailPage {
+    pub contract: &'static str,
     pub conflict_id: String,
-    pub stable_version_id: String,
-    pub stable_root: Map<String, Value>,
-    pub stable_media: Vec<CausalMediaItem>,
-    pub branches: Vec<ConflictBranchDetail>,
-    pub conflicting_paths: Vec<String>,
-    pub auto_merged: Map<String, Value>,
+    pub entity_type: String,
+    pub client_uuid: String,
     pub snapshot_token: String,
     pub expires_at: i64,
+    pub stable: ConflictVersionView,
+    pub branches: Vec<ConflictVersionView>,
+    pub conflicting: Vec<ConflictingPath>,
+    pub auto_merged: Vec<AutoMergedPath>,
     pub page_index: usize,
     pub continuation: Option<String>,
     pub complete: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConflictVersionView {
+    pub version_id: String,
+    pub base_version: Option<String>,
+    pub root: Map<String, Value>,
+    pub media: Vec<CausalMediaItem>,
+    pub deleted: bool,
+    pub mutation_id: String,
+    pub actor_id: String,
+    pub device_id: String,
+    pub received_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ConflictOutcome {
+    Set { value: Value },
+    Remove,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConflictSource {
+    pub version_id: String,
+    pub mutation_id: String,
+    pub actor_id: String,
+    pub device_id: String,
+    pub received_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConflictCandidate {
+    pub choice_id: String,
+    pub outcome: ConflictOutcome,
+    pub sources: Vec<ConflictSource>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ConflictingPath {
+    pub path: String,
+    pub candidates: Vec<ConflictCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AutoMergedPath {
+    pub path: String,
+    pub outcome: ConflictOutcome,
+    pub sources: Vec<ConflictSource>,
+}
+
 pub(super) struct ConflictSnapshotMaterial {
     pub conflict_id: String,
-    pub stable_version_id: String,
-    pub stable_root: Map<String, Value>,
-    pub stable_media: Vec<CausalMediaItem>,
-    pub branches: Vec<ConflictBranchDetail>,
-    pub conflicting_paths: Vec<String>,
-    pub auto_merged: Map<String, Value>,
+    pub entity_type: String,
+    pub client_uuid: String,
+    pub stable: ConflictVersionView,
+    pub branches: Vec<ConflictVersionView>,
+    pub conflicting: Vec<ConflictingPath>,
+    pub auto_merged: Vec<AutoMergedPath>,
 }
 
 pub(super) struct ConflictSnapshotBinding<'a> {
@@ -73,7 +124,7 @@ pub(super) struct ConflictSnapshotBinding<'a> {
 impl ConflictSnapshotBinding<'_> {
     fn fingerprint(&self) -> String {
         let mut parts = vec![
-            "conflict_snapshot_v2",
+            SERIALIZER_CONTRACT,
             self.family_id,
             self.conflict_id,
             self.kind,
@@ -97,6 +148,8 @@ struct StoredSnapshotReceipt {
     expires_at_seconds: i64,
     page_ends: Vec<usize>,
     continuation_nonces: Vec<String>,
+    #[serde(default)]
+    choice_ids: BTreeMap<String, String>,
     page_digests: Vec<String>,
     integrity_tag: String,
 }
@@ -115,6 +168,7 @@ impl StoredSnapshotReceipt {
             self.expires_at_seconds,
             &self.page_ends,
             &self.continuation_nonces,
+            &self.choice_ids,
         ))
         .expect("receipt layout is serializable")
     }
@@ -155,6 +209,428 @@ impl StoredSnapshotReceipt {
     }
 }
 
+fn version_view(version: &StableSnapshot) -> Result<ConflictVersionView, StoreError> {
+    let base_version = match version.parents.len() {
+        0 => None,
+        1 => version.parents.iter().next().cloned(),
+        _ => return Err(StoreError::InvalidStoredPayload),
+    };
+    Ok(ConflictVersionView {
+        version_id: version.version_id.clone(),
+        base_version,
+        root: version.root.clone(),
+        media: version.media.clone(),
+        deleted: version.deleted_at.is_some(),
+        mutation_id: version
+            .mutation_id
+            .clone()
+            .ok_or(StoreError::InvalidStoredPayload)?,
+        actor_id: version
+            .actor_id
+            .clone()
+            .ok_or(StoreError::InvalidStoredPayload)?,
+        device_id: version
+            .device_id
+            .clone()
+            .ok_or(StoreError::InvalidStoredPayload)?,
+        received_at: version
+            .received_at
+            .ok_or(StoreError::InvalidStoredPayload)?,
+    })
+}
+
+fn source(version: &StableSnapshot) -> Result<ConflictSource, StoreError> {
+    let view = version_view(version)?;
+    Ok(ConflictSource {
+        version_id: view.version_id,
+        mutation_id: view.mutation_id,
+        actor_id: view.actor_id,
+        device_id: view.device_id,
+        received_at: view.received_at,
+    })
+}
+
+fn pointer_escape(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+fn root_differences(
+    path: &str,
+    base: Option<&Value>,
+    head: Option<&Value>,
+    output: &mut BTreeMap<String, ConflictOutcome>,
+) -> Result<(), StoreError> {
+    if base == head {
+        return Ok(());
+    }
+    let Some(head) = head else {
+        return Err(StoreError::InvalidStoredPayload);
+    };
+    match (base, head) {
+        (Some(Value::Object(base)), Value::Object(head))
+            if base.keys().any(|key| !head.contains_key(key)) =>
+        {
+            output.insert(
+                path.to_owned(),
+                ConflictOutcome::Set {
+                    value: Value::Object(head.clone()),
+                },
+            );
+        }
+        (Some(Value::Object(base)), Value::Object(head)) => {
+            let keys = base.keys().chain(head.keys()).collect::<BTreeSet<_>>();
+            for key in keys {
+                root_differences(
+                    &format!("{path}/{}", pointer_escape(key)),
+                    base.get(key),
+                    head.get(key),
+                    output,
+                )?;
+            }
+        }
+        (None, Value::Object(head)) if !head.is_empty() => {
+            for (key, value) in head {
+                root_differences(
+                    &format!("{path}/{}", pointer_escape(key)),
+                    None,
+                    Some(value),
+                    output,
+                )?;
+            }
+        }
+        _ => {
+            output.insert(
+                path.to_owned(),
+                ConflictOutcome::Set {
+                    value: head.clone(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn version_differences(
+    base: &StableSnapshot,
+    head: &StableSnapshot,
+) -> Result<BTreeMap<String, ConflictOutcome>, StoreError> {
+    let mut differences = BTreeMap::new();
+    let type_changed = base.root.get("type") != head.root.get("type");
+    let root_keys = base
+        .root
+        .keys()
+        .chain(head.root.keys())
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "updated_at" | "created_by_membership_id" | "observer_membership_id"
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for key in root_keys {
+        if type_changed
+            && matches!(
+                key.as_str(),
+                "end_timestamp" | "effective_wake_observation_client_uuid"
+            )
+            && head.root.get(key).is_none()
+        {
+            // These keys are conditionally forbidden/required by the selected
+            // record type. A removed key travels with the complete /type source
+            // view instead of being misreported as set(null)/remove. A key
+            // introduced by the target type remains a typed outcome, so two
+            // same-type heads can still disagree on its value.
+            continue;
+        }
+        root_differences(
+            &format!("/{}", pointer_escape(key)),
+            base.root.get(key),
+            head.root.get(key),
+            &mut differences,
+        )?;
+    }
+
+    let base_deleted = base.deleted_at.is_some();
+    let head_deleted = head.deleted_at.is_some();
+    if base_deleted != head_deleted {
+        differences.insert(
+            "/_mutation.deleted".to_owned(),
+            if head_deleted {
+                ConflictOutcome::Remove
+            } else {
+                ConflictOutcome::Set {
+                    value: Value::Bool(false),
+                }
+            },
+        );
+    }
+
+    let base_media = base
+        .media
+        .iter()
+        .map(|item| (&item.media_uuid, item))
+        .collect::<BTreeMap<_, _>>();
+    let head_media = head
+        .media
+        .iter()
+        .map(|item| (&item.media_uuid, item))
+        .collect::<BTreeMap<_, _>>();
+    for media_uuid in base_media
+        .keys()
+        .chain(head_media.keys())
+        .collect::<BTreeSet<_>>()
+    {
+        if base_media.get(media_uuid) == head_media.get(media_uuid) {
+            continue;
+        }
+        differences.insert(
+            format!("/media/{media_uuid}"),
+            match head_media.get(media_uuid) {
+                Some(item) => ConflictOutcome::Set {
+                    value: item.to_value(),
+                },
+                None => ConflictOutcome::Remove,
+            },
+        );
+    }
+    Ok(differences)
+}
+
+fn is_path_ancestor(ancestor: &str, path: &str) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn value_at_pointer(root: &Map<String, Value>, path: &str) -> Option<Value> {
+    Value::Object(root.clone()).pointer(path).cloned()
+}
+
+fn conditional_record_shape(root: &Map<String, Value>, path: &str) -> Option<&'static str> {
+    let record_type = root.get("type")?.as_str()?;
+    match (path, record_type) {
+        ("/effective_wake_observation_client_uuid", "sleep") => Some("sleep"),
+        ("/end_timestamp", "sleep") => None,
+        ("/end_timestamp", _) => Some("non_sleep"),
+        _ => None,
+    }
+}
+
+pub(super) fn build_conflict_snapshot(
+    projection: &ConflictHeads,
+) -> Result<ConflictSnapshotMaterial, StoreError> {
+    let stable = projection.stable();
+    let mut heads = vec![stable];
+    heads.extend(
+        projection
+            .branch_version_ids
+            .iter()
+            .map(|version_id| projection.version(version_id)),
+    );
+
+    let mut changes = BTreeMap::<String, BTreeMap<String, ConflictOutcome>>::new();
+    for head in &heads {
+        let base_id = head
+            .parents
+            .iter()
+            .next()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        if head.parents.len() != 1 {
+            return Err(StoreError::InvalidStoredPayload);
+        }
+        let base = projection.version(base_id);
+        changes.insert(head.version_id.clone(), version_differences(base, head)?);
+    }
+
+    if projection.entity_type == "record" {
+        let mut unpaired_shape_introductions = Vec::new();
+        for head in &heads {
+            let base = projection.direct_base(&head.version_id);
+            if base.root.get("type") == head.root.get("type") {
+                continue;
+            }
+            for (path, key) in [
+                ("/end_timestamp", "end_timestamp"),
+                (
+                    "/effective_wake_observation_client_uuid",
+                    "effective_wake_observation_client_uuid",
+                ),
+            ] {
+                if base.root.contains_key(key) || !head.root.contains_key(key) {
+                    continue;
+                }
+                let Some(shape) = conditional_record_shape(&head.root, path) else {
+                    continue;
+                };
+                let peers = heads
+                    .iter()
+                    .filter(|candidate| {
+                        conditional_record_shape(&candidate.root, path) == Some(shape)
+                    })
+                    .count();
+                if peers < 2 {
+                    unpaired_shape_introductions.push((head.version_id.clone(), path));
+                }
+            }
+        }
+        for (version_id, path) in unpaired_shape_introductions {
+            changes
+                .get_mut(&version_id)
+                .ok_or(StoreError::InvalidStoredPayload)?
+                .remove(path);
+        }
+    }
+
+    if projection.kind == "tombstone_restore" {
+        let base = projection.direct_base(&stable.version_id);
+        changes.clear();
+        changes.insert(
+            stable.version_id.clone(),
+            BTreeMap::from([("/_mutation.deleted".to_owned(), ConflictOutcome::Remove)]),
+        );
+        changes.insert(
+            base.version_id.clone(),
+            BTreeMap::from([(
+                "/_mutation.deleted".to_owned(),
+                ConflictOutcome::Set {
+                    value: Value::Bool(false),
+                },
+            )]),
+        );
+        heads.push(base);
+    } else {
+        let deleting = changes
+            .values()
+            .any(|paths| paths.get("/_mutation.deleted") == Some(&ConflictOutcome::Remove));
+        if deleting {
+            for head in &heads {
+                let paths = changes
+                    .get_mut(&head.version_id)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                if head.deleted_at.is_none()
+                    && paths.keys().any(|path| path != "/_mutation.deleted")
+                {
+                    paths.insert(
+                        "/_mutation.deleted".to_owned(),
+                        ConflictOutcome::Set {
+                            value: Value::Bool(false),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let all_paths = changes
+        .values()
+        .flat_map(BTreeMap::keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let normalized_paths = all_paths
+        .iter()
+        .filter(|path| {
+            !all_paths
+                .iter()
+                .any(|candidate| candidate != *path && is_path_ancestor(candidate, path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut conflicting = Vec::new();
+    let mut auto_merged = Vec::new();
+    for path in normalized_paths {
+        let mut outcomes = BTreeMap::<String, (ConflictOutcome, Vec<ConflictSource>)>::new();
+        for head in &heads {
+            let Some(head_changes) = changes.get(&head.version_id) else {
+                continue;
+            };
+            let relevant = head_changes
+                .iter()
+                .find(|(candidate, _)| {
+                    candidate.as_str() == path || is_path_ancestor(&path, candidate)
+                })
+                .map(|(_, outcome)| outcome.clone());
+            let Some(outcome) = relevant else {
+                continue;
+            };
+            let outcome = if head_changes.contains_key(&path) {
+                outcome
+            } else {
+                ConflictOutcome::Set {
+                    value: value_at_pointer(&head.root, &path)
+                        .ok_or(StoreError::InvalidStoredPayload)?,
+                }
+            };
+            let key = serde_json::to_string(&outcome)?;
+            outcomes
+                .entry(key)
+                .or_insert_with(|| (outcome, Vec::new()))
+                .1
+                .push(source(head)?);
+        }
+        for (_, sources) in outcomes.values_mut() {
+            sources.sort_by(|left, right| {
+                (
+                    &left.mutation_id,
+                    &left.actor_id,
+                    &left.device_id,
+                    left.received_at,
+                    &left.version_id,
+                )
+                    .cmp(&(
+                        &right.mutation_id,
+                        &right.actor_id,
+                        &right.device_id,
+                        right.received_at,
+                        &right.version_id,
+                    ))
+            });
+        }
+        if outcomes.len() == 1 {
+            let (_, (outcome, sources)) = outcomes.pop_first().expect("one outcome");
+            auto_merged.push(AutoMergedPath {
+                path,
+                outcome,
+                sources,
+            });
+        } else if outcomes.len() > 1 {
+            conflicting.push(ConflictingPath {
+                path,
+                candidates: outcomes
+                    .into_values()
+                    .map(|(outcome, sources)| ConflictCandidate {
+                        choice_id: String::new(),
+                        outcome,
+                        sources,
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    let branches = projection
+        .branch_version_ids
+        .iter()
+        .map(|version_id| version_view(projection.version(version_id)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ConflictSnapshotMaterial {
+        conflict_id: projection.conflict_id.clone(),
+        entity_type: projection.entity_type.clone(),
+        client_uuid: projection.client_uuid.clone(),
+        stable: version_view(stable)?,
+        branches,
+        conflicting,
+        auto_merged,
+    })
+}
+
+fn choice_binding(path: &str, candidate: &ConflictCandidate) -> Result<String, StoreError> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&(
+        path,
+        &candidate.outcome,
+        &candidate.sources,
+    ))?)))
+}
+
 fn render_page(
     receipt: &StoredSnapshotReceipt,
     material: &ConflictSnapshotMaterial,
@@ -174,16 +650,27 @@ fn render_page(
         return Err(StoreError::InvalidStoredPayload);
     }
     let continuation = receipt.continuation(receipt_key, page_index);
+    let mut conflicting = material.conflicting.clone();
+    for item in &mut conflicting {
+        for candidate in &mut item.candidates {
+            candidate.choice_id = receipt
+                .choice_ids
+                .get(&choice_binding(&item.path, candidate)?)
+                .cloned()
+                .ok_or(StoreError::InvalidStoredPayload)?;
+        }
+    }
     Ok(ConflictDetailPage {
+        contract: "conflict_snapshot_v2",
         conflict_id: material.conflict_id.clone(),
-        stable_version_id: material.stable_version_id.clone(),
-        stable_root: material.stable_root.clone(),
-        stable_media: material.stable_media.clone(),
-        branches: material.branches[start..end].to_vec(),
-        conflicting_paths: material.conflicting_paths.clone(),
-        auto_merged: material.auto_merged.clone(),
+        entity_type: material.entity_type.clone(),
+        client_uuid: material.client_uuid.clone(),
         snapshot_token: snapshot_token.to_owned(),
         expires_at: receipt.expires_at_seconds.saturating_mul(1_000),
+        stable: material.stable.clone(),
+        branches: material.branches[start..end].to_vec(),
+        conflicting,
+        auto_merged: material.auto_merged.clone(),
         page_index,
         complete: continuation.is_none(),
         continuation,
@@ -239,6 +726,18 @@ fn plan_receipt(
         expires_at_seconds: now.saturating_add(SNAPSHOT_RECEIPT_TTL_SECONDS),
         page_ends: vec![],
         continuation_nonces: vec![],
+        choice_ids: material
+            .conflicting
+            .iter()
+            .flat_map(|item| {
+                item.candidates
+                    .iter()
+                    .map(|candidate| choice_binding(&item.path, candidate))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?
+            .into_iter()
+            .map(|binding| (binding, random_nonce()))
+            .collect(),
         page_digests: vec![],
         integrity_tag: String::new(),
     };

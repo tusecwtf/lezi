@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01, R12, R17 and R18 reviewed and fully gated; H02 is the serial frontier
+Status: in-progress — H01, R12, R17, R18 and H02 reviewed and fully gated; H03 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -26,7 +26,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | # | File | Status | Blocked by |
 |---|------|--------|------------|
 | 01 | [`01-freeze-conflict-v2-contract`](./issues/01-freeze-conflict-v2-contract.md) | implemented (review/gates pass) | — |
-| 02 | [`02-deterministic-nway-conflict-snapshot`](./issues/02-deterministic-nway-conflict-snapshot.md) | ready-for-agent | 01, R17, R18 |
+| 02 | [`02-deterministic-nway-conflict-snapshot`](./issues/02-deterministic-nway-conflict-snapshot.md) | implemented (review/gates pass) | 01, R17, R18 |
 | 03 | [`03-choice-only-authoritative-resolution`](./issues/03-choice-only-authoritative-resolution.md) | ready-for-agent | 02 |
 | 04 | [`04-causal-tombstone-restore`](./issues/04-causal-tombstone-restore.md) | ready-for-agent | 03 |
 | 05 | [`05-record-snapshot-room-projection`](./issues/05-record-snapshot-room-projection.md) | ready-for-agent | 03, 04, R19 |
@@ -78,7 +78,8 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H02 is the next executable ticket. Follow the serial order above. H27
+H03 is the next executable ticket; H04 remains blocked by H03 and repository R19 remains blocked by H04.
+Follow the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.
 

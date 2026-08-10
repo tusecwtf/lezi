@@ -15348,11 +15348,84 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{detail}");
-    assert!(detail["conflicting_paths"]
+    assert_eq!(detail["contract"], "conflict_snapshot_v2");
+    assert_eq!(detail["stable"]["version_id"], v2);
+    assert!(detail.get("stable_root").is_none());
+    assert!(detail.get("conflicting_paths").is_none());
+    assert_eq!(
+        detail
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "auto_merged",
+            "branches",
+            "client_uuid",
+            "complete",
+            "conflict_id",
+            "conflicting",
+            "continuation",
+            "contract",
+            "entity_type",
+            "expires_at",
+            "page_index",
+            "snapshot_token",
+            "stable",
+        ]),
+    );
+    let version_keys = BTreeSet::from([
+        "actor_id",
+        "base_version",
+        "deleted",
+        "device_id",
+        "media",
+        "mutation_id",
+        "received_at",
+        "root",
+        "version_id",
+    ]);
+    assert_eq!(
+        detail["stable"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        version_keys,
+    );
+    assert!(detail["conflicting"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|p| p == "/note"));
+        .any(|item| item["path"] == "/note"));
+    let note = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "/note")
+        .unwrap();
+    assert!(note["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|candidate| {
+            candidate["choice_id"]
+                .as_str()
+                .is_some_and(|id| id.len() >= 16)
+                && candidate["outcome"]["op"] == "set"
+                && candidate["sources"].as_array().is_some_and(|sources| {
+                    !sources.is_empty()
+                        && sources.iter().all(|source| {
+                            source["version_id"].is_string()
+                                && source["mutation_id"].is_string()
+                                && source["actor_id"].is_string()
+                                && source["device_id"].is_string()
+                                && source["received_at"].is_number()
+                        })
+                })
+        }));
 
     let (status, resolved) = json_request(
         &rig.app,
@@ -15695,7 +15768,7 @@ async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|branch| branch["branch_version_id"].as_str().unwrap().to_owned()),
+                .map(|branch| branch["version_id"].as_str().unwrap().to_owned()),
         );
         match &snapshot_token {
             Some(value) => assert_eq!(detail["snapshot_token"], *value),

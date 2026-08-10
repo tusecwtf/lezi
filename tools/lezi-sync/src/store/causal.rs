@@ -23,8 +23,8 @@ use super::causal_merge::{
     leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
 };
 use super::conflict_snapshots::{
-    open_conflict_detail_page, ConflictDetailPageRequest, ConflictSnapshotBinding,
-    ConflictSnapshotMaterial,
+    build_conflict_snapshot, open_conflict_detail_page, ConflictDetailPageRequest, ConflictOutcome,
+    ConflictSnapshotBinding,
 };
 use super::{migration_content_hash, CausalCommitSaturation, Principal, Store, StoreError};
 
@@ -41,6 +41,7 @@ const CAUSAL_ENTITY_TYPES: &[&str] = &[
 ];
 
 pub const MAX_CAUSAL_UNITS: usize = 64;
+pub(super) const VERSION_PROVENANCE_PRINCIPAL: &str = "__version_provenance_v2__";
 
 #[derive(Debug, Clone)]
 pub struct CausalMutation {
@@ -91,15 +92,6 @@ pub struct ConflictSummary {
     pub branch_version_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ConflictBranchDetail {
-    pub branch_version_id: String,
-    pub root: Map<String, Value>,
-    pub media: Vec<CausalMediaItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mutation_id: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct ResolveConflictInput {
     pub expected_stable_version: String,
@@ -126,38 +118,41 @@ pub struct ResolveConflictResult {
 }
 
 #[derive(Debug, Clone)]
-struct StableSnapshot {
-    version_id: String,
-    root: Map<String, Value>,
-    media: Vec<CausalMediaItem>,
-    deleted_at: Option<i64>,
-    updated_at: i64,
-    mutation_id: Option<String>,
-    parents: BTreeSet<String>,
+pub(super) struct StableSnapshot {
+    pub(super) version_id: String,
+    pub(super) root: Map<String, Value>,
+    pub(super) media: Vec<CausalMediaItem>,
+    pub(super) deleted_at: Option<i64>,
+    pub(super) updated_at: i64,
+    pub(super) mutation_id: Option<String>,
+    pub(super) parents: BTreeSet<String>,
+    pub(super) actor_id: Option<String>,
+    pub(super) device_id: Option<String>,
+    pub(super) received_at: Option<i64>,
 }
 
-struct ConflictHeads {
-    conflict_id: String,
-    entity_type: String,
-    client_uuid: String,
-    stable_version_id: String,
-    kind: String,
-    branch_version_ids: Vec<String>,
-    versions: BTreeMap<String, StableSnapshot>,
+pub(super) struct ConflictHeads {
+    pub(super) conflict_id: String,
+    pub(super) entity_type: String,
+    pub(super) client_uuid: String,
+    pub(super) stable_version_id: String,
+    pub(super) kind: String,
+    pub(super) branch_version_ids: Vec<String>,
+    pub(super) versions: BTreeMap<String, StableSnapshot>,
 }
 
 impl ConflictHeads {
-    fn version(&self, version_id: &str) -> &StableSnapshot {
+    pub(super) fn version(&self, version_id: &str) -> &StableSnapshot {
         self.versions
             .get(version_id)
             .expect("validated conflict version")
     }
 
-    fn stable(&self) -> &StableSnapshot {
+    pub(super) fn stable(&self) -> &StableSnapshot {
         self.version(&self.stable_version_id)
     }
 
-    fn direct_base(&self, version_id: &str) -> &StableSnapshot {
+    pub(super) fn direct_base(&self, version_id: &str) -> &StableSnapshot {
         let parent = self
             .version(version_id)
             .parents
@@ -281,6 +276,9 @@ fn load_version(
         deleted_at,
         mutation_id,
         parents,
+        actor_id: None,
+        device_id: None,
+        received_at: None,
     }))
 }
 
@@ -354,12 +352,43 @@ fn load_conflict_heads(
                 (SELECT json_group_array(media_uuid) FROM (
                     SELECT media_uuid FROM entity_version_media
                      WHERE family_id = v.family_id AND version_id = v.version_id
-                     ORDER BY media_uuid COLLATE BINARY))
+                     ORDER BY media_uuid COLLATE BINARY)),
+                (SELECT COUNT(*) FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id),
+                (SELECT json_extract(mr.receipt_json, '$.actor_id')
+                   FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id),
+                (SELECT json_extract(mr.receipt_json, '$.device_id')
+                   FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id),
+                (SELECT json_extract(mr.receipt_json, '$.received_at')
+                   FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id)
          FROM wanted w
          JOIN entity_versions v ON v.family_id = ?1 AND v.version_id = w.version_id
          ORDER BY v.version_id COLLATE BINARY",
     )?;
-    let mut rows = statement.query(params![family_id, conflict_id])?;
+    let mut rows = statement.query(params![
+        family_id,
+        conflict_id,
+        VERSION_PROVENANCE_PRINCIPAL
+    ])?;
     while let Some(row) = rows.next()? {
         let version_id = row.get::<_, String>(0)?;
         if row.get::<_, String>(1)? != entity_type || row.get::<_, String>(2)? != client_uuid {
@@ -373,6 +402,10 @@ fn load_conflict_heads(
         let parents = serde_json::from_str::<BTreeSet<String>>(&row.get::<_, String>(9)?)?;
         let media_json = row.get::<_, String>(10)?;
         let media_ids = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(11)?)?;
+        let provenance_count = row.get::<_, i64>(12)?;
+        let actor_id = row.get::<_, Option<String>>(13)?;
+        let device_id = row.get::<_, Option<String>>(14)?;
+        let received_at = row.get::<_, Option<i64>>(15)?;
         let media_payloads = serde_json::from_str::<Vec<String>>(&media_json)?;
         let media = parse_media_json(&media_json)?;
         let updated_at = row.get(5)?;
@@ -385,6 +418,9 @@ fn load_conflict_heads(
             deleted_at,
             mutation_id,
             parents,
+            actor_id,
+            device_id,
+            received_at,
         };
         let media_cap = if entity_type == "baby" {
             1
@@ -412,6 +448,7 @@ fn load_conflict_heads(
                 .media
                 .iter()
                 .any(|item| item.validate_for_entity(&entity_type).is_err())
+            || provenance_count > 1
             || if origin == "migration_base" {
                 snapshot.mutation_id.is_some() || content_hash != legacy_hash()
             } else {
@@ -823,7 +860,7 @@ fn load_live_associated_media_uuids(
 fn save_receipt(
     tx: &Transaction<'_>,
     family_id: &str,
-    membership_id: &str,
+    principal: &Principal,
     entity_type: &str,
     client_uuid: &str,
     mutation_id: &str,
@@ -843,7 +880,7 @@ fn save_receipt(
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             family_id,
-            membership_id,
+            principal.membership_id,
             entity_type,
             client_uuid,
             mutation_id,
@@ -856,6 +893,59 @@ fn save_receipt(
             created_at
         ],
     )?;
+    let version_id = branch_version_id.or(stable_version_id);
+    if let Some(version_id) = version_id {
+        let version_mutation: Option<String> = tx
+            .query_row(
+                "SELECT mutation_id FROM entity_versions
+                 WHERE family_id = ?1 AND version_id = ?2",
+                params![family_id, version_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if version_mutation.as_deref() == Some(mutation_id) {
+            let provenance = serde_json::to_string(&serde_json::json!({
+                "actor_id": principal.membership_id,
+                "device_id": principal.device_id,
+                "received_at": created_at,
+            }))?;
+            tx.execute(
+                "INSERT OR IGNORE INTO mutation_receipts(
+                    family_id, membership_id, entity_type, client_uuid, mutation_id,
+                    content_hash, status, stable_version_id, branch_version_id,
+                    conflict_id, receipt_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?5, NULL, ?8, ?9, ?10)",
+                params![
+                    family_id,
+                    VERSION_PROVENANCE_PRINCIPAL,
+                    entity_type,
+                    client_uuid,
+                    version_id,
+                    migration_content_hash(&["version-provenance-v2", version_id]),
+                    status,
+                    conflict_id,
+                    provenance,
+                    created_at,
+                ],
+            )?;
+            let stored: String = tx.query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = ?2
+                   AND entity_type = ?3 AND client_uuid = ?4 AND mutation_id = ?5",
+                params![
+                    family_id,
+                    VERSION_PROVENANCE_PRINCIPAL,
+                    entity_type,
+                    client_uuid,
+                    version_id,
+                ],
+                |row| row.get(0),
+            )?;
+            if stored != provenance {
+                return Err(StoreError::InvalidStoredPayload);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1640,7 +1730,6 @@ fn evaluate_unit(
             &incoming_media,
             &request_hash,
             &base_version,
-            paths,
         );
     }
 
@@ -1780,7 +1869,6 @@ fn evaluate_unit(
                 &incoming_media,
                 &request_hash,
                 &base_version,
-                conflicting_paths,
             )
         }
     }
@@ -1920,7 +2008,7 @@ fn commit_accepted_new(
     save_receipt(
         ctx.tx,
         &ctx.principal.family_id,
-        &ctx.principal.membership_id,
+        ctx.principal,
         &mutation.entity_type,
         &mutation.client_uuid,
         &mutation.mutation_id,
@@ -2055,7 +2143,7 @@ fn commit_accepted_update(
     save_receipt(
         ctx.tx,
         &ctx.principal.family_id,
-        &ctx.principal.membership_id,
+        ctx.principal,
         &mutation.entity_type,
         &mutation.client_uuid,
         &mutation.mutation_id,
@@ -2201,7 +2289,7 @@ fn commit_merged(
     save_receipt(
         ctx.tx,
         &ctx.principal.family_id,
-        &ctx.principal.membership_id,
+        ctx.principal,
         &mutation.entity_type,
         &mutation.client_uuid,
         &mutation.mutation_id,
@@ -2224,7 +2312,6 @@ fn branch_unit(
     incoming_media: &[CausalMediaItem],
     request_hash: &str,
     base_version: &str,
-    conflicting_paths: Vec<String>,
 ) -> Result<CausalUnitResult, StoreError> {
     admit_new_branch(
         ctx.tx,
@@ -2261,7 +2348,6 @@ fn branch_unit(
         None
     };
     let content_hash = root_content_hash(incoming_root, incoming_media, mutation.deleted);
-    let _ = conflicting_paths;
     insert_version(
         ctx.tx,
         &ctx.principal.family_id,
@@ -2288,9 +2374,6 @@ fn branch_unit(
         &branch_version_id,
         ctx.now,
     )?;
-    // Persist auto_merged / conflicting_paths? Store in receipt_json only;
-    // detail recomputes from versions.
-    let _ = conflicting_paths;
     // Branch-only write still advances entity rev for pull discoverability.
     bump_entity_rev_only(
         ctx.tx,
@@ -2314,7 +2397,7 @@ fn branch_unit(
     save_receipt(
         ctx.tx,
         &ctx.principal.family_id,
-        &ctx.principal.membership_id,
+        ctx.principal,
         &mutation.entity_type,
         &mutation.client_uuid,
         &mutation.mutation_id,
@@ -2449,7 +2532,7 @@ impl Store {
                     save_receipt(
                         &tx,
                         &principal.family_id,
-                        &principal.membership_id,
+                        principal,
                         &unit.entity_type,
                         &unit.client_uuid,
                         &unit.mutation_id,
@@ -2506,7 +2589,7 @@ impl Store {
         let projection = load_conflict_heads(&tx, &principal.family_id, conflict_id)?;
         #[cfg(test)]
         super::conflict_snapshots::test_hook::projection_loaded(&principal.family_id);
-        let (conflicting_paths, auto_merged) = compute_conflict_paths(&projection);
+        let material = build_conflict_snapshot(&projection)?;
         let binding = ConflictSnapshotBinding {
             family_id: &principal.family_id,
             conflict_id,
@@ -2517,7 +2600,6 @@ impl Store {
             branch_version_ids: &projection.branch_version_ids,
             receipt_key: &self.snapshot_receipt_key,
         };
-        let material = conflict_snapshot_material(&projection, conflicting_paths, auto_merged);
         let page = open_conflict_detail_page(&tx, binding, material, request, now)?;
         tx.commit()?;
         Ok(page)
@@ -2605,7 +2687,26 @@ impl Store {
             });
         }
 
-        let (conflicting_paths, auto_merged) = compute_conflict_paths(&projection);
+        let semantic = build_conflict_snapshot(&projection)?;
+        let conflicting_paths = semantic
+            .conflicting
+            .iter()
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>();
+        let auto_merged = semantic
+            .auto_merged
+            .iter()
+            .map(|item| {
+                let value = match &item.outcome {
+                    ConflictOutcome::Set { value } => value.clone(),
+                    ConflictOutcome::Remove if item.path == "/_mutation.deleted" => {
+                        Value::Bool(true)
+                    }
+                    ConflictOutcome::Remove => Value::Null,
+                };
+                (item.path.clone(), value)
+            })
+            .collect::<Map<_, _>>();
 
         // Choices must be subset of conflicting paths.
         for key in input.conflict_choices.keys() {
@@ -2816,91 +2917,6 @@ impl Store {
             conflict_summary: None,
         })
     }
-}
-
-fn conflict_snapshot_material(
-    projection: &ConflictHeads,
-    conflicting_paths: Vec<String>,
-    auto_merged: Map<String, Value>,
-) -> ConflictSnapshotMaterial {
-    let stable = projection.stable();
-    let branches = projection
-        .branch_version_ids
-        .iter()
-        .map(|branch_id| {
-            let branch = projection.version(branch_id);
-            ConflictBranchDetail {
-                branch_version_id: branch.version_id.clone(),
-                root: branch.root.clone(),
-                media: branch.media.clone(),
-                mutation_id: branch.mutation_id.clone(),
-            }
-        })
-        .collect();
-    ConflictSnapshotMaterial {
-        conflict_id: projection.conflict_id.clone(),
-        stable_version_id: stable.version_id.clone(),
-        stable_root: stable.root.clone(),
-        stable_media: stable.media.clone(),
-        branches,
-        conflicting_paths,
-        auto_merged,
-    }
-}
-
-/// Union conflicting paths across the already-complete bounded snapshot.
-fn compute_conflict_paths(projection: &ConflictHeads) -> (Vec<String>, Map<String, Value>) {
-    let stable = projection.stable();
-    if projection.kind == "tombstone_restore" {
-        let mut auto = Map::new();
-        for (k, v) in &stable.root {
-            auto.insert(format!("/{k}"), v.clone());
-        }
-        auto.insert("/_mutation.deleted".to_owned(), Value::Bool(true));
-        return (vec!["/_mutation.deleted".to_owned()], auto);
-    }
-    let mut all_paths: BTreeSet<String> = BTreeSet::new();
-    let mut auto_merged: Map<String, Value> = Map::new();
-    for branch_id in &projection.branch_version_ids {
-        let branch = projection.version(branch_id);
-        let base = projection.direct_base(branch_id);
-        let decision = three_way_merge(
-            &base.root,
-            &base.media,
-            base.deleted_at.is_some(),
-            &stable.root,
-            &stable.media,
-            stable.deleted_at.is_some(),
-            &branch.root,
-            &branch.media,
-            branch.deleted_at.is_some(),
-        );
-        match decision {
-            MergeDecision::Conflict {
-                conflicting_paths,
-                auto_merged: am,
-            } => {
-                all_paths.extend(conflicting_paths);
-                for (k, v) in am {
-                    auto_merged.entry(k).or_insert(v);
-                }
-            }
-            MergeDecision::AutoMerge {
-                auto_merged: am, ..
-            } => {
-                for (k, v) in am {
-                    auto_merged.entry(k).or_insert(v);
-                }
-            }
-            MergeDecision::Identical => {}
-        }
-    }
-    if all_paths.is_empty() && !projection.branch_version_ids.is_empty() {
-        // Distinct branches on same field values still need a path if roots differ
-        // only by stamps — treat as note conflict fallback for resolution UI.
-        all_paths.insert("/note".to_owned());
-    }
-    (all_paths.into_iter().collect(), auto_merged)
 }
 
 /// Rebuild authoritative root/media/deleted from auto_merged ⊕ choices.
