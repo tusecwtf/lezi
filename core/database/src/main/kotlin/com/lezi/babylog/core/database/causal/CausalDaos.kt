@@ -295,9 +295,21 @@ interface ConflictSnapshotCacheDao {
     @Query("DELETE FROM conflict_detail_cache WHERE conflictId = :conflictId")
     suspend fun delete(conflictId: String)
 
+    /** Removes both the promoted snapshot and any resumable H08 page evidence. */
+    @Transaction
+    suspend fun deleteConflictState(conflictId: String) {
+        delete(conflictId)
+        delete(conflictSnapshotStageCacheKey(conflictId))
+    }
+
     @Query("DELETE FROM conflict_detail_cache")
     suspend fun deleteAll()
 }
+
+const val CONFLICT_SNAPSHOT_STAGE_KEY_PREFIX = "conflict-page-stage:"
+
+fun conflictSnapshotStageCacheKey(conflictId: String): String =
+    "$CONFLICT_SNAPSHOT_STAGE_KEY_PREFIX$conflictId"
 
 @Dao
 interface SuspectedDuplicateGroupDao {

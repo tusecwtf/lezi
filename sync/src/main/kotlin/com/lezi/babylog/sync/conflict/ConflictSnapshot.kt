@@ -131,7 +131,10 @@ data class AutoMergedPath(
     val sources: List<ConflictSource>,
 )
 
-/** One lossless server page. H05 only promotes complete page 0; H08 owns paging. */
+/**
+ * One lossless server page. [ConflictSnapshotProjection] is the only module that
+ * may assemble pages into the canonical complete page-0 view used by callers.
+ */
 data class ConflictSnapshot(
     val conflictId: String,
     val entityType: ConflictRootType,

@@ -2,7 +2,8 @@ package com.lezi.babylog.sync.backend
 
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.conflict.ConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
@@ -667,10 +668,12 @@ interface SyncBackend {
     /**
      * On-demand conflict detail (wire §8.1). Not included in ordinary pull pages.
      */
-    suspend fun fetchConflictSnapshot(
+    suspend fun fetchConflictSnapshotPage(
         session: SyncSession,
         conflictId: String,
-    ): ConflictSnapshot = throw UnsupportedOperationException("Conflict detail is not implemented")
+        request: ConflictSnapshotPageRequest,
+    ): FetchedConflictSnapshotPage =
+        throw UnsupportedOperationException("Conflict detail paging is not implemented")
 
     /** CAS conflict resolution (wire §8.2): receipt token + canonical opaque choices only. */
     suspend fun resolveConflict(

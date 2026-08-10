@@ -93,16 +93,20 @@ class ConflictResolverDraftTest {
     }
 
     @Test
-    fun incompleteExpiredOfflineAndUnauthorizedSnapshotsAreReadOnly() {
+    fun partialSnapshotIsRejectedAndExpiredOfflineUnauthorizedSnapshotsAreReadOnly() {
         val current = snapshot(ConflictRootType.Record, recordRoot(), "/note")
+        assertThat(
+            runCatching {
+                ConflictResolverDraft.open(
+                    current.copy(complete = false, continuation = "next"),
+                    ConflictResolverAudience("member-author", false),
+                    fetchedOnline = true,
+                    nowMillis = 1_000,
+                    resolutionMutationId = mutationId(20),
+                )
+            }.isFailure,
+        ).isTrue()
         val cases = listOf(
-            ConflictResolverDraft.open(
-                current.copy(complete = false, continuation = "next"),
-                ConflictResolverAudience("member-author", false),
-                fetchedOnline = true,
-                nowMillis = 1_000,
-                resolutionMutationId = mutationId(20),
-            ) to ConflictResolverAvailability.Incomplete,
             ConflictResolverDraft.open(
                 current.copy(expiresAt = 1_000),
                 ConflictResolverAudience("member-author", false),

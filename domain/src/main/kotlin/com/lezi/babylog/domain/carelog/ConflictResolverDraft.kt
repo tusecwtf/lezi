@@ -23,7 +23,6 @@ data class ConflictResolverAudience(
 
 enum class ConflictResolverAvailability {
     Current,
-    Incomplete,
     Expired,
     Offline,
     Forbidden,
@@ -201,7 +200,6 @@ class ConflictResolverDraft private constructor(
 
     private fun currentReadOnlyReason(): String = when (currentAvailability()) {
         ConflictResolverAvailability.Current -> "每个冲突字段必须明确选择一次"
-        ConflictResolverAvailability.Incomplete -> "冲突快照尚未完整，当前只能查看"
         ConflictResolverAvailability.Expired -> "冲突快照已过期，请联网刷新"
         ConflictResolverAvailability.Offline -> "离线快照只读，请联网后重新打开"
         ConflictResolverAvailability.Forbidden -> "当前身份不能解决这条冲突"
@@ -291,9 +289,10 @@ private fun ConflictSnapshot.toResolverModel(
         entityType != ConflictRootType.Baby &&
             stable.root.authorMembershipId() == audience.membershipId
     )
+    require(complete && pageIndex == 0 && continuation == null) {
+        "resolver 只接受完整 ConflictSnapshot"
+    }
     val availability = when {
-        !complete || pageIndex != 0 || continuation != null ->
-            ConflictResolverAvailability.Incomplete
         nowMillis >= expiresAt -> ConflictResolverAvailability.Expired
         !fetchedOnline -> ConflictResolverAvailability.Offline
         !authorized -> ConflictResolverAvailability.Forbidden
@@ -301,7 +300,6 @@ private fun ConflictSnapshot.toResolverModel(
     }
     val readOnlyReason = when (availability) {
         ConflictResolverAvailability.Current -> null
-        ConflictResolverAvailability.Incomplete -> "冲突快照尚未完整，当前只能查看"
         ConflictResolverAvailability.Expired -> "冲突快照已过期，请联网刷新"
         ConflictResolverAvailability.Offline -> "离线快照只读，请联网后重新打开"
         ConflictResolverAvailability.Forbidden -> if (entityType == ConflictRootType.Baby) {

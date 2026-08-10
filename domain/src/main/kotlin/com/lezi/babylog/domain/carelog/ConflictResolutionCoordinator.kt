@@ -70,7 +70,7 @@ internal class ConflictResolutionCoordinator(
             val rootType = runCatching { ConflictRootType.fromWire(row.entityType) }.getOrNull()
                 ?: return@mapNotNull null
             val snapshot = row.snapshotJson
-                ?.let { runCatching { ConflictSnapshotCodec.decode(it) }.getOrNull() }
+                ?.let { runCatching { ConflictSnapshotCodec.decodeComplete(it) }.getOrNull() }
                 ?.takeIf {
                     it.conflictId == row.conflictId &&
                         it.entityType == rootType &&
@@ -121,10 +121,9 @@ internal class ConflictResolutionCoordinator(
     suspend fun loadDetail(conflictId: String, forceRefresh: Boolean = true): ConflictResolverLoad? {
         if (forceRefresh) {
             val fetched = runCatching { syncPort.fetchConflictSnapshot(conflictId) }.getOrNull()
-            if (fetched?.conflictId == conflictId) {
-                if (fetched.pageIndex == 0 && fetched.complete && fetched.continuation == null) {
-                    snapshotProjection.replaceComplete(fetched)
-                }
+            if (fetched?.conflictId == conflictId &&
+                fetched.pageIndex == 0 && fetched.complete && fetched.continuation == null
+            ) {
                 return ConflictResolverLoad(fetched, fetchedOnline = true)
             }
         }

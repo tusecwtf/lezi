@@ -69,6 +69,13 @@ class ReplicaSyncEngineConflictTest {
                 cachedAt = 100,
             ),
         )
+        rig.conflictDetails.upsert(
+            ConflictSnapshotCacheEntity(
+                conflictId = "conflict-page-stage:conflict-stale",
+                snapshotJson = "{staged}",
+                cachedAt = 101,
+            ),
+        )
 
         rig.engine.applyInitialEntities(
             session,
@@ -82,6 +89,7 @@ class ReplicaSyncEngineConflictTest {
 
         assertThat(rig.conflictSummaries.get("conflict-stale")).isNull()
         assertThat(rig.conflictDetails.get("conflict-stale")).isNull()
+        assertThat(rig.conflictDetails.get("conflict-page-stage:conflict-stale")).isNull()
         assertThat(rig.records.getByClientUuid("record-clear-conflict")!!.openConflictId).isNull()
     }
 

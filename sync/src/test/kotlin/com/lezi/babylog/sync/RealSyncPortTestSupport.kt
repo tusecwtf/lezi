@@ -137,6 +137,8 @@ import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
 import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 
 
 // Shared harness for RealSyncPort* contract suites (extracted from kitchen sink).
@@ -230,6 +232,11 @@ internal class RecordingSyncBackend : SyncBackend {
     val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
     var nextCausalReconcile: CausalBatchResult? = null
     var nextCausalCommit: CausalBatchResult? = null
+    val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
+    val conflictSnapshotPageFailures = ArrayDeque<Throwable>()
+    val conflictSnapshotPageRequests = mutableListOf<ConflictSnapshotPageRequest>()
+    var conflictSnapshotPageHandler:
+        (suspend (String, ConflictSnapshotPageRequest) -> FetchedConflictSnapshotPage)? = null
     var onCausalReconcile: (suspend (List<CausalMutationUnit>) -> Unit)? = null
     var onCausalCommit: (suspend (List<CausalMutationUnit>) -> Unit)? = null
     /**
@@ -799,6 +806,18 @@ internal class RecordingSyncBackend : SyncBackend {
             mintStableVersion = true,
             useContentHash = true,
         )
+    }
+
+    override suspend fun fetchConflictSnapshotPage(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictSnapshotPageRequest,
+    ): FetchedConflictSnapshotPage {
+        conflictSnapshotPageRequests += request
+        conflictSnapshotPageHandler?.let { return it(conflictId, request) }
+        conflictSnapshotPageFailures.removeFirstOrNull()?.let { throw it }
+        return conflictSnapshotPages.removeFirstOrNull()
+            ?: throw UnsupportedOperationException("Conflict detail paging is not prepared")
     }
 
     private fun defaultCausalBatch(
@@ -2764,6 +2783,7 @@ internal class MemoryConflictSnapshotCacheDao :
     com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao {
     private val items =
         mutableListOf<com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity>()
+    var deleteFailure: Throwable? = null
 
     override suspend fun get(
         conflictId: String,
@@ -2778,6 +2798,7 @@ internal class MemoryConflictSnapshotCacheDao :
     }
 
     override suspend fun delete(conflictId: String) {
+        deleteFailure?.let { throw it }
         items.removeAll { it.conflictId == conflictId }
     }
 

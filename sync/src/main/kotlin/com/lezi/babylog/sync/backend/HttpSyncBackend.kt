@@ -1,6 +1,8 @@
 package com.lezi.babylog.sync.backend
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
-import com.lezi.babylog.sync.conflict.ConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPaging
+import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.conflict.toConflictSnapshot
 import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
 import java.io.ByteArrayOutputStream
@@ -86,6 +88,11 @@ internal fun interface TrustedEndpointResolver {
 private object DefaultSyncHttpConnectionFactory : SyncHttpConnectionFactory {
     override fun open(url: URL): HttpURLConnection = url.openConnection() as HttpURLConnection
 }
+
+private data class JsonTransportResponse(
+    val json: JsonObject,
+    val encodedBytes: Int,
+)
 
 class HttpSyncBackend internal constructor(
     private val connectionFactory: SyncHttpConnectionFactory,
@@ -878,22 +885,44 @@ class HttpSyncBackend internal constructor(
         return json.toSourceRelationResult("source relation resolve-group")
     }
 
-    override suspend fun fetchConflictSnapshot(
+    override suspend fun fetchConflictSnapshotPage(
         session: SyncSession,
         conflictId: String,
-    ): ConflictSnapshot {
+        request: ConflictSnapshotPageRequest,
+    ): FetchedConflictSnapshotPage {
         session.requireCurrentReplicaTransport()
         val id = conflictId.trim()
         require(id.isNotEmpty()) { "conflict_id 无效" }
         val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
-        val json = get(
-            session.baseUrl,
-            "/v1/conflicts/$encoded",
-            session.accessToken,
+        val query = when (request) {
+            ConflictSnapshotPageRequest.First -> ""
+            is ConflictSnapshotPageRequest.Continuation -> {
+                ConflictSnapshotValidation.requireRuntimeToken(
+                    request.snapshotToken,
+                    "conflict detail request.snapshot_token",
+                )
+                ConflictSnapshotValidation.requireRuntimeToken(
+                    request.continuation,
+                    "conflict detail request.continuation",
+                )
+                val token = URLEncoder.encode(request.snapshotToken, Charsets.UTF_8.name())
+                val continuation = URLEncoder.encode(request.continuation, Charsets.UTF_8.name())
+                "?snapshot_token=$token&continuation=$continuation"
+            }
+        }
+        val response = requestJsonWithEvidence(
+            base = session.baseUrl,
+            path = "/v1/conflicts/$encoded$query",
+            method = "GET",
+            token = session.accessToken,
+            body = null,
+            successLimitBytes = ConflictSnapshotPaging.MAX_ENCODED_PAGE_BYTES,
+            successResponseKind = "冲突详情页",
         )
-        return json.toConflictSnapshot("conflict snapshot").also { snapshot ->
+        val snapshot = response.json.toConflictSnapshot("conflict snapshot").also { snapshot ->
             require(snapshot.conflictId == id) { "conflict snapshot.conflict_id 与请求不一致" }
         }
+        return FetchedConflictSnapshotPage(snapshot, response.encodedBytes)
     }
 
     override suspend fun resolveConflict(
@@ -1387,7 +1416,27 @@ class HttpSyncBackend internal constructor(
         body: JsonObject?,
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
-    ): JsonObject {
+    ): JsonObject = requestJsonWithEvidence(
+        base = base,
+        path = path,
+        method = method,
+        token = token,
+        body = body,
+        extraHeaders = extraHeaders,
+        trustedEndpoint = trustedEndpoint,
+    ).json
+
+    private suspend fun requestJsonWithEvidence(
+        base: String,
+        path: String,
+        method: String,
+        token: String?,
+        body: JsonObject?,
+        extraHeaders: Map<String, String> = emptyMap(),
+        trustedEndpoint: TrustedEndpointProfile? = null,
+        successLimitBytes: Int = MAX_SYNC_JSON_RESPONSE_BYTES,
+        successResponseKind: String = "JSON",
+    ): JsonTransportResponse {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
             val connection = open(base, path, method, token, extraHeaders, resolvedEndpoint)
@@ -1399,7 +1448,18 @@ class HttpSyncBackend internal constructor(
                         it.write(body.toString())
                     }
                 }
-                readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
+                val (code, bytes) = readBoundedBody(
+                    connection = connection,
+                    successLimitBytes = successLimitBytes,
+                    successResponseKind = successResponseKind,
+                )
+                val text = bytes.toString(Charsets.UTF_8)
+                if (code !in 200..299) throw SyncHttpException(code, text)
+                require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
+                JsonTransportResponse(
+                    json = Json.parseToJsonElement(text).jsonObject,
+                    encodedBytes = bytes.size,
+                )
             } finally {
                 connection.disconnect()
             }
@@ -1557,18 +1617,6 @@ class HttpSyncBackend internal constructor(
             }
             extraHeaders.forEach(::setRequestProperty)
         }
-
-    private fun readResponse(connection: HttpURLConnection): String {
-        val (code, bytes) = readBoundedBody(
-            connection = connection,
-            successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
-            successResponseKind = "JSON",
-        )
-        val text = bytes.toString(Charsets.UTF_8)
-        if (code !in 200..299) throw SyncHttpException(code, text)
-        require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
-        return text
-    }
 
     private fun readBoundedBody(
         connection: HttpURLConnection,

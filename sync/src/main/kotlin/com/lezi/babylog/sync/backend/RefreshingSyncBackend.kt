@@ -180,10 +180,11 @@ internal class RefreshingSyncBackend(
         delegate.putCausalMediaPreimage(it, mediaUuid, source, sha256)
     }
 
-    override suspend fun fetchConflictSnapshot(
+    override suspend fun fetchConflictSnapshotPage(
         session: SyncSession,
         conflictId: String,
-    ) = authenticated(session) { delegate.fetchConflictSnapshot(it, conflictId) }
+        request: com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest,
+    ) = authenticated(session) { delegate.fetchConflictSnapshotPage(it, conflictId, request) }
 
     override suspend fun resolveConflict(
         session: SyncSession,

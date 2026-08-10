@@ -294,13 +294,13 @@ internal class CausalSettlement(
         val prior = conflictSummaryDao.listForRoot(entityType, clientUuid)
         if (summary == null) {
             prior.forEach { stale ->
-                conflictSnapshotCacheDao?.delete(stale.conflictId)
+                conflictSnapshotCacheDao?.deleteConflictState(stale.conflictId)
                 conflictSummaryDao.delete(stale.conflictId)
             }
             return
         }
         prior.filter { it.conflictId != summary.conflictId }.forEach { stale ->
-            conflictSnapshotCacheDao?.delete(stale.conflictId)
+            conflictSnapshotCacheDao?.deleteConflictState(stale.conflictId)
             conflictSummaryDao.delete(stale.conflictId)
         }
         conflictSummaryDao.upsert(

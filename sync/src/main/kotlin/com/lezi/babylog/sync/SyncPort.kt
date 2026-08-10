@@ -369,8 +369,9 @@ interface SyncPort {
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
 
     /**
-     * On-demand conflict detail for the resolver (wire §8.1). Default: unavailable.
-     * Must not block ordinary CareLog local saves.
+     * Complete on-demand conflict detail for the resolver (wire §8.1).
+     * Implementations persist/resume pages below this seam and never expose a
+     * partial receipt. Must not block ordinary CareLog local saves.
      */
     suspend fun fetchConflictSnapshot(
         conflictId: String,

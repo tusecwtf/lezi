@@ -6,12 +6,359 @@ import com.lezi.babylog.sync.MemoryConflictSummaryDao
 import com.lezi.babylog.sync.RecordingTransactionRunner
 import com.lezi.babylog.sync.backend.CausalMediaItem
 import com.lezi.babylog.sync.conflict.ConflictSnapshotCodec
+import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import org.junit.Test
 
 class ConflictSnapshotProjectionTest {
+    @Test
+    fun pagedSnapshotResumesFromCommittedContinuationAndPromotesOnlyWhenComplete() = runTest {
+        val summaries = MemoryConflictSummaryDao()
+        val rows = MemoryConflictSnapshotCacheDao()
+        val transactions = RecordingTransactionRunner()
+        val projection = ConflictSnapshotProjection(summaries, rows, transactions)
+        val oldComplete = recordSnapshot(CONFLICT_ONE, "old", note = JsonNull)
+        projection.replaceComplete(oldComplete)
+        val full = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val continuation = "c".repeat(43)
+        val first = full.copy(
+            complete = false,
+            continuation = continuation,
+        )
+        val second = full.copy(
+            branches = listOf(full.branches.single().copy(versionId = "b2")),
+            pageIndex = 1,
+        )
+        var calls = 0
+
+        val interrupted = runCatching {
+            projection.loadComplete(CONFLICT_THREE) { request ->
+                when (calls++) {
+                    0 -> {
+                        assertThat(request).isEqualTo(ConflictSnapshotPageRequest.First)
+                        FetchedConflictSnapshotPage(first, encodedBytes = 12_000)
+                    }
+                    else -> throw IOException("process stopped after the first page commit")
+                }
+            }
+        }.exceptionOrNull()
+
+        assertThat(interrupted).isInstanceOf(IOException::class.java)
+        assertThat(projection.read(CONFLICT_THREE)).isNull()
+        assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
+
+        val requests = mutableListOf<ConflictSnapshotPageRequest>()
+        val restarted = ConflictSnapshotProjection(summaries, rows, transactions)
+        val complete = restarted.loadComplete(CONFLICT_THREE) { request ->
+            requests += request
+            FetchedConflictSnapshotPage(second, encodedBytes = 13_000)
+        }
+
+        assertThat(requests).containsExactly(
+            ConflictSnapshotPageRequest.Continuation(
+                snapshotToken = full.snapshotToken,
+                continuation = continuation,
+            ),
+        )
+        assertThat(complete.complete).isTrue()
+        assertThat(complete.pageIndex).isEqualTo(0)
+        assertThat(complete.continuation).isNull()
+        assertThat(complete.branches.map { it.versionId }).containsExactly("b1", "b2").inOrder()
+        assertThat(restarted.read(CONFLICT_THREE)).isEqualTo(complete)
+        assertThat(restarted.read(CONFLICT_ONE)).isNull()
+        assertThat(summaries.get(CONFLICT_THREE)!!.branchVersionIdsJson).contains("b2")
+    }
+
+    @Test
+    fun invalidNextPageFailsClosedWithoutChangingCommittedSnapshotOrStage() = runTest {
+        val full = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val continuation = "c".repeat(43)
+        val first = full.copy(complete = false, continuation = continuation)
+        val invalidPages = listOf(
+            full.copy(
+                branches = listOf(full.branches.single().copy(versionId = "b2")),
+                pageIndex = 2,
+            ),
+            full.copy(pageIndex = 1),
+            full.copy(
+                branches = listOf(full.branches.single().copy(versionId = "b2")),
+                pageIndex = 1,
+                complete = false,
+                continuation = continuation,
+            ),
+        )
+
+        invalidPages.forEach { invalid ->
+            val summaries = MemoryConflictSummaryDao()
+            val rows = MemoryConflictSnapshotCacheDao()
+            val projection = ConflictSnapshotProjection(
+                summaries,
+                rows,
+                RecordingTransactionRunner(),
+            )
+            val oldComplete = recordSnapshot(CONFLICT_ONE, "old", note = JsonNull)
+            projection.replaceComplete(oldComplete)
+            var firstAttempt = true
+            runCatching {
+                projection.loadComplete(CONFLICT_THREE) {
+                    if (firstAttempt) {
+                        firstAttempt = false
+                        FetchedConflictSnapshotPage(first, encodedBytes = 12_000)
+                    } else {
+                        throw IOException("stop after stage")
+                    }
+                }
+            }
+
+            val failure = runCatching {
+                projection.loadComplete(CONFLICT_THREE) {
+                    FetchedConflictSnapshotPage(invalid, encodedBytes = 13_000)
+                }
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
+            assertThat(projection.read(CONFLICT_THREE)).isNull()
+            var resumed: ConflictSnapshotPageRequest? = null
+            runCatching {
+                projection.loadComplete(CONFLICT_THREE) { request ->
+                    resumed = request
+                    throw IOException("observe recovery request")
+                }
+            }
+            assertThat(resumed).isEqualTo(
+                ConflictSnapshotPageRequest.Continuation(full.snapshotToken, continuation),
+            )
+        }
+    }
+
+    @Test
+    fun emptyTerminalContinuationCannotTruncateACommittedPageSet() = runTest {
+        val summaries = MemoryConflictSummaryDao()
+        val rows = MemoryConflictSnapshotCacheDao()
+        val projection = ConflictSnapshotProjection(
+            summaries,
+            rows,
+            RecordingTransactionRunner(),
+        )
+        val oldComplete = recordSnapshot(CONFLICT_ONE, "old", note = JsonNull)
+        projection.replaceComplete(oldComplete)
+        val full = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val continuation = "c".repeat(43)
+        var page = 0
+
+        val failure = runCatching {
+            projection.loadComplete(CONFLICT_THREE) {
+                when (page++) {
+                    0 -> FetchedConflictSnapshotPage(
+                        full.copy(complete = false, continuation = continuation),
+                        12_000,
+                    )
+                    else -> FetchedConflictSnapshotPage(
+                        full.copy(
+                            branches = emptyList(),
+                            pageIndex = 1,
+                            complete = true,
+                            continuation = null,
+                        ),
+                        1_000,
+                    )
+                }
+            }
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
+        assertThat(projection.read(CONFLICT_THREE)).isNull()
+    }
+
+    @Test
+    fun damagedCommittedStageIsDiscardedAndRestartedWithoutTouchingCompleteCache() = runTest {
+        val summaries = MemoryConflictSummaryDao()
+        val rows = MemoryConflictSnapshotCacheDao()
+        val projection = ConflictSnapshotProjection(
+            summaries,
+            rows,
+            RecordingTransactionRunner(),
+        )
+        val oldComplete = recordSnapshot(CONFLICT_ONE, "old", note = JsonNull)
+        projection.replaceComplete(oldComplete)
+        val full = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val first = full.copy(complete = false, continuation = "c".repeat(43))
+        var firstAttempt = true
+        runCatching {
+            projection.loadComplete(CONFLICT_THREE) {
+                if (firstAttempt) {
+                    firstAttempt = false
+                    FetchedConflictSnapshotPage(first, 12_000)
+                } else {
+                    throw IOException("stop after stage")
+                }
+            }
+        }
+        val stageKey = "conflict-page-stage:$CONFLICT_THREE"
+        rows.upsert(requireNotNull(rows.get(stageKey)).copy(snapshotJson = "{damaged"))
+        var recoveredRequest: ConflictSnapshotPageRequest? = null
+
+        val failure = runCatching {
+            ConflictSnapshotProjection(summaries, rows, RecordingTransactionRunner())
+                .loadComplete(CONFLICT_THREE) { request ->
+                    recoveredRequest = request
+                    throw IOException("observe safe restart")
+                }
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IOException::class.java)
+        assertThat(recoveredRequest).isEqualTo(ConflictSnapshotPageRequest.First)
+        assertThat(rows.get(stageKey)).isNull()
+        assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
+    }
+
+    @Test
+    fun stagedEmptyNonFinalPageIsDiscardedAndSafelyRestartsFromPageZero() = runTest {
+        val summaries = MemoryConflictSummaryDao()
+        val rows = MemoryConflictSnapshotCacheDao()
+        val projection = ConflictSnapshotProjection(
+            summaries,
+            rows,
+            RecordingTransactionRunner(),
+        )
+        val oldComplete = recordSnapshot(CONFLICT_ONE, "old", note = JsonNull)
+        projection.replaceComplete(oldComplete)
+        val invalid = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull).copy(
+            branches = emptyList(),
+            complete = false,
+            continuation = "c".repeat(43),
+        )
+        rows.upsert(
+            com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity(
+                conflictId = "conflict-page-stage:$CONFLICT_THREE",
+                snapshotJson = ConflictSnapshotStageCodec.encode(
+                    StagedConflictSnapshot(
+                        listOf(ConflictSnapshotPageEvidence(invalid, encodedBytes = 1_000)),
+                    ),
+                ),
+                cachedAt = 100,
+            ),
+        )
+        var requestSeen: ConflictSnapshotPageRequest? = null
+
+        val failure = runCatching {
+            projection.loadComplete(CONFLICT_THREE) { request ->
+                requestSeen = request
+                throw IOException("observe safe restart")
+            }
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IOException::class.java)
+        assertThat(requestSeen).isEqualTo(ConflictSnapshotPageRequest.First)
+        assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
+    }
+
+    @Test
+    fun overBudgetPageEvidenceIsRejectedBeforeItCanPolluteTheCache() = runTest {
+        val oversized = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val cases = listOf(
+            FetchedConflictSnapshotPage(
+                snapshot = oversized,
+                encodedBytes = ConflictSnapshotPaging.MAX_ENCODED_PAGE_BYTES + 1,
+            ),
+            FetchedConflictSnapshotPage(
+                snapshot = oversized.copy(
+                    branches = (1..17).map { index ->
+                        oversized.branches.single().copy(
+                            versionId = "b${index.toString().padStart(2, '0')}",
+                        )
+                    },
+                ),
+                encodedBytes = 12_000,
+            ),
+        )
+        cases.forEach { fetched ->
+            val summaries = MemoryConflictSummaryDao()
+            val rows = MemoryConflictSnapshotCacheDao()
+            val projection = ConflictSnapshotProjection(
+                summaries,
+                rows,
+                RecordingTransactionRunner(),
+            )
+            val oldComplete = recordSnapshot(CONFLICT_ONE, "old", note = JsonNull)
+            projection.replaceComplete(oldComplete)
+
+            val failure = runCatching {
+                projection.loadComplete(CONFLICT_THREE) {
+                    fetched
+                }
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
+            assertThat(projection.read(CONFLICT_THREE)).isNull()
+        }
+    }
+
+    @Test
+    fun exactSixtyFourBranchesPromoteAndRoundTripAfterRepositoryRestart() = runTest {
+        val summaries = MemoryConflictSummaryDao()
+        val rows = MemoryConflictSnapshotCacheDao()
+        val transactions = RecordingTransactionRunner()
+        val projection = ConflictSnapshotProjection(summaries, rows, transactions)
+        val template = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val allBranches = numberedBranches(template, 64)
+        val pages = allBranches.chunked(16).mapIndexed { index, branches ->
+            template.copy(
+                branches = branches,
+                pageIndex = index,
+                continuation = if (index == 3) null else ('c' + index).toString().repeat(43),
+                complete = index == 3,
+            )
+        }
+        var pageIndex = 0
+
+        val complete = projection.loadComplete(CONFLICT_THREE) {
+            FetchedConflictSnapshotPage(pages[pageIndex++], encodedBytes = 120_000)
+        }
+
+        assertThat(complete.branches).hasSize(64)
+        assertThat(complete.branchVersionIds).isEqualTo(allBranches.map { it.versionId })
+        val restarted = ConflictSnapshotProjection(summaries, rows, transactions)
+        assertThat(restarted.read(CONFLICT_THREE)).isEqualTo(complete)
+    }
+
+    @Test
+    fun sixtyFifthTotalBranchFailsClosedAndRetainsPriorComplete() = runTest {
+        val summaries = MemoryConflictSummaryDao()
+        val rows = MemoryConflictSnapshotCacheDao()
+        val projection = ConflictSnapshotProjection(
+            summaries,
+            rows,
+            RecordingTransactionRunner(),
+        )
+        val old = recordSnapshot(CONFLICT_THREE, "old", note = JsonNull)
+        projection.replaceComplete(old)
+        val fresh = recordSnapshot(CONFLICT_THREE, "new", note = JsonNull)
+        val pages = numberedBranches(fresh, 65).chunked(16).mapIndexed { index, branches ->
+            fresh.copy(
+                branches = branches,
+                pageIndex = index,
+                continuation = if (index == 4) null else ('d' + index).toString().repeat(43),
+                complete = index == 4,
+            )
+        }
+        var pageIndex = 0
+
+        val failure = runCatching {
+            projection.loadComplete(CONFLICT_THREE) {
+                FetchedConflictSnapshotPage(pages[pageIndex++], encodedBytes = 120_000)
+            }
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(projection.read(CONFLICT_THREE)).isEqualTo(old)
+    }
+
     @Test
     fun fiveRootSnapshotsRemainTypedAfterRepositoryRestart() = runTest {
         val cases = listOf(
@@ -192,6 +539,15 @@ class ConflictSnapshotProjectionTest {
             pageIndex = 0,
             continuation = null,
             complete = true,
+        )
+    }
+
+    private fun numberedBranches(
+        template: ConflictSnapshot,
+        count: Int,
+    ): List<ConflictVersionSnapshot> = (1..count).map { index ->
+        template.branches.single().copy(
+            versionId = "b${index.toString().padStart(3, '0')}",
         )
     }
 

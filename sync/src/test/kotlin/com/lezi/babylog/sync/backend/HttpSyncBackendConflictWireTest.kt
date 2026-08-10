@@ -4,6 +4,8 @@ import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.conflict.ConflictOutcome
 import com.lezi.babylog.sync.conflict.ConflictRoot
 import com.lezi.babylog.sync.conflict.ConflictRootType
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPaging
 import java.net.InetAddress
 import java.net.ServerSocket
 import kotlin.concurrent.thread
@@ -16,6 +18,84 @@ import org.junit.Test
  * against the accepted/rejected closed terminals, not only NoOp defaults.
  */
 class HttpSyncBackendConflictWireTest {
+    @Test
+    fun fetchConflictSnapshotPageRejectsTransportBodyAboveReceiptBudget() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-conflict-budget-test") {
+            server.accept().use { socket ->
+                readRequest(socket)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${ConflictSnapshotPaging.MAX_ENCODED_PAGE_BYTES + 1}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                }
+            }
+        }
+        try {
+            val failure = runCatching {
+                loopbackBackend().fetchConflictSnapshotPage(
+                    testSession(server),
+                    "00000000-0000-0000-0000-000000000010",
+                    ConflictSnapshotPageRequest.First,
+                )
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(SyncResponseTooLargeException::class.java)
+            assertThat((failure as SyncResponseTooLargeException).limitBytes)
+                .isEqualTo(ConflictSnapshotPaging.MAX_ENCODED_PAGE_BYTES)
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun fetchConflictSnapshotPageSendsOpaqueReceiptAndContinuationTogether() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = mutableListOf<String>()
+        val token = "t".repeat(43)
+        val continuation = "c".repeat(43)
+        val body = """
+            {"contract":"conflict_snapshot_v2","conflict_id":"00000000-0000-0000-0000-000000000010","entity_type":"custom_item","client_uuid":"00000000-0000-0000-0000-000000000001","snapshot_token":"$token","expires_at":2000000,"stable":{"version_id":"v1","base_version":null,"root":{"name":"散步","icon_slot":1,"updated_at":100,"created_by_membership_id":"member-a"},"media":[],"deleted":false,"mutation_id":"00000000-0000-0000-0000-000000000003","actor_id":"member-a","device_id":"device-a","received_at":100},"branches":[],"conflicting":[{"path":"/name","candidates":[{"choice_id":"${"a".repeat(43)}","outcome":{"op":"set","value":"散步"},"sources":[{"version_id":"v1","mutation_id":"00000000-0000-0000-0000-000000000003","actor_id":"member-a","device_id":"device-a","received_at":100}]},{"choice_id":"${"b".repeat(43)}","outcome":{"op":"set","value":"晒太阳"},"sources":[{"version_id":"v2","mutation_id":"00000000-0000-0000-0000-000000000004","actor_id":"member-b","device_id":"device-b","received_at":110}]}]}],"auto_merged":[],"page_index":1,"continuation":null,"complete":true}
+        """.trimIndent().toByteArray(Charsets.UTF_8)
+        val responder = thread(name = "lezi-conflict-continuation-test") {
+            server.accept().use { socket ->
+                captured += readRequest(socket)
+                socket.getOutputStream().use { output ->
+                    output.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: application/json\r\n" +
+                                "Content-Length: ${body.size}\r\n" +
+                                "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                    )
+                    output.write(body)
+                }
+            }
+        }
+        try {
+            val fetched = loopbackBackend().fetchConflictSnapshotPage(
+                testSession(server),
+                "00000000-0000-0000-0000-000000000010",
+                ConflictSnapshotPageRequest.Continuation(token, continuation),
+            )
+            assertThat(fetched.snapshot.pageIndex).isEqualTo(1)
+            assertThat(fetched.encodedBytes).isEqualTo(body.size)
+            assertThat(captured.single().lineSequence().first()).startsWith(
+                "GET /v1/conflicts/00000000-0000-0000-0000-000000000010" +
+                    "?snapshot_token=$token&continuation=$continuation ",
+            )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
     @Test
     fun fetchConflictSnapshot_parsesCompleteRecordSnapshotWithoutLoss() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
@@ -139,10 +219,12 @@ class HttpSyncBackendConflictWireTest {
             }
         }
         try {
-            val detail = loopbackBackend().fetchConflictSnapshot(
+            val fetched = loopbackBackend().fetchConflictSnapshotPage(
                 testSession(server),
                 "00000000-0000-0000-0000-000000000010",
+                ConflictSnapshotPageRequest.First,
             )
+            val detail = fetched.snapshot
             assertThat(detail.conflictId)
                 .isEqualTo("00000000-0000-0000-0000-000000000010")
             assertThat(detail.snapshotToken)
@@ -162,6 +244,7 @@ class HttpSyncBackendConflictWireTest {
                 .isEqualTo("member-a")
             assertThat(detail.complete).isTrue()
             assertThat(detail.continuation).isNull()
+            assertThat(fetched.encodedBytes).isEqualTo(body.size)
             assertThat(captured.single().lineSequence().first())
                 .startsWith("GET /v1/conflicts/00000000-0000-0000-0000-000000000010 ")
             assertThat(captured.single()).contains("Authorization: Bearer family-token")

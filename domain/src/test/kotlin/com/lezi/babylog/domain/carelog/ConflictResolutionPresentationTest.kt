@@ -1,6 +1,8 @@
 package com.lezi.babylog.domain.carelog
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
+import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.domain.RecordingTransactionRunner
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.SyncPort
@@ -12,12 +14,14 @@ import com.lezi.babylog.sync.conflict.ConflictOutcome
 import com.lezi.babylog.sync.conflict.ConflictRoot
 import com.lezi.babylog.sync.conflict.ConflictRootType
 import com.lezi.babylog.sync.conflict.ConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSnapshotCodec
 import com.lezi.babylog.sync.conflict.ConflictSource
 import com.lezi.babylog.sync.conflict.ConflictVersionSnapshot
 import com.lezi.babylog.sync.conflict.ConflictingPath
 import java.io.IOException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import org.junit.Test
@@ -28,6 +32,7 @@ class ConflictResolutionPresentationTest {
         val snapshot = recordConflictSnapshot()
         val summaries = FakeConflictSummaryDao()
         val cache = FakeConflictSnapshotCacheDao()
+        seedCompleteSnapshot(summaries, cache, snapshot)
         val online = coordinator(
             summaries = summaries,
             cache = cache,
@@ -71,7 +76,7 @@ class ConflictResolutionPresentationTest {
     }
 
     @Test
-    fun incompleteNetworkPageIsReadableButNeverPromotedAsSubmitReceipt() = runTest {
+    fun incompleteNetworkPageIsNeverExposedPastTheCompleteSnapshotSeam() = runTest {
         val summaries = FakeConflictSummaryDao()
         val cache = FakeConflictSnapshotCacheDao()
         val partial = recordConflictSnapshot().copy(complete = false, continuation = "next")
@@ -83,17 +88,8 @@ class ConflictResolutionPresentationTest {
             },
         ).loadDetail(TEST_CONFLICT_UUID)
 
-        assertThat(loaded!!.snapshot).isEqualTo(partial)
+        assertThat(loaded).isNull()
         assertThat(cache.get(TEST_CONFLICT_UUID)).isNull()
-        val draft = ConflictResolverDraft.open(
-            partial,
-            ConflictResolverAudience("member-author", false),
-            fetchedOnline = true,
-            nowMillis = 1_000,
-            resolutionMutationId = RESOLUTION_MUTATION_UUID,
-        )
-        assertThat(draft.model.availability).isEqualTo(ConflictResolverAvailability.Incomplete)
-        assertThat(runCatching { draft.choose("/note", STABLE_CHOICE_ID) }.isFailure).isTrue()
     }
 
     @Test
@@ -101,6 +97,7 @@ class ConflictResolutionPresentationTest {
         val snapshot = recordConflictSnapshot()
         val summaries = FakeConflictSummaryDao()
         val cache = FakeConflictSnapshotCacheDao()
+        seedCompleteSnapshot(summaries, cache, snapshot)
         val calls = mutableListOf<ConflictResolveRequest>()
         val triggers = mutableListOf<SyncTrigger>()
         val sync = object : SyncPort by NoOpSyncPort() {
@@ -163,6 +160,7 @@ class ConflictResolutionPresentationTest {
             val snapshot = recordConflictSnapshot()
             val summaries = FakeConflictSummaryDao()
             val cache = FakeConflictSnapshotCacheDao()
+            seedCompleteSnapshot(summaries, cache, snapshot)
             val sync = object : SyncPort by NoOpSyncPort() {
                 override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
                 override suspend fun resolveConflict(
@@ -196,6 +194,7 @@ class ConflictResolutionPresentationTest {
         val snapshot = recordConflictSnapshot()
         val summaries = FakeConflictSummaryDao()
         val cache = FakeConflictSnapshotCacheDao()
+        seedCompleteSnapshot(summaries, cache, snapshot)
         val triggers = mutableListOf<SyncTrigger>()
         val sync = object : SyncPort by NoOpSyncPort() {
             override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
@@ -243,6 +242,7 @@ class ConflictResolutionPresentationTest {
         val snapshot = base.copy(stable = base.stable.copy(deleted = true))
         val summaries = FakeConflictSummaryDao()
         val cache = FakeConflictSnapshotCacheDao()
+        seedCompleteSnapshot(summaries, cache, snapshot)
         val triggers = mutableListOf<SyncTrigger>()
         val sync = object : SyncPort by NoOpSyncPort() {
             override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
@@ -286,6 +286,7 @@ class ConflictResolutionPresentationTest {
         val snapshot = recordConflictSnapshot()
         val summaries = FakeConflictSummaryDao()
         val cache = FakeConflictSnapshotCacheDao()
+        seedCompleteSnapshot(summaries, cache, snapshot)
         var submits = 0
         val sync = object : SyncPort by NoOpSyncPort() {
             override suspend fun fetchConflictSnapshot(conflictId: String) = snapshot
@@ -312,6 +313,35 @@ class ConflictResolutionPresentationTest {
             .isEqualTo("incomplete_choices")
         assertThat(submits).isEqualTo(0)
     }
+}
+
+private suspend fun seedCompleteSnapshot(
+    summaries: FakeConflictSummaryDao,
+    cache: FakeConflictSnapshotCacheDao,
+    snapshot: ConflictSnapshot,
+) {
+    cache.upsert(
+        ConflictSnapshotCacheEntity(
+            conflictId = snapshot.conflictId,
+            snapshotJson = ConflictSnapshotCodec.encode(snapshot),
+            cachedAt = snapshot.branches.maxOfOrNull { it.receivedAt } ?: snapshot.stable.receivedAt,
+        ),
+    )
+    summaries.upsert(
+        ConflictSummaryEntity(
+            conflictId = snapshot.conflictId,
+            entityType = snapshot.entityType.wireName,
+            clientUuid = snapshot.clientUuid,
+            stableVersionId = snapshot.stable.versionId,
+            status = "open",
+            kind = if (snapshot.branches.isEmpty()) "tombstone_restore" else "concurrent",
+            branchVersionIdsJson = JsonArray(
+                snapshot.branchVersionIds.map(::JsonPrimitive),
+            ).toString(),
+            updatedAt = snapshot.branches.maxOfOrNull { it.receivedAt }
+                ?: snapshot.stable.receivedAt,
+        ),
+    )
 }
 
 private fun coordinator(

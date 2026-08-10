@@ -10,11 +10,64 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import kotlinx.coroutines.runBlocking
+import java.io.IOException
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ConflictSnapshotRoomProjectionTest {
+    @Test
+    fun productionProjection_resumesCommittedPageAfterDatabaseReopen() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "conflict-page-resume-${System.nanoTime()}.db"
+        var database = Room.databaseBuilder(context, LeziDatabase::class.java, name).build()
+        try {
+            val old = snapshot(CONFLICT_ONE, "old", "old")
+            projection(database).replaceComplete(old)
+            val full = snapshot(CONFLICT_THREE, "new", "new")
+            val continuation = "c".repeat(43)
+            val first = full.copy(complete = false, continuation = continuation)
+            var calls = 0
+            assertThat(
+                runCatching {
+                    projection(database).loadComplete(CONFLICT_THREE) {
+                        if (calls++ == 0) {
+                            FetchedConflictSnapshotPage(first, 12_000)
+                        } else {
+                            throw IOException("stop after first committed page")
+                        }
+                    }
+                }.exceptionOrNull(),
+            ).isInstanceOf(IOException::class.java)
+            assertThat(projection(database).read(CONFLICT_ONE)).isEqualTo(old)
+            assertThat(projection(database).read(CONFLICT_THREE)).isNull()
+
+            database.close()
+            database = Room.databaseBuilder(context, LeziDatabase::class.java, name).build()
+            var resumed: ConflictSnapshotPageRequest? = null
+            val complete = projection(database).loadComplete(CONFLICT_THREE) { request ->
+                resumed = request
+                FetchedConflictSnapshotPage(
+                    full.copy(
+                        branches = listOf(full.branches.single().copy(versionId = "branch-z")),
+                        pageIndex = 1,
+                    ),
+                    13_000,
+                )
+            }
+            assertThat(resumed).isEqualTo(
+                ConflictSnapshotPageRequest.Continuation(full.snapshotToken, continuation),
+            )
+            assertThat(complete.branches.map { it.versionId })
+                .containsExactly("branch-new", "branch-z").inOrder()
+            assertThat(projection(database).read(CONFLICT_ONE)).isNull()
+            assertThat(projection(database).read(CONFLICT_THREE)).isEqualTo(complete)
+        } finally {
+            database.close()
+            context.deleteDatabase(name)
+        }
+    }
+
     @Test
     fun productionProjection_roundTripsReplacesClearsReopensAndRollsBack() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

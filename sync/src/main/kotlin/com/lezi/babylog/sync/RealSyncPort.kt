@@ -22,6 +22,7 @@ import com.lezi.babylog.core.model.SyncStatus
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Named
@@ -52,6 +53,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+
 import com.lezi.babylog.sync.availability.AvailabilityProbeReason
 import com.lezi.babylog.sync.availability.FamilyServerAvailability
 import com.lezi.babylog.sync.availability.FamilyServerAvailabilityPolicy
@@ -78,7 +80,10 @@ import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
+import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
 import com.lezi.babylog.sync.clear.LocalReplicaClearCoordinator
+import com.lezi.babylog.sync.conflict.ConflictSnapshotProjection
+import com.lezi.babylog.sync.conflict.ConflictSnapshotLoadLocks
 import com.lezi.babylog.sync.disasterrecovery.DisasterRecoverySnapshotBuilder
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
@@ -122,6 +127,24 @@ import com.lezi.babylog.sync.session.matchesOrigin
 import com.lezi.babylog.sync.session.requireDeviceName
 import com.lezi.babylog.sync.session.requireMemberDisplayName
 import com.lezi.babylog.sync.session.receiptFor
+
+private data class ConflictSnapshotSessionIdentity(
+    val familyId: String,
+    val deviceId: String,
+    val baseUrl: String,
+    val membershipId: String,
+    val pullGeneration: String,
+    val joined: Boolean,
+)
+
+private fun SyncSession.conflictSnapshotIdentity() = ConflictSnapshotSessionIdentity(
+    familyId = familyId,
+    deviceId = deviceId,
+    baseUrl = baseUrl,
+    membershipId = membershipId,
+    pullGeneration = pullGeneration,
+    joined = isJoined,
+)
 
 @Singleton
 class RealSyncPort @Inject constructor(
@@ -191,6 +214,14 @@ class RealSyncPort @Inject constructor(
     )
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
+    /** Invalidates detail intents captured before a committed local/identity clear. */
+    private val conflictSnapshotClearEpoch = AtomicLong()
+    private val conflictSnapshotLoadLocks = ConflictSnapshotLoadLocks()
+    private val conflictSnapshotProjection = ConflictSnapshotProjection(
+        summaries = conflictSummaryDao,
+        snapshots = conflictSnapshotCacheDao,
+        transactions = transactionRunner,
+    )
     /**
      * Serializes app-update install + staging cleanup so about-check, banner install,
      * and force overlay cannot race the same private staging path.
@@ -669,9 +700,38 @@ class RealSyncPort @Inject constructor(
     override suspend fun fetchConflictSnapshot(
         conflictId: String,
     ): com.lezi.babylog.sync.conflict.ConflictSnapshot {
-        val session = preferences.session.first()
-        check(session.isJoined) { "未加入家庭，无法加载冲突详情" }
-        return backend.fetchConflictSnapshot(session, conflictId)
+        val requestedClearEpoch = conflictSnapshotClearEpoch.get()
+        return conflictSnapshotLoadLocks.withLock(conflictId) {
+            check(conflictSnapshotClearEpoch.get() == requestedClearEpoch) {
+                "冲突详情请求已跨越 session/local clear 边界"
+            }
+            val session = preferences.session.first()
+            check(session.isJoined) { "未加入家庭，无法加载冲突详情" }
+            val sessionIdentity = session.conflictSnapshotIdentity()
+            val isLoadCurrent: suspend () -> Boolean = {
+                conflictSnapshotClearEpoch.get() == requestedClearEpoch &&
+                    preferences.session.first().conflictSnapshotIdentity() == sessionIdentity
+            }
+            suspend fun load() = conflictSnapshotProjection.loadComplete(
+                conflictId = conflictId,
+                persistenceBarrier = syncMutex,
+                isLoadCurrent = isLoadCurrent,
+            ) { request -> backend.fetchConflictSnapshotPage(session, conflictId, request) }
+            try {
+                load()
+            } catch (failure: SyncHttpException) {
+                val code = syncHttpCodeOrNull(failure.responseBody)
+                val receiptCanRestart = code in setOf(
+                    "invalid_snapshot_token",
+                    "snapshot_expired",
+                    "snapshot_stale",
+                )
+                if (!receiptCanRestart || !conflictSnapshotProjection.discardStaging(conflictId)) {
+                    throw failure
+                }
+                load()
+            }
+        }
     }
 
     override suspend fun resolveConflict(
@@ -1363,13 +1423,15 @@ class RealSyncPort @Inject constructor(
     override suspend fun clearLocalData(
         scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
-    ): Result<Unit> = localReplicaClearCoordinator
-        .clear(
+    ): Result<Unit> {
+        conflictSnapshotClearEpoch.incrementAndGet()
+        return localReplicaClearCoordinator.clear(
             scope = scope,
             workflow = workflow,
             recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
         )
         .onFailure(::updateFailureStatus)
+    }
 
     override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> {
         // Opportunistic staging cleanup on the check path — never while an install
@@ -1875,6 +1937,7 @@ class RealSyncPort @Inject constructor(
     }
 
     private suspend fun finishPendingTerminalIdentityClear() {
+        conflictSnapshotClearEpoch.incrementAndGet()
         syncMutex.withLock {
             // Terminal identity and every local family projection converge under
             // the same barrier used by foreground sync. Credentials are already

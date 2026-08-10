@@ -17,7 +17,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
-internal fun JsonObject.toConflictSnapshot(context: String): ConflictSnapshot {
+internal fun JsonObject.toConflictSnapshot(
+    context: String,
+    maxBranches: Int = ConflictSnapshotValidation.MAX_BRANCHES_PER_PAGE,
+): ConflictSnapshot {
     requireClosedKeys(
         context,
         "contract",
@@ -43,8 +46,8 @@ internal fun JsonObject.toConflictSnapshot(context: String): ConflictSnapshot {
         (raw as? JsonObject)?.toVersion(entityType, "$context.branches[$index]")
             ?: throw IllegalArgumentException("$context.branches[$index] 不是对象")
     }
-    require(branches.size <= ConflictSnapshotValidation.MAX_BRANCHES_PER_PAGE) {
-        "$context.branches 超出单页上限"
+    require(branches.size <= maxBranches) {
+        "$context.branches 超出当前 snapshot 上限"
     }
     require(branches.map { it.versionId } == branches.map { it.versionId }.sorted()) {
         "$context.branches 必须按 version_id 排序"
@@ -115,10 +118,22 @@ object ConflictSnapshotCodec {
     private val json = Json
 
     fun decode(raw: String): ConflictSnapshot {
+        return decode(raw, ConflictSnapshotValidation.MAX_BRANCHES_PER_PAGE)
+    }
+
+    fun decodeComplete(raw: String): ConflictSnapshot {
+        val snapshot = decode(raw, ConflictSnapshotPaging.MAX_BRANCHES_PER_SNAPSHOT)
+        require(snapshot.pageIndex == 0 && snapshot.complete && snapshot.continuation == null) {
+            "conflict snapshot cache 不是完整 page-0 snapshot"
+        }
+        return snapshot
+    }
+
+    private fun decode(raw: String, maxBranches: Int): ConflictSnapshot {
         val value = runCatching { json.parseToJsonElement(raw) }.getOrElse {
             throw IllegalArgumentException("conflict snapshot cache 不是 JSON", it)
         } as? JsonObject ?: throw IllegalArgumentException("conflict snapshot cache 不是对象")
-        return value.toConflictSnapshot("conflict snapshot cache")
+        return value.toConflictSnapshot("conflict snapshot cache", maxBranches)
     }
 
     fun encode(snapshot: ConflictSnapshot): String = buildJsonObject {
