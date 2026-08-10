@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.family.conflict
 
 import androidx.lifecycle.SavedStateHandle
 import com.lezi.babylog.domain.carelog.ConflictResolverSavedState
+import com.lezi.babylog.domain.carelog.ConflictResolverTerminalDisposition
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -10,10 +11,23 @@ class ConflictResolverSessionStateTest {
     @Test
     fun processRecreationRestoresOneOpaqueAttemptFrame() {
         val handle = SavedStateHandle()
-        val expected = validState(submitted = true)
+        val expected = validState(submitted = true, requiresRefresh = true)
         ConflictResolverSessionState(handle).persist(expected)
         assertEquals(expected, ConflictResolverSessionState(handle).restore(CONFLICT_ID))
         assertEquals(setOf(FRAME_KEY), handle.keys())
+    }
+
+    @Test
+    fun processRecreationRestoresTerminalDisposition() {
+        val handle = SavedStateHandle()
+        val expected = validState(
+            submitted = true,
+            terminalDisposition = ConflictResolverTerminalDisposition.Forbidden,
+        )
+
+        ConflictResolverSessionState(handle).persist(expected)
+
+        assertEquals(expected, ConflictResolverSessionState(handle).restore(CONFLICT_ID))
     }
 
     @Test
@@ -34,12 +48,18 @@ class ConflictResolverSessionStateTest {
         }
     }
 
-    private fun validState(submitted: Boolean = false) = ConflictResolverSavedState(
+    private fun validState(
+        submitted: Boolean = false,
+        requiresRefresh: Boolean = false,
+        terminalDisposition: ConflictResolverTerminalDisposition? = null,
+    ) = ConflictResolverSavedState(
         conflictId = CONFLICT_ID,
         snapshotToken = "a".repeat(43),
         resolutionMutationId = "00000000-0000-0000-0000-000000000020",
         selectedChoiceIds = mapOf("/note" to "b".repeat(43)),
         submitted = submitted,
+        requiresRefresh = requiresRefresh,
+        terminalDisposition = terminalDisposition,
     )
 }
 

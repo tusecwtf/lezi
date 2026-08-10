@@ -44,10 +44,16 @@ class ConflictResolverDeviceTest {
         composeRule.setContent {
             LeziTheme(visualStyle = "warm") {
                 ConflictResolverContent(
-                    state = ConflictResolverUiState(draft = draft),
-                    onDraftChanged = { draft = it },
+                    state = ConflictResolverUiState(
+                        draft = draft,
+                        phase = ConflictResolverPhase.Complete,
+                    ),
+                    onChoose = { path, choiceId ->
+                        draft = (draft.select(path, choiceId) as
+                            com.lezi.babylog.domain.carelog.ConflictResolverChoiceResult.Selected).draft
+                    },
                     onSubmit = { submitted = true },
-                    onRetry = {},
+                    onRefresh = {},
                 )
             }
         }
@@ -83,10 +89,19 @@ class ConflictResolverDeviceTest {
             composeRule.setContent {
                 LeziTheme(visualStyle = "warm") {
                     ConflictResolverContent(
-                        state = ConflictResolverUiState(draft = draft),
-                        onDraftChanged = { error("read-only choice") },
+                        state = ConflictResolverUiState(
+                            draft = draft,
+                            phase = if (draft.model.availability ==
+                                com.lezi.babylog.domain.carelog.ConflictResolverAvailability.Offline
+                            ) {
+                                ConflictResolverPhase.Offline(requireNotNull(draft.model.readOnlyReason))
+                            } else {
+                                ConflictResolverPhase.Complete
+                            },
+                        ),
+                        onChoose = { _, _ -> error("read-only choice") },
                         onSubmit = { error("read-only submit") },
-                        onRetry = {},
+                        onRefresh = {},
                     )
                 }
             }
@@ -97,40 +112,77 @@ class ConflictResolverDeviceTest {
     }
 
     @Test
-    fun crossingExpiryRejectsStaleTapWithoutCrashing() {
-        var clockNow = 999L
-        var draft by mutableStateOf(
-            openDraft(fetchedOnline = true, expiresAt = 1_000, clock = { clockNow }),
+    fun freshnessStatesKeepOldEvidenceVisibleAndRefreshable() {
+        val draft = openDraft(fetchedOnline = true)
+        var state by mutableStateOf(
+            ConflictResolverUiState(
+                conflictId = draft.model.conflictId,
+                draft = draft,
+                phase = ConflictResolverPhase.Offline("当前离线；旧快照仍保留为只读证据"),
+            ),
         )
+        var refreshed = false
         composeRule.setContent {
             LeziTheme(visualStyle = "warm") {
                 ConflictResolverContent(
-                    state = ConflictResolverUiState(draft = draft),
-                    onDraftChanged = { draft = it },
-                    onSubmit = { error("expired submit") },
-                    onRetry = {},
+                    state = state,
+                    onChoose = { _, _ -> error("read-only choice") },
+                    onSubmit = { error("read-only submit") },
+                    onRefresh = { refreshed = true },
                 )
             }
         }
-        composeRule.runOnIdle { clockNow = 1_000 }
-        composeRule.onNodeWithTag("conflict_option_/note_$BRANCH_CHOICE_ID").performClick()
-        composeRule.onNodeWithText("冲突快照已过期，请联网刷新").assertExists()
+
+        composeRule.onNodeWithTag("conflict_offline").assertExists()
+        composeRule.onNodeWithTag("conflict_version_0").assertExists()
         composeRule.onNodeWithTag("conflict_submit").assertIsNotEnabled()
-        composeRule.runOnIdle { assertThat(draft.selectedChoiceIds).isEmpty() }
+        composeRule.onNodeWithTag("conflict_refresh").performClick()
+        composeRule.runOnIdle {
+            assertThat(refreshed).isTrue()
+            state = state.copy(
+                phase = ConflictResolverPhase.Refreshing("正在刷新完整冲突快照…"),
+            )
+        }
+        composeRule.onNodeWithTag("conflict_refreshing").assertExists()
+        composeRule.onNodeWithTag("conflict_version_0").assertExists()
+        composeRule.onNodeWithTag("conflict_submit").assertIsNotEnabled()
+
+        composeRule.runOnIdle {
+            state = state.copy(
+                phase = ConflictResolverPhase.Error(
+                    "刷新失败；旧快照仍保留为只读证据",
+                    ConflictResolverRetry.Refresh,
+                ),
+            )
+        }
+        composeRule.onNodeWithTag("conflict_error").assertExists()
+        composeRule.onNodeWithTag("conflict_version_0").assertExists()
+        composeRule.onNodeWithTag("conflict_refresh").assertExists()
+
+        composeRule.runOnIdle {
+            state = state.copy(
+                phase = ConflictResolverPhase.Error(
+                    "本次解决请求已被拒绝，请关闭后重新打开冲突",
+                    ConflictResolverRetry.None,
+                ),
+            )
+        }
+        composeRule.onNodeWithTag("conflict_error").assertExists()
+        composeRule.onNodeWithTag("conflict_version_0").assertExists()
+        composeRule.onNodeWithTag("conflict_refresh").assertDoesNotExist()
+        composeRule.onNodeWithTag("conflict_submit").assertIsNotEnabled()
     }
 
     private fun openDraft(
         membershipId: String = "member-self",
         fetchedOnline: Boolean,
-        expiresAt: Long = 2_000_000,
-        clock: () -> Long = { 1_000 },
     ) = ConflictResolverDraft.open(
-        snapshot = resolverSnapshot().copy(expiresAt = expiresAt),
+        snapshot = resolverSnapshot(),
         audience = ConflictResolverAudience(membershipId, false),
         fetchedOnline = fetchedOnline,
-        nowMillis = clock(),
+        nowMillis = 1_000,
         resolutionMutationId = "00000000-0000-0000-0000-000000000020",
-        clock = clock,
+        clock = { 1_000 },
     )
 }
 

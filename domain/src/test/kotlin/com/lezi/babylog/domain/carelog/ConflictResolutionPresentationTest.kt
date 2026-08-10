@@ -152,6 +152,7 @@ class ConflictResolutionPresentationTest {
         val cases = listOf(
             "snapshot_stale" to ConflictResolveOutcome.RefreshRequired::class.java,
             "snapshot_expired" to ConflictResolveOutcome.RefreshRequired::class.java,
+            "invalid_snapshot_token" to ConflictResolveOutcome.RefreshRequired::class.java,
             "cas_mismatch" to ConflictResolveOutcome.RefreshRequired::class.java,
             "forbidden" to ConflictResolveOutcome.Forbidden::class.java,
             "invalid_choice" to ConflictResolveOutcome.Rejected::class.java,

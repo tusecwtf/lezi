@@ -18,9 +18,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -42,9 +39,11 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.carelog.ConflictResolveOutcome
 import com.lezi.babylog.domain.carelog.ConflictResolverLoad
 import com.lezi.babylog.domain.carelog.ConflictResolverAudience
+import com.lezi.babylog.domain.carelog.ConflictResolverAvailability
 import com.lezi.babylog.domain.carelog.ConflictResolverChoiceResult
 import com.lezi.babylog.domain.carelog.ConflictResolverDraft
 import com.lezi.babylog.domain.carelog.ConflictResolverPath
+import com.lezi.babylog.domain.carelog.ConflictResolverTerminalDisposition
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.session.FamilyRole
@@ -54,8 +53,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
@@ -64,12 +63,44 @@ import kotlinx.coroutines.launch
 
 data class ConflictResolverUiState(
     val conflictId: String? = null,
-    val loading: Boolean = false,
     val draft: ConflictResolverDraft? = null,
-    val error: String? = null,
     val submitting: Boolean = false,
     val resolvedConflictId: String? = null,
-)
+    val phase: ConflictResolverPhase = ConflictResolverPhase.Idle,
+    val requiresFreshSnapshot: Boolean = false,
+) {
+    val canChoose: Boolean
+        get() = phase == ConflictResolverPhase.Complete &&
+            draft?.canChoose == true && !submitting
+
+    val canSubmit: Boolean
+        get() = when (val currentPhase = phase) {
+            ConflictResolverPhase.Complete -> true
+            is ConflictResolverPhase.Error -> currentPhase.retry == ConflictResolverRetry.Submit
+            else -> false
+        } && draft?.canSubmit == true && !submitting
+}
+
+sealed interface ConflictResolverPhase {
+    data object Idle : ConflictResolverPhase
+
+    data object Loading : ConflictResolverPhase
+
+    data object Complete : ConflictResolverPhase
+
+    data class Offline(val message: String) : ConflictResolverPhase
+
+    data class Stale(val message: String) : ConflictResolverPhase
+
+    data class Refreshing(val message: String) : ConflictResolverPhase
+
+    data class Error(
+        val message: String,
+        val retry: ConflictResolverRetry,
+    ) : ConflictResolverPhase
+}
+
+enum class ConflictResolverRetry { None, Refresh, Submit }
 
 internal data class ConflictResolverAttempt(
     val generation: Long,
@@ -132,7 +163,10 @@ class ConflictResolverHost internal constructor(
         loadJob?.cancel()
         submitJob?.cancel()
         val attempt = attempts.begin(conflictId)
-        mutableState.value = ConflictResolverUiState(conflictId = conflictId, loading = true)
+        mutableState.value = ConflictResolverUiState(
+            conflictId = conflictId,
+            phase = ConflictResolverPhase.Loading,
+        )
         loadJob = viewModelScope.launch {
             try {
                 val load = loadConflict(conflictId, forceRefresh)
@@ -140,12 +174,16 @@ class ConflictResolverHost internal constructor(
                 if (load == null) {
                     mutableState.value = ConflictResolverUiState(
                         conflictId = conflictId,
-                        error = "暂时无法取得冲突详情，请联网后重试",
+                        phase = ConflictResolverPhase.Error(
+                            "暂时无法取得冲突详情，请联网后重试",
+                            ConflictResolverRetry.Refresh,
+                        ),
                     )
                     return@launch
                 }
                 val session = sessions.first()
                 if (!attempts.accepts(attempt)) return@launch
+                val restored = sessionState.restore(conflictId)
                 val draft = ConflictResolverDraft.open(
                     snapshot = load.snapshot,
                     audience = ConflictResolverAudience(
@@ -154,42 +192,119 @@ class ConflictResolverHost internal constructor(
                     ),
                     fetchedOnline = load.fetchedOnline,
                     nowMillis = nowMillis(),
-                    restored = sessionState.restore(conflictId),
+                    restored = restored,
                     resolutionMutationId = newClientUuid(),
                     clock = nowMillis,
                 )
                 if (!attempts.accepts(attempt)) return@launch
-                sessionState.persist(draft.savedState())
-                mutableState.value = ConflictResolverUiState(conflictId, draft = draft)
+                val restoredApplies = restored?.snapshotToken == draft.model.snapshotToken
+                val stillRequiresRefresh = restoredApplies && restored?.requiresRefresh == true
+                val terminalDisposition = restored?.terminalDisposition.takeIf { restoredApplies }
+                sessionState.persist(
+                    draft.savedState(
+                        requiresRefresh = stillRequiresRefresh,
+                        terminalDisposition = terminalDisposition,
+                    ),
+                )
+                mutableState.value = ConflictResolverUiState(
+                    conflictId = conflictId,
+                    draft = draft,
+                    phase = terminalDisposition?.toTerminalPhase()
+                        ?: phaseFor(load, draft, stillRequiresRefresh),
+                    requiresFreshSnapshot = stillRequiresRefresh,
+                )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
                 if (!attempts.accepts(attempt)) return@launch
+                val message = productUiError(error, "加载失败，请重试")
                 mutableState.value = ConflictResolverUiState(
                     conflictId = conflictId,
-                    error = productUiError(error, "加载失败，请重试"),
+                    phase = ConflictResolverPhase.Error(
+                        message,
+                        ConflictResolverRetry.Refresh,
+                    ),
                 )
             }
         }
     }
 
-    fun rememberDraft(draft: ConflictResolverDraft) {
-        if (draft.model.conflictId != mutableState.value.conflictId) return
-        sessionState.persist(draft.savedState())
-        mutableState.update { it.copy(draft = draft, error = null) }
+    fun choose(path: String, choiceId: String) {
+        val current = mutableState.value
+        if (current.phase != ConflictResolverPhase.Complete) return
+        val draft = current.draft ?: return
+        when (val result = draft.select(path, choiceId)) {
+            is ConflictResolverChoiceResult.Selected -> {
+                sessionState.persist(result.draft.savedState())
+                mutableState.update { it.copy(draft = result.draft) }
+            }
+            is ConflictResolverChoiceResult.ReadOnly -> {
+                if (nowMillis() >= draft.model.expiresAt) {
+                    val attempt = current.conflictId?.let(attempts::current) ?: return
+                    mutableState.update {
+                        it.copy(
+                            draft = draft,
+                            phase = ConflictResolverPhase.Stale(result.reason),
+                            requiresFreshSnapshot = true,
+                        )
+                    }
+                    refreshEvidence(
+                        attempt = attempt,
+                        evidence = draft,
+                        message = result.reason,
+                        requireNewSnapshot = true,
+                    )
+                } else {
+                    mutableState.update {
+                        it.copy(
+                            phase = ConflictResolverPhase.Error(
+                                result.reason,
+                                ConflictResolverRetry.Refresh,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun submit() {
         val current = mutableState.value
         if (current.submitting) return
+        if ((current.phase as? ConflictResolverPhase.Error)?.retry == ConflictResolverRetry.None) return
         val attempt = current.conflictId?.let(attempts::current) ?: return
         val draft = current.draft ?: return
+        if (!current.canSubmit) {
+            if (nowMillis() >= draft.model.expiresAt) {
+                val message = "冲突快照已过期，请联网刷新"
+                mutableState.update {
+                    it.copy(
+                        phase = ConflictResolverPhase.Stale(message),
+                        requiresFreshSnapshot = true,
+                    )
+                }
+                refreshEvidence(
+                    attempt = attempt,
+                    evidence = draft,
+                    message = message,
+                    requireNewSnapshot = true,
+                )
+            }
+            return
+        }
         val frozen = runCatching { if (draft.submitted) draft else draft.freeze() }.getOrElse { error ->
-            mutableState.update { it.copy(error = error.message ?: "选择不完整") }
+            mutableState.update {
+                it.copy(
+                    phase = ConflictResolverPhase.Error(
+                        error.message ?: "选择不完整",
+                        ConflictResolverRetry.Refresh,
+                    ),
+                )
+            }
             return
         }
         sessionState.persist(frozen.savedState())
-        mutableState.update { it.copy(draft = frozen, submitting = true, error = null) }
+        mutableState.update { it.copy(draft = frozen, submitting = true) }
         submitJob = viewModelScope.launch {
             val outcome = try {
                 resolveConflict(frozen.model.conflictId, frozen.command())
@@ -207,22 +322,182 @@ class ConflictResolverHost internal constructor(
                     )
                 }
                 is ConflictResolveOutcome.TransportFailure -> mutableState.update {
-                    it.copy(draft = frozen, submitting = false, error = outcome.message)
+                    it.copy(
+                        draft = frozen,
+                        submitting = false,
+                        phase = ConflictResolverPhase.Error(
+                            outcome.message,
+                            ConflictResolverRetry.Submit,
+                        ),
+                    )
                 }
                 is ConflictResolveOutcome.RefreshRequired -> {
-                    sessionState.clear()
-                    mutableState.update { it.copy(draft = null, submitting = false, error = outcome.message) }
+                    mutableState.update {
+                        it.copy(
+                            draft = frozen,
+                            submitting = false,
+                            phase = ConflictResolverPhase.Stale(outcome.message),
+                            requiresFreshSnapshot = true,
+                        )
+                    }
+                    refreshEvidence(
+                        attempt = attempt,
+                        evidence = frozen,
+                        message = outcome.message,
+                        requireNewSnapshot = true,
+                    )
                 }
                 is ConflictResolveOutcome.Forbidden -> {
-                    sessionState.clear()
-                    mutableState.update { it.copy(draft = null, submitting = false, error = outcome.message) }
+                    sessionState.persist(
+                        frozen.savedState(
+                            terminalDisposition = ConflictResolverTerminalDisposition.Forbidden,
+                        ),
+                    )
+                    mutableState.update {
+                        it.copy(
+                            draft = frozen,
+                            submitting = false,
+                            phase = ConflictResolverPhase.Error(
+                                outcome.message,
+                                ConflictResolverRetry.None,
+                            ),
+                        )
+                    }
                 }
                 is ConflictResolveOutcome.Rejected -> {
-                    sessionState.clear()
-                    mutableState.update { it.copy(draft = null, submitting = false, error = outcome.message) }
+                    sessionState.persist(
+                        frozen.savedState(
+                            terminalDisposition = ConflictResolverTerminalDisposition.Rejected,
+                        ),
+                    )
+                    mutableState.update {
+                        it.copy(
+                            draft = frozen,
+                            submitting = false,
+                            phase = ConflictResolverPhase.Error(
+                                outcome.message,
+                                ConflictResolverRetry.None,
+                            ),
+                        )
+                    }
                 }
             }
         }
+    }
+
+    private fun refreshEvidence(
+        attempt: ConflictResolverAttempt,
+        evidence: ConflictResolverDraft,
+        message: String,
+        requireNewSnapshot: Boolean,
+    ) {
+        loadJob?.cancel()
+        sessionState.persist(evidence.savedState(requiresRefresh = requireNewSnapshot))
+        loadJob = viewModelScope.launch {
+            if (!attempts.accepts(attempt)) return@launch
+            mutableState.update {
+                it.copy(
+                    draft = evidence,
+                    phase = ConflictResolverPhase.Refreshing(message),
+                    requiresFreshSnapshot = requireNewSnapshot,
+                )
+            }
+            val load = try {
+                loadConflict(attempt.conflictId, true)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                null
+            }
+            if (!attempts.accepts(attempt)) return@launch
+            if (load == null) {
+                mutableState.update {
+                    it.copy(
+                        draft = evidence,
+                        phase = ConflictResolverPhase.Error(
+                            "刷新失败；旧快照仍保留为只读证据",
+                            ConflictResolverRetry.Refresh,
+                        ),
+                        requiresFreshSnapshot = requireNewSnapshot,
+                    )
+                }
+                return@launch
+            }
+            if (!load.fetchedOnline) {
+                mutableState.update {
+                    it.copy(
+                        draft = evidence,
+                        phase = ConflictResolverPhase.Offline(
+                            "当前离线；旧快照仍保留为只读证据",
+                        ),
+                        requiresFreshSnapshot = requireNewSnapshot,
+                    )
+                }
+                return@launch
+            }
+            val sameSnapshot = load.snapshot.snapshotToken == evidence.model.snapshotToken
+            val preservedAttempt = evidence.savedState().takeIf { sameSnapshot }
+            val refreshed = try {
+                val session = sessions.first()
+                if (!attempts.accepts(attempt)) return@launch
+                ConflictResolverDraft.open(
+                    snapshot = load.snapshot,
+                    audience = ConflictResolverAudience(
+                        membershipId = session.membershipId,
+                        isOwner = session.role == FamilyRole.Owner,
+                    ),
+                    fetchedOnline = true,
+                    nowMillis = nowMillis(),
+                    restored = preservedAttempt,
+                    resolutionMutationId = newClientUuid(),
+                    clock = nowMillis,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                if (!attempts.accepts(attempt)) return@launch
+                mutableState.update {
+                    it.copy(
+                        draft = evidence,
+                        phase = ConflictResolverPhase.Error(
+                            productUiError(error, "刷新失败；旧快照仍保留为只读证据"),
+                            ConflictResolverRetry.Refresh,
+                        ),
+                        requiresFreshSnapshot = requireNewSnapshot,
+                    )
+                }
+                return@launch
+            }
+            if (!attempts.accepts(attempt)) return@launch
+            val stillRequiresRefresh = requireNewSnapshot && sameSnapshot
+            sessionState.persist(refreshed.savedState(stillRequiresRefresh))
+            mutableState.value = ConflictResolverUiState(
+                conflictId = attempt.conflictId,
+                draft = refreshed,
+                phase = phaseFor(load, refreshed, stillRequiresRefresh),
+                requiresFreshSnapshot = stillRequiresRefresh,
+            )
+        }
+    }
+
+    fun refresh() {
+        val current = mutableState.value
+        val conflictId = current.conflictId ?: return
+        if (current.submitting || current.phase is ConflictResolverPhase.Refreshing) return
+        if ((current.phase as? ConflictResolverPhase.Error)?.retry == ConflictResolverRetry.None) return
+        val evidence = current.draft
+        val attempt = attempts.current(conflictId)
+        if (evidence == null || attempt == null) {
+            open(conflictId)
+            return
+        }
+        refreshEvidence(
+            attempt = attempt,
+            evidence = evidence,
+            message = "正在刷新完整冲突快照…",
+            requireNewSnapshot = current.requiresFreshSnapshot ||
+                current.phase is ConflictResolverPhase.Stale,
+        )
     }
 
     fun dismiss() {
@@ -263,9 +538,9 @@ fun ConflictResolverRoute(
     ) {
         ConflictResolverContent(
             state = state,
-            onDraftChanged = host::rememberDraft,
+            onChoose = host::choose,
             onSubmit = host::submit,
-            onRetry = { host.open(conflictId) },
+            onRefresh = host::refresh,
         )
     }
 }
@@ -273,31 +548,52 @@ fun ConflictResolverRoute(
 @Composable
 fun ConflictResolverContent(
     state: ConflictResolverUiState,
-    onDraftChanged: (ConflictResolverDraft) -> Unit,
+    onChoose: (String, String) -> Unit,
     onSubmit: () -> Unit,
-    onRetry: () -> Unit,
+    onRefresh: () -> Unit,
 ) {
-    var interactionReadOnlyReason by remember(
-        state.draft?.model?.conflictId,
-        state.draft?.resolutionMutationId,
-    ) { mutableStateOf<String?>(null) }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(LeziSpacing.Page),
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
     ) {
         Text("解决${state.draft?.model?.entityLabel ?: "事实"}冲突", style = LeziTypography.Title)
         Text("只列出真实冲突字段；已自动合并的内容保持不变。")
-        if (state.loading) Text("正在取得最新差异…", modifier = Modifier.testTag("conflict_loading"))
-        state.error?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("conflict_error"))
-            if (state.draft == null && !state.loading) {
-                LeziTextButton("重新加载", onClick = onRetry)
-            }
+        when (val phase = state.phase) {
+            ConflictResolverPhase.Idle, ConflictResolverPhase.Complete -> Unit
+            ConflictResolverPhase.Loading -> Text(
+                "正在取得最新差异…",
+                modifier = Modifier.testTag("conflict_loading"),
+            )
+            is ConflictResolverPhase.Offline -> FreshnessStatus(
+                phase.message,
+                "conflict_offline",
+                onRefresh,
+            )
+            is ConflictResolverPhase.Stale -> FreshnessStatus(
+                phase.message,
+                "conflict_stale",
+                onRefresh,
+            )
+            is ConflictResolverPhase.Refreshing -> FreshnessStatus(
+                phase.message,
+                "conflict_refreshing",
+            )
+            is ConflictResolverPhase.Error -> FreshnessStatus(
+                phase.message,
+                "conflict_error",
+                onRefresh.takeIf { phase.retry == ConflictResolverRetry.Refresh },
+            )
         }
         state.draft?.let { current ->
-            (interactionReadOnlyReason ?: current.model.readOnlyReason)?.let { reason ->
-                Text(reason, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag("conflict_read_only"))
-            }
+            current.model.readOnlyReason
+                ?.takeIf { state.phase == ConflictResolverPhase.Complete }
+                ?.let { reason ->
+                    Text(
+                        reason,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("conflict_read_only"),
+                    )
+                }
             current.model.versions.forEachIndexed { index, version ->
                 LeziSurfacePanel(
                     Modifier.fillMaxWidth().testTag("conflict_version_$index").semantics {
@@ -328,16 +624,9 @@ fun ConflictResolverContent(
                 ConflictPathChooser(
                     path,
                     current.selectedChoiceIds[path.path],
-                    current.canChoose,
-                ) { selectedPath, choiceId ->
-                    when (val result = current.select(selectedPath, choiceId)) {
-                        is ConflictResolverChoiceResult.Selected -> {
-                            interactionReadOnlyReason = null
-                            onDraftChanged(result.draft)
-                        }
-                        is ConflictResolverChoiceResult.ReadOnly -> interactionReadOnlyReason = result.reason
-                    }
-                }
+                    state.canChoose,
+                    onChoose,
+                )
             }
             LeziPrimaryButton(
                 label = when {
@@ -345,13 +634,58 @@ fun ConflictResolverContent(
                     current.submitted -> "重试同一次提交"
                     else -> "确认解决"
                 },
-                enabled = current.canSubmit && !state.submitting,
+                enabled = state.canSubmit,
                 busy = state.submitting,
                 onClick = onSubmit,
                 modifier = Modifier.fillMaxWidth().testTag("conflict_submit"),
             )
         }
         Spacer(Modifier.height(LeziSpacing.Lg))
+    }
+}
+
+private fun phaseFor(
+    load: ConflictResolverLoad,
+    draft: ConflictResolverDraft,
+    requiresRefresh: Boolean,
+): ConflictResolverPhase = when {
+    !load.fetchedOnline -> ConflictResolverPhase.Offline(
+        "当前离线；以下为上次完整快照，只读",
+    )
+    requiresRefresh || draft.model.availability == ConflictResolverAvailability.Expired ->
+        ConflictResolverPhase.Stale("冲突快照已过期，请联网刷新")
+    else -> ConflictResolverPhase.Complete
+}
+
+private fun ConflictResolverTerminalDisposition.toTerminalPhase(): ConflictResolverPhase.Error =
+    when (this) {
+        ConflictResolverTerminalDisposition.Forbidden -> ConflictResolverPhase.Error(
+            "当前账号无权解决此冲突",
+            ConflictResolverRetry.None,
+        )
+        ConflictResolverTerminalDisposition.Rejected -> ConflictResolverPhase.Error(
+            "本次解决请求已被拒绝，请关闭后重新打开冲突",
+            ConflictResolverRetry.None,
+        )
+    }
+
+@Composable
+private fun FreshnessStatus(
+    message: String,
+    tag: String,
+    onRefresh: (() -> Unit)? = null,
+) {
+    Text(
+        message,
+        color = MaterialTheme.colorScheme.error,
+        modifier = Modifier.testTag(tag).semantics { contentDescription = message },
+    )
+    onRefresh?.let { refresh ->
+        LeziTextButton(
+            "刷新完整快照",
+            onClick = refresh,
+            modifier = Modifier.testTag("conflict_refresh"),
+        )
     }
 }
 

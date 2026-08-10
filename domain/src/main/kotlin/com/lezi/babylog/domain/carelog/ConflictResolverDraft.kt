@@ -85,7 +85,11 @@ data class ConflictResolverSavedState(
     val resolutionMutationId: String,
     val selectedChoiceIds: Map<String, String>,
     val submitted: Boolean = false,
+    val requiresRefresh: Boolean = false,
+    val terminalDisposition: ConflictResolverTerminalDisposition? = null,
 )
+
+enum class ConflictResolverTerminalDisposition { Forbidden, Rejected }
 
 sealed interface ConflictResolverChoiceResult {
     data class Selected(val draft: ConflictResolverDraft) : ConflictResolverChoiceResult
@@ -183,12 +187,17 @@ class ConflictResolverDraft private constructor(
         }
     }
 
-    fun savedState(): ConflictResolverSavedState = ConflictResolverSavedState(
+    fun savedState(
+        requiresRefresh: Boolean = false,
+        terminalDisposition: ConflictResolverTerminalDisposition? = null,
+    ): ConflictResolverSavedState = ConflictResolverSavedState(
         conflictId = model.conflictId,
         snapshotToken = model.snapshotToken,
         resolutionMutationId = resolutionMutationId,
         selectedChoiceIds = selectedChoiceIds.toSortedMap(),
         submitted = submitted,
+        requiresRefresh = requiresRefresh,
+        terminalDisposition = terminalDisposition,
     )
 
     private fun currentAvailability(): ConflictResolverAvailability =

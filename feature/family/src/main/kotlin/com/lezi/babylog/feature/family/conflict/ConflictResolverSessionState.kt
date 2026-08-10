@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.family.conflict
 
 import androidx.lifecycle.SavedStateHandle
 import com.lezi.babylog.domain.carelog.ConflictResolverSavedState
+import com.lezi.babylog.domain.carelog.ConflictResolverTerminalDisposition
 import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
 
 /** Process-death state for the single app-shell resolution attempt. */
@@ -17,12 +18,16 @@ internal class ConflictResolverSessionState(
             ConflictSnapshotValidation.requireRuntimeToken(choiceId, "resolver saved choice_id")
         }
         require(!state.submitted || sortedChoices.isNotEmpty())
+        require(state.terminalDisposition == null || state.submitted)
+        require(state.terminalDisposition == null || !state.requiresRefresh)
         savedState[FRAME] = ArrayList(buildList {
             add(FRAME_VERSION)
             add(state.conflictId)
             add(state.snapshotToken)
             add(state.resolutionMutationId)
             add(if (state.submitted) SUBMITTED else DRAFT)
+            add(if (state.requiresRefresh) REQUIRES_REFRESH else FRESH)
+            add(state.terminalDisposition?.name ?: NO_TERMINAL)
             add(sortedChoices.size.toString())
             sortedChoices.forEach { (path, choiceId) ->
                 add(path)
@@ -52,7 +57,20 @@ internal class ConflictResolverSessionState(
             DRAFT -> false
             else -> error("resolver saved submitted 无效")
         }
-        val count = frame[5].toIntOrNull()
+        val requiresRefresh = when (frame[5]) {
+            REQUIRES_REFRESH -> true
+            FRESH -> false
+            else -> error("resolver saved freshness 无效")
+        }
+        val terminalDisposition = when (frame[6]) {
+            NO_TERMINAL -> null
+            ConflictResolverTerminalDisposition.Forbidden.name ->
+                ConflictResolverTerminalDisposition.Forbidden
+            ConflictResolverTerminalDisposition.Rejected.name ->
+                ConflictResolverTerminalDisposition.Rejected
+            else -> error("resolver saved terminal 无效")
+        }
+        val count = frame[7].toIntOrNull()
             ?.takeIf { it in 0..ConflictSnapshotValidation.MAX_RESOLUTION_PATHS }
             ?: error("resolver saved choice count 无效")
         require(frame.size == HEADER_SIZE + count * 2)
@@ -68,12 +86,16 @@ internal class ConflictResolverSessionState(
         }
         require(choices.keys.toList() == choices.keys.sorted())
         require(!submitted || choices.isNotEmpty())
+        require(terminalDisposition == null || submitted)
+        require(terminalDisposition == null || !requiresRefresh)
         return ConflictResolverSavedState(
             conflictId,
             token,
             mutation,
             choices,
             submitted,
+            requiresRefresh,
+            terminalDisposition,
         )
     }
 
@@ -85,9 +107,12 @@ internal class ConflictResolverSessionState(
 
     private companion object {
         const val FRAME = "conflict_resolver_attempt_v1"
-        const val FRAME_VERSION = "1"
+        const val FRAME_VERSION = "3"
         const val DRAFT = "0"
         const val SUBMITTED = "1"
-        const val HEADER_SIZE = 6
+        const val FRESH = "0"
+        const val REQUIRES_REFRESH = "1"
+        const val NO_TERMINAL = "-"
+        const val HEADER_SIZE = 8
     }
 }
