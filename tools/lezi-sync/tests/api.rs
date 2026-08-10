@@ -15555,21 +15555,107 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     assert_eq!(resolved["replay"], false);
     assert_eq!(resolved["stable_root"]["note"], "c");
 
+    let database_path = rig.directory.path().join("lezi.db");
+    let connection = Connection::open(&database_path).unwrap();
+    let valid_snapshot_receipt: String = connection
+        .query_row(
+            "SELECT receipt_json FROM mutation_receipts
+              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1",
+            [&conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = '[]'
+              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1",
+            [&conflict_id],
+        )
+        .unwrap();
+    drop(connection);
+    let resolution_time = rig.now.fetch_add(24 * 60 * 60, Ordering::SeqCst);
+    let retention_time = resolution_time + 24 * 60 * 60;
+    Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE device_sessions SET access_expires_at = ?1",
+            [retention_time + 60],
+        )
+        .unwrap();
     let (status, replay) = json_request(
         &rig.app,
         Method::POST,
         &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(token),
-        resolve_body,
+        resolve_body.clone(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(replay["status"], "accepted");
     assert_eq!(replay["replay"], true);
     assert_eq!(replay["stable_version_id"], resolved["stable_version_id"]);
+    let connection = Connection::open(&database_path).unwrap();
+    let retained_after_gc_failure: (i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1)",
+            [&conflict_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained_after_gc_failure, (1, 1));
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = ?1
+              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?2",
+            (&valid_snapshot_receipt, &conflict_id),
+        )
+        .unwrap();
+    drop(connection);
+    let (status, retry_after_gc_failure) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{retry_after_gc_failure}");
+    assert_eq!(retry_after_gc_failure["replay"], true);
+
+    let compacted: (i64, i64) = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1)",
+            [&conflict_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(compacted, (0, 0));
+
+    let restarted = rig.restart("generation-a");
+    let (status, restarted_replay) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restarted_replay}");
+    assert_eq!(restarted_replay["replay"], true);
+    assert_eq!(
+        restarted_replay["stable_version_id"],
+        resolved["stable_version_id"]
+    );
 
     let (status, drift) = json_request(
-        &rig.app,
+        &restarted,
         Method::POST,
         &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(token),

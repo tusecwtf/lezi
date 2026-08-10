@@ -54,6 +54,81 @@ fn conflict_detail_pages(
     }
 }
 
+fn seed_resolved_conflict_with_branches(
+    branch_count: usize,
+) -> (
+    CausalFx,
+    Uuid,
+    String,
+    ResolveConflictInput,
+    ResolveConflictResult,
+) {
+    let fx = CausalFx::new();
+    let (record_id, conflict_id, input, resolved) = seed_resolved_conflict_on(&fx, branch_count);
+    (fx, record_id, conflict_id, input, resolved)
+}
+
+fn seed_resolved_conflict_on(
+    fx: &CausalFx,
+    branch_count: usize,
+) -> (Uuid, String, ResolveConflictInput, ResolveConflictResult) {
+    assert!((1..=MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT).contains(&branch_count));
+    let record_id = Uuid::new_v4();
+    let created = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, None, "base"),
+            1_700_000_000,
+        )
+        .unwrap();
+    let base = created.results[0].stable_version_id.clone().unwrap();
+    let stable = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "stable"),
+            1_700_000_001,
+        )
+        .unwrap();
+    assert_eq!(stable.results[0].status, "accepted");
+
+    let mut conflict_id = None;
+    for index in 0..branch_count {
+        let branch = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, Some(&base), &format!("branch-{index}")),
+                1_700_000_002,
+            )
+            .unwrap();
+        assert_eq!(branch.results[0].status, "branched");
+        let current = branch.results[0].conflict_id.clone().unwrap();
+        assert!(conflict_id
+            .as_ref()
+            .is_none_or(|expected| expected == &current));
+        conflict_id = Some(current);
+    }
+    let conflict_id = conflict_id.unwrap();
+    let pages = conflict_detail_pages(&fx.store, &fx.owner, &conflict_id, 1_700_000_100).unwrap();
+    let detail = pages.last().unwrap();
+    let input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token.clone(),
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices: vec![resolution_choice(
+            detail,
+            "/note",
+            ConflictOutcome::Set {
+                value: Value::String(format!("branch-{}", branch_count - 1)),
+            },
+        )],
+    };
+    let resolved = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_101)
+        .unwrap();
+    assert_eq!(resolved.status, "accepted");
+    (record_id, conflict_id, input, resolved)
+}
+
 fn resolution_choice(
     detail: &ConflictDetailPage,
     path: &str,
@@ -1713,6 +1788,463 @@ fn concurrent_choice_only_resolutions_publish_exactly_one_terminal() {
 }
 
 #[test]
+fn choice_only_resolution_statement_budget_is_independent_of_branch_count() {
+    fn measured(branch_count: usize) -> usize {
+        let fx = CausalFx::new();
+        let record_id = Uuid::new_v4();
+        let created = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, None, "base"),
+                1_700_000_000,
+            )
+            .unwrap();
+        let base = created.results[0].stable_version_id.clone().unwrap();
+        fx.commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "stable"),
+            1_700_000_001,
+        )
+        .unwrap();
+        let mut conflict_id = None;
+        for index in 0..branch_count {
+            let branched = fx
+                .commit(
+                    &fx.owner,
+                    fx.record_mutation(record_id, Some(&base), &format!("branch-{index}")),
+                    1_700_000_002,
+                )
+                .unwrap();
+            conflict_id = branched.results[0].conflict_id.clone();
+        }
+        let conflict_id = conflict_id.unwrap();
+        let pages =
+            conflict_detail_pages(&fx.store, &fx.owner, &conflict_id, 1_700_000_100).unwrap();
+        let detail = pages.last().unwrap();
+        let input = ResolveConflictInput {
+            snapshot_token: detail.snapshot_token.clone(),
+            resolution_mutation_id: Uuid::new_v4().to_string(),
+            choices: vec![resolution_choice(
+                detail,
+                "/note",
+                ConflictOutcome::Set {
+                    value: Value::String("branch-0".to_owned()),
+                },
+            )],
+        };
+        begin_statement_count(&fx.family_id);
+        let result = fx
+            .store
+            .resolve_conflict(&fx.owner, &conflict_id, input, 1_700_000_101)
+            .unwrap();
+        let statements = finish_statement_count(&fx.family_id);
+        assert_eq!(result.status, "accepted");
+        statements
+    }
+
+    let one = measured(1);
+    let sixty_four = measured(MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT);
+    assert_eq!(sixty_four, one);
+    assert!(one <= 32, "resolution statement budget drifted to {one}");
+}
+
+#[test]
+fn conflict_retention_gc_is_two_phase_and_replay_safe_after_restart() {
+    let (fx, record_id, conflict_id, input, resolved) =
+        seed_resolved_conflict_with_branches(MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT);
+    let stable_version = resolved.stable_version_id.clone().unwrap();
+    let before = fx.store.connect().unwrap();
+    let branch_rows: i64 = before
+        .query_row(
+            "SELECT COUNT(*) FROM conflict_branches WHERE family_id = ?1 AND conflict_id = ?2",
+            params![fx.family_id, conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let snapshot_rows: i64 = before
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_receipts
+              WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'
+                AND conflict_id = ?2",
+            params![fx.family_id, conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(branch_rows, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT as i64);
+    assert_eq!(snapshot_rows, 1);
+    drop(before);
+
+    assert_eq!(
+        fx.store
+            .gc_conflict_metadata(1_700_000_101 + 86_399)
+            .unwrap(),
+        0,
+    );
+    super::super::conflict_retention::test_hook::fail_after_mark_once();
+    assert!(matches!(
+        fx.store.gc_conflict_metadata(1_700_000_101 + 86_400),
+        Err(StoreError::InvalidStoredPayload),
+    ));
+
+    let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
+    assert_eq!(
+        restarted
+            .gc_conflict_metadata(1_700_000_101 + 86_400)
+            .unwrap(),
+        1,
+    );
+    let replay = restarted
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_100_000)
+        .unwrap();
+    assert_eq!(replay.replay, Some(true));
+    assert_eq!(
+        replay.stable_version_id.as_deref(),
+        Some(stable_version.as_str())
+    );
+    let mut drift = input;
+    drift.choices[0].choice_id = "A".repeat(43);
+    let drift = restarted
+        .resolve_conflict(&fx.owner, &conflict_id, drift, 1_700_100_000)
+        .unwrap();
+    assert_eq!(drift.error.unwrap().code, "content_drift");
+
+    let after = restarted.connect().unwrap();
+    let compacted: (i64, i64, i64, i64, i64, i64) = after
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches
+                  WHERE family_id = ?1 AND conflict_id = ?2),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'
+                    AND conflict_id = ?2),
+                (SELECT COUNT(*) FROM conflict_resolutions
+                  WHERE family_id = ?1 AND conflict_id = ?2),
+                (SELECT COUNT(*) FROM conflicts
+                  WHERE family_id = ?1 AND conflict_id = ?2 AND status = 'resolved'),
+                (SELECT COUNT(*) FROM entity_stable_heads
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?3
+                    AND version_id = ?4),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE family_id = ?1 AND membership_id = ?5 AND mutation_id = ?4)",
+            params![
+                fx.family_id,
+                conflict_id,
+                record_id.to_string(),
+                stable_version,
+                VERSION_PROVENANCE_PRINCIPAL,
+            ],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(compacted, (0, 0, 1, 1, 1, 1));
+}
+
+#[test]
+fn conflict_detail_compacts_expired_snapshot_choice_receipts() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    for now in [1_700_000_100, 1_700_000_700, 1_700_001_300] {
+        fx.store
+            .conflict_detail_page(
+                &fx.owner,
+                &conflict_id,
+                ConflictDetailPageRequest::First,
+                now,
+            )
+            .unwrap();
+    }
+    let receipt_json: String = fx
+        .store
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT receipt_json FROM mutation_receipts
+              WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'
+                AND conflict_id = ?2",
+            params![fx.family_id, conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<Value>>(&receipt_json)
+            .unwrap()
+            .len(),
+        1,
+    );
+}
+
+#[test]
+fn conflict_retention_fails_closed_on_corrupt_choice_material() {
+    let (fx, _, conflict_id, _, _) = seed_resolved_conflict_with_branches(1);
+    let connection = fx.store.connect().unwrap();
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = '[]'
+              WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'
+                AND conflict_id = ?2",
+            params![fx.family_id, conflict_id],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(matches!(
+        fx.store.gc_conflict_metadata(1_700_000_101 + 86_400),
+        Err(StoreError::InvalidStoredPayload),
+    ));
+    let connection = fx.store.connect().unwrap();
+    let retained: (i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches
+                  WHERE family_id = ?1 AND conflict_id = ?2),
+                (SELECT COUNT(*) FROM entity_versions v
+                  JOIN conflict_branches b
+                    ON b.family_id = v.family_id AND b.branch_version_id = v.version_id
+                 WHERE b.family_id = ?1 AND b.conflict_id = ?2)",
+            params![fx.family_id, conflict_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, (1, 1));
+}
+
+#[test]
+fn conflict_retention_fails_closed_on_valid_receipt_bound_to_another_conflict() {
+    let fx = CausalFx::new();
+    let (_, target_conflict, _, _) = seed_resolved_conflict_on(&fx, 1);
+    let (_, donor_conflict, _, _) = seed_resolved_conflict_on(&fx, 1);
+    let connection = fx.store.connect().unwrap();
+    let donor_receipt: String = connection
+        .query_row(
+            "SELECT receipt_json FROM mutation_receipts
+              WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'
+                AND conflict_id = ?2",
+            params![fx.family_id, donor_conflict],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = ?1
+              WHERE family_id = ?2 AND membership_id = '__conflict_snapshot_v2__'
+                AND conflict_id = ?3",
+            params![donor_receipt, fx.family_id, target_conflict],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "DELETE FROM mutation_receipts
+              WHERE family_id = ?1 AND membership_id = '__conflict_retention_v2__'
+                AND conflict_id = ?2",
+            params![fx.family_id, donor_conflict],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        fx.store.gc_conflict_metadata(1_700_000_101 + 86_400),
+        Err(StoreError::InvalidStoredPayload),
+    ));
+    let connection = fx.store.connect().unwrap();
+    let retained: (i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches
+                  WHERE family_id = ?1 AND conflict_id = ?2),
+                (SELECT COUNT(*) FROM entity_versions v
+                  JOIN conflict_branches b
+                    ON b.family_id = v.family_id AND b.branch_version_id = v.version_id
+                 WHERE b.family_id = ?1 AND b.conflict_id = ?2)",
+            params![fx.family_id, target_conflict],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, (1, 1));
+}
+
+#[test]
+fn concurrent_conflict_retention_sweeps_publish_one_idempotent_terminal() {
+    let (fx, _, conflict_id, input, resolved) = seed_resolved_conflict_with_branches(1);
+    let barrier = Arc::new(Barrier::new(3));
+    let handles = (0..2)
+        .map(|_| {
+            let store = fx.store.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                store.gc_conflict_metadata(1_700_000_101 + 86_400)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().sum::<usize>(), 1);
+    let replay = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input, 1_700_100_000)
+        .unwrap();
+    assert_eq!(replay.replay, Some(true));
+    assert_eq!(replay.stable_version_id, resolved.stable_version_id);
+}
+
+#[test]
+fn conflict_retention_budget_is_bounded_with_one_hundred_thousand_eligible_receipts() {
+    let fx = CausalFx::new();
+    for _ in 0..8 {
+        seed_resolved_conflict_on(&fx, 1);
+    }
+    let connection = fx.store.connect().unwrap();
+    let stable_version: String = connection
+        .query_row(
+            "SELECT version_id FROM entity_stable_heads
+              WHERE family_id = ?1 AND entity_type = 'baby' AND client_uuid = ?2",
+            params![fx.family_id, fx.baby_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let client_uuid = fx.baby_id.to_string();
+    let tx = connection.unchecked_transaction().unwrap();
+    {
+        let mut insert_conflict = tx
+            .prepare(
+                "INSERT INTO conflicts(
+                    family_id, conflict_id, entity_type, client_uuid, base_version_id,
+                    stable_version_id, status, kind, created_at, resolved_at
+                 ) VALUES (?1, ?2, 'baby', ?3, NULL, ?4, 'resolved',
+                    'tombstone_restore', 1, ?5)",
+            )
+            .unwrap();
+        let mut insert_resolution = tx
+            .prepare(
+                "INSERT INTO conflict_resolutions(
+                    family_id, conflict_id, resolution_mutation_id, resolver_membership_id,
+                    expected_stable_version_id, expected_branch_versions_json,
+                    conflict_choices_json, resolved_version_id, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, '[]', '{}', ?5, ?6)",
+            )
+            .unwrap();
+        let mut insert_snapshot_receipt = tx
+            .prepare(
+                "INSERT INTO mutation_receipts(
+                    family_id, membership_id, entity_type, client_uuid, mutation_id,
+                    content_hash, status, stable_version_id, branch_version_id,
+                    conflict_id, receipt_json, created_at
+                 ) VALUES (?1, '__conflict_snapshot_v2__', 'baby', ?2, ?3,
+                    ?4, 'accepted', ?5, NULL, ?6, ?7, ?8)",
+            )
+            .unwrap();
+        for index in 0..100_000 {
+            let conflict_id = format!("historical-eligible-{index:06}");
+            let resolution_mutation_id = format!("historical-resolution-{index:06}");
+            let snapshot_receipt =
+                super::super::conflict_snapshots::test_resolution_ready_receipt_json(
+                    &fx.store,
+                    super::super::conflict_snapshots::TestReceiptBinding {
+                        family_id: &fx.family_id,
+                        conflict_id: &conflict_id,
+                        kind: "tombstone_restore",
+                        entity_type: "baby",
+                        client_uuid: &client_uuid,
+                        stable_version_id: &stable_version,
+                        branch_version_ids: &[],
+                    },
+                );
+            insert_conflict
+                .execute(params![
+                    fx.family_id,
+                    conflict_id,
+                    client_uuid,
+                    stable_version,
+                    1_700_000_102_i64,
+                ])
+                .unwrap();
+            insert_resolution
+                .execute(params![
+                    fx.family_id,
+                    conflict_id,
+                    resolution_mutation_id,
+                    fx.owner.membership_id,
+                    stable_version,
+                    1_700_000_102_i64,
+                ])
+                .unwrap();
+            insert_snapshot_receipt
+                .execute(params![
+                    fx.family_id,
+                    client_uuid,
+                    format!("snapshot-receipts:{conflict_id}"),
+                    "0".repeat(64),
+                    stable_version,
+                    conflict_id,
+                    snapshot_receipt,
+                    1_700_000_102_i64,
+                ])
+                .unwrap();
+            super::super::conflict_retention::stage_resolution_retention(
+                &tx,
+                super::super::conflict_retention::ResolutionRetentionBinding {
+                    family_id: &fx.family_id,
+                    conflict_id: &conflict_id,
+                    kind: "tombstone_restore",
+                    entity_type: "baby",
+                    client_uuid: &client_uuid,
+                    expected_stable_version_id: &stable_version,
+                    expected_branch_versions_json: "[]",
+                    resolved_version_id: &stable_version,
+                    resolved_at: 1_700_000_102,
+                },
+            )
+            .unwrap();
+        }
+    }
+    tx.commit().unwrap();
+    let now = 1_700_000_102 + 86_400;
+    let plan =
+        super::super::conflict_retention::candidate_query_plan(&fx.store, &fx.family_id, now)
+            .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("mutation_receipts_lookup")),
+        "retention candidates must use the due-marker range index: {plan:?}",
+    );
+    assert!(
+        plan.iter().all(|step| !step.contains("USE TEMP B-TREE")),
+        "retention candidates must not sort eligible history: {plan:?}",
+    );
+    begin_statement_count(&fx.family_id);
+    assert_eq!(
+        fx.store
+            .gc_conflict_metadata_for_family(&fx.family_id, now)
+            .unwrap(),
+        8,
+    );
+    let statements = finish_statement_count(&fx.family_id);
+    assert!(
+        statements <= 128,
+        "retention statement budget drifted to {statements}"
+    );
+}
+
+#[test]
 fn ordinary_commit_and_choice_resolution_share_media_domain_validation() {
     let fx = CausalFx::new();
     let media_item = || CausalMediaItem {
@@ -2322,17 +2854,83 @@ fn choice_only_resolution_restores_the_complete_direct_live_base() {
             1_700_000_003,
         )
         .is_err());
+    let mut unrelated_staging = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".to_owned(),
+        sha256: String::new(),
+        byte_size: 7,
+        mime: "image/jpeg".to_owned(),
+        width: None,
+        height: None,
+    };
+    seeded.fx.stage_media_bytes(&mut unrelated_staging);
+    let unrelated_staging_path = seeded
+        .fx
+        ._dir
+        .path()
+        .join("media/.causal-stage")
+        .join(&seeded.fx.family_id)
+        .join(&unrelated_staging.media_uuid);
     let restarted = Store::open(seeded.fx._dir.path().join("lezi.db")).unwrap();
     let replay = restarted
         .resolve_conflict(
             &seeded.fx.owner,
             &seeded.conflict_id,
-            seeded.input,
+            seeded.input.clone(),
             1_700_000_003,
         )
         .unwrap();
     assert_eq!(replay.replay, Some(true));
-    assert_eq!(replay.stable_version_id, Some(resolved_version));
+    assert_eq!(replay.stable_version_id, Some(resolved_version.clone()));
+    assert_eq!(
+        restarted
+            .gc_conflict_metadata(1_700_000_002 + 86_400)
+            .unwrap(),
+        1,
+    );
+    let replay_after_retention = restarted
+        .resolve_conflict(
+            &seeded.fx.owner,
+            &seeded.conflict_id,
+            seeded.input,
+            1_700_100_000,
+        )
+        .unwrap();
+    assert_eq!(replay_after_retention.replay, Some(true));
+    let retained_direct_chain: i64 = restarted
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE family_id = ?1 AND version_id IN (?2, ?3)",
+            params![
+                seeded.fx.family_id,
+                seeded.base_version,
+                seeded.tombstone_version,
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained_direct_chain, 2);
+    assert!(unrelated_staging_path.is_file());
+    let retained_media_state: (i64, i64) = restarted
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM causal_media_staging
+                  WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'staged'),
+                (SELECT COUNT(*) FROM media_publications
+                  WHERE family_id = ?1 AND media_uuid = ?3)",
+            params![
+                seeded.fx.family_id,
+                unrelated_staging.media_uuid,
+                seeded.media[0].media_uuid,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained_media_state, (1, 1));
 }
 
 #[test]

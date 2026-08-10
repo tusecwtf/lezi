@@ -23,6 +23,7 @@ mod causal;
 mod causal_admission;
 mod causal_media_staging;
 mod causal_merge;
+mod conflict_retention;
 mod conflict_snapshots;
 mod identity;
 mod media;

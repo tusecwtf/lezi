@@ -144,7 +144,7 @@ impl From<StoreError> for ConflictResolutionRejection {
 }
 
 impl ConflictSnapshotBinding<'_> {
-    fn fingerprint(&self) -> String {
+    pub(super) fn fingerprint(&self) -> String {
         let mut parts = vec![
             SERIALIZER_CONTRACT,
             self.family_id,
@@ -176,6 +176,94 @@ struct StoredSnapshotReceipt {
     resolution_ready: bool,
     page_digests: Vec<String>,
     integrity_tag: String,
+}
+
+pub(super) fn validate_snapshot_receipts_for_retention(
+    receipt_json: &str,
+    receipt_key: &[u8],
+    expected_fingerprint: &str,
+) -> Result<(), StoreError> {
+    let receipts: Vec<StoredSnapshotReceipt> = serde_json::from_str(receipt_json)?;
+    let has_bound_resolution = receipts.iter().any(|receipt| {
+        receipt.resolution_ready
+            && crate::constant_time_eq(
+                receipt.fingerprint.as_bytes(),
+                expected_fingerprint.as_bytes(),
+            )
+    });
+    if receipts.is_empty()
+        || receipts.len() > MAX_RECEIPTS_PER_CONFLICT
+        || serde_json::to_string(&receipts)? != receipt_json
+        || !has_bound_resolution
+        || receipts.iter().any(|receipt| {
+            receipt.token_nonce.len() != RESOLUTION_CREDENTIAL_LENGTH
+                || receipt.page_ends.is_empty()
+                || receipt.page_ends.len() != receipt.page_digests.len()
+                || receipt.continuation_nonces.len() != receipt.page_ends.len().saturating_sub(1)
+                || receipt.page_ends.windows(2).any(|pair| pair[0] >= pair[1])
+                || receipt
+                    .page_digests
+                    .iter()
+                    .any(|digest| !is_lower_hex_sha256(digest))
+                || !crate::constant_time_eq(
+                    receipt.expected_integrity_tag(receipt_key).as_bytes(),
+                    receipt.integrity_tag.as_bytes(),
+                )
+        })
+    {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(in crate::store) struct TestReceiptBinding<'a> {
+    pub family_id: &'a str,
+    pub conflict_id: &'a str,
+    pub kind: &'a str,
+    pub entity_type: &'a str,
+    pub client_uuid: &'a str,
+    pub stable_version_id: &'a str,
+    pub branch_version_ids: &'a [String],
+}
+
+#[cfg(test)]
+pub(in crate::store) fn test_resolution_ready_receipt_json(
+    store: &super::Store,
+    test_binding: TestReceiptBinding<'_>,
+) -> String {
+    let binding = ConflictSnapshotBinding {
+        family_id: test_binding.family_id,
+        conflict_id: test_binding.conflict_id,
+        kind: test_binding.kind,
+        entity_type: test_binding.entity_type,
+        client_uuid: test_binding.client_uuid,
+        stable_version_id: test_binding.stable_version_id,
+        branch_version_ids: test_binding.branch_version_ids,
+        receipt_key: &store.snapshot_receipt_key,
+    };
+    let mut receipt = StoredSnapshotReceipt {
+        token_nonce: "A".repeat(RESOLUTION_CREDENTIAL_LENGTH),
+        fingerprint: binding.fingerprint(),
+        expires_at_seconds: i64::MAX,
+        page_ends: vec![1],
+        continuation_nonces: Vec::new(),
+        choice_ids: BTreeMap::new(),
+        resolution_ready: true,
+        page_digests: vec!["0".repeat(64)],
+        integrity_tag: String::new(),
+    };
+    receipt.integrity_tag = receipt.expected_integrity_tag(binding.receipt_key);
+    serde_json::to_string(&[receipt]).expect("test receipt is canonical JSON")
+}
+
+const RESOLUTION_CREDENTIAL_LENGTH: usize = 43;
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn random_nonce() -> String {
@@ -1073,6 +1161,11 @@ pub(super) fn open_conflict_detail_page(
     .unwrap_or_default();
 
     let first_request = matches!(&request, ConflictDetailPageRequest::First);
+    let receipt_count_before_expiry = receipts.len();
+    if first_request {
+        receipts.retain(|receipt| now < receipt.expires_at_seconds);
+    }
+    let expired_receipts_pruned = receipts.len() != receipt_count_before_expiry;
     let requested = match request {
         ConflictDetailPageRequest::First => receipts
             .iter()
@@ -1126,10 +1219,13 @@ pub(super) fn open_conflict_detail_page(
             now,
             page_index,
         )?;
-        if result.complete && !receipts[receipt_index].resolution_ready {
+        let became_resolution_ready = result.complete && !receipts[receipt_index].resolution_ready;
+        if became_resolution_ready {
             receipts[receipt_index].resolution_ready = true;
             receipts[receipt_index].integrity_tag =
                 receipts[receipt_index].expected_integrity_tag(binding.receipt_key);
+        }
+        if became_resolution_ready || expired_receipts_pruned {
             save_receipts(tx, &binding, &receipt_id, &receipts, now)?;
         }
         return Ok(result);

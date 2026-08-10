@@ -539,6 +539,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     // unconsumed preimages.
     store.promote_consumed_causal_media()?;
     store.gc_expired_causal_media_preimages((config.clock)())?;
+    store.gc_conflict_metadata((config.clock)())?;
     let validation_media_root = media_root.clone();
     let validation = store
         .validate_authority_graph(

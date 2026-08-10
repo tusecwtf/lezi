@@ -558,7 +558,8 @@ pub(crate) async fn resolve_conflict(
         choices: request.choices,
     };
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let guard = family_lock.lock().await;
+    let family_id = principal.family_id.clone();
     let blocking_state = state.clone();
     let result = run_blocking(move || {
         blocking_state
@@ -570,6 +571,19 @@ pub(crate) async fn resolve_conflict(
             })
     })
     .await?;
+    drop(guard);
+    let retention_state = state.clone();
+    let retention = run_blocking(move || {
+        retention_state
+            .store
+            .gc_conflict_metadata_for_family(&family_id, retention_state.now())
+            .map(|_| ())
+            .map_err(ApiError::from)
+    })
+    .await;
+    if let Err(error) = retention {
+        tracing::warn!(?error, "bounded conflict retention sweep failed");
+    }
     Ok(Json(serde_json::to_value(result).map_err(|_| {
         ApiError::internal("failed to serialize resolve result")
     })?))

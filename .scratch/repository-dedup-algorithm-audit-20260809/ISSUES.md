@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–18 implemented; ticket 19 is the serial frontier
+Status: implemented — tickets 01–19 implemented; causal hardening continues independently
 
 Spec: [`spec.md`](./spec.md)
 
@@ -49,12 +49,13 @@ post-0.3.13/01 implementation stabilizes
 | 16 | [Centralize structured-cancellation cause policy](./issues/16-shared-cancellation-cause-policy.md) | P3 | implemented | — |
 | 17 | [Batch-load bounded conflict heads](./issues/17-bounded-conflict-head-loader.md) | P1 | implemented | 12 + causal hardening 01 |
 | 18 | [Persist snapshot receipts with bounded pagination](./issues/18-conflict-snapshot-receipt-pagination.md) | P1 | implemented | 17 + causal hardening 01 |
-| 19 | [Bound resolution queries and retain conflict metadata](./issues/19-resolution-metadata-retention.md) | P1 | ready-for-agent | 18 + causal hardening 04 (implemented) |
+| 19 | [Bound resolution queries and retain conflict metadata](./issues/19-resolution-metadata-retention.md) | P1 | implemented | 18 + causal hardening 04 (implemented) |
 
 ## Frontier
 
-`19` 是本 tracker 与跨 tracker 的下一张串行 frontier；其 18 与 causal hardening 04 依赖均已实现。
-一个 agent 不应并行领取图中共享同一箭头端点的票；已标 implemented 的 02/04/09/18 不是 frontier。
+本 tracker 的 01–19 已全部实现。跨 tracker 的下一张串行 frontier 是
+[`causal-sync-conflict-transport-hardening/05`](../causal-sync-conflict-transport-hardening/issues/05-record-snapshot-room-projection.md)；
+causal hardening 05–43 仍是独立未完成范围，不能因本 tracker 完成而标记为已实现。
 
 ## Excluded as already owned
 

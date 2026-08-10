@@ -322,7 +322,7 @@ fn load_version(
     Ok(load_validated_version(tx, family_id, version_id)?.map(|(_, _, snapshot)| snapshot))
 }
 
-fn load_validated_version(
+pub(super) fn load_validated_version(
     tx: &Transaction<'_>,
     family_id: &str,
     version_id: &str,
@@ -2967,12 +2967,14 @@ impl Store {
             conflict_client_uuid,
             conflict_status,
             conflict_stable_version_id,
+            conflict_kind,
+            conflict_resolved_at,
         )) = tx
             .query_row(
                 "SELECT resolver_membership_id, expected_stable_version_id,
                         expected_branch_versions_json, conflict_choices_json,
                         resolved_version_id, c.entity_type, c.client_uuid,
-                        c.status, c.stable_version_id
+                        c.status, c.stable_version_id, c.kind, c.resolved_at
                    FROM conflict_resolutions r
                    JOIN conflicts c USING(family_id, conflict_id)
                   WHERE r.family_id = ?1 AND r.conflict_id = ?2
@@ -2993,6 +2995,8 @@ impl Store {
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, Option<i64>>(10)?,
                     ))
                 },
             )
@@ -3021,6 +3025,25 @@ impl Store {
                     .collect::<Result<_, _>>()?;
                 rows
             };
+            let retention_complete = conflict_resolved_at
+                .map(|resolved_at| {
+                    super::conflict_retention::terminal_metadata_was_compacted(
+                        &tx,
+                        super::conflict_retention::TerminalRetentionBinding {
+                            family_id: &principal.family_id,
+                            conflict_id,
+                            kind: &conflict_kind,
+                            entity_type: &conflict_entity_type,
+                            client_uuid: &conflict_client_uuid,
+                            expected_stable_version_id: &expected_stable_version_id,
+                            expected_branch_versions_json: &expected_branch_versions_json,
+                            resolved_version_id: &resolved_version_id,
+                            resolved_at,
+                        },
+                    )
+                })
+                .transpose()?
+                .unwrap_or(false);
             if !crate::constant_time_eq(receipt.request_hash.as_bytes(), request_hash.as_bytes()) {
                 return Ok(rejected_resolution(&input, "content_drift"));
             }
@@ -3038,7 +3061,8 @@ impl Store {
                 || conflict_status != "resolved"
                 || conflict_stable_version_id != resolved_version_id
                 || !branches_are_canonical
-                || current_branches != branch_versions
+                || (current_branches != branch_versions
+                    && !(retention_complete && current_branches.is_empty()))
                 || receipt.request_hash.len() != 64
                 || !receipt
                     .request_hash
@@ -3301,6 +3325,7 @@ impl Store {
         if updated != 1 {
             return Ok(rejected_resolution(&input, "cas_mismatch"));
         }
+        let expected_branch_versions_json = serde_json::to_string(&branch_ids)?;
         tx.execute(
             "INSERT INTO conflict_resolutions(
                 family_id, conflict_id, resolution_mutation_id, resolver_membership_id,
@@ -3313,11 +3338,25 @@ impl Store {
                 input.resolution_mutation_id,
                 principal.membership_id,
                 stable_version_id,
-                serde_json::to_string(&branch_ids)?,
+                &expected_branch_versions_json,
                 stored_receipt,
                 version_id,
                 now
             ],
+        )?;
+        super::conflict_retention::stage_resolution_retention(
+            &tx,
+            super::conflict_retention::ResolutionRetentionBinding {
+                family_id: &principal.family_id,
+                conflict_id,
+                kind: &projection.kind,
+                entity_type: &entity_type,
+                client_uuid: &client_uuid,
+                expected_stable_version_id: &stable_version_id,
+                expected_branch_versions_json: &expected_branch_versions_json,
+                resolved_version_id: &version_id,
+                resolved_at: now,
+            },
         )?;
         if resolved_deleted {
             let _ = conflict_id_for_stable_delete(

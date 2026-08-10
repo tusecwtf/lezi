@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H04 and R12/R17/R18 are implemented; repository R19 is the serial frontier
+Status: in-progress — H01–H04 and R12/R17/R18/R19 are implemented; H05 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -78,8 +78,8 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-Repository R19 is the next executable ticket; H04 is implemented and satisfies its remaining blocker. H05 waits
-for R19. Follow the serial order above. H27
+Repository R19 is implemented. H05 is the next executable DAG frontier; H05–H43 remain open and follow
+the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.
 
