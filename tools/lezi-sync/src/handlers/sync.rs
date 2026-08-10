@@ -515,6 +515,14 @@ pub(crate) async fn conflict_detail(
                 StoreError::SnapshotStale => {
                     ApiError::conflict("conflict heads changed").with_code("snapshot_stale")
                 }
+                StoreError::MissingRestoreBase => {
+                    ApiError::conflict("tombstone restore base is missing")
+                        .with_code("missing_restore_base")
+                }
+                StoreError::IncompleteRestoreBase => {
+                    ApiError::conflict("tombstone restore base is incomplete")
+                        .with_code("incomplete_restore_base")
+                }
                 StoreError::ConflictSnapshotPageTooLarge => {
                     ApiError::payload_too_large("conflict detail exceeds the response budget")
                 }

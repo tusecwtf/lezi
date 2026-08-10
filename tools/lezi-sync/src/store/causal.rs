@@ -588,8 +588,17 @@ fn load_conflict_heads(
             version.parents.len() == 1 && versions.contains_key(version.parents.first().unwrap())
         })
     };
-    if branch_version_ids.iter().any(|id| !has_direct_base(id))
-        || (kind == "tombstone_restore" && !has_direct_base(&stable_version_id))
+    if branch_version_ids.iter().any(|id| !has_direct_base(id)) {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    if kind == "tombstone_restore"
+        && direct_restore_base_policy(
+            tx,
+            family_id,
+            &entity_type,
+            &client_uuid,
+            &stable_version_id,
+        )? != DirectRestoreBasePolicy::Restorable
     {
         return Err(StoreError::InvalidStoredPayload);
     }
@@ -602,6 +611,148 @@ fn load_conflict_heads(
         branch_version_ids,
         versions,
     })
+}
+
+#[derive(Clone, Copy)]
+enum TombstoneRestorePreflight {
+    NotApplicable,
+    Forbidden,
+    Authorized(Option<&'static str>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DirectRestoreBasePolicy {
+    Restorable,
+    Missing,
+    Incomplete,
+}
+
+/// Classifies the one direct base named by a stable tombstone. This is the
+/// single policy used when minting a handle and when detail/resolve consume it.
+/// It deliberately loads only the tombstone and its direct parent.
+fn direct_restore_base_policy(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    entity_type: &str,
+    client_uuid: &str,
+    stable_version_id: &str,
+) -> Result<DirectRestoreBasePolicy, StoreError> {
+    let stable = match load_validated_version(tx, family_id, stable_version_id) {
+        Ok(Some((stored_type, stored_uuid, stable)))
+            if stored_type == entity_type
+                && stored_uuid == client_uuid
+                && stable.deleted_at.is_some() =>
+        {
+            stable
+        }
+        Ok(_) | Err(StoreError::InvalidStoredPayload) => {
+            return Ok(DirectRestoreBasePolicy::Incomplete);
+        }
+        Err(error) => return Err(error),
+    };
+    if stable.parents.is_empty() {
+        return Ok(DirectRestoreBasePolicy::Missing);
+    }
+    if stable.parents.len() != 1 {
+        return Ok(DirectRestoreBasePolicy::Incomplete);
+    }
+    let base_version_id = stable.parents.first().expect("one parent checked");
+    match load_validated_version(tx, family_id, base_version_id) {
+        Ok(Some((stored_type, stored_uuid, base)))
+            if stored_type == entity_type
+                && stored_uuid == client_uuid
+                && base.deleted_at.is_none() =>
+        {
+            Ok(DirectRestoreBasePolicy::Restorable)
+        }
+        Ok(None) => Ok(DirectRestoreBasePolicy::Missing),
+        Ok(Some(_)) | Err(StoreError::InvalidStoredPayload) => {
+            Ok(DirectRestoreBasePolicy::Incomplete)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Authorizes before classifying the direct-base proof, so a damaged restore
+/// handle cannot become an ACL oracle. The bounded loader remains authoritative
+/// for canonical root/media and content hashes; no ancestor fallback exists.
+fn preflight_tombstone_restore(
+    tx: &Transaction<'_>,
+    principal: &Principal,
+    conflict_id: &str,
+) -> Result<TombstoneRestorePreflight, StoreError> {
+    let conflict = tx
+        .query_row(
+            "SELECT kind, entity_type, client_uuid, stable_version_id
+               FROM conflicts
+              WHERE family_id = ?1 AND conflict_id = ?2 AND status = 'open'",
+            params![principal.family_id, conflict_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((kind, entity_type, client_uuid, stable_version_id)) = conflict else {
+        return Ok(TombstoneRestorePreflight::NotApplicable);
+    };
+    if kind != "tombstone_restore" {
+        return Ok(TombstoneRestorePreflight::NotApplicable);
+    }
+    let stable = tx
+        .query_row(
+            "SELECT entity_type, client_uuid, deleted_at
+               FROM entity_versions
+              WHERE family_id = ?1 AND version_id = ?2",
+            params![principal.family_id, stable_version_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let stable_identity_is_complete =
+        stable.is_some_and(|(stored_type, stored_uuid, deleted_at)| {
+            stored_type == entity_type && stored_uuid == client_uuid && deleted_at.is_some()
+        });
+    if principal.role != "owner" {
+        let authorized = stable_identity_is_complete
+            && load_validated_version(tx, &principal.family_id, &stable_version_id)
+                .ok()
+                .flatten()
+                .is_some_and(|(stored_type, stored_uuid, snapshot)| {
+                    stored_type == entity_type
+                        && stored_uuid == client_uuid
+                        && authorize_resolve(principal, &entity_type, &snapshot.root).is_ok()
+                });
+        if !authorized {
+            return Ok(TombstoneRestorePreflight::Forbidden);
+        }
+    }
+    if !stable_identity_is_complete {
+        return Ok(TombstoneRestorePreflight::Authorized(Some(
+            "incomplete_restore_base",
+        )));
+    }
+    let base_error = match direct_restore_base_policy(
+        tx,
+        &principal.family_id,
+        &entity_type,
+        &client_uuid,
+        &stable_version_id,
+    )? {
+        DirectRestoreBasePolicy::Restorable => None,
+        DirectRestoreBasePolicy::Missing => Some("missing_restore_base"),
+        DirectRestoreBasePolicy::Incomplete => Some("incomplete_restore_base"),
+    };
+    Ok(TombstoneRestorePreflight::Authorized(base_error))
 }
 
 pub(super) fn load_receipt(
@@ -1097,26 +1248,45 @@ fn conflict_id_for_stable_delete(
     client_uuid: &str,
     stable_version_id: &str,
     now: i64,
-) -> Result<String, StoreError> {
-    let existing: Option<(String, String)> = tx
+) -> Result<Option<String>, StoreError> {
+    let policy =
+        direct_restore_base_policy(tx, family_id, entity_type, client_uuid, stable_version_id)?;
+    let existing: Option<(String, bool)> = tx
         .query_row(
-            "SELECT conflict_id, kind FROM conflicts
+            "SELECT conflict_id, EXISTS(
+                    SELECT 1 FROM conflict_branches b
+                     WHERE b.family_id = conflicts.family_id
+                       AND b.conflict_id = conflicts.conflict_id)
+               FROM conflicts
              WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3
                AND status = 'open'
              ORDER BY created_at ASC LIMIT 1",
             params![family_id, entity_type, client_uuid],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
         )
         .optional()?;
-    if let Some((id, kind)) = existing {
-        // Keep concurrent handle; pin stable to new tombstone head.
+    if let Some((id, has_branches)) = existing {
+        if !has_branches && policy != DirectRestoreBasePolicy::Restorable {
+            tx.execute(
+                "UPDATE conflicts SET status = 'resolved', resolved_at = ?1,
+                        stable_version_id = ?2
+                 WHERE family_id = ?3 AND conflict_id = ?4 AND status = 'open'",
+                params![now, stable_version_id, family_id, id],
+            )?;
+            return Ok(None);
+        }
+        // Keep a real concurrent handle; otherwise normalize the empty handle
+        // to the one pure-restore kind before pinning the new tombstone.
         tx.execute(
-            "UPDATE conflicts SET stable_version_id = ?1
-             WHERE family_id = ?2 AND conflict_id = ?3",
-            params![stable_version_id, family_id, id],
+            "UPDATE conflicts SET stable_version_id = ?1,
+                    kind = CASE WHEN ?2 THEN kind ELSE 'tombstone_restore' END
+             WHERE family_id = ?3 AND conflict_id = ?4",
+            params![stable_version_id, has_branches, family_id, id],
         )?;
-        let _ = kind;
-        return Ok(id);
+        return Ok(Some(id));
+    }
+    if policy != DirectRestoreBasePolicy::Restorable {
+        return Ok(None);
     }
     open_or_get_tombstone_conflict(
         tx,
@@ -1135,7 +1305,7 @@ fn open_or_get_tombstone_conflict(
     client_uuid: &str,
     stable_version_id: &str,
     now: i64,
-) -> Result<String, StoreError> {
+) -> Result<Option<String>, StoreError> {
     // Idempotent: same (type, uuid, stable tombstone version) → same open conflict.
     let existing: Option<String> = tx
         .query_row(
@@ -1149,7 +1319,7 @@ fn open_or_get_tombstone_conflict(
         )
         .optional()?;
     if let Some(id) = existing {
-        return Ok(id);
+        return Ok(Some(id));
     }
     // Prefer any open conflict on this root (should not happen if caller used
     // conflict_id_for_stable_delete first).
@@ -1159,7 +1329,7 @@ fn open_or_get_tombstone_conflict(
              WHERE family_id = ?2 AND conflict_id = ?3",
             params![stable_version_id, family_id, id],
         )?;
-        return Ok(id);
+        return Ok(Some(id));
     }
     let conflict_id = Uuid::new_v4().to_string();
     tx.execute(
@@ -1177,7 +1347,7 @@ fn open_or_get_tombstone_conflict(
             now
         ],
     )?;
-    Ok(conflict_id)
+    Ok(Some(conflict_id))
 }
 
 /// Keep open conflict.stable_version_id aligned with entity_stable_heads (CAS safety).
@@ -1797,14 +1967,14 @@ fn evaluate_unit(
         && stable_deleted == incoming_deleted
     {
         let conflict_id = if stable_deleted {
-            Some(open_or_get_tombstone_conflict(
+            conflict_id_for_stable_delete(
                 ctx.tx,
                 &ctx.principal.family_id,
                 &mutation.entity_type,
                 &mutation.client_uuid,
                 &stable.version_id,
                 ctx.now,
-            )?)
+            )?
         } else {
             load_open_conflict_id(
                 ctx.tx,
@@ -2120,14 +2290,14 @@ fn commit_accepted_new(
         &version_id,
     )?;
     let conflict_id = if mutation.deleted {
-        Some(conflict_id_for_stable_delete(
+        conflict_id_for_stable_delete(
             ctx.tx,
             &ctx.principal.family_id,
             &mutation.entity_type,
             &mutation.client_uuid,
             &version_id,
             ctx.now,
-        )?)
+        )?
     } else {
         None
     };
@@ -2250,14 +2420,14 @@ fn commit_accepted_update(
         &version_id,
     )?;
     let conflict_id = if mutation.deleted {
-        Some(conflict_id_for_stable_delete(
+        conflict_id_for_stable_delete(
             ctx.tx,
             &ctx.principal.family_id,
             &mutation.entity_type,
             &mutation.client_uuid,
             &version_id,
             ctx.now,
-        )?)
+        )?
     } else {
         load_open_conflict_id(
             ctx.tx,
@@ -2401,14 +2571,14 @@ fn commit_merged(
         &version_id,
     )?;
     let conflict_id = if merged_deleted {
-        Some(conflict_id_for_stable_delete(
+        conflict_id_for_stable_delete(
             ctx.tx,
             &ctx.principal.family_id,
             &mutation.entity_type,
             &mutation.client_uuid,
             &version_id,
             ctx.now,
-        )?)
+        )?
     } else {
         None
     };
@@ -2725,7 +2895,24 @@ impl Store {
             tx_result.as_ref().ok().map(|tx| &**tx),
         )?;
         let tx = tx_result?;
-        let projection = load_conflict_heads(&tx, &principal.family_id, conflict_id)?;
+        let projection = match load_conflict_heads(&tx, &principal.family_id, conflict_id) {
+            Ok(projection) => projection,
+            Err(StoreError::InvalidStoredPayload) => {
+                match preflight_tombstone_restore(&tx, principal, conflict_id)? {
+                    TombstoneRestorePreflight::Forbidden => {
+                        return Err(StoreError::ConflictNotFound);
+                    }
+                    TombstoneRestorePreflight::Authorized(Some("missing_restore_base")) => {
+                        return Err(StoreError::MissingRestoreBase);
+                    }
+                    TombstoneRestorePreflight::Authorized(Some("incomplete_restore_base")) => {
+                        return Err(StoreError::IncompleteRestoreBase);
+                    }
+                    _ => return Err(StoreError::InvalidStoredPayload),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         #[cfg(test)]
         super::conflict_snapshots::test_hook::projection_loaded(&principal.family_id);
         let material = build_conflict_snapshot(&projection)?;
@@ -2863,9 +3050,28 @@ impl Store {
             }
             let mut replay = receipt.result;
             replay.replay = Some(true);
+            tx.commit()?;
+            self.promote_consumed_causal_media_manifest(
+                &principal.family_id,
+                &replay.stable_media,
+            )?;
             return Ok(replay);
         }
 
+        let restore_preflight = preflight_tombstone_restore(&tx, principal, conflict_id)?;
+        match restore_preflight {
+            TombstoneRestorePreflight::Forbidden => {
+                return Ok(rejected_resolution(&input, "forbidden"));
+            }
+            TombstoneRestorePreflight::Authorized(Some(code)) => {
+                return Ok(rejected_resolution(&input, code));
+            }
+            _ => {}
+        }
+        let loading_tombstone_restore = matches!(
+            restore_preflight,
+            TombstoneRestorePreflight::Authorized(None)
+        );
         let projection = match load_conflict_heads(&tx, &principal.family_id, conflict_id) {
             Ok(projection) => projection,
             Err(StoreError::ConflictNotFound) => {
@@ -2880,6 +3086,9 @@ impl Store {
                 }
                 return Err(StoreError::ConflictNotFound);
             }
+            Err(StoreError::InvalidStoredPayload) if loading_tombstone_restore => {
+                return Ok(rejected_resolution(&input, "incomplete_restore_base"));
+            }
             Err(error) => return Err(error),
         };
         let entity_type = projection.entity_type.clone();
@@ -2887,7 +3096,9 @@ impl Store {
         let stable_version_id = projection.stable_version_id.clone();
         let branch_ids = projection.branch_version_ids.clone();
         let stable = projection.stable();
-        if authorize_resolve(principal, &entity_type, &stable.root).is_err() {
+        if !loading_tombstone_restore
+            && authorize_resolve(principal, &entity_type, &stable.root).is_err()
+        {
             return Ok(rejected_resolution(&input, "forbidden"));
         }
 
@@ -2931,20 +3142,16 @@ impl Store {
             }
             Err(ConflictResolutionRejection::Store(error)) => return Err(error),
         };
-        if projection.kind == "tombstone_restore" {
-            // H04 owns direct-live-base proof and media-byte provenance. H03
-            // validates choice-only requests but must not activate restore.
-            return Ok(rejected_resolution(&input, "missing_restore_base"));
-        }
-
         let mut resolved_root = resolution.root;
-        stamp_root(
-            &mut resolved_root,
-            &entity_type,
-            principal,
-            Some(&stable.root),
-            now.saturating_mul(1_000),
-        );
+        if !resolution.restores_direct_base {
+            stamp_root(
+                &mut resolved_root,
+                &entity_type,
+                principal,
+                Some(&stable.root),
+                now.saturating_mul(1_000),
+            );
+        }
         let resolved_deleted = resolution.deleted;
         let resolved_media = if resolved_deleted {
             vec![]
@@ -2977,17 +3184,22 @@ impl Store {
             return Ok(rejected_resolution(&input, "invalid_domain"));
         }
 
-        if !resolved_deleted
-            && require_media_bytes_present(
+        if !resolved_deleted {
+            let media_result = require_media_bytes_present(
                 &tx,
                 &self.database_path,
                 principal,
                 &resolved_media,
                 now,
-            )
-            .is_err()
-        {
-            return Ok(rejected_resolution(&input, "invalid_domain"));
+            );
+            if media_result.is_err() {
+                let code = if resolution.restores_direct_base {
+                    "missing_restore_media"
+                } else {
+                    "invalid_domain"
+                };
+                return Ok(rejected_resolution(&input, code));
+            }
         }
 
         let version_id = Uuid::new_v4().to_string();
@@ -3120,7 +3332,7 @@ impl Store {
             consume_manifest(&tx, principal, &resolved_media, now)?;
         }
         tx.commit()?;
-        self.promote_consumed_causal_media_for_family(&principal.family_id)?;
+        self.promote_consumed_causal_media_manifest(&principal.family_id, &resolved_media)?;
         Ok(resolved)
     }
 }

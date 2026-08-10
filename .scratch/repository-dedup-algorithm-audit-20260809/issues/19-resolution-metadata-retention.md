@@ -6,7 +6,7 @@ Priority: P1
 
 Audit baseline: `38cfbe7dbcf1f410237dce77b50ec1bd4854d8a6`
 
-Blocked by: 18；以及 [`causal hardening 04`](../../causal-sync-conflict-transport-hardening/issues/04-causal-tombstone-restore.md)。
+Blocked by: —（18 与 [`causal hardening 04`](../../causal-sync-conflict-transport-hardening/issues/04-causal-tombstone-restore.md) 已实现）。
 
 ## What to build
 

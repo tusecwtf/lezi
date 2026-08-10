@@ -109,6 +109,7 @@ pub(super) struct ConflictSnapshotMaterial {
     pub branches: Vec<ConflictVersionView>,
     pub conflicting: Vec<ConflictingPath>,
     pub auto_merged: Vec<AutoMergedPath>,
+    restore_base: Option<ConflictVersionView>,
 }
 
 pub(super) struct ConflictSnapshotBinding<'a> {
@@ -126,6 +127,7 @@ pub(super) struct AuthoritativeResolution {
     pub root: Map<String, Value>,
     pub media: Vec<CausalMediaItem>,
     pub deleted: bool,
+    pub restores_direct_base: bool,
 }
 
 pub(super) enum ConflictResolutionRejection {
@@ -507,7 +509,7 @@ pub(super) fn build_conflict_snapshot(
         }
     }
 
-    if projection.kind == "tombstone_restore" {
+    let restore_base = if projection.kind == "tombstone_restore" {
         let base = projection.direct_base(&stable.version_id);
         changes.clear();
         changes.insert(
@@ -524,6 +526,7 @@ pub(super) fn build_conflict_snapshot(
             )]),
         );
         heads.push(base);
+        Some(version_view(base)?)
     } else {
         let deleting = changes
             .values()
@@ -545,7 +548,8 @@ pub(super) fn build_conflict_snapshot(
                 }
             }
         }
-    }
+        None
+    };
 
     let all_paths = changes
         .values()
@@ -647,6 +651,7 @@ pub(super) fn build_conflict_snapshot(
         branches,
         conflicting,
         auto_merged,
+        restore_base,
     })
 }
 
@@ -782,6 +787,7 @@ pub(super) fn authorize_snapshot_resolution(
             &merged.outcome,
         )?;
     }
+    let mut selected_candidates = Vec::with_capacity(material.conflicting.len());
     for conflict in &material.conflicting {
         let choice = selected
             .get(conflict.path.as_str())
@@ -805,11 +811,40 @@ pub(super) fn authorize_snapshot_resolution(
             &conflict.path,
             &candidate.outcome,
         )?;
+        selected_candidates.push((&conflict.path, candidate));
+    }
+    if binding.kind == "tombstone_restore" {
+        let base = material
+            .restore_base
+            .as_ref()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        let is_exact_restore_choice = material.branches.is_empty()
+            && material.auto_merged.is_empty()
+            && selected_candidates.len() == 1
+            && selected_candidates[0].0.as_str() == "/_mutation.deleted"
+            && selected_candidates[0].1.outcome
+                == (ConflictOutcome::Set {
+                    value: Value::Bool(false),
+                })
+            && selected_candidates[0].1.sources.len() == 1
+            && selected_candidates[0].1.sources[0].version_id == base.version_id
+            && material.stable.base_version.as_deref() == Some(base.version_id.as_str())
+            && !base.deleted;
+        if !is_exact_restore_choice {
+            return Err(ConflictResolutionRejection::InvalidChoice);
+        }
+        return Ok(AuthoritativeResolution {
+            root: base.root.clone(),
+            media: base.media.clone(),
+            deleted: false,
+            restores_direct_base: true,
+        });
     }
     Ok(AuthoritativeResolution {
         root,
         media: media.into_values().collect(),
         deleted,
+        restores_direct_base: false,
     })
 }
 

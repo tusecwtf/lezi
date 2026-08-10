@@ -354,6 +354,10 @@ pub enum StoreError {
     UnresolvedReference(String),
     #[error("stored entity payload is invalid")]
     InvalidStoredPayload,
+    #[error("tombstone restore base is missing")]
+    MissingRestoreBase,
+    #[error("tombstone restore base is incomplete")]
+    IncompleteRestoreBase,
     #[error("atomic bundle not found")]
     BundleNotFound,
     #[error("atomic bundle already committed with different content")]

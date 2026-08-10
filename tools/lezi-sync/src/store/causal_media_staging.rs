@@ -21,6 +21,7 @@ pub(crate) const CAUSAL_MEDIA_STAGING_TTL_SECONDS: i64 = 24 * 60 * 60;
 pub(crate) const MAX_CAUSAL_MEDIA_STAGED_PER_MEMBERSHIP: usize = 64;
 pub(crate) const MAX_CAUSAL_MEDIA_STAGED_PER_FAMILY: usize = 256;
 pub(crate) const MAX_CAUSAL_MEDIA_STAGED_BYTES_PER_FAMILY: usize = 512 * 1024 * 1024;
+const MAX_CAUSAL_MEDIA_PER_ROOT: usize = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CausalMediaStagingLimits {
@@ -370,6 +371,52 @@ fn finalize_consumed_publication(
     Ok(())
 }
 
+fn promote_consumed_row(
+    store: &Store,
+    row: (String, String, String, i64),
+) -> Result<(), StoreError> {
+    let (family_id, media_uuid, sha256, byte_size) = row;
+    let byte_size =
+        usize::try_from(byte_size).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
+    let staged = staging_path(&store.database_path, &family_id, &media_uuid);
+    let published = published_path(&store.database_path, &family_id, &media_uuid);
+    if checked_digest(&published, byte_size, &sha256)? {
+        if staged.try_exists()? {
+            fs::remove_file(&staged)?;
+            sync_parent(&staged)?;
+        }
+        finalize_consumed_publication(store, &family_id, &media_uuid)?;
+        return Ok(());
+    }
+    if published.try_exists()? || !checked_digest(&staged, byte_size, &sha256)? {
+        return Err(StoreError::CausalMediaPreimageConflict);
+    }
+    let parent = published
+        .parent()
+        .ok_or(StoreError::InvalidCausalMediaStaging)?;
+    fs::create_dir_all(parent)?;
+    crate::secure_directory(parent)?;
+    match fs::hard_link(&staged, &published) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !checked_digest(&published, byte_size, &sha256)? {
+                return Err(StoreError::CausalMediaPreimageConflict);
+            }
+        }
+        Err(error) if hard_link_fallback_allowed(&error) => {
+            atomic_copy_noreplace(&staged, &published)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    crate::secure_file(&published)?;
+    fs::File::open(&published)?.sync_all()?;
+    crate::sync_directory(parent)?;
+    crate::sync_directory(&media_root(&store.database_path))?;
+    fs::remove_file(&staged)?;
+    sync_parent(&staged)?;
+    finalize_consumed_publication(store, &family_id, &media_uuid)
+}
+
 pub(in crate::store) fn verify_manifest(
     tx: &Transaction<'_>,
     database_path: &Path,
@@ -612,6 +659,53 @@ impl Store {
         self.promote_consumed_causal_media_scoped(Some(family_id))
     }
 
+    /// Repairs only the receipt-authorized root manifest. Resolution replay is
+    /// admission-free, so it must never turn into a scan of retained family
+    /// media. Current causal root schemas cap this manifest at three items.
+    pub(in crate::store) fn promote_consumed_causal_media_manifest(
+        &self,
+        family_id: &str,
+        media: &[CausalMediaItem],
+    ) -> Result<(), StoreError> {
+        if media.len() > MAX_CAUSAL_MEDIA_PER_ROOT
+            || media
+                .windows(2)
+                .any(|pair| pair[0].media_uuid >= pair[1].media_uuid)
+        {
+            return Err(StoreError::InvalidCausalMediaStaging);
+        }
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT family_id, media_uuid, sha256, byte_size
+               FROM causal_media_staging
+              WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'consumed'",
+        )?;
+        let mut rows = Vec::with_capacity(media.len());
+        for item in media {
+            let row = statement
+                .query_row(params![family_id, item.media_uuid], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .optional()?
+                .ok_or(StoreError::InvalidCausalMediaStaging)?;
+            if row.2 != item.sha256 || row.3 != item.byte_size {
+                return Err(StoreError::InvalidCausalMediaStaging);
+            }
+            rows.push(row);
+        }
+        drop(statement);
+        drop(connection);
+        for row in rows {
+            promote_consumed_row(self, row)?;
+        }
+        Ok(())
+    }
+
     fn promote_consumed_causal_media_scoped(
         &self,
         family_scope: Option<&str>,
@@ -635,46 +729,8 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         drop(connection);
-        for (family_id, media_uuid, sha256, byte_size) in rows {
-            let byte_size =
-                usize::try_from(byte_size).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
-            let staged = staging_path(&self.database_path, &family_id, &media_uuid);
-            let published = published_path(&self.database_path, &family_id, &media_uuid);
-            if checked_digest(&published, byte_size, &sha256)? {
-                if staged.try_exists()? {
-                    fs::remove_file(&staged)?;
-                    sync_parent(&staged)?;
-                }
-                finalize_consumed_publication(self, &family_id, &media_uuid)?;
-                continue;
-            }
-            if published.try_exists()? || !checked_digest(&staged, byte_size, &sha256)? {
-                return Err(StoreError::CausalMediaPreimageConflict);
-            }
-            let parent = published
-                .parent()
-                .ok_or(StoreError::InvalidCausalMediaStaging)?;
-            fs::create_dir_all(parent)?;
-            crate::secure_directory(parent)?;
-            match fs::hard_link(&staged, &published) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if !checked_digest(&published, byte_size, &sha256)? {
-                        return Err(StoreError::CausalMediaPreimageConflict);
-                    }
-                }
-                Err(error) if hard_link_fallback_allowed(&error) => {
-                    atomic_copy_noreplace(&staged, &published)?;
-                }
-                Err(error) => return Err(error.into()),
-            }
-            crate::secure_file(&published)?;
-            fs::File::open(&published)?.sync_all()?;
-            crate::sync_directory(parent)?;
-            crate::sync_directory(&media_root(&self.database_path))?;
-            fs::remove_file(&staged)?;
-            sync_parent(&staged)?;
-            finalize_consumed_publication(self, &family_id, &media_uuid)?;
+        for row in rows {
+            promote_consumed_row(self, row)?;
         }
         Ok(())
     }

@@ -15992,6 +15992,259 @@ async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
 }
 
 #[tokio::test]
+async fn two_clients_restore_only_the_tombstones_complete_direct_base_across_restart() {
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "direct-restore-owner", "direct-restore-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let media_bytes = b"restore";
+    let media_sha = hex::encode(Sha256::digest(media_bytes));
+    assert_eq!(
+        put_causal_media_bytes(&rig.app, member_token, media_id, media_bytes)
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let media = causal_media_item(media_id, "log", &media_sha, media_bytes.len());
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "direct-base", 90, 20),
+            vec![media.clone()],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base_version = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let base_root = created["results"][0]["stable_root"].clone();
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base_version),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "delete-envelope", 90, 30),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted");
+    let tombstone_version = deleted["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict_id = deleted["results"][0]["conflict_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(member_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["branches"].as_array().unwrap().is_empty());
+    let restore_path = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "/_mutation.deleted")
+        .unwrap();
+    let restore_candidate = restore_path["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["outcome"] == json!({"op": "set", "value": false}))
+        .unwrap();
+    assert_eq!(restore_candidate["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(restore_candidate["sources"][0]["version_id"], base_version,);
+    let resolution_mutation_id = Uuid::new_v4().to_string();
+    let resolve = json!({
+        "snapshot_token": detail["snapshot_token"],
+        "resolution_mutation_id": resolution_mutation_id,
+        "choices": [{
+            "path": "/_mutation.deleted",
+            "choice_id": restore_candidate["choice_id"],
+        }],
+    });
+    let restarted = rig.restart("generation-a");
+    // A crash artifact can make post-commit promotion fail after the accepted
+    // resolution is durable. Exact replay must retry that repair rather than
+    // returning the receipt while media publication is still absent.
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    fs::create_dir_all(&staged_path).unwrap();
+    let (status, failed_after_commit) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        resolve.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{failed_after_commit}"
+    );
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (conflict_status, publication_count): (String, i64) = connection
+        .query_row(
+            "SELECT c.status,
+                    (SELECT COUNT(*) FROM media_publications p
+                      WHERE p.family_id = c.family_id AND p.media_uuid = ?1)
+               FROM conflicts c WHERE c.conflict_id = ?2",
+            [media_id.to_string(), conflict_id.clone()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(conflict_status, "resolved");
+    assert_eq!(publication_count, 0);
+    drop(connection);
+    let unavailable = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::NOT_FOUND);
+    let unrelated_media_dir = rig
+        .directory
+        .path()
+        .join("media")
+        .join(owner["family_id"].as_str().unwrap());
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for _ in 0..32 {
+        let unrelated_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO causal_media_staging(
+                    family_id, membership_id, media_uuid, sha256, byte_size,
+                    created_at, expires_at, status, consumed_at
+                 ) VALUES (?1, ?2, ?3, ?4, 1, 1, 2, 'consumed', 1)",
+                rusqlite::params![
+                    owner["family_id"].as_str().unwrap(),
+                    owner["membership_id"].as_str().unwrap(),
+                    unrelated_id,
+                    "0".repeat(64),
+                ],
+            )
+            .unwrap();
+        fs::write(unrelated_media_dir.join(unrelated_id), [1_u8]).unwrap();
+    }
+    drop(connection);
+    fs::remove_dir(&staged_path).unwrap();
+    let (status, restored) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        resolve.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["status"], "accepted");
+    assert_eq!(restored["replay"], true);
+    let unrelated_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+              WHERE family_id = ?1 AND media_uuid != ?2 AND status = 'consumed'",
+            [
+                owner["family_id"].as_str().unwrap(),
+                media_id.to_string().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unrelated_count, 32);
+    assert_eq!(restored["stable_root"], base_root);
+    assert_eq!(restored["stable_media"], json!([media]));
+    let resolved_version = restored["stable_version_id"].as_str().unwrap();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let parent: String = connection
+        .query_row(
+            "SELECT parent_version_id FROM entity_version_parents WHERE version_id = ?1",
+            [resolved_version],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent, tombstone_version);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                  WHERE membership_id = '__version_provenance_v2__' AND mutation_id = ?1",
+                [resolved_version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], member["membership_id"]);
+    assert_eq!(provenance["device_id"], member["device_id"]);
+    drop(connection);
+    let download = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(
+        download.into_body().collect().await.unwrap().to_bytes(),
+        Bytes::from_static(media_bytes),
+    );
+    for token in [owner_token, member_token] {
+        let pull = pull_entities(&restarted, token, generation).await;
+        let record = find_entity(&pull, record_id);
+        assert!(record["deleted_at"].is_null());
+        assert_eq!(record["payload"]["note"], "direct-base");
+        conflict_summary_is_closed(record);
+    }
+    let (status, replay) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        resolve,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["replay"], true);
+    assert_eq!(replay["stable_version_id"], restored["stable_version_id"]);
+}
+
+#[tokio::test]
 async fn causal_commit_http_returns_typed_saturation_and_allows_exact_replay() {
     let rig = Rig::new();
     let owner = create_family(

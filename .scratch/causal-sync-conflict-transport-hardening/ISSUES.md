@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01, R12, R17, R18, H02 and H03 reviewed and fully gated; H04 is the serial frontier
+Status: in-progress — H01–H04 and R12/R17/R18 are implemented; repository R19 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -28,7 +28,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 01 | [`01-freeze-conflict-v2-contract`](./issues/01-freeze-conflict-v2-contract.md) | implemented (review/gates pass) | — |
 | 02 | [`02-deterministic-nway-conflict-snapshot`](./issues/02-deterministic-nway-conflict-snapshot.md) | implemented (review/gates pass) | 01, R17, R18 |
 | 03 | [`03-choice-only-authoritative-resolution`](./issues/03-choice-only-authoritative-resolution.md) | implemented (review/gates pass) | 02 |
-| 04 | [`04-causal-tombstone-restore`](./issues/04-causal-tombstone-restore.md) | ready-for-agent | 03 |
+| 04 | [`04-causal-tombstone-restore`](./issues/04-causal-tombstone-restore.md) | implemented (review/gates pass) | 03 |
 | 05 | [`05-record-snapshot-room-projection`](./issues/05-record-snapshot-room-projection.md) | ready-for-agent | 03, 04, R19 |
 | 06 | [`06-record-choice-resolver`](./issues/06-record-choice-resolver.md) | ready-for-agent | 05 |
 | 07 | [`07-family-conflict-inbox`](./issues/07-family-conflict-inbox.md) | ready-for-agent | 06 |
@@ -78,8 +78,8 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H04 is the next executable ticket; H03 is implemented and repository R19 remains blocked by H04.
-Follow the serial order above. H27
+Repository R19 is the next executable ticket; H04 is implemented and satisfies its remaining blocker. H05 waits
+for R19. Follow the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.
 

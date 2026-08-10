@@ -2097,29 +2097,55 @@ fn choice_only_resolution_can_authoritatively_select_concurrent_tombstone() {
     );
 }
 
-#[test]
-fn choice_only_resolution_does_not_activate_h04_tombstone_restore() {
+struct TombstoneRestoreFixture {
+    fx: CausalFx,
+    record_id: Uuid,
+    base_version: String,
+    tombstone_version: String,
+    conflict_id: String,
+    detail: ConflictDetailPage,
+    input: ResolveConflictInput,
+    direct_base_root: Map<String, Value>,
+    media: Vec<CausalMediaItem>,
+}
+
+fn seed_tombstone_restore(with_media: bool) -> TombstoneRestoreFixture {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();
-    let create = mut_unit(
+    let media = with_media
+        .then(|| {
+            let mut item = CausalMediaItem {
+                media_uuid: Uuid::new_v4().to_string(),
+                role: "log".to_owned(),
+                sha256: String::new(),
+                byte_size: 19,
+                mime: "image/jpeg".to_owned(),
+                width: Some(1),
+                height: Some(1),
+            };
+            fx.stage_media_bytes(&mut item);
+            item
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut create = mut_unit(
         "record",
         record_id,
         None,
         record_root(fx.baby_id, "a", 100, 20),
         false,
     );
-    let v1 = fx
+    create.media = media.clone();
+    let created = fx
         .store
         .causal_commit(&fx.owner, vec![create], 1_700_000_000)
-        .unwrap()
-        .results[0]
-        .stable_version_id
-        .clone()
         .unwrap();
+    let base_version = created.results[0].stable_version_id.clone().unwrap();
+    let direct_base_root = created.results[0].stable_root.clone();
     let del = mut_unit(
         "record",
         record_id,
-        Some(&v1),
+        Some(&base_version),
         record_root(fx.baby_id, "a", 100, 21),
         true,
     );
@@ -2128,35 +2154,569 @@ fn choice_only_resolution_does_not_activate_h04_tombstone_restore() {
         .causal_commit(&fx.owner, vec![del], 1_700_000_001)
         .unwrap();
     let conflict_id = deleted.results[0].conflict_id.clone().unwrap();
+    let tombstone_version = deleted.results[0].stable_version_id.clone().unwrap();
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
-    let restored = fx
+    let input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token.clone(),
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices: vec![resolution_choice(
+            &detail,
+            "/_mutation.deleted",
+            ConflictOutcome::Set {
+                value: Value::Bool(false),
+            },
+        )],
+    };
+    TombstoneRestoreFixture {
+        fx,
+        record_id,
+        base_version,
+        tombstone_version,
+        conflict_id,
+        detail,
+        input,
+        direct_base_root,
+        media,
+    }
+}
+
+#[test]
+fn tombstone_without_one_direct_live_base_does_not_mint_a_restore_handle() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut first = fx.record_mutation(record_id, None, "never-live");
+    first.deleted = true;
+    let deleted = fx.commit(&fx.owner, first, 1_700_000_001).unwrap();
+    assert_eq!(deleted.results[0].status, "accepted");
+    assert!(deleted.results[0].conflict_id.is_none());
+    let row = fx
+        .store
+        .pull(&fx.family_id, 0)
+        .unwrap()
+        .entities
+        .into_iter()
+        .find(|entity| entity.client_uuid == record_id.to_string())
+        .unwrap();
+    assert!(row.deleted_at.is_some());
+    assert!(row.conflict_summary.is_none());
+    let open_handles: i64 = fx
+        .store
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM conflicts
+              WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
+                AND status = 'open'",
+            params![fx.family_id, record_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(open_handles, 0);
+}
+
+#[test]
+fn choice_only_resolution_restores_the_complete_direct_live_base() {
+    let seeded = seed_tombstone_restore(true);
+    let restore_candidate = seeded
+        .detail
+        .conflicting
+        .iter()
+        .find(|item| item.path == "/_mutation.deleted")
+        .unwrap()
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.outcome
+                == ConflictOutcome::Set {
+                    value: Value::Bool(false),
+                }
+        })
+        .unwrap();
+    assert_eq!(restore_candidate.sources.len(), 1);
+    assert_eq!(restore_candidate.sources[0].version_id, seeded.base_version);
+    let before_forbidden = resolution_durable_state(
+        &seeded.fx.store,
+        &seeded.fx.family_id,
+        &seeded.conflict_id,
+        seeded.record_id,
+    );
+    let forbidden = seeded
+        .fx
         .store
         .resolve_conflict(
-            &fx.owner,
-            &conflict_id,
-            ResolveConflictInput {
-                snapshot_token: detail.snapshot_token.clone(),
-                resolution_mutation_id: Uuid::new_v4().to_string(),
-                choices: vec![resolution_choice(
-                    &detail,
-                    "/_mutation.deleted",
-                    ConflictOutcome::Set {
-                        value: Value::Bool(false),
-                    },
-                )],
-            },
+            &seeded.fx.member,
+            &seeded.conflict_id,
+            seeded.input.clone(),
             1_700_000_002,
         )
         .unwrap();
-    assert_eq!(restored.status, "rejected");
-    assert_eq!(restored.error.unwrap().code, "missing_restore_base");
-    let page = fx.store.pull(&fx.family_id, 0).unwrap();
+    assert_eq!(forbidden.error.unwrap().code, "forbidden");
+    assert_eq!(
+        resolution_durable_state(
+            &seeded.fx.store,
+            &seeded.fx.family_id,
+            &seeded.conflict_id,
+            seeded.record_id,
+        ),
+        before_forbidden,
+    );
+    let restored = seeded
+        .fx
+        .store
+        .resolve_conflict(
+            &seeded.fx.owner,
+            &seeded.conflict_id,
+            seeded.input.clone(),
+            1_700_000_002,
+        )
+        .unwrap();
+    assert_eq!(restored.status, "accepted");
+    assert_eq!(restored.stable_root, seeded.direct_base_root);
+    assert_eq!(restored.stable_media, seeded.media);
+    assert_eq!(restored.replay, Some(false));
+    let resolved_version = restored.stable_version_id.clone().unwrap();
+    let connection = seeded.fx.store.connect().unwrap();
+    let direct_parent: String = connection
+        .query_row(
+            "SELECT parent_version_id FROM entity_version_parents
+              WHERE family_id = ?1 AND version_id = ?2",
+            params![seeded.fx.family_id, resolved_version],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(direct_parent, seeded.tombstone_version);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                  WHERE family_id = ?1 AND membership_id = ?2 AND mutation_id = ?3",
+                params![
+                    seeded.fx.family_id,
+                    VERSION_PROVENANCE_PRINCIPAL,
+                    resolved_version
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], seeded.fx.owner.membership_id);
+    assert_eq!(provenance["device_id"], seeded.fx.owner.device_id);
+    assert_eq!(provenance["received_at"], 1_700_000_002);
+    drop(connection);
+    let page = seeded.fx.store.pull(&seeded.fx.family_id, 0).unwrap();
     let row = page
         .entities
         .iter()
-        .find(|e| e.client_uuid == record_id.to_string())
+        .find(|e| e.client_uuid == seeded.record_id.to_string())
+        .unwrap();
+    assert!(row.deleted_at.is_none());
+    assert!(row.conflict_summary.is_none());
+    assert!(seeded
+        .fx
+        .store
+        .conflict_detail_page(
+            &seeded.fx.owner,
+            &seeded.conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_003,
+        )
+        .is_err());
+    let restarted = Store::open(seeded.fx._dir.path().join("lezi.db")).unwrap();
+    let replay = restarted
+        .resolve_conflict(
+            &seeded.fx.owner,
+            &seeded.conflict_id,
+            seeded.input,
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(replay.replay, Some(true));
+    assert_eq!(replay.stable_version_id, Some(resolved_version));
+}
+
+#[test]
+fn tombstone_restore_snapshot_fails_stale_after_a_new_live_branch() {
+    let seeded = seed_tombstone_restore(false);
+    let branch = seeded.fx.record_mutation(
+        seeded.record_id,
+        Some(&seeded.base_version),
+        "late-live-branch",
+    );
+    let branched = seeded
+        .fx
+        .commit(&seeded.fx.owner, branch, 1_700_000_002)
+        .unwrap();
+    assert_eq!(branched.results[0].status, "branched");
+    assert_eq!(
+        branched.results[0].conflict_id.as_deref(),
+        Some(seeded.conflict_id.as_str()),
+    );
+    let before = resolution_durable_state(
+        &seeded.fx.store,
+        &seeded.fx.family_id,
+        &seeded.conflict_id,
+        seeded.record_id,
+    );
+    let stale = seeded
+        .fx
+        .store
+        .resolve_conflict(
+            &seeded.fx.owner,
+            &seeded.conflict_id,
+            seeded.input,
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(stale.error.unwrap().code, "snapshot_stale");
+    assert_eq!(
+        resolution_durable_state(
+            &seeded.fx.store,
+            &seeded.fx.family_id,
+            &seeded.conflict_id,
+            seeded.record_id,
+        ),
+        before,
+    );
+    let row = seeded
+        .fx
+        .store
+        .pull(&seeded.fx.family_id, 0)
+        .unwrap()
+        .entities
+        .into_iter()
+        .find(|entity| entity.client_uuid == seeded.record_id.to_string())
         .unwrap();
     assert!(row.deleted_at.is_some());
+}
+
+#[test]
+fn concurrent_tombstone_restores_publish_exactly_one_live_terminal() {
+    let seeded = seed_tombstone_restore(false);
+    let before = resolution_durable_state(
+        &seeded.fx.store,
+        &seeded.fx.family_id,
+        &seeded.conflict_id,
+        seeded.record_id,
+    );
+    let control = super::super::conflict_snapshots::test_hook::install(&seeded.fx.family_id);
+    let (results_tx, results_rx) = mpsc::channel();
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let store = seeded.fx.store.clone();
+        let owner = seeded.fx.owner.clone();
+        let conflict_id = seeded.conflict_id.clone();
+        let snapshot_token = seeded.input.snapshot_token.clone();
+        let choices = seeded.input.choices.clone();
+        let results_tx = results_tx.clone();
+        handles.push(thread::spawn(move || {
+            let result = store
+                .resolve_conflict(
+                    &owner,
+                    &conflict_id,
+                    ResolveConflictInput {
+                        snapshot_token,
+                        resolution_mutation_id: Uuid::new_v4().to_string(),
+                        choices,
+                    },
+                    1_700_000_002,
+                )
+                .unwrap();
+            results_tx.send(result).unwrap();
+        }));
+    }
+    drop(results_tx);
+    control.wait_resolution_entry(1);
+    control.wait_resolution_busy();
+    control.release_one_resolution();
+    control.wait_resolution_entry(2);
+    let first = results_rx.recv().unwrap();
+    let after_winner = resolution_durable_state(
+        &seeded.fx.store,
+        &seeded.fx.family_id,
+        &seeded.conflict_id,
+        seeded.record_id,
+    );
+    control.release_one_resolution();
+    let second = results_rx.recv().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let after_loser = resolution_durable_state(
+        &seeded.fx.store,
+        &seeded.fx.family_id,
+        &seeded.conflict_id,
+        seeded.record_id,
+    );
+    assert_ne!(after_winner, before);
+    assert_eq!(after_loser, after_winner);
+    let results = [first, second];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status == "accepted")
+            .count(),
+        1,
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "snapshot_stale"))
+            .count(),
+        1,
+    );
+}
+
+#[test]
+fn concurrent_delete_replay_does_not_revive_a_tombstone() {
+    let seeded = seed_tombstone_restore(false);
+    let mut second_delete = seeded.fx.record_mutation(
+        seeded.record_id,
+        Some(&seeded.base_version),
+        "second-delete",
+    );
+    second_delete.deleted = true;
+    let result = seeded
+        .fx
+        .commit(&seeded.fx.owner, second_delete, 1_700_000_002)
+        .unwrap();
+    assert!(matches!(
+        result.results[0].status.as_str(),
+        "accepted" | "merged"
+    ));
+    assert!(result.results[0].conflict_id.is_none());
+    let row = seeded
+        .fx
+        .store
+        .pull(&seeded.fx.family_id, 0)
+        .unwrap()
+        .entities
+        .into_iter()
+        .find(|entity| entity.client_uuid == seeded.record_id.to_string())
+        .unwrap();
+    assert!(row.deleted_at.is_some());
+    assert!(row.conflict_summary.is_none());
+    assert!(matches!(
+        first_conflict_detail(&seeded.fx.store, &seeded.fx.owner, &seeded.conflict_id),
+        Err(StoreError::ConflictNotFound)
+    ));
+}
+
+#[test]
+fn tombstone_restore_rejects_non_restore_choices_without_writes() {
+    for add_edit_choice in [false, true] {
+        let mut seeded = seed_tombstone_restore(false);
+        if add_edit_choice {
+            seeded.input.choices.push(ConflictResolutionChoice {
+                path: "/note".to_owned(),
+                choice_id: seeded.input.choices[0].choice_id.clone(),
+            });
+        } else {
+            seeded.input.choices = vec![resolution_choice(
+                &seeded.detail,
+                "/_mutation.deleted",
+                ConflictOutcome::Remove,
+            )];
+        }
+        let before = resolution_durable_state(
+            &seeded.fx.store,
+            &seeded.fx.family_id,
+            &seeded.conflict_id,
+            seeded.record_id,
+        );
+        let rejected = seeded
+            .fx
+            .store
+            .resolve_conflict(
+                &seeded.fx.owner,
+                &seeded.conflict_id,
+                seeded.input,
+                1_700_000_002,
+            )
+            .unwrap();
+        assert_eq!(rejected.error.unwrap().code, "invalid_choice");
+        assert_eq!(
+            resolution_durable_state(
+                &seeded.fx.store,
+                &seeded.fx.family_id,
+                &seeded.conflict_id,
+                seeded.record_id,
+            ),
+            before,
+        );
+    }
+}
+
+#[test]
+fn tombstone_restore_classifies_missing_and_incomplete_direct_bases_without_writes() {
+    for corruption in [
+        "missing_parent",
+        "multiple_parents",
+        "deleted_base",
+        "content_drift",
+    ] {
+        let seeded = seed_tombstone_restore(false);
+        let connection = seeded.fx.store.connect().unwrap();
+        match corruption {
+            "missing_parent" => {
+                connection
+                    .execute(
+                        "DELETE FROM entity_version_parents
+                          WHERE family_id = ?1 AND version_id = ?2",
+                        params![seeded.fx.family_id, seeded.tombstone_version],
+                    )
+                    .unwrap();
+            }
+            "multiple_parents" => {
+                let baby_version: String = connection
+                    .query_row(
+                        "SELECT version_id FROM entity_stable_heads
+                          WHERE family_id = ?1 AND entity_type = 'baby'",
+                        params![seeded.fx.family_id],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO entity_version_parents(family_id, version_id, parent_version_id)
+                         VALUES (?1, ?2, ?3)",
+                        params![seeded.fx.family_id, seeded.tombstone_version, baby_version],
+                    )
+                    .unwrap();
+            }
+            "deleted_base" => {
+                connection
+                    .execute(
+                        "UPDATE entity_versions SET deleted_at = 1
+                          WHERE family_id = ?1 AND version_id = ?2",
+                        params![seeded.fx.family_id, seeded.base_version],
+                    )
+                    .unwrap();
+            }
+            "content_drift" => {
+                connection
+                    .execute(
+                        "UPDATE entity_versions SET content_hash = ?1
+                          WHERE family_id = ?2 AND version_id = ?3",
+                        params!["0".repeat(64), seeded.fx.family_id, seeded.base_version],
+                    )
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        drop(connection);
+        let detail_error =
+            first_conflict_detail(&seeded.fx.store, &seeded.fx.owner, &seeded.conflict_id)
+                .unwrap_err();
+        if corruption == "missing_parent" {
+            assert!(matches!(detail_error, StoreError::MissingRestoreBase));
+        } else {
+            assert!(matches!(detail_error, StoreError::IncompleteRestoreBase));
+        }
+        let before = resolution_durable_state(
+            &seeded.fx.store,
+            &seeded.fx.family_id,
+            &seeded.conflict_id,
+            seeded.record_id,
+        );
+        if corruption == "missing_parent" {
+            let forbidden = seeded
+                .fx
+                .store
+                .resolve_conflict(
+                    &seeded.fx.member,
+                    &seeded.conflict_id,
+                    seeded.input.clone(),
+                    1_700_000_002,
+                )
+                .unwrap();
+            assert_eq!(forbidden.error.unwrap().code, "forbidden");
+            assert_eq!(
+                resolution_durable_state(
+                    &seeded.fx.store,
+                    &seeded.fx.family_id,
+                    &seeded.conflict_id,
+                    seeded.record_id,
+                ),
+                before,
+            );
+        }
+        let rejected = seeded
+            .fx
+            .store
+            .resolve_conflict(
+                &seeded.fx.owner,
+                &seeded.conflict_id,
+                seeded.input,
+                1_700_000_002,
+            )
+            .unwrap();
+        let expected = if corruption == "missing_parent" {
+            "missing_restore_base"
+        } else {
+            "incomplete_restore_base"
+        };
+        assert_eq!(rejected.error.unwrap().code, expected, "{corruption}");
+        assert_eq!(
+            resolution_durable_state(
+                &seeded.fx.store,
+                &seeded.fx.family_id,
+                &seeded.conflict_id,
+                seeded.record_id,
+            ),
+            before,
+            "{corruption}",
+        );
+    }
+}
+
+#[test]
+fn tombstone_restore_requires_exact_direct_base_media_bytes_without_writes() {
+    for corruption in ["missing", "corrupt"] {
+        let seeded = seed_tombstone_restore(true);
+        let media_path = seeded
+            .fx
+            ._dir
+            .path()
+            .join("media")
+            .join(&seeded.fx.family_id)
+            .join(&seeded.media[0].media_uuid);
+        if corruption == "missing" {
+            std::fs::remove_file(&media_path).unwrap();
+        } else {
+            std::fs::write(&media_path, vec![1_u8; seeded.media[0].byte_size as usize]).unwrap();
+        }
+        let before = resolution_durable_state(
+            &seeded.fx.store,
+            &seeded.fx.family_id,
+            &seeded.conflict_id,
+            seeded.record_id,
+        );
+        let rejected = seeded
+            .fx
+            .store
+            .resolve_conflict(
+                &seeded.fx.owner,
+                &seeded.conflict_id,
+                seeded.input,
+                1_700_000_002,
+            )
+            .unwrap();
+        assert_eq!(rejected.error.unwrap().code, "missing_restore_media");
+        assert_eq!(
+            resolution_durable_state(
+                &seeded.fx.store,
+                &seeded.fx.family_id,
+                &seeded.conflict_id,
+                seeded.record_id,
+            ),
+            before,
+            "{corruption}",
+        );
+    }
 }
 
 #[test]
@@ -2573,7 +3133,7 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
 }
 
 #[test]
-fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles() {
+fn causal_branch_cap_spans_open_conflicts_and_rejects_incomplete_empty_handles() {
     let fx = CausalFx::with_admission(admission(20, 20, 4));
     let (record_id, base) = fx.seed_concurrent_record();
     let mut first_conflict = String::new();
@@ -2636,10 +3196,11 @@ fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles(
             .len(),
         1,
     );
-    assert!(first_conflict_detail(&fx.store, &fx.owner, &empty_conflict)
-        .unwrap()
-        .branches
-        .is_empty());
+    let empty_error = first_conflict_detail(&fx.store, &fx.owner, &empty_conflict).unwrap_err();
+    assert!(
+        matches!(empty_error, StoreError::IncompleteRestoreBase),
+        "unexpected empty handle result: {empty_error:?}",
+    );
 
     fx.commit(
         &fx.owner,
