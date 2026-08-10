@@ -49,8 +49,8 @@ use crate::model::Entity;
 use self::SourceRelationReceipt as _;
 pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
 pub use causal::{
-    CausalBatchResult, CausalMutation, CausalUnitResult, ConflictSummary, ResolveConflictInput,
-    ResolveConflictResult,
+    CausalBatchResult, CausalMutation, CausalUnitResult, ConflictResolutionChoice, ConflictSummary,
+    ResolveConflictInput, ResolveConflictResult,
 };
 pub(crate) use causal_admission::CausalAdmissionConfig;
 pub use causal_admission::CausalCommitSaturation;

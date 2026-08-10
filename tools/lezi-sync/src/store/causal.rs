@@ -19,17 +19,18 @@ use crate::model::{validate_causal_root, validate_causal_root_shape, Entity};
 use super::bundles::validate_canonical_package_ingress;
 use super::causal_admission::admit_new_branch;
 use super::causal_media_staging::{consume_manifest, verify_manifest};
-use super::causal_merge::{
-    leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
-};
+use super::causal_merge::{mutation_content_hash, three_way_merge, CausalMediaItem, MergeDecision};
 use super::conflict_snapshots::{
-    build_conflict_snapshot, open_conflict_detail_page, ConflictDetailPageRequest, ConflictOutcome,
-    ConflictSnapshotBinding,
+    authorize_snapshot_resolution, build_conflict_snapshot, open_conflict_detail_page,
+    ConflictDetailPageRequest, ConflictResolutionRejection, ConflictSnapshotBinding,
 };
 use super::{migration_content_hash, CausalCommitSaturation, Principal, Store, StoreError};
 
 /// Wire §7: at most 32 conflict_summary entries per ordinary pull page.
 pub(crate) const MAX_CONFLICT_SUMMARIES_PER_PAGE: usize = 32;
+const MAX_RESOLUTION_CHOICES: usize = 64;
+const RESOLUTION_TOKEN_LENGTH: usize = 43;
+const MAX_RESOLUTION_PATH_BYTES: usize = 1_024;
 
 /// Closed set of versioned entity types for the causal path.
 const CAUSAL_ENTITY_TYPES: &[&str] = &[
@@ -92,29 +93,110 @@ pub struct ConflictSummary {
     pub branch_version_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ResolveConflictInput {
-    pub expected_stable_version: String,
-    pub expected_branch_versions: Vec<String>,
-    pub resolved_root: Map<String, Value>,
-    pub resolved_media: Vec<CausalMediaItem>,
-    pub resolution_mutation_id: String,
-    pub conflict_choices: Map<String, Value>,
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConflictResolutionChoice {
+    pub path: String,
+    pub choice_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone)]
+pub struct ResolveConflictInput {
+    pub snapshot_token: String,
+    pub resolution_mutation_id: String,
+    pub choices: Vec<ConflictResolutionChoice>,
+}
+
+impl ResolveConflictInput {
+    fn validation_code(&self) -> Option<&'static str> {
+        let is_framed_token = |value: &str| {
+            value.len() == RESOLUTION_TOKEN_LENGTH
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        };
+        let canonical_mutation_id = Uuid::parse_str(&self.resolution_mutation_id)
+            .is_ok_and(|id| id.to_string() == self.resolution_mutation_id);
+        let choices_are_sorted = self
+            .choices
+            .windows(2)
+            .all(|pair| pair[0].path <= pair[1].path);
+        if !is_framed_token(&self.snapshot_token)
+            || !canonical_mutation_id
+            || self.choices.len() > MAX_RESOLUTION_CHOICES
+            || !choices_are_sorted
+            || self.choices.iter().any(|choice| {
+                choice.path.is_empty()
+                    || choice.path.len() > MAX_RESOLUTION_PATH_BYTES
+                    || !choice.path.starts_with('/')
+                    || !is_framed_token(&choice.choice_id)
+            })
+        {
+            Some("non_canonical_value")
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ResolveConflictError {
+    pub code: String,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct ResolveConflictResult {
     pub status: String,
+    pub resolution_mutation_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stable_version_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub stable_root: Map<String, Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stable_media: Vec<CausalMediaItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
+    pub replay: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub conflict_summary: Option<ConflictSummary>,
+    pub error: Option<ResolveConflictError>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredResolutionReceipt {
+    request_hash: String,
+    result: ResolveConflictResult,
+}
+
+// Schema 12 is the immutable 0.3.13 upgrade source. Until H28 creates schema
+// 13, `conflict_choices_json` stores exactly this target receipt and the two
+// `expected_*` columns store the receipt-authoritative stable/branch audit set.
+// No client-supplied value/root/media is persisted or read on this path.
+
+fn resolution_request_hash(input: &ResolveConflictInput) -> Result<String, StoreError> {
+    // validation_code enforces the wire's canonical path order before hashing.
+    let choices_json = serde_json::to_string(&input.choices)?;
+    Ok(migration_content_hash(&[
+        "choice-only-resolution-v2",
+        &input.snapshot_token,
+        &input.resolution_mutation_id,
+        &choices_json,
+    ]))
+}
+
+fn rejected_resolution(input: &ResolveConflictInput, code: &str) -> ResolveConflictResult {
+    ResolveConflictResult {
+        status: "rejected".to_owned(),
+        resolution_mutation_id: input.resolution_mutation_id.clone(),
+        stable_version_id: None,
+        stable_root: Map::new(),
+        stable_media: vec![],
+        replay: None,
+        error: Some(ResolveConflictError {
+            code: code.to_owned(),
+            retryable: false,
+        }),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -237,9 +319,17 @@ fn load_version(
     family_id: &str,
     version_id: &str,
 ) -> Result<Option<StableSnapshot>, StoreError> {
-    let row = tx
-        .query_row(
-            "SELECT v.payload_json, v.updated_at, v.deleted_at, v.mutation_id,
+    Ok(load_validated_version(tx, family_id, version_id)?.map(|(_, _, snapshot)| snapshot))
+}
+
+fn load_validated_version(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    version_id: &str,
+) -> Result<Option<(String, String, StableSnapshot)>, StoreError> {
+    let mut statement = tx.prepare(
+        "SELECT v.version_id, v.entity_type, v.client_uuid, v.payload_json,
+                    v.content_hash, v.updated_at, v.deleted_at, v.mutation_id, v.origin,
                 (SELECT json_group_array(parent_version_id) FROM (
                     SELECT parent_version_id FROM entity_version_parents
                      WHERE family_id = v.family_id AND version_id = v.version_id
@@ -247,39 +337,129 @@ fn load_version(
                 (SELECT json_group_array(media_payload_json) FROM (
                     SELECT media_payload_json FROM entity_version_media
                      WHERE family_id = v.family_id AND version_id = v.version_id
-                     ORDER BY media_uuid COLLATE BINARY))
+                     ORDER BY media_uuid COLLATE BINARY)),
+                (SELECT json_group_array(media_uuid) FROM (
+                    SELECT media_uuid FROM entity_version_media
+                     WHERE family_id = v.family_id AND version_id = v.version_id
+                     ORDER BY media_uuid COLLATE BINARY)),
+                (SELECT COUNT(*) FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id),
+                (SELECT json_extract(mr.receipt_json, '$.actor_id')
+                   FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id),
+                (SELECT json_extract(mr.receipt_json, '$.device_id')
+                   FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id),
+                (SELECT json_extract(mr.receipt_json, '$.received_at')
+                   FROM mutation_receipts mr
+                  WHERE mr.family_id = v.family_id
+                    AND mr.membership_id = ?3
+                    AND mr.entity_type = v.entity_type
+                    AND mr.client_uuid = v.client_uuid
+                    AND mr.mutation_id = v.version_id)
          FROM entity_versions v WHERE v.family_id = ?1 AND v.version_id = ?2",
-            params![family_id, version_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((payload, updated_at, deleted_at, mutation_id, parents, media)) = row else {
+    )?;
+    let mut rows = statement.query(params![family_id, version_id, VERSION_PROVENANCE_PRINCIPAL])?;
+    let Some(row) = rows.next()? else {
         return Ok(None);
     };
-    let root = serde_json::from_str::<Map<String, Value>>(&payload)?;
-    let parents = serde_json::from_str::<BTreeSet<String>>(&parents)?;
-    let media = parse_media_json(&media)?;
-    Ok(Some(StableSnapshot {
-        version_id: version_id.to_owned(),
+    let version = validated_snapshot_from_row(row, None, None)?;
+    if rows.next()?.is_some() {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    Ok(Some(version))
+}
+
+fn validated_snapshot_from_row(
+    row: &rusqlite::Row<'_>,
+    expected_entity_type: Option<&str>,
+    expected_client_uuid: Option<&str>,
+) -> Result<(String, String, StableSnapshot), StoreError> {
+    let version_id = row.get::<_, String>(0)?;
+    let entity_type = row.get::<_, String>(1)?;
+    let client_uuid = row.get::<_, String>(2)?;
+    if expected_entity_type.is_some_and(|expected| expected != entity_type)
+        || expected_client_uuid.is_some_and(|expected| expected != client_uuid)
+    {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    let payload_json = row.get::<_, String>(3)?;
+    let root = serde_json::from_str::<Map<String, Value>>(&payload_json)?;
+    let content_hash = row.get::<_, String>(4)?;
+    let updated_at = row.get::<_, i64>(5)?;
+    let deleted_at = row.get::<_, Option<i64>>(6)?;
+    let mutation_id = row.get::<_, Option<String>>(7)?;
+    let origin = row.get::<_, String>(8)?;
+    let parents = serde_json::from_str::<BTreeSet<String>>(&row.get::<_, String>(9)?)?;
+    let media_json = row.get::<_, String>(10)?;
+    let media_payloads = serde_json::from_str::<Vec<String>>(&media_json)?;
+    let media_ids = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(11)?)?;
+    let provenance_count = row.get::<_, i64>(12)?;
+    let media = parse_media_json(&media_json)?;
+    let snapshot = StableSnapshot {
+        version_id: version_id.clone(),
         root,
         media,
         updated_at,
         deleted_at,
         mutation_id,
         parents,
-        actor_id: None,
-        device_id: None,
-        received_at: None,
-    }))
+        actor_id: row.get(13)?,
+        device_id: row.get(14)?,
+        received_at: row.get(15)?,
+    };
+    let media_cap = match entity_type.as_str() {
+        "baby" => 1,
+        "custom_item" => 0,
+        _ => 3,
+    };
+    let legacy_hash = || {
+        let updated = updated_at.to_string();
+        let deleted = deleted_at
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let mut parts = vec![updated.as_str(), deleted.as_str(), payload_json.as_str()];
+        for (id, payload) in media_ids.iter().zip(&media_payloads) {
+            parts.extend([id.as_str(), payload.as_str()]);
+        }
+        migration_content_hash(&parts)
+    };
+    if media_ids.len() != media_payloads.len()
+        || !validate_causal_root(&entity_type, &client_uuid, &snapshot.root)
+            .is_ok_and(|canonical| canonical == snapshot.root)
+        || snapshot.media.len() > media_cap
+        || snapshot
+            .media
+            .iter()
+            .any(|item| item.validate_for_entity(&entity_type).is_err())
+        || provenance_count > 1
+        || if origin == "migration_base" {
+            snapshot.mutation_id.is_some() || content_hash != legacy_hash()
+        } else {
+            snapshot.mutation_id.is_none()
+                || content_hash
+                    != root_content_hash(
+                        &snapshot.root,
+                        &snapshot.media,
+                        snapshot.deleted_at.is_some(),
+                    )
+        }
+    {
+        return Err(StoreError::InvalidStoredPayload);
+    }
+    Ok((entity_type, client_uuid, snapshot))
 }
 
 /// Load the complete bounded conflict graph in two statements. Both detail and
@@ -390,79 +570,9 @@ fn load_conflict_heads(
         VERSION_PROVENANCE_PRINCIPAL
     ])?;
     while let Some(row) = rows.next()? {
-        let version_id = row.get::<_, String>(0)?;
-        if row.get::<_, String>(1)? != entity_type || row.get::<_, String>(2)? != client_uuid {
-            return Err(StoreError::InvalidStoredPayload);
-        }
-        let payload_json = row.get::<_, String>(3)?;
-        let root = serde_json::from_str::<Map<String, Value>>(&payload_json)?;
-        let content_hash = row.get::<_, String>(4)?;
-        let mutation_id = row.get::<_, Option<String>>(7)?;
-        let origin = row.get::<_, String>(8)?;
-        let parents = serde_json::from_str::<BTreeSet<String>>(&row.get::<_, String>(9)?)?;
-        let media_json = row.get::<_, String>(10)?;
-        let media_ids = serde_json::from_str::<Vec<String>>(&row.get::<_, String>(11)?)?;
-        let provenance_count = row.get::<_, i64>(12)?;
-        let actor_id = row.get::<_, Option<String>>(13)?;
-        let device_id = row.get::<_, Option<String>>(14)?;
-        let received_at = row.get::<_, Option<i64>>(15)?;
-        let media_payloads = serde_json::from_str::<Vec<String>>(&media_json)?;
-        let media = parse_media_json(&media_json)?;
-        let updated_at = row.get(5)?;
-        let deleted_at = row.get(6)?;
-        let snapshot = StableSnapshot {
-            version_id: version_id.clone(),
-            root,
-            media,
-            updated_at,
-            deleted_at,
-            mutation_id,
-            parents,
-            actor_id,
-            device_id,
-            received_at,
-        };
-        let media_cap = if entity_type == "baby" {
-            1
-        } else if entity_type == "custom_item" {
-            0
-        } else {
-            3
-        };
-        let legacy_hash = || {
-            let updated = updated_at.to_string();
-            let deleted = deleted_at
-                .map(|value| value.to_string())
-                .unwrap_or_default();
-            let mut parts = vec![updated.as_str(), deleted.as_str(), payload_json.as_str()];
-            for (id, payload) in media_ids.iter().zip(&media_payloads) {
-                parts.extend([id.as_str(), payload.as_str()]);
-            }
-            migration_content_hash(&parts)
-        };
-        if media_ids.len() != media_payloads.len()
-            || !validate_causal_root(&entity_type, &client_uuid, &snapshot.root)
-                .is_ok_and(|canonical| canonical == snapshot.root)
-            || snapshot.media.len() > media_cap
-            || snapshot
-                .media
-                .iter()
-                .any(|item| item.validate_for_entity(&entity_type).is_err())
-            || provenance_count > 1
-            || if origin == "migration_base" {
-                snapshot.mutation_id.is_some() || content_hash != legacy_hash()
-            } else {
-                snapshot.mutation_id.is_none()
-                    || content_hash
-                        != root_content_hash(
-                            &snapshot.root,
-                            &snapshot.media,
-                            snapshot.deleted_at.is_some(),
-                        )
-            }
-        {
-            return Err(StoreError::InvalidStoredPayload);
-        }
+        let (_, _, snapshot) =
+            validated_snapshot_from_row(row, Some(&entity_type), Some(&client_uuid))?;
+        let version_id = snapshot.version_id.clone();
         versions.insert(version_id, snapshot);
     }
 
@@ -895,56 +1005,85 @@ fn save_receipt(
     )?;
     let version_id = branch_version_id.or(stable_version_id);
     if let Some(version_id) = version_id {
-        let version_mutation: Option<String> = tx
-            .query_row(
-                "SELECT mutation_id FROM entity_versions
-                 WHERE family_id = ?1 AND version_id = ?2",
-                params![family_id, version_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if version_mutation.as_deref() == Some(mutation_id) {
-            let provenance = serde_json::to_string(&serde_json::json!({
-                "actor_id": principal.membership_id,
-                "device_id": principal.device_id,
-                "received_at": created_at,
-            }))?;
-            tx.execute(
-                "INSERT OR IGNORE INTO mutation_receipts(
-                    family_id, membership_id, entity_type, client_uuid, mutation_id,
-                    content_hash, status, stable_version_id, branch_version_id,
-                    conflict_id, receipt_json, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?5, NULL, ?8, ?9, ?10)",
-                params![
-                    family_id,
-                    VERSION_PROVENANCE_PRINCIPAL,
-                    entity_type,
-                    client_uuid,
-                    version_id,
-                    migration_content_hash(&["version-provenance-v2", version_id]),
-                    status,
-                    conflict_id,
-                    provenance,
-                    created_at,
-                ],
-            )?;
-            let stored: String = tx.query_row(
-                "SELECT receipt_json FROM mutation_receipts
-                 WHERE family_id = ?1 AND membership_id = ?2
-                   AND entity_type = ?3 AND client_uuid = ?4 AND mutation_id = ?5",
-                params![
-                    family_id,
-                    VERSION_PROVENANCE_PRINCIPAL,
-                    entity_type,
-                    client_uuid,
-                    version_id,
-                ],
-                |row| row.get(0),
-            )?;
-            if stored != provenance {
-                return Err(StoreError::InvalidStoredPayload);
-            }
-        }
+        save_version_provenance(
+            tx,
+            family_id,
+            principal,
+            entity_type,
+            client_uuid,
+            mutation_id,
+            status,
+            conflict_id,
+            version_id,
+            created_at,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_version_provenance(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    principal: &Principal,
+    entity_type: &str,
+    client_uuid: &str,
+    mutation_id: &str,
+    status: &str,
+    conflict_id: Option<&str>,
+    version_id: &str,
+    created_at: i64,
+) -> Result<(), StoreError> {
+    let version_mutation: Option<String> = tx
+        .query_row(
+            "SELECT mutation_id FROM entity_versions
+             WHERE family_id = ?1 AND version_id = ?2",
+            params![family_id, version_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if version_mutation.as_deref() != Some(mutation_id) {
+        return Ok(());
+    }
+    let provenance = serde_json::to_string(&serde_json::json!({
+        "actor_id": principal.membership_id,
+        "device_id": principal.device_id,
+        "received_at": created_at,
+    }))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO mutation_receipts(
+            family_id, membership_id, entity_type, client_uuid, mutation_id,
+            content_hash, status, stable_version_id, branch_version_id,
+            conflict_id, receipt_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?5, NULL, ?8, ?9, ?10)",
+        params![
+            family_id,
+            VERSION_PROVENANCE_PRINCIPAL,
+            entity_type,
+            client_uuid,
+            version_id,
+            migration_content_hash(&["version-provenance-v2", version_id]),
+            status,
+            conflict_id,
+            provenance,
+            created_at,
+        ],
+    )?;
+    let stored: String = tx.query_row(
+        "SELECT receipt_json FROM mutation_receipts
+         WHERE family_id = ?1 AND membership_id = ?2
+           AND entity_type = ?3 AND client_uuid = ?4 AND mutation_id = ?5",
+        params![
+            family_id,
+            VERSION_PROVENANCE_PRINCIPAL,
+            entity_type,
+            client_uuid,
+            version_id,
+        ],
+        |row| row.get(0),
+    )?;
+    if stored != provenance {
+        return Err(StoreError::InvalidStoredPayload);
     }
     Ok(())
 }
@@ -2612,204 +2751,243 @@ impl Store {
         input: ResolveConflictInput,
         now: i64,
     ) -> Result<ResolveConflictResult, StoreError> {
+        if let Some(code) = input.validation_code() {
+            return Ok(rejected_resolution(&input, code));
+        }
         let mut connection = self.connect()?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let projection = load_conflict_heads(&tx, &principal.family_id, conflict_id)?;
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::arm_busy_handler(
+            &connection,
+            &principal.family_id,
+            super::conflict_snapshots::test_hook::BusyOperation::Resolution,
+        )?;
+        let tx_result = connection.transaction_with_behavior(TransactionBehavior::Immediate);
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::disarm_busy_handler(
+            tx_result.as_ref().ok().map(|tx| &**tx),
+        )?;
+        let tx = tx_result?;
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::resolution_entered(&principal.family_id);
+        let request_hash = resolution_request_hash(&input)?;
+        if let Some((
+            resolver_membership_id,
+            expected_stable_version_id,
+            expected_branch_versions_json,
+            receipt_json,
+            resolved_version_id,
+            conflict_entity_type,
+            conflict_client_uuid,
+            conflict_status,
+            conflict_stable_version_id,
+        )) = tx
+            .query_row(
+                "SELECT resolver_membership_id, expected_stable_version_id,
+                        expected_branch_versions_json, conflict_choices_json,
+                        resolved_version_id, c.entity_type, c.client_uuid,
+                        c.status, c.stable_version_id
+                   FROM conflict_resolutions r
+                   JOIN conflicts c USING(family_id, conflict_id)
+                  WHERE r.family_id = ?1 AND r.conflict_id = ?2
+                    AND r.resolution_mutation_id = ?3",
+                params![
+                    principal.family_id,
+                    conflict_id,
+                    input.resolution_mutation_id,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            if resolver_membership_id != principal.membership_id {
+                return Ok(rejected_resolution(&input, "forbidden"));
+            }
+            let receipt: StoredResolutionReceipt = serde_json::from_str(&receipt_json)?;
+            let branch_versions: Vec<String> =
+                serde_json::from_str(&expected_branch_versions_json)?;
+            let branches_are_canonical = branch_versions.len() <= MAX_RESOLUTION_CHOICES
+                && branch_versions.windows(2).all(|pair| pair[0] < pair[1])
+                && serde_json::to_string(&branch_versions)? == expected_branch_versions_json;
+            let (version_entity_type, version_client_uuid, stored_version) =
+                load_validated_version(&tx, &principal.family_id, &resolved_version_id)?
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+            let current_branches: Vec<String> = {
+                let mut statement = tx.prepare(
+                    "SELECT branch_version_id FROM conflict_branches
+                     WHERE family_id = ?1 AND conflict_id = ?2
+                     ORDER BY branch_version_id COLLATE BINARY",
+                )?;
+                let rows = statement
+                    .query_map(params![principal.family_id, conflict_id], |row| row.get(0))?
+                    .collect::<Result<_, _>>()?;
+                rows
+            };
+            if !crate::constant_time_eq(receipt.request_hash.as_bytes(), request_hash.as_bytes()) {
+                return Ok(rejected_resolution(&input, "content_drift"));
+            }
+            if receipt.result.resolution_mutation_id != input.resolution_mutation_id
+                || receipt.result.status != "accepted"
+                || receipt.result.replay != Some(false)
+                || receipt.result.error.is_some()
+                || receipt.result.stable_version_id.as_deref() != Some(&resolved_version_id)
+                || receipt.result.stable_root != stored_version.root
+                || receipt.result.stable_media != stored_version.media
+                || stored_version.mutation_id.as_deref() != Some(&input.resolution_mutation_id)
+                || stored_version.parents != BTreeSet::from([expected_stable_version_id])
+                || version_entity_type != conflict_entity_type
+                || version_client_uuid != conflict_client_uuid
+                || conflict_status != "resolved"
+                || conflict_stable_version_id != resolved_version_id
+                || !branches_are_canonical
+                || current_branches != branch_versions
+                || receipt.request_hash.len() != 64
+                || !receipt
+                    .request_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || serde_json::to_string(&receipt)? != receipt_json
+            {
+                return Err(StoreError::InvalidStoredPayload);
+            }
+            let mut replay = receipt.result;
+            replay.replay = Some(true);
+            return Ok(replay);
+        }
+
+        let projection = match load_conflict_heads(&tx, &principal.family_id, conflict_id) {
+            Ok(projection) => projection,
+            Err(StoreError::ConflictNotFound) => {
+                let known: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM conflicts
+                     WHERE family_id = ?1 AND conflict_id = ?2)",
+                    params![principal.family_id, conflict_id],
+                    |row| row.get(0),
+                )?;
+                if known {
+                    return Ok(rejected_resolution(&input, "snapshot_stale"));
+                }
+                return Err(StoreError::ConflictNotFound);
+            }
+            Err(error) => return Err(error),
+        };
         let entity_type = projection.entity_type.clone();
         let client_uuid = projection.client_uuid.clone();
         let stable_version_id = projection.stable_version_id.clone();
         let branch_ids = projection.branch_version_ids.clone();
-
-        // CAS: expected stable + complete branch set. Also pin to live head so a
-        // newer accepted projection cannot be overwritten by an old screen.
-        let live_head: Option<String> = tx
-            .query_row(
-                "SELECT version_id FROM entity_stable_heads
-                 WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3",
-                params![principal.family_id, entity_type, client_uuid],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let mut expected_branches = input.expected_branch_versions.clone();
-        expected_branches.sort();
-        let cas_stable = live_head
-            .as_ref()
-            .filter(|h| *h == &stable_version_id)
-            .cloned()
-            .unwrap_or(stable_version_id.clone());
-        if input.expected_stable_version != cas_stable
-            || input.expected_stable_version != stable_version_id
-            || branch_ids != expected_branches
-        {
-            let summary = ConflictSummary {
-                conflict_id: conflict_id.to_owned(),
-                entity_type: entity_type.clone(),
-                client_uuid: client_uuid.clone(),
-                stable_version_id: live_head.unwrap_or(stable_version_id.clone()),
-                branch_version_ids: branch_ids,
-            };
-            return Ok(ResolveConflictResult {
-                status: "cas_mismatch".to_owned(),
-                stable_version_id: None,
-                stable_root: Map::new(),
-                stable_media: vec![],
-                code: Some("cas_mismatch".to_owned()),
-                conflict_summary: Some(summary),
-            });
-        }
-
         let stable = projection.stable();
-        authorize_resolve(principal, &entity_type, &stable.root)?;
-
-        // Idempotent resolution mutation.
-        if let Ok(Some(existing_version)) = tx
-            .query_row(
-                "SELECT resolved_version_id FROM conflict_resolutions
-                 WHERE family_id = ?1 AND conflict_id = ?2 AND resolution_mutation_id = ?3",
-                params![
-                    principal.family_id,
-                    conflict_id,
-                    input.resolution_mutation_id
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-        {
-            let snap = load_version(&tx, &principal.family_id, &existing_version)?
-                .ok_or(StoreError::InvalidStoredPayload)?;
-            return Ok(ResolveConflictResult {
-                status: "resolved".to_owned(),
-                stable_version_id: Some(existing_version),
-                stable_root: snap.root,
-                stable_media: snap.media,
-                code: None,
-                conflict_summary: None,
-            });
+        if authorize_resolve(principal, &entity_type, &stable.root).is_err() {
+            return Ok(rejected_resolution(&input, "forbidden"));
         }
 
-        let semantic = build_conflict_snapshot(&projection)?;
-        let conflicting_paths = semantic
-            .conflicting
-            .iter()
-            .map(|item| item.path.clone())
-            .collect::<Vec<_>>();
-        let auto_merged = semantic
-            .auto_merged
-            .iter()
-            .map(|item| {
-                let value = match &item.outcome {
-                    ConflictOutcome::Set { value } => value.clone(),
-                    ConflictOutcome::Remove if item.path == "/_mutation.deleted" => {
-                        Value::Bool(true)
-                    }
-                    ConflictOutcome::Remove => Value::Null,
-                };
-                (item.path.clone(), value)
-            })
-            .collect::<Map<_, _>>();
-
-        // Choices must be subset of conflicting paths.
-        for key in input.conflict_choices.keys() {
-            if !conflicting_paths.iter().any(|p| p == key) {
-                return Ok(ResolveConflictResult {
-                    status: "rejected".to_owned(),
-                    stable_version_id: Some(stable_version_id.clone()),
-                    stable_root: stable.root.clone(),
-                    stable_media: stable.media.clone(),
-                    code: Some("invalid_conflict_choices".to_owned()),
-                    conflict_summary: None,
-                });
-            }
-        }
-        for path in &conflicting_paths {
-            if !input.conflict_choices.contains_key(path) {
-                return Ok(ResolveConflictResult {
-                    status: "rejected".to_owned(),
-                    stable_version_id: Some(stable_version_id.clone()),
-                    stable_root: stable.root.clone(),
-                    stable_media: stable.media.clone(),
-                    code: Some("incomplete_conflict_choices".to_owned()),
-                    conflict_summary: None,
-                });
-            }
-        }
-
-        // Server rebuild: auto_merged ⊕ conflict_choices (wire §8.2).
-        let (mut rebuilt_root, rebuilt_media, rebuilt_deleted) = rebuild_from_auto_merged(
-            stable,
-            &auto_merged,
-            &input.conflict_choices,
-            &conflicting_paths,
-        );
-        stamp_root(
-            &mut rebuilt_root,
-            &entity_type,
-            principal,
-            Some(&stable.root),
-            now.saturating_mul(1_000),
-        );
-
-        // Normalize client resolved_* and deep-equal.
-        let mut client_root = input.resolved_root.clone();
-        stamp_root(
-            &mut client_root,
-            &entity_type,
-            principal,
-            Some(&stable.root),
-            now.saturating_mul(1_000),
-        );
-        // updated_at is non-conflict; align for equality.
-        if let Some(v) = rebuilt_root.get("updated_at").cloned() {
-            client_root.insert("updated_at".to_owned(), v);
-        }
-        let client_media = media_sorted(input.resolved_media.clone());
-        let client_deleted = input
-            .conflict_choices
-            .get("/_mutation.deleted")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        // For concurrent without delete choice, deleted follows rebuild.
-        let client_deleted = if conflicting_paths.iter().any(|p| p == "/_mutation.deleted") {
-            client_deleted
-        } else {
-            rebuilt_deleted
+        let material = build_conflict_snapshot(&projection)?;
+        let binding = ConflictSnapshotBinding {
+            family_id: &principal.family_id,
+            conflict_id,
+            kind: &projection.kind,
+            entity_type: &entity_type,
+            client_uuid: &client_uuid,
+            stable_version_id: &stable_version_id,
+            branch_version_ids: &branch_ids,
+            receipt_key: &self.snapshot_receipt_key,
         };
-
-        if leaf_paths(&client_root) != leaf_paths(&rebuilt_root)
-            || !media_equal(&client_media, &rebuilt_media)
-            || client_deleted != rebuilt_deleted
-        {
-            return Ok(ResolveConflictResult {
-                status: "rejected".to_owned(),
-                stable_version_id: Some(stable_version_id),
-                stable_root: stable.root.clone(),
-                stable_media: stable.media.clone(),
-                code: Some("rewrote_auto_merged_path".to_owned()),
-                conflict_summary: None,
-            });
+        let resolution = match authorize_snapshot_resolution(
+            &tx,
+            &binding,
+            &material,
+            &input.snapshot_token,
+            &input.choices,
+            now,
+        ) {
+            Ok(resolution) => resolution,
+            Err(ConflictResolutionRejection::InvalidChoice) => {
+                return Ok(rejected_resolution(&input, "invalid_choice"));
+            }
+            Err(ConflictResolutionRejection::DuplicateChoice) => {
+                return Ok(rejected_resolution(&input, "duplicate_choice"));
+            }
+            Err(ConflictResolutionRejection::IncompleteChoices) => {
+                return Ok(rejected_resolution(&input, "incomplete_choices"));
+            }
+            Err(ConflictResolutionRejection::Store(StoreError::InvalidSnapshotToken)) => {
+                return Ok(rejected_resolution(&input, "invalid_snapshot_token"));
+            }
+            Err(ConflictResolutionRejection::Store(StoreError::SnapshotExpired)) => {
+                return Ok(rejected_resolution(&input, "snapshot_expired"));
+            }
+            Err(ConflictResolutionRejection::Store(StoreError::SnapshotStale)) => {
+                return Ok(rejected_resolution(&input, "snapshot_stale"));
+            }
+            Err(ConflictResolutionRejection::Store(error)) => return Err(error),
+        };
+        if projection.kind == "tombstone_restore" {
+            // H04 owns direct-live-base proof and media-byte provenance. H03
+            // validates choice-only requests but must not activate restore.
+            return Ok(rejected_resolution(&input, "missing_restore_base"));
         }
 
-        let resolved_root = rebuilt_root;
-        let resolved_media = rebuilt_media;
-        let resolved_deleted = rebuilt_deleted;
+        let mut resolved_root = resolution.root;
+        stamp_root(
+            &mut resolved_root,
+            &entity_type,
+            principal,
+            Some(&stable.root),
+            now.saturating_mul(1_000),
+        );
+        let resolved_deleted = resolution.deleted;
+        let resolved_media = if resolved_deleted {
+            vec![]
+        } else {
+            media_sorted(resolution.media)
+        };
+        let candidate = CausalMutation {
+            mutation_id: input.resolution_mutation_id.clone(),
+            base_version: Some(stable_version_id.clone()),
+            entity_type: entity_type.clone(),
+            client_uuid: client_uuid.clone(),
+            root: resolved_root.clone(),
+            media: resolved_media.clone(),
+            deleted: resolved_deleted,
+        };
+        if validate_mutation_shape(&candidate).is_err() {
+            return Ok(rejected_resolution(&input, "invalid_domain"));
+        }
+        resolved_root = match validate_mutation_content(&candidate) {
+            Ok(root) => root,
+            Err(_) => return Ok(rejected_resolution(&input, "invalid_domain")),
+        };
+        if entity_type == "wake_observation"
+            && validate_wake_against_sleep_start(&tx, &principal.family_id, &candidate).is_err()
+        {
+            return Ok(rejected_resolution(&input, "invalid_domain"));
+        }
+        let package = canonical_package(&candidate, &resolved_root, &resolved_media, now)?;
+        if validate_canonical_package_ingress(&tx, principal, &package).is_err() {
+            return Ok(rejected_resolution(&input, "invalid_domain"));
+        }
 
-        if !resolved_deleted {
-            if let Err(code) = require_media_bytes_present(
+        if !resolved_deleted
+            && require_media_bytes_present(
                 &tx,
                 &self.database_path,
                 principal,
                 &resolved_media,
                 now,
-            ) {
-                return Ok(ResolveConflictResult {
-                    status: "rejected".to_owned(),
-                    stable_version_id: Some(stable_version_id),
-                    stable_root: stable.root.clone(),
-                    stable_media: stable.media.clone(),
-                    code: Some(code.to_owned()),
-                    conflict_summary: None,
-                });
-            }
+            )
+            .is_err()
+        {
+            return Ok(rejected_resolution(&input, "invalid_domain"));
         }
 
         let version_id = Uuid::new_v4().to_string();
@@ -2823,10 +3001,10 @@ impl Store {
             None
         };
         let content_hash = root_content_hash(&resolved_root, &resolved_media, resolved_deleted);
-        let mut parents = vec![stable_version_id.clone()];
-        parents.extend(branch_ids.iter().cloned());
-        parents.sort();
-        parents.dedup();
+        // A resolution mutation has one direct causal base. The closed full
+        // branch set is durably bound by its snapshot/request receipt, not
+        // encoded as an ambiguous multi-parent `base_version`.
+        let parents = vec![stable_version_id.clone()];
         insert_version(
             &tx,
             &principal.family_id,
@@ -2842,6 +3020,18 @@ impl Store {
             now,
             &parents,
             &resolved_media,
+        )?;
+        save_version_provenance(
+            &tx,
+            &principal.family_id,
+            principal,
+            &entity_type,
+            &client_uuid,
+            &input.resolution_mutation_id,
+            "accepted",
+            Some(conflict_id),
+            &version_id,
+            now,
         )?;
         let rev = advance_rev(&tx, &principal.family_id)?;
         upsert_entity_projection(
@@ -2871,11 +3061,34 @@ impl Store {
             &client_uuid,
             &version_id,
         )?;
-        tx.execute(
+        let resolved = ResolveConflictResult {
+            status: "accepted".to_owned(),
+            resolution_mutation_id: input.resolution_mutation_id.clone(),
+            stable_version_id: Some(version_id.clone()),
+            stable_root: resolved_root.clone(),
+            stable_media: resolved_media.clone(),
+            replay: Some(false),
+            error: None,
+        };
+        let stored_receipt = serde_json::to_string(&StoredResolutionReceipt {
+            request_hash,
+            result: resolved.clone(),
+        })?;
+        let updated = tx.execute(
             "UPDATE conflicts SET status = 'resolved', resolved_at = ?1, stable_version_id = ?2
-             WHERE family_id = ?3 AND conflict_id = ?4",
-            params![now, version_id, principal.family_id, conflict_id],
+             WHERE family_id = ?3 AND conflict_id = ?4 AND status = 'open'
+               AND stable_version_id = ?5",
+            params![
+                now,
+                version_id,
+                principal.family_id,
+                conflict_id,
+                stable_version_id,
+            ],
         )?;
+        if updated != 1 {
+            return Ok(rejected_resolution(&input, "cas_mismatch"));
+        }
         tx.execute(
             "INSERT INTO conflict_resolutions(
                 family_id, conflict_id, resolution_mutation_id, resolver_membership_id,
@@ -2887,9 +3100,9 @@ impl Store {
                 conflict_id,
                 input.resolution_mutation_id,
                 principal.membership_id,
-                input.expected_stable_version,
-                serde_json::to_string(&input.expected_branch_versions)?,
-                serde_json::to_string(&input.conflict_choices)?,
+                stable_version_id,
+                serde_json::to_string(&branch_ids)?,
+                stored_receipt,
                 version_id,
                 now
             ],
@@ -2908,76 +3121,8 @@ impl Store {
         }
         tx.commit()?;
         self.promote_consumed_causal_media_for_family(&principal.family_id)?;
-        Ok(ResolveConflictResult {
-            status: "resolved".to_owned(),
-            stable_version_id: Some(version_id),
-            stable_root: resolved_root,
-            stable_media: resolved_media,
-            code: None,
-            conflict_summary: None,
-        })
+        Ok(resolved)
     }
-}
-
-/// Rebuild authoritative root/media/deleted from auto_merged ⊕ choices.
-fn rebuild_from_auto_merged(
-    stable: &StableSnapshot,
-    auto_merged: &Map<String, Value>,
-    choices: &Map<String, Value>,
-    conflicting_paths: &[String],
-) -> (Map<String, Value>, Vec<CausalMediaItem>, bool) {
-    let mut root = stable.root.clone();
-    // Apply auto_merged non-media paths first.
-    for (path, value) in auto_merged {
-        if path == "/_mutation.deleted" || path.starts_with("/media/") {
-            continue;
-        }
-        set_path(&mut root, path, value.clone());
-    }
-    // Apply conflict choices (authoritative for conflicting paths).
-    for path in conflicting_paths {
-        if path == "/_mutation.deleted" || path.starts_with("/media/") {
-            continue;
-        }
-        if let Some(v) = choices.get(path) {
-            set_path(&mut root, path, v.clone());
-        }
-    }
-    let mut deleted = stable.deleted_at.is_some();
-    if let Some(Value::Bool(d)) = choices.get("/_mutation.deleted") {
-        deleted = *d;
-    } else if let Some(Value::Bool(d)) = auto_merged.get("/_mutation.deleted") {
-        deleted = *d;
-    }
-
-    // Media: start from stable, apply auto_merged media paths, then choices.
-    let mut media_map: BTreeMap<String, CausalMediaItem> = stable
-        .media
-        .iter()
-        .map(|m| (m.media_uuid.clone(), m.clone()))
-        .collect();
-    for (path, value) in auto_merged {
-        if let Some(uuid) = path.strip_prefix("/media/") {
-            if value.is_null() {
-                media_map.remove(uuid);
-            } else if let Some(item) = CausalMediaItem::from_value(value) {
-                media_map.insert(uuid.to_owned(), item);
-            }
-        }
-    }
-    for path in conflicting_paths {
-        if let Some(uuid) = path.strip_prefix("/media/") {
-            if let Some(value) = choices.get(path) {
-                if value.is_null() {
-                    media_map.remove(uuid);
-                } else if let Some(item) = CausalMediaItem::from_value(value) {
-                    media_map.insert(uuid.to_owned(), item);
-                }
-            }
-        }
-    }
-    let media: Vec<CausalMediaItem> = media_map.into_values().collect();
-    (root, media_sorted(media), deleted)
 }
 
 // serde Deserialize for CausalUnitResult (receipt round-trip).

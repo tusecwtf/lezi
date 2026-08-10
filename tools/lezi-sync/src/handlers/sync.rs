@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -14,8 +15,9 @@ use crate::model::{
     MAX_BUNDLE_MEDIA_ENTITIES,
 };
 use crate::store::{
-    CausalMediaItem, CausalMutation, ConflictDetailPage, ConflictDetailPageRequest, PullPage,
-    PulledEntity, ReconcileResult, ReconcileUnit, ResolveConflictInput, StoreError,
+    CausalMediaItem, CausalMutation, ConflictDetailPage, ConflictDetailPageRequest,
+    ConflictResolutionChoice, PullPage, PulledEntity, ReconcileResult, ReconcileUnit,
+    ResolveConflictInput, StoreError,
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
@@ -243,14 +245,97 @@ struct RawCausalMutation {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolveRequest {
-    expected_stable_version: String,
-    expected_branch_versions: Vec<String>,
-    resolved_root: Map<String, Value>,
-    #[serde(default)]
-    resolved_media: Vec<CausalMediaItem>,
+    snapshot_token: String,
     resolution_mutation_id: String,
-    #[serde(default)]
-    conflict_choices: Map<String, Value>,
+    choices: Vec<ConflictResolutionChoice>,
+}
+
+const MAX_RESOLVE_BODY_BYTES: usize = 128 * 1024;
+
+fn terminal_resolve_rejection(mutation_id: Option<&str>, code: &str) -> Json<Value> {
+    let mut value = json!({
+        "status": "rejected",
+        "error": { "code": code, "retryable": false },
+    });
+    if let Some(mutation_id) = mutation_id {
+        value
+            .as_object_mut()
+            .expect("terminal envelope is an object")
+            .insert(
+                "resolution_mutation_id".to_owned(),
+                Value::String(mutation_id.to_owned()),
+            );
+    }
+    Json(value)
+}
+
+fn classify_resolve_request(raw: &[u8]) -> Result<ResolveRequest, Json<Value>> {
+    if raw.len() > MAX_RESOLVE_BODY_BYTES {
+        return Err(terminal_resolve_rejection(None, "wrong_type"));
+    }
+    let value: Value =
+        serde_json::from_slice(raw).map_err(|_| terminal_resolve_rejection(None, "wrong_type"))?;
+    let Some(object) = value.as_object() else {
+        return Err(terminal_resolve_rejection(None, "wrong_type"));
+    };
+    let mutation_id = object
+        .get("resolution_mutation_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let allowed = ["snapshot_token", "resolution_mutation_id", "choices"];
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(terminal_resolve_rejection(
+            mutation_id.as_deref(),
+            "unknown_field",
+        ));
+    }
+    if allowed.iter().any(|key| !object.contains_key(*key)) {
+        return Err(terminal_resolve_rejection(
+            mutation_id.as_deref(),
+            "missing_field",
+        ));
+    }
+    if !object["snapshot_token"].is_string()
+        || !object["resolution_mutation_id"].is_string()
+        || !object["choices"].is_array()
+    {
+        return Err(terminal_resolve_rejection(
+            mutation_id.as_deref(),
+            "wrong_type",
+        ));
+    }
+    for choice in object["choices"].as_array().expect("checked array") {
+        let Some(choice) = choice.as_object() else {
+            return Err(terminal_resolve_rejection(
+                mutation_id.as_deref(),
+                "wrong_type",
+            ));
+        };
+        let choice_allowed = ["path", "choice_id"];
+        if choice
+            .keys()
+            .any(|key| !choice_allowed.contains(&key.as_str()))
+        {
+            return Err(terminal_resolve_rejection(
+                mutation_id.as_deref(),
+                "unknown_field",
+            ));
+        }
+        if choice_allowed.iter().any(|key| !choice.contains_key(*key)) {
+            return Err(terminal_resolve_rejection(
+                mutation_id.as_deref(),
+                "missing_field",
+            ));
+        }
+        if !choice["path"].is_string() || !choice["choice_id"].is_string() {
+            return Err(terminal_resolve_rejection(
+                mutation_id.as_deref(),
+                "wrong_type",
+            ));
+        }
+    }
+    serde_json::from_value(value)
+        .map_err(|_| terminal_resolve_rejection(mutation_id.as_deref(), "wrong_type"))
 }
 
 fn parse_causal_units(request: CausalBatchRequest) -> Result<Vec<CausalMutation>, ApiError> {
@@ -451,18 +536,18 @@ pub(crate) async fn resolve_conflict(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(conflict_id): Path<String>,
-    body: Result<Json<ResolveRequest>, JsonRejection>,
+    body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
     let principal = authenticate(&state, &headers).await?;
     require_supported_client(&state, &headers).await?;
-    let request = json_body(body)?;
+    let request = match classify_resolve_request(&body) {
+        Ok(request) => request,
+        Err(rejection) => return Ok(rejection),
+    };
     let input = ResolveConflictInput {
-        expected_stable_version: request.expected_stable_version,
-        expected_branch_versions: request.expected_branch_versions,
-        resolved_root: request.resolved_root,
-        resolved_media: request.resolved_media,
+        snapshot_token: request.snapshot_token,
         resolution_mutation_id: request.resolution_mutation_id,
-        conflict_choices: request.conflict_choices,
+        choices: request.choices,
     };
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
@@ -473,10 +558,6 @@ pub(crate) async fn resolve_conflict(
             .resolve_conflict(&principal, &conflict_id, input, blocking_state.now())
             .map_err(|error| match error {
                 StoreError::ConflictNotFound => ApiError::not_found("conflict not found"),
-                StoreError::ForbiddenBaby
-                | StoreError::ForbiddenRecord
-                | StoreError::ForbiddenCarePlan
-                | StoreError::ForbiddenCustomItem => ApiError::unprocessable(error.to_string()),
                 other => other.into(),
             })
     })

@@ -54,7 +54,7 @@ post-0.3.13/01 implementation stabilizes
 ## Frontier
 
 本 tracker 暂无可执行 frontier：`19` 仍等待 causal hardening 04。跨 tracker 的下一张串行
-frontier 是 causal hardening H03；一个 agent 不应并行领取图中共享同一箭头端点的票；已标
+frontier 是 causal hardening H04；H03 已实现；一个 agent 不应并行领取图中共享同一箭头端点的票；已标
 implemented 的 02/04/09/18 不是 frontier。
 
 ## Excluded as already owned

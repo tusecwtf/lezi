@@ -13,7 +13,8 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::causal::{ConflictHeads, StableSnapshot};
+use super::causal::{ConflictHeads, ConflictResolutionChoice, StableSnapshot};
+use super::causal_merge::set_path;
 use super::{migration_content_hash, CausalMediaItem, StoreError};
 
 const SYSTEM_RECEIPT_PRINCIPAL: &str = "__conflict_snapshot_v2__";
@@ -121,6 +122,25 @@ pub(super) struct ConflictSnapshotBinding<'a> {
     pub receipt_key: &'a [u8],
 }
 
+pub(super) struct AuthoritativeResolution {
+    pub root: Map<String, Value>,
+    pub media: Vec<CausalMediaItem>,
+    pub deleted: bool,
+}
+
+pub(super) enum ConflictResolutionRejection {
+    InvalidChoice,
+    DuplicateChoice,
+    IncompleteChoices,
+    Store(StoreError),
+}
+
+impl From<StoreError> for ConflictResolutionRejection {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
 impl ConflictSnapshotBinding<'_> {
     fn fingerprint(&self) -> String {
         let mut parts = vec![
@@ -150,6 +170,8 @@ struct StoredSnapshotReceipt {
     continuation_nonces: Vec<String>,
     #[serde(default)]
     choice_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    resolution_ready: bool,
     page_digests: Vec<String>,
     integrity_tag: String,
 }
@@ -203,6 +225,11 @@ impl StoredSnapshotReceipt {
             &[
                 &self.token_nonce,
                 &self.layout_binding(),
+                if self.resolution_ready {
+                    "resolution-ready"
+                } else {
+                    "resolution-pending"
+                },
                 &serde_json::to_string(&self.page_digests).expect("page digests are serializable"),
             ],
         )
@@ -631,6 +658,161 @@ fn choice_binding(path: &str, candidate: &ConflictCandidate) -> Result<String, S
     ))?)))
 }
 
+fn apply_resolution_outcome(
+    root: &mut Map<String, Value>,
+    media: &mut BTreeMap<String, CausalMediaItem>,
+    deleted: &mut bool,
+    path: &str,
+    outcome: &ConflictOutcome,
+) -> Result<(), StoreError> {
+    if path == "/_mutation.deleted" {
+        *deleted = match outcome {
+            ConflictOutcome::Set {
+                value: Value::Bool(false),
+            } => false,
+            ConflictOutcome::Remove => true,
+            _ => return Err(StoreError::InvalidStoredPayload),
+        };
+        return Ok(());
+    }
+    if let Some(media_uuid) = path.strip_prefix("/media/") {
+        match outcome {
+            ConflictOutcome::Set { value } => {
+                let item = CausalMediaItem::from_value(value)
+                    .filter(|item| item.media_uuid == media_uuid)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                media.insert(media_uuid.to_owned(), item);
+            }
+            ConflictOutcome::Remove => {
+                media.remove(media_uuid);
+            }
+        }
+        return Ok(());
+    }
+    match outcome {
+        ConflictOutcome::Set { value } => {
+            set_path(root, path, value.clone());
+            Ok(())
+        }
+        ConflictOutcome::Remove => Err(StoreError::InvalidStoredPayload),
+    }
+}
+
+pub(super) fn authorize_snapshot_resolution(
+    tx: &Transaction<'_>,
+    binding: &ConflictSnapshotBinding<'_>,
+    material: &ConflictSnapshotMaterial,
+    snapshot_token: &str,
+    choices: &[ConflictResolutionChoice],
+    now: i64,
+) -> Result<AuthoritativeResolution, ConflictResolutionRejection> {
+    let fingerprint = binding.fingerprint();
+    let receipt_id = binding.receipt_id();
+    let receipts: Vec<StoredSnapshotReceipt> = super::causal::load_receipt(
+        tx,
+        binding.family_id,
+        SYSTEM_RECEIPT_PRINCIPAL,
+        binding.entity_type,
+        binding.client_uuid,
+        &receipt_id,
+    )?
+    .map(|(_, json)| serde_json::from_str(&json).map_err(StoreError::from))
+    .transpose()?
+    .unwrap_or_default();
+    let receipt = receipts
+        .iter()
+        .find(|receipt| {
+            crate::constant_time_eq(
+                receipt.token(binding.receipt_key).as_bytes(),
+                snapshot_token.as_bytes(),
+            )
+        })
+        .ok_or(StoreError::InvalidSnapshotToken)?;
+    if !crate::constant_time_eq(
+        receipt
+            .expected_integrity_tag(binding.receipt_key)
+            .as_bytes(),
+        receipt.integrity_tag.as_bytes(),
+    ) {
+        return Err(StoreError::InvalidStoredPayload.into());
+    }
+    if now >= receipt.expires_at_seconds {
+        return Err(StoreError::SnapshotExpired.into());
+    }
+    if receipt.fingerprint != fingerprint {
+        return Err(StoreError::SnapshotStale.into());
+    }
+    if !receipt.resolution_ready {
+        return Err(ConflictResolutionRejection::IncompleteChoices);
+    }
+
+    let mut selected = BTreeMap::new();
+    for choice in choices {
+        if selected.insert(choice.path.as_str(), choice).is_some() {
+            return Err(ConflictResolutionRejection::DuplicateChoice);
+        }
+    }
+    let expected_paths = material
+        .conflicting
+        .iter()
+        .map(|item| item.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected.keys().any(|path| !expected_paths.contains(path)) {
+        return Err(ConflictResolutionRejection::InvalidChoice);
+    }
+    if selected.len() != expected_paths.len() {
+        return Err(ConflictResolutionRejection::IncompleteChoices);
+    }
+
+    let mut root = material.stable.root.clone();
+    let mut media = material
+        .stable
+        .media
+        .iter()
+        .cloned()
+        .map(|item| (item.media_uuid.clone(), item))
+        .collect::<BTreeMap<_, _>>();
+    let mut deleted = material.stable.deleted;
+    for merged in &material.auto_merged {
+        apply_resolution_outcome(
+            &mut root,
+            &mut media,
+            &mut deleted,
+            &merged.path,
+            &merged.outcome,
+        )?;
+    }
+    for conflict in &material.conflicting {
+        let choice = selected
+            .get(conflict.path.as_str())
+            .ok_or(ConflictResolutionRejection::IncompleteChoices)?;
+        let candidate = conflict
+            .candidates
+            .iter()
+            .find(|candidate| {
+                choice_binding(&conflict.path, candidate)
+                    .ok()
+                    .and_then(|candidate_binding| receipt.choice_ids.get(&candidate_binding))
+                    .is_some_and(|expected| {
+                        crate::constant_time_eq(expected.as_bytes(), choice.choice_id.as_bytes())
+                    })
+            })
+            .ok_or(ConflictResolutionRejection::InvalidChoice)?;
+        apply_resolution_outcome(
+            &mut root,
+            &mut media,
+            &mut deleted,
+            &conflict.path,
+            &candidate.outcome,
+        )?;
+    }
+    Ok(AuthoritativeResolution {
+        root,
+        media: media.into_values().collect(),
+        deleted,
+    })
+}
+
 fn render_page(
     receipt: &StoredSnapshotReceipt,
     material: &ConflictSnapshotMaterial,
@@ -738,6 +920,7 @@ fn plan_receipt(
             .into_iter()
             .map(|binding| (binding, random_nonce()))
             .collect(),
+        resolution_ready: false,
         page_digests: vec![],
         integrity_tag: String::new(),
     };
@@ -780,6 +963,7 @@ fn plan_receipt(
             Ok(hex::encode(Sha256::digest(serde_json::to_vec(&page)?)))
         })
         .collect::<Result<_, StoreError>>()?;
+    receipt.resolution_ready = receipt.page_ends.len() == 1;
     receipt.integrity_tag = receipt.expected_integrity_tag(binding.receipt_key);
     Ok(receipt)
 }
@@ -857,30 +1041,32 @@ pub(super) fn open_conflict_detail_page(
     let requested = match request {
         ConflictDetailPageRequest::First => receipts
             .iter()
-            .rev()
-            .find(|receipt| receipt.fingerprint == fingerprint && now < receipt.expires_at_seconds)
-            .map(|receipt| (receipt, receipt.token(binding.receipt_key), 0)),
+            .rposition(|receipt| {
+                receipt.fingerprint == fingerprint && now < receipt.expires_at_seconds
+            })
+            .map(|index| (index, receipts[index].token(binding.receipt_key), 0)),
         ConflictDetailPageRequest::SnapshotToken(token) => receipts
             .iter()
-            .find(|receipt| {
+            .position(|receipt| {
                 crate::constant_time_eq(
                     receipt.token(binding.receipt_key).as_bytes(),
                     token.as_bytes(),
                 )
             })
-            .map(|receipt| (receipt, token, 0)),
+            .map(|index| (index, token, 0)),
         ConflictDetailPageRequest::Continuation {
             snapshot_token,
             continuation,
         } => receipts
             .iter()
-            .find(|receipt| {
+            .position(|receipt| {
                 crate::constant_time_eq(
                     receipt.token(binding.receipt_key).as_bytes(),
                     snapshot_token.as_bytes(),
                 )
             })
-            .and_then(|receipt| {
+            .and_then(|index| {
+                let receipt = &receipts[index];
                 (0..receipt.continuation_nonces.len())
                     .find(|page_index| {
                         receipt
@@ -892,19 +1078,26 @@ pub(super) fn open_conflict_detail_page(
                                 )
                             })
                     })
-                    .map(|page_index| (receipt, snapshot_token, page_index + 1))
+                    .map(|page_index| (index, snapshot_token, page_index + 1))
             }),
     };
-    if let Some((receipt, token, page_index)) = requested {
-        return checked_page(
-            receipt,
+    if let Some((receipt_index, token, page_index)) = requested {
+        let result = checked_page(
+            &receipts[receipt_index],
             &material,
             binding.receipt_key,
             &token,
             &fingerprint,
             now,
             page_index,
-        );
+        )?;
+        if result.complete && !receipts[receipt_index].resolution_ready {
+            receipts[receipt_index].resolution_ready = true;
+            receipts[receipt_index].integrity_tag =
+                receipts[receipt_index].expected_integrity_tag(binding.receipt_key);
+            save_receipts(tx, &binding, &receipt_id, &receipts, now)?;
+        }
+        return Ok(result);
     }
     if !first_request {
         return Err(StoreError::InvalidSnapshotToken);
@@ -943,6 +1136,7 @@ pub(super) mod test_hook {
     pub(crate) enum BusyOperation {
         Snapshot,
         Writer,
+        Resolution,
     }
 
     thread_local! {
@@ -953,6 +1147,9 @@ pub(super) mod test_hook {
     struct State {
         snapshot_busy: usize,
         writer_busy: usize,
+        resolution_busy: usize,
+        resolution_entries: usize,
+        resolution_releases: usize,
         projection_loaded: bool,
         released: bool,
     }
@@ -1019,6 +1216,7 @@ pub(super) mod test_hook {
                     notify(family_id, |state| match operation {
                         BusyOperation::Snapshot => state.snapshot_busy += 1,
                         BusyOperation::Writer => state.writer_busy += 1,
+                        BusyOperation::Resolution => state.resolution_busy += 1,
                     });
                 }
             });
@@ -1072,6 +1270,27 @@ pub(super) mod test_hook {
         }
     }
 
+    pub(crate) fn resolution_entered(family_id: &str) {
+        let hook = lock_unpoisoned(hooks()).get(family_id).cloned();
+        if let Some(hook) = hook {
+            let mut state = lock_unpoisoned(&hook.state);
+            state.resolution_entries += 1;
+            let entry = state.resolution_entries;
+            hook.changed.notify_all();
+            while state.resolution_releases < entry {
+                let (next, timeout) = hook
+                    .changed
+                    .wait_timeout(state, hook.timeout)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if timeout.timed_out() {
+                    drop(next);
+                    panic!("resolution hook release timed out");
+                }
+                state = next;
+            }
+        }
+    }
+
     impl Control {
         pub(crate) fn wait_projection(&self) {
             self.wait(|state| state.projection_loaded);
@@ -1083,6 +1302,20 @@ pub(super) mod test_hook {
 
         pub(crate) fn wait_writer_busy(&self) {
             self.wait(|state| state.writer_busy >= 1);
+        }
+
+        pub(crate) fn wait_resolution_busy(&self) {
+            self.wait(|state| state.resolution_busy >= 1);
+        }
+
+        pub(crate) fn wait_resolution_entry(&self, count: usize) {
+            self.wait(|state| state.resolution_entries >= count);
+        }
+
+        pub(crate) fn release_one_resolution(&self) {
+            let mut state = lock_unpoisoned(&self.hook.state);
+            state.resolution_releases += 1;
+            self.hook.changed.notify_all();
         }
 
         fn wait(&self, ready: impl Fn(&State) -> bool) {
@@ -1104,6 +1337,7 @@ pub(super) mod test_hook {
         pub(crate) fn release(&self) {
             let mut state = lock_unpoisoned(&self.hook.state);
             state.released = true;
+            state.resolution_releases = usize::MAX;
             self.hook.changed.notify_all();
         }
     }

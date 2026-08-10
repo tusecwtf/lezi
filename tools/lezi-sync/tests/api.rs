@@ -15336,11 +15336,6 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
         .as_str()
         .unwrap()
         .to_owned();
-    let branch_id = right["results"][0]["branch_version_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-
     let (status, detail) = get_json(
         &rig.app,
         &format!("/v1/conflicts/{conflict_id}"),
@@ -15427,34 +15422,175 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
                 })
         }));
 
+    let resolution_mutation_id = Uuid::new_v4().to_string();
+    let resolve_body = json!({
+        "snapshot_token": detail["snapshot_token"],
+        "resolution_mutation_id": resolution_mutation_id.clone(),
+        "choices": [conflict_set_choice(&detail, "/note", json!("c"))]
+    });
+    let valid_choice = conflict_set_choice(&detail, "/note", json!("c"));
+    let malformed_id = Uuid::new_v4().to_string();
+    let malformed_cases = [
+        (
+            json!({
+                "expected_stable_version": v2,
+                "expected_branch_versions": [],
+                "resolved_root": {},
+                "resolved_media": [],
+                "resolution_mutation_id": malformed_id,
+                "conflict_choices": {}
+            }),
+            "unknown_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+            }),
+            "missing_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": {},
+            }),
+            "wrong_type",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": [{"path": "/note", "choice_id": valid_choice["choice_id"], "value": "c"}],
+            }),
+            "unknown_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": [{"path": "/note"}],
+            }),
+            "missing_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": [{"path": 7, "choice_id": valid_choice["choice_id"]}],
+            }),
+            "wrong_type",
+        ),
+    ];
+    for (malformed, expected_code) in malformed_cases {
+        let (status, rejected) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/conflicts/{conflict_id}/resolve"),
+            Some(token),
+            malformed,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rejected}");
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(rejected["resolution_mutation_id"], malformed_id);
+        assert_eq!(
+            rejected["error"],
+            json!({"code": expected_code, "retryable": false})
+        );
+        assert_eq!(
+            rejected
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["error", "resolution_mutation_id", "status"]),
+        );
+        let (detail_status, still_open) = get_json(
+            &rig.app,
+            &format!("/v1/conflicts/{conflict_id}"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(detail_status, StatusCode::OK, "{still_open}");
+        assert_eq!(still_open["conflict_id"], conflict_id);
+    }
+    for rejected_body in [
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": vec![valid_choice.clone(); 65],
+        }),
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [{
+                "path": format!("/{}", "x".repeat(1_024)),
+                "choice_id": valid_choice["choice_id"],
+            }],
+        }),
+    ] {
+        let (status, rejected) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/conflicts/{conflict_id}/resolve"),
+            Some(token),
+            rejected_body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "non_canonical_value");
+    }
     let (status, resolved) = json_request(
         &rig.app,
         Method::POST,
         &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(token),
-        json!({
-            "expected_stable_version": v2,
-            "expected_branch_versions": [branch_id],
-            "resolved_root": {
-                "baby_client_uuid": baby_id,
-                "type": "formula",
-                "custom_item_client_uuid": null,
-                "timestamp": 100,
-                "end_timestamp": null,
-                "note": "c",
-                "payload_json": {"amount_ml": 100},
-                "schema_version": 2,
-                "updated_at": 50
-            },
-            "resolved_media": [],
-            "resolution_mutation_id": Uuid::new_v4().to_string(),
-            "conflict_choices": {"/note": "c"}
-        }),
+        resolve_body.clone(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resolved}");
-    assert_eq!(resolved["status"], "resolved");
+    assert_eq!(resolved["status"], "accepted");
+    assert_eq!(resolved["replay"], false);
     assert_eq!(resolved["stable_root"]["note"], "c");
+
+    let (status, replay) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["status"], "accepted");
+    assert_eq!(replay["replay"], true);
+    assert_eq!(replay["stable_version_id"], resolved["stable_version_id"]);
+
+    let (status, drift) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": resolution_mutation_id,
+            "choices": [conflict_set_choice(&detail, "/note", json!("b"))]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{drift}");
+    assert_eq!(drift["error"]["code"], "content_drift");
+    assert_eq!(
+        drift
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["error", "resolution_mutation_id", "status"]),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -15519,6 +15655,21 @@ fn causal_media_item(media_uuid: Uuid, role: &str, sha256: &str, byte_size: usiz
         "width": 1,
         "height": 1
     })
+}
+
+fn conflict_set_choice(detail: &Value, path: &str, expected: Value) -> Value {
+    let choice_id = detail["conflicting"]
+        .as_array()
+        .and_then(|paths| paths.iter().find(|item| item["path"] == path))
+        .and_then(|item| item["candidates"].as_array())
+        .and_then(|candidates| {
+            candidates.iter().find(|candidate| {
+                candidate["outcome"]["op"] == "set" && candidate["outcome"]["value"] == expected
+            })
+        })
+        .and_then(|candidate| candidate["choice_id"].as_str())
+        .unwrap_or_else(|| panic!("missing {path} conflict choice"));
+    json!({"path": path, "choice_id": choice_id})
 }
 
 fn causal_unit(
@@ -15621,6 +15772,223 @@ async fn commit_causal_record(
     );
     let (status, body) = causal_commit_units(app, token, vec![mutation.clone()]).await;
     (status, body, mutation)
+}
+
+#[tokio::test]
+async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "choice-media-owner",
+        "choice-media-create-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let removed_id = Uuid::new_v4();
+    let added_id = Uuid::new_v4();
+    let removed_bytes = vec![1_u8; 4];
+    let added_bytes = vec![2_u8; 5];
+    assert_eq!(
+        put_causal_media_bytes(&rig.app, token, removed_id, &removed_bytes)
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let removed_media = causal_media_item(
+        removed_id,
+        "log",
+        &hex::encode(Sha256::digest(&removed_bytes)),
+        removed_bytes.len(),
+    );
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "base", 100, 20),
+            vec![removed_media],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base = created["results"][0]["stable_version_id"].as_str().unwrap();
+    assert_eq!(
+        put_causal_media_bytes(&rig.app, token, added_id, &added_bytes)
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let added_media = causal_media_item(
+        added_id,
+        "log",
+        &hex::encode(Sha256::digest(&added_bytes)),
+        added_bytes.len(),
+    );
+    let (status, live) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(base),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "stable-live", 100, 30),
+            vec![added_media.clone()],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{live}");
+    let live_version = live["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, tombstone) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(base),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "offline-delete", 100, 40),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tombstone}");
+    assert_eq!(tombstone["results"][0]["status"], "branched");
+    let tombstone_version = tombstone["results"][0]["branch_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict_id = tombstone["results"][0]["conflict_id"].as_str().unwrap();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["deleted"] == true));
+    let mut choices = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let candidate = item["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| {
+                    if item["path"] == "/_mutation.deleted" {
+                        candidate["outcome"] == json!({"op": "remove"})
+                    } else {
+                        candidate["sources"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|source| source["version_id"] == tombstone_version)
+                    }
+                })
+                .unwrap();
+            json!({"path": item["path"], "choice_id": candidate["choice_id"]})
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap()
+            .cmp(right["path"].as_str().unwrap())
+    });
+    let resolve = json!({
+        "snapshot_token": detail["snapshot_token"],
+        "resolution_mutation_id": Uuid::new_v4().to_string(),
+        "choices": choices,
+    });
+    let (status, accepted) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["stable_root"]["note"], "offline-delete");
+    assert!(accepted.get("stable_media").is_none());
+    let resolved_version = accepted["stable_version_id"].as_str().unwrap();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (deleted_at, parent_count, parent): (Option<i64>, i64, String) = connection
+        .query_row(
+            "SELECT v.deleted_at, COUNT(p.parent_version_id), MIN(p.parent_version_id)
+             FROM entity_versions v
+             JOIN entity_version_parents p
+               ON p.family_id = v.family_id AND p.version_id = v.version_id
+             WHERE v.version_id = ?1 GROUP BY v.family_id, v.version_id",
+            [resolved_version],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(deleted_at.is_some());
+    assert_eq!(parent_count, 1);
+    assert_eq!(parent, live_version);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE membership_id = '__version_provenance_v2__' AND mutation_id = ?1",
+                [resolved_version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], owner["membership_id"]);
+    assert_eq!(provenance["device_id"], owner["device_id"]);
+    let (status, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{pull}");
+    let entities = pull["entities"].as_array().unwrap();
+    let record = entities
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id.to_string())
+        .unwrap();
+    assert!(record["deleted_at"].is_number());
+    assert_eq!(record["version_id"], accepted["stable_version_id"]);
+    assert!(entities.iter().any(|entity| {
+        entity["type"] == "media"
+            && entity["client_uuid"] == added_id.to_string()
+            && entity["deleted_at"].is_number()
+    }));
+    assert!(entities.iter().any(|entity| {
+        entity["type"] == "media"
+            && entity["client_uuid"] == removed_id.to_string()
+            && entity["deleted_at"].is_number()
+    }));
+    let (status, replay) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["replay"], true);
+    assert_eq!(replay["stable_root"], accepted["stable_root"]);
+    assert!(replay.get("stable_media").is_none());
 }
 
 #[tokio::test]
@@ -16755,10 +17123,6 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
         .as_str()
         .unwrap()
         .to_owned();
-    let branch_id = member_branch["results"][0]["branch_version_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     assert_eq!(
         member_branch["results"][0]["stable_version_id"].as_str(),
         Some(v_owner.as_str())
@@ -16777,24 +17141,72 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
     );
     assert_eq!(summary["conflict_id"], conflict_id);
 
-    // Stale resolve (wrong expected stable) fails closed; then good CAS wins.
+    let (status, first_detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first_detail}");
+    let first_choice = conflict_set_choice(&first_detail, "/note", json!("member-branch-note"));
+    let outsider = approve_new_member(&rig.app, owner_token, "two-client-merge-outsider").await;
+    let (status, forbidden) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(outsider["access_token"].as_str().unwrap()),
+        json!({
+            "snapshot_token": first_detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [first_choice.clone()]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{forbidden}");
+    assert_eq!(forbidden["error"]["code"], "forbidden");
+
+    // A new branch after detail invalidates the receipt-bound full set.
+    let (status, late_branch) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v_merged),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "late-branch", 180, 65),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{late_branch}");
+    assert_eq!(late_branch["results"][0]["status"], "branched");
+
     let (status, stale_resolve) = json_request(
         &rig.app,
         Method::POST,
         &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(owner_token),
         json!({
-            "expected_stable_version": v_merged,
-            "expected_branch_versions": [branch_id],
-            "resolved_root": causal_formula_root(baby_id, "member-branch-note", 180, 70),
-            "resolved_media": [],
+            "snapshot_token": first_detail["snapshot_token"],
             "resolution_mutation_id": Uuid::new_v4().to_string(),
-            "conflict_choices": {"/note": "member-branch-note"}
+            "choices": [first_choice]
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{stale_resolve}");
-    assert_eq!(stale_resolve["status"], "cas_mismatch", "{stale_resolve}");
+    assert_eq!(stale_resolve["status"], "rejected", "{stale_resolve}");
+    assert_eq!(stale_resolve["error"]["code"], "snapshot_stale");
+
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let member_choice = conflict_set_choice(&detail, "/note", json!("member-branch-note"));
 
     let (status, resolved) = json_request(
         &rig.app,
@@ -16802,44 +17214,32 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
         &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(owner_token),
         json!({
-            "expected_stable_version": v_owner,
-            "expected_branch_versions": [branch_id],
-            "resolved_root": causal_formula_root(baby_id, "member-branch-note", 180, 70),
-            "resolved_media": [],
+            "snapshot_token": detail["snapshot_token"],
             "resolution_mutation_id": Uuid::new_v4().to_string(),
-            "conflict_choices": {"/note": "member-branch-note"}
+            "choices": [member_choice]
         }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{resolved}");
-    assert_eq!(resolved["status"], "resolved");
+    assert_eq!(resolved["status"], "accepted");
     assert_eq!(resolved["stable_root"]["note"], "member-branch-note");
 
-    // Second resolve with pre-success expectations must fail closed (CAS or gone).
+    // A different resolution mutation cannot overwrite the closed conflict.
     let (status, race) = json_request(
         &rig.app,
         Method::POST,
         &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(member_token),
         json!({
-            "expected_stable_version": v_owner,
-            "expected_branch_versions": [branch_id],
-            "resolved_root": causal_formula_root(baby_id, "owner-wins-candidate", 180, 71),
-            "resolved_media": [],
+            "snapshot_token": detail["snapshot_token"],
             "resolution_mutation_id": Uuid::new_v4().to_string(),
-            "conflict_choices": {"/note": "owner-wins-candidate"}
+            "choices": [conflict_set_choice(&detail, "/note", json!("owner-wins-candidate"))]
         }),
     )
     .await;
-    assert!(
-        status == StatusCode::NOT_FOUND
-            || (status == StatusCode::OK
-                && matches!(
-                    race["status"].as_str(),
-                    Some("cas_mismatch") | Some("rejected")
-                )),
-        "second resolve after race must fail closed: {status} {race}"
-    );
+    assert_eq!(status, StatusCode::OK, "{race}");
+    assert_eq!(race["status"], "rejected");
+    assert_eq!(race["error"]["code"], "snapshot_stale");
 
     let member_pull = pull_entities(&rig.app, member_token, generation).await;
     let settled = find_entity(&member_pull, record_id);

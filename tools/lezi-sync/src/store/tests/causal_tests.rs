@@ -8,7 +8,7 @@ use super::test_support::*;
 use rusqlite::params;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, Barrier};
+use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -51,6 +51,132 @@ fn conflict_detail_pages(
             snapshot_token,
             continuation: continuation.expect("an incomplete page has continuation"),
         };
+    }
+}
+
+fn resolution_choice(
+    detail: &ConflictDetailPage,
+    path: &str,
+    outcome: ConflictOutcome,
+) -> ConflictResolutionChoice {
+    let candidate = detail
+        .conflicting
+        .iter()
+        .find(|item| item.path == path)
+        .and_then(|item| {
+            item.candidates
+                .iter()
+                .find(|candidate| candidate.outcome == outcome)
+        })
+        .unwrap_or_else(|| panic!("missing {path} resolution candidate"));
+    ConflictResolutionChoice {
+        path: path.to_owned(),
+        choice_id: candidate.choice_id.clone(),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ResolutionDurableState {
+    rev: i64,
+    entities: String,
+    versions: String,
+    parents: String,
+    version_media: String,
+    stable_heads: String,
+    receipts: String,
+    conflicts: String,
+    conflict_branches: String,
+    resolutions: String,
+    media_staging: String,
+    media_publications: String,
+}
+
+fn resolution_durable_state(
+    store: &Store,
+    family_id: &str,
+    _conflict_id: &str,
+    _client_uuid: Uuid,
+) -> ResolutionDurableState {
+    let connection = store.connect().unwrap();
+    let rows = |sql: &str| {
+        connection
+            .query_row(sql, params![family_id], |row| row.get(0))
+            .unwrap()
+    };
+    ResolutionDurableState {
+        rev: connection
+            .query_row(
+                "SELECT rev FROM family_meta WHERE family_id = ?1",
+                params![family_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+        entities: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(entity_type, client_uuid, updated_at, deleted_at,
+                    payload_json, rev) AS value FROM entities
+                 WHERE family_id = ?1 ORDER BY entity_type, client_uuid)",
+        ),
+        versions: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(version_id, entity_type, client_uuid, updated_at, deleted_at,
+                    payload_json, content_hash, mutation_id, origin, created_at) AS value
+                  FROM entity_versions WHERE family_id = ?1 ORDER BY version_id)",
+        ),
+        parents: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(version_id, parent_version_id) AS value
+                  FROM entity_version_parents WHERE family_id = ?1
+                 ORDER BY version_id, parent_version_id)",
+        ),
+        version_media: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(version_id, media_uuid, media_payload_json, content_hash) AS value
+                  FROM entity_version_media WHERE family_id = ?1 ORDER BY version_id, media_uuid)",
+        ),
+        stable_heads: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(entity_type, client_uuid, version_id) AS value
+                  FROM entity_stable_heads WHERE family_id = ?1 ORDER BY entity_type, client_uuid)",
+        ),
+        receipts: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(membership_id, entity_type, client_uuid, mutation_id,
+                    content_hash, status, stable_version_id, branch_version_id, conflict_id,
+                    receipt_json, created_at) AS value
+                  FROM mutation_receipts WHERE family_id = ?1
+                 ORDER BY membership_id, entity_type, client_uuid, mutation_id)",
+        ),
+        conflicts: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(conflict_id, entity_type, client_uuid, base_version_id,
+                    stable_version_id, status, kind, created_at, resolved_at) AS value
+                  FROM conflicts WHERE family_id = ?1 ORDER BY conflict_id)",
+        ),
+        conflict_branches: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(conflict_id, branch_version_id) AS value
+                  FROM conflict_branches WHERE family_id = ?1 ORDER BY conflict_id, branch_version_id)",
+        ),
+        resolutions: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(conflict_id, resolution_mutation_id, resolver_membership_id,
+                    expected_stable_version_id, expected_branch_versions_json,
+                    conflict_choices_json, resolved_version_id, created_at) AS value
+                  FROM conflict_resolutions WHERE family_id = ?1
+                 ORDER BY conflict_id, resolution_mutation_id)",
+        ),
+        media_staging: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(membership_id, media_uuid, sha256, byte_size, created_at,
+                    expires_at, status, consumed_at) AS value
+                  FROM causal_media_staging WHERE family_id = ?1 ORDER BY media_uuid)",
+        ),
+        media_publications: rows(
+            "SELECT json_group_array(value) FROM (
+                SELECT json_array(media_uuid, source, bundle_id) AS value
+                  FROM media_publications WHERE family_id = ?1 ORDER BY media_uuid)",
+        ),
     }
 }
 
@@ -912,52 +1038,56 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
         Some(v2.as_str())
     );
     let conflict_id = branched.results[0].conflict_id.clone().unwrap();
-    let branch_id = branched.results[0].branch_version_id.clone().unwrap();
-
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     assert!(detail.conflicting.iter().any(|item| item.path == "/note"));
     assert_eq!(detail.branches.len(), 1);
 
-    // CAS mismatch returns latest summary without write.
+    // A token, not client-declared stable/branch values, owns full-set CAS.
+    let mut tampered_token = detail.snapshot_token.clone();
+    let replacement = if tampered_token.starts_with('A') {
+        "B"
+    } else {
+        "A"
+    };
+    tampered_token.replace_range(..1, replacement);
     let bad = fx
         .store
         .resolve_conflict(
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: "wrong".into(),
-                expected_branch_versions: vec![branch_id.clone()],
-                resolved_root: record_root(fx.baby_id, "c", 100, 50),
-                resolved_media: vec![],
+                snapshot_token: tampered_token,
                 resolution_mutation_id: Uuid::new_v4().to_string(),
-                conflict_choices: map(json!({"/note": "c"})),
+                choices: vec![resolution_choice(
+                    &detail,
+                    "/note",
+                    ConflictOutcome::Set { value: json!("c") },
+                )],
             },
             1_700_000_003,
         )
         .unwrap();
-    assert_eq!(bad.status, "cas_mismatch");
-    assert!(bad.conflict_summary.is_some());
+    assert_eq!(bad.status, "rejected");
+    assert_eq!(bad.error.unwrap().code, "invalid_snapshot_token");
 
-    // Successful resolve.
-    let mut choices = Map::new();
-    choices.insert("/note".to_owned(), json!("c"));
     let ok = fx
         .store
         .resolve_conflict(
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: v2.clone(),
-                expected_branch_versions: vec![branch_id],
-                resolved_root: record_root(fx.baby_id, "c", 100, 50),
-                resolved_media: vec![],
+                snapshot_token: detail.snapshot_token.clone(),
                 resolution_mutation_id: Uuid::new_v4().to_string(),
-                conflict_choices: choices,
+                choices: vec![resolution_choice(
+                    &detail,
+                    "/note",
+                    ConflictOutcome::Set { value: json!("c") },
+                )],
             },
             1_700_000_004,
         )
         .unwrap();
-    assert_eq!(ok.status, "resolved");
+    assert_eq!(ok.status, "accepted");
     assert_eq!(
         ok.stable_root.get("note").and_then(Value::as_str),
         Some("c")
@@ -968,7 +1098,1007 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
 }
 
 #[test]
-fn causal_explicit_tombstone_restore_via_resolution() {
+fn choice_only_resolution_rebuilds_authoritative_result_and_replays_after_restart() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-choice"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let choice = resolution_choice(
+        &detail,
+        "/note",
+        ConflictOutcome::Set {
+            value: json!("branch-choice"),
+        },
+    );
+    let input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token.clone(),
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices: vec![choice],
+    };
+
+    let accepted = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_003)
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
+    assert_eq!(accepted.replay, Some(false));
+    assert_eq!(
+        accepted.stable_root.get("note").and_then(Value::as_str),
+        Some("branch-choice")
+    );
+
+    let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
+    let replay = restarted
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_004)
+        .unwrap();
+    assert_eq!(replay.status, "accepted");
+    assert_eq!(replay.replay, Some(true));
+    assert_eq!(replay.stable_version_id, accepted.stable_version_id);
+    assert_eq!(replay.stable_root, accepted.stable_root);
+    let stored: Value = restarted
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT conflict_choices_json FROM conflict_resolutions
+             WHERE family_id = ?1 AND conflict_id = ?2
+               AND resolution_mutation_id = ?3",
+            params![fx.family_id, conflict_id, input.resolution_mutation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map(|raw| serde_json::from_str(&raw).unwrap())
+        .unwrap();
+    assert_eq!(stored["request_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(stored["result"]["status"], "accepted");
+    assert_eq!(stored["result"]["stable_root"]["note"], "branch-choice");
+    assert!(!stored.to_string().contains(&detail.snapshot_token));
+
+    let later = restarted
+        .causal_commit(
+            &fx.owner,
+            vec![fx.record_mutation(record_id, Some(&base), "later-branch")],
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(later.results[0].status, "branched");
+    let later_detail = first_conflict_detail(
+        &restarted,
+        &fx.owner,
+        later.results[0].conflict_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        later_detail.stable.version_id,
+        accepted.stable_version_id.unwrap()
+    );
+}
+
+#[test]
+fn choice_only_resolution_replay_rejects_corrupt_terminal_receipt_and_audit() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-choice"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token.clone(),
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices: vec![resolution_choice(
+            &detail,
+            "/note",
+            ConflictOutcome::Set {
+                value: json!("branch-choice"),
+            },
+        )],
+    };
+    fx.store
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_003)
+        .unwrap();
+    let connection = fx.store.connect().unwrap();
+    let original: (String, String, String, String) = connection
+        .query_row(
+            "SELECT expected_stable_version_id, expected_branch_versions_json,
+                    conflict_choices_json, resolved_version_id
+             FROM conflict_resolutions
+             WHERE family_id = ?1 AND conflict_id = ?2 AND resolution_mutation_id = ?3",
+            params![fx.family_id, conflict_id, input.resolution_mutation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    let mut corrupt_receipt: Value = serde_json::from_str(&original.2).unwrap();
+    corrupt_receipt["result"]["stable_root"]["note"] = json!("stored-tamper");
+    let cases = [
+        (
+            "conflict_choices_json",
+            serde_json::to_string(&corrupt_receipt).unwrap(),
+        ),
+        ("resolved_version_id", original.0.clone()),
+        ("expected_stable_version_id", original.3.clone()),
+        ("expected_branch_versions_json", "[]".to_owned()),
+    ];
+    for (column, corrupted) in cases {
+        connection
+            .execute(
+                &format!(
+                    "UPDATE conflict_resolutions SET {column} = ?1
+                     WHERE family_id = ?2 AND conflict_id = ?3 AND resolution_mutation_id = ?4"
+                ),
+                params![
+                    corrupted,
+                    fx.family_id,
+                    conflict_id,
+                    input.resolution_mutation_id
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            fx.store
+                .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_004),
+            Err(StoreError::InvalidStoredPayload)
+        ));
+        connection
+            .execute(
+                "UPDATE conflict_resolutions SET expected_stable_version_id = ?1,
+                        expected_branch_versions_json = ?2, conflict_choices_json = ?3,
+                        resolved_version_id = ?4
+                 WHERE family_id = ?5 AND conflict_id = ?6 AND resolution_mutation_id = ?7",
+                params![
+                    original.0,
+                    original.1,
+                    original.2,
+                    original.3,
+                    fx.family_id,
+                    conflict_id,
+                    input.resolution_mutation_id
+                ],
+            )
+            .unwrap();
+    }
+
+    let original_payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM entity_versions
+             WHERE family_id = ?1 AND version_id = ?2",
+            params![fx.family_id, original.3],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut coordinated_receipt: Value = serde_json::from_str(&original.2).unwrap();
+    coordinated_receipt["result"]["stable_root"]["note"] = json!("coordinated-tamper");
+    let mut coordinated_payload: Value = serde_json::from_str(&original_payload).unwrap();
+    coordinated_payload["note"] = json!("coordinated-tamper");
+    connection
+        .execute(
+            "UPDATE conflict_resolutions SET conflict_choices_json = ?1
+             WHERE family_id = ?2 AND conflict_id = ?3 AND resolution_mutation_id = ?4",
+            params![
+                serde_json::to_string(&coordinated_receipt).unwrap(),
+                fx.family_id,
+                conflict_id,
+                input.resolution_mutation_id
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE entity_versions SET payload_json = ?1
+             WHERE family_id = ?2 AND version_id = ?3",
+            params![
+                serde_json::to_string(coordinated_payload.as_object().unwrap()).unwrap(),
+                fx.family_id,
+                original.3
+            ],
+        )
+        .unwrap();
+    let coordinated_result =
+        fx.store
+            .resolve_conflict(&fx.owner, &conflict_id, input, 1_700_000_004);
+    assert!(
+        matches!(coordinated_result, Err(StoreError::InvalidStoredPayload)),
+        "coordinated receipt/version drift returned {coordinated_result:?}"
+    );
+    connection
+        .execute(
+            "UPDATE conflict_resolutions SET conflict_choices_json = ?1
+             WHERE family_id = ?2 AND conflict_id = ?3",
+            params![original.2, fx.family_id, conflict_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE entity_versions SET payload_json = ?1
+             WHERE family_id = ?2 AND version_id = ?3",
+            params![original_payload, fx.family_id, original.3],
+        )
+        .unwrap();
+}
+
+#[test]
+fn choice_only_resolution_rejects_tamper_acl_and_incomplete_sets_without_write() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-choice"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let valid_choice = resolution_choice(
+        &detail,
+        "/note",
+        ConflictOutcome::Set {
+            value: json!("branch-choice"),
+        },
+    );
+    let request = |choices: Vec<ConflictResolutionChoice>| ResolveConflictInput {
+        snapshot_token: detail.snapshot_token.clone(),
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices,
+    };
+
+    let cases = [
+        (request(vec![]), "incomplete_choices"),
+        (
+            request(vec![valid_choice.clone(), valid_choice.clone()]),
+            "duplicate_choice",
+        ),
+        (
+            request(vec![ConflictResolutionChoice {
+                path: "/foreign".to_owned(),
+                choice_id: valid_choice.choice_id.clone(),
+            }]),
+            "invalid_choice",
+        ),
+        (
+            request(vec![ConflictResolutionChoice {
+                path: valid_choice.path.clone(),
+                choice_id: "A".repeat(43),
+            }]),
+            "invalid_choice",
+        ),
+        (
+            ResolveConflictInput {
+                snapshot_token: "x".repeat(44),
+                ..request(vec![valid_choice.clone()])
+            },
+            "non_canonical_value",
+        ),
+        (
+            request(vec![valid_choice.clone(); 65]),
+            "non_canonical_value",
+        ),
+        (
+            request(vec![ConflictResolutionChoice {
+                path: format!("/{}", "x".repeat(1_024)),
+                choice_id: valid_choice.choice_id.clone(),
+            }]),
+            "non_canonical_value",
+        ),
+    ];
+    for (input, expected) in cases {
+        let before = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+        let result = fx
+            .store
+            .resolve_conflict(&fx.owner, &conflict_id, input, 1_700_000_003)
+            .unwrap();
+        assert_eq!(result.status, "rejected");
+        assert_eq!(result.error.unwrap().code, expected);
+        assert_eq!(
+            resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id),
+            before,
+        );
+    }
+
+    let before = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    let forbidden = fx
+        .store
+        .resolve_conflict(
+            &fx.member,
+            &conflict_id,
+            request(vec![valid_choice.clone()]),
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(forbidden.error.unwrap().code, "forbidden");
+    assert_eq!(
+        resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id),
+        before,
+    );
+
+    let before = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    let expired = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            request(vec![valid_choice]),
+            detail.expires_at / 1_000,
+        )
+        .unwrap();
+    assert_eq!(expired.error.unwrap().code, "snapshot_expired");
+    assert_eq!(
+        resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id),
+        before,
+    );
+
+    let status: String = fx
+        .store
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT status FROM conflicts WHERE family_id = ?1 AND conflict_id = ?2",
+            params![fx.family_id, conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "open");
+}
+
+#[test]
+fn choice_only_resolution_requires_every_conflicting_path_exactly_once() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let created = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "record",
+                record_id,
+                None,
+                record_root(fx.baby_id, "base", 100, 20),
+                false,
+            ),
+            1_700_000_000,
+        )
+        .unwrap();
+    let base = created.results[0].stable_version_id.clone().unwrap();
+    fx.commit(
+        &fx.owner,
+        mut_unit(
+            "record",
+            record_id,
+            Some(&base),
+            record_root(fx.baby_id, "stable", 110, 30),
+            false,
+        ),
+        1_700_000_001,
+    )
+    .unwrap();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "record",
+                record_id,
+                Some(&base),
+                record_root(fx.baby_id, "branch", 120, 40),
+                false,
+            ),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    assert_eq!(detail.conflicting.len(), 2);
+    let note = resolution_choice(
+        &detail,
+        "/note",
+        ConflictOutcome::Set {
+            value: json!("branch"),
+        },
+    );
+    let amount = resolution_choice(
+        &detail,
+        "/payload_json/amount_ml",
+        ConflictOutcome::Set { value: json!(120) },
+    );
+    let mutation_id = Uuid::new_v4().to_string();
+    let partial = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token.clone(),
+                resolution_mutation_id: mutation_id.clone(),
+                choices: vec![note.clone()],
+            },
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(partial.error.unwrap().code, "incomplete_choices");
+    let unsorted = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token.clone(),
+                resolution_mutation_id: mutation_id.clone(),
+                choices: vec![amount.clone(), note.clone()],
+            },
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(unsorted.error.unwrap().code, "non_canonical_value");
+    let accepted = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token.clone(),
+                resolution_mutation_id: mutation_id.clone(),
+                choices: vec![note.clone(), amount.clone()],
+            },
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
+    let replay = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token,
+                resolution_mutation_id: mutation_id,
+                choices: vec![note, amount],
+            },
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(replay.replay, Some(true));
+}
+
+#[test]
+fn choice_only_resolution_request_drift_cannot_replace_the_original_terminal() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-choice"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let mutation_id = Uuid::new_v4().to_string();
+    let accepted_input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token.clone(),
+        resolution_mutation_id: mutation_id.clone(),
+        choices: vec![resolution_choice(
+            &detail,
+            "/note",
+            ConflictOutcome::Set {
+                value: json!("branch-choice"),
+            },
+        )],
+    };
+    let accepted = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, accepted_input, 1_700_000_003)
+        .unwrap();
+    let drifted = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token.clone(),
+                resolution_mutation_id: mutation_id,
+                choices: vec![resolution_choice(
+                    &detail,
+                    "/note",
+                    ConflictOutcome::Set {
+                        value: json!("stable"),
+                    },
+                )],
+            },
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(drifted.error.unwrap().code, "content_drift");
+    let pull = fx.store.pull(&fx.family_id, 0).unwrap();
+    let record = pull
+        .entities
+        .iter()
+        .find(|entity| entity.client_uuid == record_id.to_string())
+        .unwrap();
+    assert_eq!(record.payload.get("note"), Some(&json!("branch-choice")));
+    assert_eq!(
+        accepted.stable_version_id.as_deref(),
+        record.version_id.as_deref()
+    );
+}
+
+#[test]
+fn concurrent_choice_only_resolutions_publish_exactly_one_terminal() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-choice"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let choice = resolution_choice(
+        &detail,
+        "/note",
+        ConflictOutcome::Set {
+            value: json!("branch-choice"),
+        },
+    );
+    let before = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    let control = super::super::conflict_snapshots::test_hook::install(&fx.family_id);
+    let (results_tx, results_rx) = mpsc::channel();
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let store = fx.store.clone();
+        let owner = fx.owner.clone();
+        let conflict_id = conflict_id.clone();
+        let snapshot_token = detail.snapshot_token.clone();
+        let choice = choice.clone();
+        let results_tx = results_tx.clone();
+        handles.push(thread::spawn(move || {
+            let result = store
+                .resolve_conflict(
+                    &owner,
+                    &conflict_id,
+                    ResolveConflictInput {
+                        snapshot_token,
+                        resolution_mutation_id: Uuid::new_v4().to_string(),
+                        choices: vec![choice],
+                    },
+                    1_700_000_003,
+                )
+                .unwrap();
+            results_tx.send(result).unwrap();
+        }));
+    }
+    drop(results_tx);
+    control.wait_resolution_entry(1);
+    control.wait_resolution_busy();
+    control.release_one_resolution();
+    control.wait_resolution_entry(2);
+    let first = results_rx.recv().unwrap();
+    let after_winner = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    control.release_one_resolution();
+    let second = results_rx.recv().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let after_loser = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    assert_ne!(after_winner, before);
+    assert_eq!(after_loser, after_winner);
+    let results = [first, second];
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| result.status == "accepted")
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| {
+                result
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| error.code == "snapshot_stale")
+            })
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn ordinary_commit_and_choice_resolution_share_media_domain_validation() {
+    let fx = CausalFx::new();
+    let media_item = || CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".to_owned(),
+        sha256: "0".repeat(64),
+        byte_size: 1,
+        mime: "image/jpeg".to_owned(),
+        width: Some(1),
+        height: Some(1),
+    };
+    let mut media = (0..4).map(|_| media_item()).collect::<Vec<_>>();
+    for item in &mut media {
+        fx.stage_media_bytes(item);
+    }
+
+    let record_id = Uuid::new_v4();
+    let created = fx
+        .commit(
+            &fx.owner,
+            mut_unit(
+                "record",
+                record_id,
+                None,
+                record_root(fx.baby_id, "base", 100, 20),
+                false,
+            ),
+            1_700_000_000,
+        )
+        .unwrap();
+    let base = created.results[0].stable_version_id.clone().unwrap();
+    let mut stable = mut_unit(
+        "record",
+        record_id,
+        Some(&base),
+        record_root(fx.baby_id, "stable", 100, 30),
+        false,
+    );
+    stable.media = media[..2].to_vec();
+    assert_eq!(
+        fx.commit(&fx.owner, stable, 1_700_000_001).unwrap().results[0].status,
+        "accepted"
+    );
+    let mut branch = mut_unit(
+        "record",
+        record_id,
+        Some(&base),
+        record_root(fx.baby_id, "branch", 100, 40),
+        false,
+    );
+    branch.media = media[2..].to_vec();
+    let branched = fx.commit(&fx.owner, branch, 1_700_000_002).unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    assert_eq!(
+        detail
+            .auto_merged
+            .iter()
+            .filter(|merged| merged.path.starts_with("/media/"))
+            .count(),
+        4
+    );
+    let resolution = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                snapshot_token: detail.snapshot_token.clone(),
+                resolution_mutation_id: Uuid::new_v4().to_string(),
+                choices: vec![resolution_choice(
+                    &detail,
+                    "/note",
+                    ConflictOutcome::Set {
+                        value: json!("branch"),
+                    },
+                )],
+            },
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(resolution.error.unwrap().code, "invalid_domain");
+
+    let mut invalid_commit = mut_unit(
+        "record",
+        Uuid::new_v4(),
+        None,
+        record_root(fx.baby_id, "too-many-media", 100, 50),
+        false,
+    );
+    invalid_commit.media = media;
+    let commit_result = fx.commit(&fx.owner, invalid_commit, 1_700_000_004).unwrap();
+    assert_eq!(
+        commit_result.results[0].code.as_deref(),
+        Some("media_limit_exceeded")
+    );
+}
+
+#[test]
+fn choice_only_resolution_rebuilds_media_and_concurrent_tombstone_authoritatively() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let media_item = |fill: u8| CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".to_owned(),
+        sha256: String::new(),
+        byte_size: usize::from(fill) as i64 + 8,
+        mime: "image/jpeg".to_owned(),
+        width: Some(1),
+        height: Some(1),
+    };
+    let mut removed_media = media_item(1);
+    let mut added_media = media_item(2);
+    fx.stage_media_bytes(&mut removed_media);
+    fx.stage_media_bytes(&mut added_media);
+    let mut create = fx.record_mutation(record_id, None, "base");
+    create.media = vec![removed_media.clone()];
+    let base = fx.commit(&fx.owner, create, 1_700_000_000).unwrap().results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let mut live = fx.record_mutation(record_id, Some(&base), "stable-live");
+    live.media = vec![added_media.clone()];
+    let live_version = fx.commit(&fx.owner, live, 1_700_000_001).unwrap().results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let mut tombstone = fx.record_mutation(record_id, Some(&base), "offline-delete");
+    tombstone.deleted = true;
+    tombstone.media = vec![];
+    let branched = fx.commit(&fx.owner, tombstone, 1_700_000_002).unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    assert!(detail.branches.iter().any(|branch| branch.deleted));
+    assert!(detail.auto_merged.iter().any(|item| {
+        item.path == format!("/media/{}", added_media.media_uuid)
+            && item.outcome
+                == ConflictOutcome::Set {
+                    value: added_media.to_value(),
+                }
+    }));
+    assert!(detail.auto_merged.iter().any(|item| {
+        item.path == format!("/media/{}", removed_media.media_uuid)
+            && item.outcome == ConflictOutcome::Remove
+    }));
+    let mut choices = detail
+        .conflicting
+        .iter()
+        .map(|item| {
+            let candidate = if item.path == "/_mutation.deleted" {
+                item.candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.outcome
+                            == ConflictOutcome::Set {
+                                value: Value::Bool(false),
+                            }
+                    })
+                    .unwrap()
+            } else {
+                item.candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate
+                            .sources
+                            .iter()
+                            .any(|source| source.version_id == detail.stable.version_id)
+                    })
+                    .unwrap()
+            };
+            ConflictResolutionChoice {
+                path: item.path.clone(),
+                choice_id: candidate.choice_id.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|left, right| left.path.cmp(&right.path));
+    let input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token,
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices,
+    };
+    let accepted = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_003)
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
+    assert_eq!(
+        accepted.stable_root.get("note"),
+        Some(&json!("stable-live"))
+    );
+    assert_eq!(accepted.stable_media, vec![added_media.clone()]);
+    let resolved_version = accepted.stable_version_id.clone().unwrap();
+    let connection = fx.store.connect().unwrap();
+    let direct_parents: Vec<String> = connection
+        .prepare(
+            "SELECT parent_version_id FROM entity_version_parents
+             WHERE family_id = ?1 AND version_id = ?2 ORDER BY parent_version_id",
+        )
+        .unwrap()
+        .query_map(params![fx.family_id, resolved_version], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(direct_parents, vec![live_version]);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = ?2
+                   AND entity_type = 'record' AND client_uuid = ?3 AND mutation_id = ?4",
+                params![
+                    fx.family_id,
+                    VERSION_PROVENANCE_PRINCIPAL,
+                    record_id.to_string(),
+                    resolved_version
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], fx.owner.membership_id);
+    assert_eq!(provenance["device_id"], fx.owner.device_id);
+    assert_eq!(provenance["received_at"], 1_700_000_003);
+    let pull = fx.store.pull(&fx.family_id, 0).unwrap();
+    let record = pull
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.entity_type == "record" && entity.client_uuid == record_id.to_string()
+        })
+        .unwrap();
+    assert!(record.deleted_at.is_none());
+    assert_eq!(
+        record.version_id.as_deref(),
+        Some(resolved_version.as_str())
+    );
+    let added_projection = pull
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.entity_type == "media" && entity.client_uuid == added_media.media_uuid
+        })
+        .unwrap();
+    assert!(added_projection.deleted_at.is_none());
+    let removed_projection = pull
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.entity_type == "media" && entity.client_uuid == removed_media.media_uuid
+        })
+        .unwrap();
+    assert!(removed_projection.deleted_at.is_some());
+    let before_replay = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    let replay = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input, 1_700_000_004)
+        .unwrap();
+    assert_eq!(replay.replay, Some(true));
+    assert_eq!(replay.stable_root, accepted.stable_root);
+    assert_eq!(replay.stable_media, accepted.stable_media);
+    assert_eq!(
+        resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id),
+        before_replay,
+    );
+}
+
+#[test]
+fn choice_only_resolution_can_authoritatively_select_concurrent_tombstone() {
+    let (fx, conflict_id, _, branch_version) = seed_media_conflict(true);
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+    let record_id = Uuid::parse_str(&detail.client_uuid).unwrap();
+    let stable_version = detail.stable.version_id.clone();
+    let stable_media_id = detail.stable.media[0].media_uuid.clone();
+    let mut choices = detail
+        .conflicting
+        .iter()
+        .map(|item| {
+            let candidate = if item.path == "/_mutation.deleted" {
+                item.candidates
+                    .iter()
+                    .find(|candidate| candidate.outcome == ConflictOutcome::Remove)
+                    .unwrap()
+            } else {
+                item.candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate
+                            .sources
+                            .iter()
+                            .any(|source| source.version_id == branch_version)
+                    })
+                    .unwrap()
+            };
+            ConflictResolutionChoice {
+                path: item.path.clone(),
+                choice_id: candidate.choice_id.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|left, right| left.path.cmp(&right.path));
+    let input = ResolveConflictInput {
+        snapshot_token: detail.snapshot_token,
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices,
+    };
+    let accepted = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input.clone(), 1_700_000_003)
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
+    assert_eq!(accepted.stable_root.get("note"), Some(&json!("branch")));
+    assert!(accepted.stable_media.is_empty());
+    let resolved_version = accepted.stable_version_id.clone().unwrap();
+    let connection = fx.store.connect().unwrap();
+    let (deleted_at, parent_count, parent): (Option<i64>, i64, String) = connection
+        .query_row(
+            "SELECT v.deleted_at, COUNT(p.parent_version_id), MIN(p.parent_version_id)
+             FROM entity_versions v
+             JOIN entity_version_parents p
+               ON p.family_id = v.family_id AND p.version_id = v.version_id
+             WHERE v.family_id = ?1 AND v.version_id = ?2
+             GROUP BY v.family_id, v.version_id",
+            params![fx.family_id, resolved_version],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(deleted_at, Some(1_700_000_003_000));
+    assert_eq!(parent_count, 1);
+    assert_eq!(parent, stable_version);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = ?2
+                   AND entity_type = 'record' AND client_uuid = ?3 AND mutation_id = ?4",
+                params![
+                    fx.family_id,
+                    VERSION_PROVENANCE_PRINCIPAL,
+                    record_id.to_string(),
+                    resolved_version
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], fx.owner.membership_id);
+    assert_eq!(provenance["device_id"], fx.owner.device_id);
+    assert_eq!(provenance["received_at"], 1_700_000_003);
+    let pull = fx.store.pull(&fx.family_id, 0).unwrap();
+    let record = pull
+        .entities
+        .iter()
+        .find(|entity| {
+            entity.entity_type == "record" && entity.client_uuid == record_id.to_string()
+        })
+        .unwrap();
+    assert_eq!(record.deleted_at, Some(1_700_000_003_000));
+    assert_eq!(
+        record.version_id.as_deref(),
+        Some(resolved_version.as_str())
+    );
+    let media = pull
+        .entities
+        .iter()
+        .find(|entity| entity.entity_type == "media" && entity.client_uuid == stable_media_id)
+        .unwrap();
+    assert!(media.deleted_at.is_some());
+    let before_replay = resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id);
+    let replay = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, input, 1_700_000_004)
+        .unwrap();
+    assert_eq!(replay.replay, Some(true));
+    assert_eq!(replay.stable_root, accepted.stable_root);
+    assert!(replay.stable_media.is_empty());
+    assert_eq!(
+        resolution_durable_state(&fx.store, &fx.family_id, &conflict_id, record_id),
+        before_replay,
+    );
+}
+
+#[test]
+fn choice_only_resolution_does_not_activate_h04_tombstone_restore() {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();
     let create = mut_unit(
@@ -997,35 +2127,36 @@ fn causal_explicit_tombstone_restore_via_resolution() {
         .store
         .causal_commit(&fx.owner, vec![del], 1_700_000_001)
         .unwrap();
-    let v2 = deleted.results[0].stable_version_id.clone().unwrap();
     let conflict_id = deleted.results[0].conflict_id.clone().unwrap();
-
-    let mut choices = Map::new();
-    choices.insert("/_mutation.deleted".to_owned(), json!(false));
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     let restored = fx
         .store
         .resolve_conflict(
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: v2,
-                expected_branch_versions: vec![],
-                resolved_root: record_root(fx.baby_id, "a", 100, 30),
-                resolved_media: vec![],
+                snapshot_token: detail.snapshot_token.clone(),
                 resolution_mutation_id: Uuid::new_v4().to_string(),
-                conflict_choices: choices,
+                choices: vec![resolution_choice(
+                    &detail,
+                    "/_mutation.deleted",
+                    ConflictOutcome::Set {
+                        value: Value::Bool(false),
+                    },
+                )],
             },
             1_700_000_002,
         )
         .unwrap();
-    assert_eq!(restored.status, "resolved");
+    assert_eq!(restored.status, "rejected");
+    assert_eq!(restored.error.unwrap().code, "missing_restore_base");
     let page = fx.store.pull(&fx.family_id, 0).unwrap();
     let row = page
         .entities
         .iter()
         .find(|e| e.client_uuid == record_id.to_string())
         .unwrap();
-    assert!(row.deleted_at.is_none());
+    assert!(row.deleted_at.is_some());
 }
 
 #[test]
@@ -1406,17 +2537,20 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: pages[0].stable.version_id.clone(),
-                expected_branch_versions: branch_ids,
-                resolved_root: record_root(fx.baby_id, "branch-0", 100, 50),
-                resolved_media: vec![],
+                snapshot_token: pages[0].snapshot_token.clone(),
                 resolution_mutation_id: Uuid::new_v4().to_string(),
-                conflict_choices: map(json!({"/note": "branch-0"})),
+                choices: vec![resolution_choice(
+                    &pages[0],
+                    "/note",
+                    ConflictOutcome::Set {
+                        value: json!("branch-0"),
+                    },
+                )],
             },
             1_700_000_004,
         )
         .unwrap();
-    assert_eq!(resolved.status, "resolved");
+    assert_eq!(resolved.status, "accepted");
     let durable_count: usize = restarted
         .connect()
         .unwrap()
@@ -2369,27 +3503,28 @@ fn conflict_detail_pages_all_heads_with_count_and_encoded_byte_budgets() {
     assert_eq!(first.branches.len(), 16);
     assert!(!first.complete);
     assert!(serde_json::to_vec(&first).unwrap().len() <= 128 * 1024);
+    let resolution_input = ResolveConflictInput {
+        snapshot_token: first.snapshot_token.clone(),
+        resolution_mutation_id: Uuid::new_v4().to_string(),
+        choices: vec![resolution_choice(
+            &first,
+            "/note",
+            ConflictOutcome::Set {
+                value: json!("branch-00"),
+            },
+        )],
+    };
     let partial_resolution = fx
         .store
         .resolve_conflict(
             &fx.owner,
             &conflict_id,
-            ResolveConflictInput {
-                expected_stable_version: first.stable.version_id.clone(),
-                expected_branch_versions: first
-                    .branches
-                    .iter()
-                    .map(|branch| branch.version_id.clone())
-                    .collect(),
-                resolved_root: record_root(fx.baby_id, "branch-00", 100, 50),
-                resolved_media: vec![],
-                resolution_mutation_id: Uuid::new_v4().to_string(),
-                conflict_choices: map(json!({"/note": "branch-00"})),
-            },
+            resolution_input.clone(),
             1_700_000_004,
         )
         .unwrap();
-    assert_eq!(partial_resolution.status, "cas_mismatch");
+    assert_eq!(partial_resolution.status, "rejected");
+    assert_eq!(partial_resolution.error.unwrap().code, "incomplete_choices");
 
     let continuation = first.continuation.clone().unwrap();
     let second = fx
@@ -2436,6 +3571,11 @@ fn conflict_detail_pages_all_heads_with_count_and_encoded_byte_budgets() {
         .collect::<Vec<_>>();
     assert_eq!(branch_ids.len(), 17);
     assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
+    let accepted = fx
+        .store
+        .resolve_conflict(&fx.owner, &conflict_id, resolution_input, 1_700_000_006)
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
 }
 
 #[test]
@@ -2940,77 +4080,6 @@ fn pull_paginates_every_mandatory_conflict_summary_without_cursor_loss() {
         }
         assert!(!second.has_more);
     }
-}
-
-#[test]
-fn causal_resolve_rejects_rewrote_auto_merged_path() {
-    let fx = CausalFx::new();
-    let record_id = Uuid::new_v4();
-    let create = mut_unit(
-        "record",
-        record_id,
-        None,
-        record_root(fx.baby_id, "a", 100, 20),
-        false,
-    );
-    let v1 = fx
-        .store
-        .causal_commit(&fx.owner, vec![create], 1_700_000_000)
-        .unwrap()
-        .results[0]
-        .stable_version_id
-        .clone()
-        .unwrap();
-    let left = mut_unit(
-        "record",
-        record_id,
-        Some(&v1),
-        record_root(fx.baby_id, "b", 100, 30),
-        false,
-    );
-    let v2 = fx
-        .store
-        .causal_commit(&fx.owner, vec![left], 1_700_000_001)
-        .unwrap()
-        .results[0]
-        .stable_version_id
-        .clone()
-        .unwrap();
-    let right = mut_unit(
-        "record",
-        record_id,
-        Some(&v1),
-        record_root(fx.baby_id, "c", 100, 40),
-        false,
-    );
-    let branched = fx
-        .store
-        .causal_commit(&fx.owner, vec![right], 1_700_000_002)
-        .unwrap();
-    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
-    let branch_id = branched.results[0].branch_version_id.clone().unwrap();
-    // Client rewrites amount_ml which is not a conflict path (still 100 both sides).
-    let bad_root = record_root(fx.baby_id, "c", 999, 50);
-    let mut choices = Map::new();
-    choices.insert("/note".to_owned(), json!("c"));
-    let rejected = fx
-        .store
-        .resolve_conflict(
-            &fx.owner,
-            &conflict_id,
-            ResolveConflictInput {
-                expected_stable_version: v2,
-                expected_branch_versions: vec![branch_id],
-                resolved_root: bad_root,
-                resolved_media: vec![],
-                resolution_mutation_id: Uuid::new_v4().to_string(),
-                conflict_choices: choices,
-            },
-            1_700_000_003,
-        )
-        .unwrap();
-    assert_eq!(rejected.status, "rejected");
-    assert_eq!(rejected.code.as_deref(), Some("rewrote_auto_merged_path"));
 }
 
 #[test]
