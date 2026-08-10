@@ -1,8 +1,7 @@
 //! Shared fixtures for store unit tests.
 
 use std::collections::BTreeMap;
-use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
 
 use super::super::*;
 use serde_json::{json, Value};
@@ -23,30 +22,6 @@ pub(in crate::store) fn trace_counted_pull_statement(sql: &str) {
             }
         }
     }
-    let (lock, changed) = statement_pause();
-    let mut pause = lock.lock().unwrap();
-    if pause
-        .as_ref()
-        .is_some_and(|state| sql.contains(&state.family_id))
-    {
-        let state = pause.as_mut().unwrap();
-        state.seen += 1;
-        if state.seen != state.pause_at {
-            return;
-        }
-        state.reached = true;
-        changed.notify_all();
-        while !pause.as_ref().unwrap().released {
-            let waited = changed
-                .wait_timeout(pause, Duration::from_secs(10))
-                .unwrap();
-            pause = waited.0;
-            if waited.1.timed_out() {
-                pause.as_mut().unwrap().released = true;
-            }
-        }
-        pause.take();
-    }
 }
 
 pub(super) fn begin_statement_count(family_id: &str) {
@@ -62,51 +37,6 @@ pub(super) fn finish_statement_count(family_id: &str) -> usize {
         .unwrap()
         .remove(family_id)
         .expect("pull statement counter was started")
-}
-
-struct StatementPause {
-    family_id: String,
-    pause_at: usize,
-    seen: usize,
-    reached: bool,
-    released: bool,
-}
-
-fn statement_pause() -> &'static (Mutex<Option<StatementPause>>, Condvar) {
-    static PAUSE: OnceLock<(Mutex<Option<StatementPause>>, Condvar)> = OnceLock::new();
-    PAUSE.get_or_init(|| (Mutex::new(None), Condvar::new()))
-}
-
-pub(super) fn begin_statement_pause(family_id: &str, pause_at: usize) {
-    *statement_pause().0.lock().unwrap() = Some(StatementPause {
-        family_id: family_id.to_owned(),
-        pause_at,
-        seen: 0,
-        reached: false,
-        released: false,
-    });
-}
-
-pub(super) fn wait_for_statement_pause() {
-    let (lock, changed) = statement_pause();
-    let mut pause = lock.lock().unwrap();
-    while !pause.as_ref().is_some_and(|state| state.reached) {
-        let waited = changed
-            .wait_timeout(pause, Duration::from_secs(10))
-            .unwrap();
-        pause = waited.0;
-        if waited.1.timed_out() {
-            pause.take();
-            panic!("timed out waiting for statement pause");
-        }
-    }
-}
-
-pub(super) fn release_statement_pause() {
-    let (lock, changed) = statement_pause();
-    let mut pause = lock.lock().unwrap();
-    pause.as_mut().expect("statement pause started").released = true;
-    changed.notify_all();
 }
 
 pub(super) trait TestPull {

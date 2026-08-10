@@ -15665,14 +15665,211 @@ async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
     assert_eq!(saturated["detail"]["scope"], "root");
 
     let conflict_id = branched["results"][0]["conflict_id"].as_str().unwrap();
-    let (detail_status, detail) = get_json(
+    let mut next = format!("/v1/conflicts/{conflict_id}");
+    let mut branch_ids = Vec::new();
+    let mut snapshot_token = None;
+    let mut first_body = None;
+    let mut replay_url = None;
+    let mut replay_body = None;
+    for expected_page in 0..4 {
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &next,
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() <= 128 * 1024, "page bytes={}", bytes.len());
+        let detail: Value = serde_json::from_slice(&bytes).unwrap();
+        if expected_page == 0 {
+            first_body = Some(bytes.clone());
+        }
+        assert_eq!(detail["page_index"], expected_page);
+        assert!(detail["branches"].as_array().unwrap().len() <= 16);
+        branch_ids.extend(
+            detail["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|branch| branch["branch_version_id"].as_str().unwrap().to_owned()),
+        );
+        match &snapshot_token {
+            Some(value) => assert_eq!(detail["snapshot_token"], *value),
+            None => snapshot_token = detail["snapshot_token"].as_str().map(str::to_owned),
+        }
+        if expected_page == 1 {
+            replay_url = Some(next.clone());
+            replay_body = Some(bytes.clone());
+        }
+        if detail["complete"] == true {
+            assert!(detail["continuation"].is_null());
+            break;
+        }
+        let continuation = detail["continuation"].as_str().unwrap();
+        next = format!(
+            "/v1/conflicts/{conflict_id}?snapshot_token={}&continuation={continuation}",
+            snapshot_token.as_deref().unwrap(),
+        );
+    }
+    assert_eq!(branch_ids.len(), 64);
+    assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let replay_response = request(
         &rig.app,
-        &format!("/v1/conflicts/{conflict_id}"),
+        Method::GET,
+        replay_url.as_deref().unwrap(),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(replay_response.status(), StatusCode::OK);
+    assert_eq!(
+        replay_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        replay_body.unwrap(),
+    );
+
+    let snapshot_token = snapshot_token.unwrap();
+    let restarted = rig.restart("generation-b");
+    let replay_first = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/conflicts/{conflict_id}?snapshot_token={snapshot_token}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(replay_first.status(), StatusCode::OK);
+    assert_eq!(
+        replay_first.into_body().collect().await.unwrap().to_bytes(),
+        first_body.unwrap(),
+    );
+
+    let current_stable = accepted["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap();
+    let (stable_status, stable_changed, _) = commit_causal_record(
+        &rig.app,
+        token,
+        baby_id,
+        record_id,
+        Some(current_stable),
+        "stable-after-snapshot",
+    )
+    .await;
+    assert_eq!(stable_status, StatusCode::OK, "{stable_changed}");
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let database_path = rig.directory.path().join("lezi.db");
+    let durable_state = || {
+        let connection = Connection::open(&database_path).unwrap();
+        let conflict = connection
+            .query_row(
+                "SELECT stable_version_id, status, kind, resolved_at
+                 FROM conflicts WHERE family_id = ?1 AND conflict_id = ?2",
+                rusqlite::params![family_id, conflict_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let branches = connection
+            .prepare(
+                "SELECT branch_version_id FROM conflict_branches
+                 WHERE family_id = ?1 AND conflict_id = ?2 ORDER BY branch_version_id",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![family_id, conflict_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let receipt = connection
+            .query_row(
+                "SELECT content_hash, stable_version_id, conflict_id, receipt_json, created_at
+                 FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'",
+                rusqlite::params![family_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let revision = connection
+            .query_row(
+                "SELECT rev FROM family_meta WHERE family_id = ?1",
+                rusqlite::params![family_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let version_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM entity_versions
+                 WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2",
+                rusqlite::params![family_id, record_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        json!({
+            "conflict": conflict,
+            "branches": branches,
+            "receipt": receipt,
+            "revision": revision,
+            "version_count": version_count,
+        })
+    };
+    let before_stale = durable_state();
+    let (stale_status, stale) = get_json(
+        &restarted,
+        &format!("/v1/conflicts/{conflict_id}?snapshot_token={snapshot_token}"),
         Some(token),
     )
     .await;
-    assert_eq!(detail_status, StatusCode::OK, "{detail}");
-    assert_eq!(detail["branches"].as_array().unwrap().len(), 64);
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+    assert_eq!(stale["code"], "snapshot_stale");
+    assert_eq!(durable_state(), before_stale);
+
+    let mut tampered_url = replay_url.unwrap();
+    let last = tampered_url.pop().unwrap();
+    tampered_url.push(if last == 'a' { 'b' } else { 'a' });
+    let before_tamper = durable_state();
+    let (tampered_status, tampered) = get_json(&restarted, &tampered_url, Some(token)).await;
+    assert_eq!(tampered_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(tampered["code"], "invalid_snapshot_token");
+    assert_eq!(durable_state(), before_tamper);
+
+    rig.now.fetch_add(10 * 60, Ordering::SeqCst);
+    let before_expiry = durable_state();
+    let (expired_status, expired) = get_json(
+        &restarted,
+        &format!("/v1/conflicts/{conflict_id}?snapshot_token={snapshot_token}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(expired_status, StatusCode::GONE);
+    assert_eq!(expired["code"], "snapshot_expired");
+    assert_eq!(durable_state(), before_expiry);
 
     let (replay_status, replay) =
         causal_commit_units(&rig.app, token, vec![first_branch.unwrap()]).await;

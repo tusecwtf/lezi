@@ -23,6 +23,7 @@ mod causal;
 mod causal_admission;
 mod causal_media_staging;
 mod causal_merge;
+mod conflict_snapshots;
 mod identity;
 mod media;
 mod pull;
@@ -48,8 +49,8 @@ use crate::model::Entity;
 use self::SourceRelationReceipt as _;
 pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
 pub use causal::{
-    CausalBatchResult, CausalMutation, CausalUnitResult, ConflictDetail, ConflictSummary,
-    ResolveConflictInput, ResolveConflictResult,
+    CausalBatchResult, CausalMutation, CausalUnitResult, ConflictSummary, ResolveConflictInput,
+    ResolveConflictResult,
 };
 pub(crate) use causal_admission::CausalAdmissionConfig;
 pub use causal_admission::CausalCommitSaturation;
@@ -57,6 +58,7 @@ pub use causal_media_staging::{
     CausalMediaStageStatus, CausalMediaStagingLimits, DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
 };
 pub use causal_merge::CausalMediaItem;
+pub use conflict_snapshots::{ConflictDetailPage, ConflictDetailPageRequest};
 pub(crate) use media::media_association_owner;
 pub(crate) use source_relations::rebuild_record_eligibility;
 pub use source_relations::{
@@ -66,7 +68,7 @@ pub use source_relations::{
 
 // Re-exported types are the public Store/HTTP causal seams (ticket 03).
 #[allow(unused_imports)]
-use self::{CausalBatchResult as _, ConflictDetail as _, ResolveConflictResult as _};
+use self::{CausalBatchResult as _, ConflictDetailPage as _, ResolveConflictResult as _};
 pub(crate) use identity::anonymize_membership_authorship_fields;
 pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION, VERSIONED_ENTITY_TYPES};
 
@@ -389,6 +391,14 @@ pub enum StoreError {
     InvalidCausalAdmissionConfig,
     #[error("conflict not found")]
     ConflictNotFound,
+    #[error("invalid snapshot token")]
+    InvalidSnapshotToken,
+    #[error("snapshot expired")]
+    SnapshotExpired,
+    #[error("snapshot stale")]
+    SnapshotStale,
+    #[error("conflict snapshot page exceeds the encoded response budget")]
+    ConflictSnapshotPageTooLarge,
     #[error("source relation request invalid: {0}")]
     InvalidSourceRelationRequest(&'static str),
     #[error("authority graph validation failed ({reason_code}) for {entity_type} {client_uuid}")]
@@ -445,6 +455,7 @@ pub struct CommittedPendingBundleMedia {
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
+    snapshot_receipt_key: Arc<[u8]>,
     causal_commit_limiter: Arc<crate::rate_limit::RateLimiter>,
     max_open_causal_branches_per_root: usize,
 }

@@ -14,8 +14,8 @@ use crate::model::{
     MAX_BUNDLE_MEDIA_ENTITIES,
 };
 use crate::store::{
-    CausalMediaItem, CausalMutation, PullPage, PulledEntity, ReconcileResult, ReconcileUnit,
-    ResolveConflictInput, StoreError,
+    CausalMediaItem, CausalMutation, ConflictDetailPage, ConflictDetailPageRequest, PullPage,
+    PulledEntity, ReconcileResult, ReconcileUnit, ResolveConflictInput, StoreError,
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
@@ -392,25 +392,59 @@ pub(crate) async fn conflict_detail(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(conflict_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+    query: Result<Query<ConflictDetailQuery>, QueryRejection>,
+) -> Result<Json<ConflictDetailPage>, ApiError> {
     let principal = authenticate(&state, &headers).await?;
     require_supported_client(&state, &headers).await?;
+    let query = query
+        .map(|Query(value)| value)
+        .map_err(|error| ApiError::unprocessable(error.body_text()))?;
+    let page_request = match (query.snapshot_token, query.continuation) {
+        (None, None) => ConflictDetailPageRequest::First,
+        (Some(token), None) => ConflictDetailPageRequest::SnapshotToken(token),
+        (Some(snapshot_token), Some(continuation)) => ConflictDetailPageRequest::Continuation {
+            snapshot_token,
+            continuation,
+        },
+        _ => {
+            return Err(ApiError::unprocessable("snapshot token is invalid")
+                .with_code("invalid_snapshot_token"))
+        }
+    };
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     let blocking_state = state.clone();
     let detail = run_blocking(move || {
         blocking_state
             .store
-            .conflict_detail(&principal, &conflict_id)
+            .conflict_detail_page(&principal, &conflict_id, page_request, blocking_state.now())
             .map_err(|error| match error {
                 StoreError::ConflictNotFound => ApiError::not_found("conflict not found"),
+                StoreError::InvalidSnapshotToken => {
+                    ApiError::unprocessable("snapshot token is invalid")
+                        .with_code("invalid_snapshot_token")
+                }
+                StoreError::SnapshotExpired => {
+                    ApiError::gone("snapshot receipt expired").with_code("snapshot_expired")
+                }
+                StoreError::SnapshotStale => {
+                    ApiError::conflict("conflict heads changed").with_code("snapshot_stale")
+                }
+                StoreError::ConflictSnapshotPageTooLarge => {
+                    ApiError::payload_too_large("conflict detail exceeds the response budget")
+                }
                 other => other.into(),
             })
     })
     .await?;
-    Ok(Json(serde_json::to_value(detail).map_err(|_| {
-        ApiError::internal("failed to serialize conflict detail")
-    })?))
+    Ok(Json(detail))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConflictDetailQuery {
+    snapshot_token: Option<String>,
+    continuation: Option<String>,
 }
 
 pub(crate) async fn resolve_conflict(

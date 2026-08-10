@@ -22,6 +22,10 @@ use super::causal_media_staging::{consume_manifest, verify_manifest};
 use super::causal_merge::{
     leaf_paths, mutation_content_hash, set_path, three_way_merge, CausalMediaItem, MergeDecision,
 };
+use super::conflict_snapshots::{
+    open_conflict_detail_page, ConflictDetailPageRequest, ConflictSnapshotBinding,
+    ConflictSnapshotMaterial,
+};
 use super::{migration_content_hash, CausalCommitSaturation, Principal, Store, StoreError};
 
 /// Wire §7: at most 32 conflict_summary entries per ordinary pull page.
@@ -94,17 +98,6 @@ pub struct ConflictBranchDetail {
     pub media: Vec<CausalMediaItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mutation_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ConflictDetail {
-    pub conflict_id: String,
-    pub stable_version_id: String,
-    pub stable_root: Map<String, Value>,
-    pub stable_media: Vec<CausalMediaItem>,
-    pub branches: Vec<ConflictBranchDetail>,
-    pub conflicting_paths: Vec<String>,
-    pub auto_merged: Map<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -464,7 +457,7 @@ fn load_conflict_heads(
     })
 }
 
-fn load_receipt(
+pub(super) fn load_receipt(
     tx: &Transaction<'_>,
     family_id: &str,
     membership_id: &str,
@@ -2388,7 +2381,18 @@ impl Store {
             return Err(StoreError::InvalidReconcileBatch);
         }
         let mut connection = self.connect()?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::arm_busy_handler(
+            &connection,
+            &principal.family_id,
+            super::conflict_snapshots::test_hook::BusyOperation::Writer,
+        )?;
+        let tx_result = connection.transaction_with_behavior(TransactionBehavior::Immediate);
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::disarm_busy_handler(
+            tx_result.as_ref().ok().map(|tx| &**tx),
+        )?;
+        let tx = tx_result?;
         let exact_replay = batch_is_exact_replay(&tx, principal, &units)?;
         if !exact_replay {
             let admission = self.causal_commit_limiter.check_and_record_in(
@@ -2479,20 +2483,44 @@ impl Store {
         Ok(CausalBatchResult { cursor, results })
     }
 
-    pub fn conflict_detail(
+    pub fn conflict_detail_page(
         &self,
         principal: &Principal,
         conflict_id: &str,
-    ) -> Result<ConflictDetail, StoreError> {
+        request: ConflictDetailPageRequest,
+        now: i64,
+    ) -> Result<super::ConflictDetailPage, StoreError> {
         let mut connection = self.connect()?;
-        let tx = connection.transaction().map_err(StoreError::from)?;
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::arm_busy_handler(
+            &connection,
+            &principal.family_id,
+            super::conflict_snapshots::test_hook::BusyOperation::Snapshot,
+        )?;
+        let tx_result = connection.transaction_with_behavior(TransactionBehavior::Immediate);
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::disarm_busy_handler(
+            tx_result.as_ref().ok().map(|tx| &**tx),
+        )?;
+        let tx = tx_result?;
         let projection = load_conflict_heads(&tx, &principal.family_id, conflict_id)?;
+        #[cfg(test)]
+        super::conflict_snapshots::test_hook::projection_loaded(&principal.family_id);
         let (conflicting_paths, auto_merged) = compute_conflict_paths(&projection);
-        Ok(conflict_detail_from_projection(
-            projection,
-            conflicting_paths,
-            auto_merged,
-        ))
+        let binding = ConflictSnapshotBinding {
+            family_id: &principal.family_id,
+            conflict_id,
+            kind: &projection.kind,
+            entity_type: &projection.entity_type,
+            client_uuid: &projection.client_uuid,
+            stable_version_id: &projection.stable_version_id,
+            branch_version_ids: &projection.branch_version_ids,
+            receipt_key: &self.snapshot_receipt_key,
+        };
+        let material = conflict_snapshot_material(&projection, conflicting_paths, auto_merged);
+        let page = open_conflict_detail_page(&tx, binding, material, request, now)?;
+        tx.commit()?;
+        Ok(page)
     }
 
     pub fn resolve_conflict(
@@ -2790,11 +2818,11 @@ impl Store {
     }
 }
 
-fn conflict_detail_from_projection(
-    projection: ConflictHeads,
+fn conflict_snapshot_material(
+    projection: &ConflictHeads,
     conflicting_paths: Vec<String>,
     auto_merged: Map<String, Value>,
-) -> ConflictDetail {
+) -> ConflictSnapshotMaterial {
     let stable = projection.stable();
     let branches = projection
         .branch_version_ids
@@ -2809,7 +2837,7 @@ fn conflict_detail_from_projection(
             }
         })
         .collect();
-    ConflictDetail {
+    ConflictSnapshotMaterial {
         conflict_id: projection.conflict_id.clone(),
         stable_version_id: stable.version_id.clone(),
         stable_root: stable.root.clone(),

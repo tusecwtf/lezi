@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: in-progress — tickets 01–17 implemented; tickets 18–19 remain
+Status: in-progress — tickets 01–18 implemented; ticket 19 remains blocked
 
 Spec: [`spec.md`](./spec.md)
 
@@ -48,14 +48,14 @@ post-0.3.13/01 implementation stabilizes
 | 15 | [Delete proven-dead Android façades and compatibility residue](./issues/15-delete-proven-dead-android-residue.md) | P3 | implemented | 09 + 10 + 11 + post-0.3.13/02 cleanup |
 | 16 | [Centralize structured-cancellation cause policy](./issues/16-shared-cancellation-cause-policy.md) | P3 | implemented | — |
 | 17 | [Batch-load bounded conflict heads](./issues/17-bounded-conflict-head-loader.md) | P1 | implemented | 12 + causal hardening 01 |
-| 18 | [Persist snapshot receipts with bounded pagination](./issues/18-conflict-snapshot-receipt-pagination.md) | P1 | ready-for-agent | 17 + causal hardening 01 |
+| 18 | [Persist snapshot receipts with bounded pagination](./issues/18-conflict-snapshot-receipt-pagination.md) | P1 | implemented | 17 + causal hardening 01 |
 | 19 | [Bound resolution queries and retain conflict metadata](./issues/19-resolution-metadata-retention.md) | P1 | blocked | 18 + causal hardening 04 |
 
 ## Frontier
 
-`18` 是下一张串行 frontier；`19` 仍等待 `18` 与 causal hardening 04。一个 agent
-不应并行领取图中共享
-同一箭头端点的票；已标 implemented 的 02/04/09 不是 frontier。
+本 tracker 暂无可执行 frontier：`19` 仍等待 causal hardening 04。跨 tracker 的下一张串行
+frontier 是 causal hardening H02；一个 agent 不应并行领取图中共享同一箭头端点的票；已标
+implemented 的 02/04/09/18 不是 frontier。
 
 ## Excluded as already owned
 

@@ -16,6 +16,43 @@ fn map(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
+fn first_conflict_detail(
+    store: &Store,
+    principal: &Principal,
+    conflict_id: &str,
+) -> Result<ConflictDetailPage, StoreError> {
+    store.conflict_detail_page(
+        principal,
+        conflict_id,
+        ConflictDetailPageRequest::First,
+        1_700_000_100,
+    )
+}
+
+fn conflict_detail_pages(
+    store: &Store,
+    principal: &Principal,
+    conflict_id: &str,
+    now: i64,
+) -> Result<Vec<ConflictDetailPage>, StoreError> {
+    let mut pages = Vec::new();
+    let mut request = ConflictDetailPageRequest::First;
+    loop {
+        let page = store.conflict_detail_page(principal, conflict_id, request, now)?;
+        let continuation = page.continuation.clone();
+        let snapshot_token = page.snapshot_token.clone();
+        let complete = page.complete;
+        pages.push(page);
+        if complete {
+            return Ok(pages);
+        }
+        request = ConflictDetailPageRequest::Continuation {
+            snapshot_token,
+            continuation: continuation.expect("an incomplete page has continuation"),
+        };
+    }
+}
+
 fn record_root(baby: Uuid, note: &str, amount: i64, updated_at: i64) -> Map<String, Value> {
     map(json!({
         "baby_client_uuid": baby,
@@ -538,7 +575,7 @@ fn causal_current_base_delete_accepted_with_tombstone_conflict_handle() {
     );
 
     // Detail exposes tombstone restore handle.
-    let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     assert!(detail
         .conflicting_paths
         .iter()
@@ -734,7 +771,7 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
     let conflict_id = branched.results[0].conflict_id.clone().unwrap();
     let branch_id = branched.results[0].branch_version_id.clone().unwrap();
 
-    let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     assert!(detail.conflicting_paths.iter().any(|p| p == "/note"));
     assert_eq!(detail.branches.len(), 1);
 
@@ -784,7 +821,7 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
     );
 
     // Conflict closed.
-    assert!(fx.store.conflict_detail(&fx.owner, &conflict_id).is_err());
+    assert!(first_conflict_detail(&fx.store, &fx.owner, &conflict_id).is_err());
 }
 
 #[test]
@@ -1149,8 +1186,7 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
         .to_owned();
     begin_statement_count(&fx.family_id);
     assert_eq!(
-        fx.store
-            .conflict_detail(&fx.owner, &conflict_id)
+        first_conflict_detail(&fx.store, &fx.owner, &conflict_id)
             .unwrap()
             .branches
             .len(),
@@ -1185,19 +1221,19 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
     ));
 
     begin_statement_count(&fx.family_id);
-    let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
     let full_branch_statements = finish_statement_count(&fx.family_id);
-    assert_eq!(detail.branches.len(), MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT);
-    assert_eq!(one_branch_statements, 2);
-    assert_eq!(full_branch_statements, one_branch_statements);
+    assert_eq!(detail.branches.len(), 16);
+    assert_eq!(one_branch_statements, 5);
+    assert_eq!(full_branch_statements, 4);
 
     let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
     assert_eq!(
-        restarted
-            .conflict_detail(&fx.owner, &conflict_id)
+        conflict_detail_pages(&restarted, &fx.owner, &conflict_id, 1_700_000_101)
             .unwrap()
-            .branches
-            .len(),
+            .iter()
+            .map(|page| page.branches.len())
+            .sum::<usize>(),
         MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT,
     );
     let restart_overflow = restarted
@@ -1212,10 +1248,10 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
         StoreError::CausalCommitSaturated(CausalCommitSaturation::OpenBranch)
     ));
 
-    let detail = restarted.conflict_detail(&fx.owner, &conflict_id).unwrap();
-    let branch_ids = detail
-        .branches
+    let pages = conflict_detail_pages(&restarted, &fx.owner, &conflict_id, 1_700_000_102).unwrap();
+    let branch_ids = pages
         .iter()
+        .flat_map(|page| &page.branches)
         .map(|branch| branch.branch_version_id.clone())
         .collect::<Vec<_>>();
     assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1224,7 +1260,7 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
             &fx.owner,
             &conflict_id,
             ResolveConflictInput {
-                expected_stable_version: detail.stable_version_id,
+                expected_stable_version: pages[0].stable_version_id.clone(),
                 expected_branch_versions: branch_ids,
                 resolved_root: record_root(fx.baby_id, "branch-0", 100, 50),
                 resolved_media: vec![],
@@ -1271,10 +1307,7 @@ fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles(
             .unwrap();
         first_conflict = result.results[0].conflict_id.clone().unwrap();
     }
-    let first_detail = fx
-        .store
-        .conflict_detail(&fx.owner, &first_conflict)
-        .unwrap();
+    let first_detail = first_conflict_detail(&fx.store, &fx.owner, &first_conflict).unwrap();
     let moved_branch = first_detail.branches[0].branch_version_id.clone();
     let second_conflict = Uuid::new_v4().to_string();
     let empty_conflict = Uuid::new_v4().to_string();
@@ -1310,24 +1343,20 @@ fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles(
     drop(connection);
 
     assert_eq!(
-        fx.store
-            .conflict_detail(&fx.owner, &first_conflict)
+        first_conflict_detail(&fx.store, &fx.owner, &first_conflict)
             .unwrap()
             .branches
             .len(),
         2,
     );
     assert_eq!(
-        fx.store
-            .conflict_detail(&fx.owner, &second_conflict)
+        first_conflict_detail(&fx.store, &fx.owner, &second_conflict)
             .unwrap()
             .branches
             .len(),
         1,
     );
-    assert!(fx
-        .store
-        .conflict_detail(&fx.owner, &empty_conflict)
+    assert!(first_conflict_detail(&fx.store, &fx.owner, &empty_conflict)
         .unwrap()
         .branches
         .is_empty());
@@ -1367,8 +1396,7 @@ fn causal_branch_cap_spans_open_conflicts_and_ignores_empty_or_resolved_handles(
         .unwrap();
     assert_eq!(admitted.results[0].status, "branched");
     assert_eq!(
-        fx.store
-            .conflict_detail(&fx.owner, &first_conflict)
+        first_conflict_detail(&fx.store, &fx.owner, &first_conflict)
             .unwrap()
             .branches
             .len(),
@@ -1425,8 +1453,7 @@ fn concurrent_causal_commits_cannot_overallocate_branch_capacity() {
         1,
     );
     assert_eq!(
-        fx.store
-            .conflict_detail(&fx.owner, &conflict_id)
+        first_conflict_detail(&fx.store, &fx.owner, &conflict_id)
             .unwrap()
             .branches
             .len(),
@@ -1581,7 +1608,7 @@ fn mark_migration_base(fx: &CausalFx, version_id: &str) {
 #[test]
 fn conflict_detail_returns_complete_ordered_heads_bases_media_and_provenance() {
     let (fx, conflict_id, _, _) = seed_media_conflict(true);
-    let detail = fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+    let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
 
     assert_eq!(detail.branches.len(), 1);
     let branch = &detail.branches[0];
@@ -1590,6 +1617,567 @@ fn conflict_detail_returns_complete_ordered_heads_bases_media_and_provenance() {
         .mutation_id
         .as_deref()
         .is_some_and(|id| !id.is_empty()));
+}
+
+#[test]
+fn conflict_detail_replays_one_persistent_snapshot_receipt_after_restart() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.as_deref().unwrap();
+
+    let first = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(first.page_index, 0);
+    assert!(first.complete);
+    assert!(first.continuation.is_none());
+    assert!(first.snapshot_token.len() >= 43);
+    assert_eq!(first.expires_at, 1_700_000_603_000);
+    let persisted: String = fx
+        .store
+        .connect()
+        .unwrap()
+        .query_row(
+            "SELECT receipt_json FROM mutation_receipts
+             WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'",
+            params![fx.family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!persisted.contains(&first.snapshot_token));
+
+    let replay = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(first.snapshot_token.clone()),
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&replay).unwrap(),
+        serde_json::to_vec(&first).unwrap()
+    );
+
+    let restarted = Store::open(fx._dir.path().join("lezi.db")).unwrap();
+    let after_restart = restarted
+        .conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&after_restart).unwrap(),
+        serde_json::to_vec(&first).unwrap(),
+    );
+}
+
+#[test]
+fn concurrent_conflict_detail_first_reads_share_one_receipt() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let control = super::super::conflict_snapshots::test_hook::install(&fx.family_id);
+    let start = |principal: Principal| {
+        let store = fx.store.clone();
+        let conflict_id = conflict_id.clone();
+        thread::spawn(move || {
+            store
+                .conflict_detail_page(
+                    &principal,
+                    &conflict_id,
+                    ConflictDetailPageRequest::First,
+                    1_700_000_003,
+                )
+                .unwrap()
+        })
+    };
+    let first = start(fx.owner.clone());
+    control.wait_projection();
+    let second = start(fx.member.clone());
+    control.wait_snapshot_busy();
+    control.release();
+    let [first, second] = [first, second].map(|handle| handle.join().unwrap());
+    assert_eq!(
+        serde_json::to_vec(&first).unwrap(),
+        serde_json::to_vec(&second).unwrap(),
+    );
+    let receipts: Value = serde_json::from_str(
+        &fx.store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'",
+                params![fx.family_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipts.as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn conflict_detail_first_and_branch_writer_are_linearizable() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-0"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let next_branch = fx.record_mutation(record_id, Some(&base), "branch-1");
+    let control = super::super::conflict_snapshots::test_hook::install(&fx.family_id);
+    let read = {
+        let store = fx.store.clone();
+        let owner = fx.owner.clone();
+        let conflict_id = conflict_id.clone();
+        thread::spawn(move || {
+            store
+                .conflict_detail_page(
+                    &owner,
+                    &conflict_id,
+                    ConflictDetailPageRequest::First,
+                    1_700_000_003,
+                )
+                .unwrap()
+        })
+    };
+    control.wait_projection();
+    let write = {
+        let store = fx.store.clone();
+        let owner = fx.owner.clone();
+        thread::spawn(move || {
+            store
+                .causal_commit(&owner, vec![next_branch], 1_700_000_003)
+                .unwrap()
+        })
+    };
+    control.wait_writer_busy();
+    control.release();
+    let page = read.join().unwrap();
+    assert_eq!(write.join().unwrap().results[0].status, "branched");
+    let replay = fx.store.conflict_detail_page(
+        &fx.owner,
+        &conflict_id,
+        ConflictDetailPageRequest::SnapshotToken(page.snapshot_token.clone()),
+        1_700_000_004,
+    );
+    assert_eq!(page.branches.len(), 1);
+    assert!(matches!(replay, Err(StoreError::SnapshotStale)));
+}
+
+#[test]
+fn conflict_detail_pages_all_heads_with_count_and_encoded_byte_budgets() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let mut conflict_id = None;
+    for index in 0..17 {
+        let result = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, Some(&base), &format!("branch-{index:02}")),
+                1_700_000_002,
+            )
+            .unwrap();
+        conflict_id = result.results[0].conflict_id.clone().or(conflict_id);
+    }
+    let conflict_id = conflict_id.unwrap();
+
+    let first = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            &conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_003,
+        )
+        .unwrap();
+    assert_eq!(first.branches.len(), 16);
+    assert!(!first.complete);
+    assert!(serde_json::to_vec(&first).unwrap().len() <= 128 * 1024);
+    let partial_resolution = fx
+        .store
+        .resolve_conflict(
+            &fx.owner,
+            &conflict_id,
+            ResolveConflictInput {
+                expected_stable_version: first.stable_version_id.clone(),
+                expected_branch_versions: first
+                    .branches
+                    .iter()
+                    .map(|branch| branch.branch_version_id.clone())
+                    .collect(),
+                resolved_root: record_root(fx.baby_id, "branch-00", 100, 50),
+                resolved_media: vec![],
+                resolution_mutation_id: Uuid::new_v4().to_string(),
+                conflict_choices: map(json!({"/note": "branch-00"})),
+            },
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(partial_resolution.status, "cas_mismatch");
+
+    let continuation = first.continuation.clone().unwrap();
+    let second = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            &conflict_id,
+            ConflictDetailPageRequest::Continuation {
+                snapshot_token: first.snapshot_token.clone(),
+                continuation: continuation.clone(),
+            },
+            1_700_000_004,
+        )
+        .unwrap();
+    assert_eq!(second.branches.len(), 1);
+    assert_eq!(second.page_index, 1);
+    assert!(second.complete);
+    assert!(second.continuation.is_none());
+    assert_eq!(second.snapshot_token, first.snapshot_token);
+    assert!(serde_json::to_vec(&second).unwrap().len() <= 128 * 1024);
+
+    let replay = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            &conflict_id,
+            ConflictDetailPageRequest::Continuation {
+                snapshot_token: first.snapshot_token.clone(),
+                continuation,
+            },
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&replay).unwrap(),
+        serde_json::to_vec(&second).unwrap()
+    );
+
+    let branch_ids = first
+        .branches
+        .iter()
+        .chain(&second.branches)
+        .map(|branch| branch.branch_version_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(branch_ids.len(), 17);
+    assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn conflict_detail_encoded_budget_splits_before_the_count_limit() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let mut conflict_id = None;
+    for index in 0..10 {
+        let note = format!("{index:02}-{}", "界".repeat(6_000));
+        let result = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, Some(&base), &note),
+                1_700_000_002,
+            )
+            .unwrap();
+        conflict_id = result.results[0].conflict_id.clone().or(conflict_id);
+    }
+
+    let pages =
+        conflict_detail_pages(&fx.store, &fx.owner, &conflict_id.unwrap(), 1_700_000_003).unwrap();
+    assert!(pages.len() > 1);
+    assert!(pages[0].branches.len() < 10);
+    assert_eq!(
+        pages.iter().map(|page| page.branches.len()).sum::<usize>(),
+        10,
+    );
+    assert!(pages
+        .iter()
+        .all(|page| serde_json::to_vec(page).unwrap().len() <= 128 * 1024),);
+}
+
+#[test]
+fn conflict_detail_receipt_authentication_rejects_plan_and_serializer_drift() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let mut conflict_id = None;
+    for index in 0..17 {
+        let result = fx
+            .commit(
+                &fx.owner,
+                fx.record_mutation(record_id, Some(&base), &format!("branch-{index:02}")),
+                1_700_000_002,
+            )
+            .unwrap();
+        conflict_id = result.results[0].conflict_id.clone().or(conflict_id);
+    }
+    let conflict_id = conflict_id.unwrap();
+    let first = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            &conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_003,
+        )
+        .unwrap();
+    let connection = fx.store.connect().unwrap();
+    let original: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'",
+                params![fx.family_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+
+    for damage in ["offset", "truncation", "continuation", "serializer"] {
+        let mut damaged = original.clone();
+        let receipt = &mut damaged.as_array_mut().unwrap()[0];
+        match damage {
+            "offset" => receipt["page_ends"][0] = json!(15),
+            "truncation" => {
+                receipt["page_ends"].as_array_mut().unwrap().pop();
+            }
+            "continuation" => receipt["continuation_nonces"][0] = json!("tampered"),
+            "serializer" => receipt["page_digests"][0] = json!("00"),
+            _ => unreachable!(),
+        }
+        connection
+            .execute(
+                "UPDATE mutation_receipts SET receipt_json = ?1
+                 WHERE family_id = ?2 AND membership_id = '__conflict_snapshot_v2__'",
+                params![serde_json::to_string(&damaged).unwrap(), fx.family_id],
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                fx.store.conflict_detail_page(
+                    &fx.owner,
+                    &conflict_id,
+                    ConflictDetailPageRequest::SnapshotToken(first.snapshot_token.clone()),
+                    1_700_000_004,
+                ),
+                Err(StoreError::InvalidStoredPayload | StoreError::InvalidSnapshotToken),
+            ),
+            "{damage}"
+        );
+    }
+}
+
+#[test]
+fn conflict_detail_receipt_history_is_bounded_without_evicting_the_latest() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.clone().unwrap();
+    let mut tokens = Vec::new();
+    let mut current_stable = String::new();
+    let mut latest_page_bytes = Vec::new();
+    for index in 0..65 {
+        let page = fx
+            .store
+            .conflict_detail_page(
+                &fx.owner,
+                &conflict_id,
+                ConflictDetailPageRequest::First,
+                1_700_000_003 + index,
+            )
+            .unwrap();
+        current_stable = page.stable_version_id.clone();
+        tokens.push(page.snapshot_token.clone());
+        if index == 64 {
+            latest_page_bytes = serde_json::to_vec(&page).unwrap();
+        }
+        if index < 64 {
+            let accepted = fx
+                .commit(
+                    &fx.owner,
+                    fx.record_mutation(
+                        record_id,
+                        Some(&current_stable),
+                        &format!("stable-{index}"),
+                    ),
+                    1_700_000_004 + index,
+                )
+                .unwrap();
+            assert_eq!(accepted.results[0].status, "accepted");
+        }
+    }
+
+    let persisted: Value = serde_json::from_str(
+        &fx.store
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'",
+                params![fx.family_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted.as_array().unwrap().len(), 64);
+    assert!(matches!(
+        fx.store.conflict_detail_page(
+            &fx.owner,
+            &conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(tokens[0].clone()),
+            1_700_000_100,
+        ),
+        Err(StoreError::InvalidSnapshotToken),
+    ));
+    let latest = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            &conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(tokens[64].clone()),
+            1_700_000_100,
+        )
+        .unwrap();
+    assert_eq!(latest.stable_version_id, current_stable);
+    assert_eq!(serde_json::to_vec(&latest).unwrap(), latest_page_bytes);
+}
+
+#[test]
+fn conflict_detail_tokens_fail_closed_for_tamper_expiry_and_branch_drift() {
+    let fx = CausalFx::new();
+    let (record_id, base) = fx.seed_concurrent_record();
+    let branched = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&base), "branch-0"),
+            1_700_000_002,
+        )
+        .unwrap();
+    let conflict_id = branched.results[0].conflict_id.as_deref().unwrap();
+    let first = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_003,
+        )
+        .unwrap();
+
+    let mut tampered = first.snapshot_token.clone();
+    tampered.replace_range(0..1, if &tampered[0..1] == "a" { "b" } else { "a" });
+    assert!(matches!(
+        fx.store.conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(tampered),
+            1_700_000_004,
+        ),
+        Err(StoreError::InvalidSnapshotToken),
+    ));
+    assert!(matches!(
+        fx.store.conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(first.snapshot_token.clone()),
+            1_700_000_603,
+        ),
+        Err(StoreError::SnapshotExpired),
+    ));
+
+    fx.commit(
+        &fx.owner,
+        fx.record_mutation(record_id, Some(&base), "branch-1"),
+        1_700_000_004,
+    )
+    .unwrap();
+    assert!(matches!(
+        fx.store.conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(first.snapshot_token.clone()),
+            1_700_000_005,
+        ),
+        Err(StoreError::SnapshotStale),
+    ));
+
+    let refreshed = fx
+        .store
+        .conflict_detail_page(
+            &fx.member,
+            conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_ne!(refreshed.snapshot_token, first.snapshot_token);
+    assert_eq!(refreshed.branches.len(), 2);
+    let owner_replay = fx
+        .store
+        .conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::First,
+            1_700_000_005,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::to_vec(&owner_replay).unwrap(),
+        serde_json::to_vec(&refreshed).unwrap(),
+        "one family snapshot receipt is shared by authenticated clients",
+    );
+
+    let stable_changed = fx
+        .commit(
+            &fx.owner,
+            fx.record_mutation(record_id, Some(&refreshed.stable_version_id), "stable-v3"),
+            1_700_000_006,
+        )
+        .unwrap();
+    assert_eq!(stable_changed.results[0].status, "accepted");
+    assert!(matches!(
+        fx.store.conflict_detail_page(
+            &fx.owner,
+            conflict_id,
+            ConflictDetailPageRequest::SnapshotToken(refreshed.snapshot_token),
+            1_700_000_007,
+        ),
+        Err(StoreError::SnapshotStale),
+    ));
 }
 
 #[test]
@@ -1607,7 +2195,7 @@ fn conflict_detail_fails_closed_for_incomplete_persisted_projection() {
         let (fx, conflict_id, base, branch) = seed_media_conflict(false);
         if damage.starts_with("legacy_") {
             mark_migration_base(&fx, &base);
-            fx.store.conflict_detail(&fx.owner, &conflict_id).unwrap();
+            first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
         }
         let connection = fx.store.connect().unwrap();
         match damage {
@@ -1687,51 +2275,12 @@ fn conflict_detail_fails_closed_for_incomplete_persisted_projection() {
             _ => unreachable!(),
         }
         drop(connection);
-        let outcome = fx.store.conflict_detail(&fx.owner, &conflict_id);
+        let outcome = first_conflict_detail(&fx.store, &fx.owner, &conflict_id);
         assert!(
             matches!(&outcome, Err(StoreError::InvalidStoredPayload)),
             "damage={damage}, outcome={outcome:?}"
         );
     }
-}
-
-#[test]
-fn conflict_detail_reads_one_transaction_snapshot_during_branch_arrival() {
-    let fx = CausalFx::new();
-    let (record_id, base) = fx.seed_concurrent_record();
-    let first = fx
-        .commit(
-            &fx.owner,
-            fx.record_mutation(record_id, Some(&base), "branch-before-detail"),
-            1_700_000_002,
-        )
-        .unwrap();
-    let conflict_id = first.results[0].conflict_id.clone().unwrap();
-    begin_statement_pause(&fx.family_id, 2);
-    let reader = {
-        let store = fx.store.clone();
-        let principal = fx.owner.clone();
-        let conflict_id = conflict_id.clone();
-        thread::spawn(move || store.conflict_detail(&principal, &conflict_id))
-    };
-    wait_for_statement_pause();
-    fx.commit(
-        &fx.owner,
-        fx.record_mutation(record_id, Some(&base), "branch-during-detail"),
-        1_700_000_003,
-    )
-    .unwrap();
-    release_statement_pause();
-
-    assert_eq!(reader.join().unwrap().unwrap().branches.len(), 1);
-    assert_eq!(
-        fx.store
-            .conflict_detail(&fx.owner, &conflict_id)
-            .unwrap()
-            .branches
-            .len(),
-        2,
-    );
 }
 
 #[test]

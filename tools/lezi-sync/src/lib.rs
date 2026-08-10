@@ -529,7 +529,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
         );
     }
-    let store = Store::open(database_path)?;
+    let store = Store::open_with_snapshot_key(database_path, &signing_secret)?;
     store.reconcile_owner_root_fingerprint((config.clock)(), owner_root_fingerprint.as_deref())?;
     let restore_family_ids = disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
     media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
@@ -1027,9 +1027,22 @@ fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
 }
 
 fn derive_token(secret: &[u8], message: &str) -> String {
+    derive_token_bytes(secret, message.as_bytes())
+}
+
+fn derive_token_bytes(secret: &[u8], message: &[u8]) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
-    mac.update(message.as_bytes());
+    mac.update(message);
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+pub(crate) fn derive_framed_token(secret: &[u8], domain: &str, parts: &[&str]) -> String {
+    let mut message = Vec::new();
+    for part in std::iter::once(domain).chain(parts.iter().copied()) {
+        message.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        message.extend_from_slice(part.as_bytes());
+    }
+    derive_token_bytes(secret, &message)
 }
 
 /// Keyed fingerprint of the deployment root password.
@@ -1333,6 +1346,11 @@ impl ApiError {
         Self::new(StatusCode::GONE, detail)
     }
 
+    fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
     pub(crate) fn unprocessable(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
@@ -1390,6 +1408,10 @@ mod tests {
         let token = derive_token(&secret, "session:abc:device");
         assert_eq!(token, derive_token(&secret, "session:abc:device"));
         assert_ne!(token, derive_token(&secret, "session:abc:other-device"));
+        assert_ne!(
+            derive_framed_token(&secret, "snapshot", &["ab", "c"]),
+            derive_framed_token(&secret, "snapshot", &["a", "bc"]),
+        );
     }
 
     #[test]

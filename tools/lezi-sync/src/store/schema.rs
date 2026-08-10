@@ -538,8 +538,24 @@ impl Store {
         inspect_schema(&connection).map(|_| ())
     }
 
+    #[cfg(test)]
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, StoreError> {
-        Self::open_configured(database_path, CausalAdmissionConfig::default())
+        Self::open_configured(
+            database_path,
+            CausalAdmissionConfig::default(),
+            Arc::from(b"lezi-sync-test-snapshot-key".as_slice()),
+        )
+    }
+
+    pub(crate) fn open_with_snapshot_key(
+        database_path: impl Into<PathBuf>,
+        snapshot_receipt_key: &[u8],
+    ) -> Result<Self, StoreError> {
+        Self::open_configured(
+            database_path,
+            CausalAdmissionConfig::default(),
+            Arc::from(snapshot_receipt_key),
+        )
     }
 
     #[cfg(test)]
@@ -547,16 +563,22 @@ impl Store {
         database_path: impl Into<PathBuf>,
         admission: CausalAdmissionConfig,
     ) -> Result<Self, StoreError> {
-        Self::open_configured(database_path, admission)
+        Self::open_configured(
+            database_path,
+            admission,
+            Arc::from(b"lezi-sync-test-snapshot-key".as_slice()),
+        )
     }
 
     fn open_configured(
         database_path: impl Into<PathBuf>,
         admission: CausalAdmissionConfig,
+        snapshot_receipt_key: Arc<[u8]>,
     ) -> Result<Self, StoreError> {
         let admission = admission.validate()?;
         let store = Self {
             database_path: database_path.into(),
+            snapshot_receipt_key,
             causal_commit_limiter: Arc::new(RateLimiter::new_with_group_limit(
                 RateLimitConfig {
                     max_attempts: admission.principal_commit_limit,
