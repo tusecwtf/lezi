@@ -9,7 +9,7 @@ import com.lezi.babylog.core.database.DatabaseModule
 import com.lezi.babylog.core.database.LeziDatabase
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
@@ -18,6 +18,7 @@ import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
+import com.lezi.babylog.sync.backend.FamilyMemberDirectorySnapshot
 import com.lezi.babylog.sync.backend.PullResult
 import com.lezi.babylog.sync.backend.SessionBootstrapResult
 import com.lezi.babylog.sync.backend.SyncBackend
@@ -197,7 +198,12 @@ class RecordCommitFirstRoomReplayTest {
         ): SessionBootstrapResult = unsupported()
 
         override suspend fun pull(session: SyncSession): PullResult = unsupported()
-        override suspend fun members(session: SyncSession): List<FamilyMember> = unsupported()
+        override suspend fun authenticatedHandshake(
+            session: SyncSession,
+        ): AuthenticatedSyncHandshake = unsupported()
+        override suspend fun memberDirectory(
+            session: SyncSession,
+        ): FamilyMemberDirectorySnapshot = unsupported()
         override suspend fun updateMyDisplayName(
             session: SyncSession,
             displayName: String,

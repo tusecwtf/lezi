@@ -5,6 +5,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.sourceCausalHandshake
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
@@ -137,6 +138,16 @@ class FakeSyncBackend : SyncBackend {
 
     override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
 
+    override suspend fun authenticatedHandshake(session: SyncSession) =
+        sourceCausalHandshake(
+            principal = SyncHandshakePrincipal(
+                membershipId = session.membershipId,
+                deviceId = session.deviceId,
+                role = session.role,
+            ),
+            directoryGeneration = "fake-directory-v1",
+        )
+
     override suspend fun reconcile(
         session: SyncSession,
         units: List<ReconcileUnitDraft>,
@@ -188,7 +199,7 @@ class FakeSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun members(session: SyncSession): List<FamilyMember> {
+    private suspend fun members(session: SyncSession): List<FamilyMember> {
         require(session.membershipId.isNotBlank()) {
             "current session membershipId is required"
         }
@@ -202,6 +213,11 @@ class FakeSyncBackend : SyncBackend {
             ),
         )
     }
+
+    override suspend fun memberDirectory(session: SyncSession) = FamilyMemberDirectorySnapshot(
+        generation = "fake-directory-v1",
+        members = members(session),
+    )
 
     override suspend fun updateMyDisplayName(
         session: SyncSession,

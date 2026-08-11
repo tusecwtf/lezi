@@ -124,7 +124,9 @@ class FamilySessionCoordinatorMemberAdminTest {
             FamilySessionCommand.ListMembers,
         ).getOrThrow()
 
-        assertThat(outcome).isEqualTo(FamilySessionOutcome.MembersListed(members))
+        assertThat(outcome).isEqualTo(
+            FamilySessionOutcome.MembersListed("directory-test", members),
+        )
         assertThat(preferences.current().membershipId).isEqualTo("membership-self")
         assertThat(observed)
             .containsExactly(previous, previous)

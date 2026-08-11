@@ -34,7 +34,7 @@ mod schema;
 mod source_relations;
 mod suspected_duplicates;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +49,7 @@ use crate::model::Entity;
 #[allow(unused_imports)]
 use self::SourceRelationReceipt as _;
 pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
+pub(crate) use causal::MAX_CAUSAL_UNITS;
 pub use causal::{
     CausalBatchResult, CausalMutation, CausalUnitResult, ConflictResolutionChoice, ConflictSummary,
     ResolveConflictInput, ResolveConflictResult,
@@ -167,6 +168,14 @@ pub struct ActiveDevice {
     pub membership_id: String,
     pub device_name: String,
     pub last_used_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FamilyDirectorySnapshot {
+    pub generation: String,
+    pub memberships: Vec<ActiveMembership>,
+    pub visible_devices: Vec<ActiveDevice>,
+    pub last_sync_by_membership: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

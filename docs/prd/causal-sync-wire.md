@@ -47,6 +47,42 @@ HTTP 路径前缀字符串（如 `/v1/families/...`）可由实现票贴合现�
 - [release 09](../../.scratch/lossless-family-causal-sync/issues/09-two-client-cutover-release-and-acceptance.md)：
   唯一生产切割/双端 smoke owner；H01–H43 与本合同都不能自行 deploy 或宣称生产完成。
 
+### 1.2 认证同步握手（source 与 v2 共用入口）
+
+endpoint trust 与家庭 session 已成立后，每个普通同步周期只发一次
+`POST /v1/sync/handshake`。`/health`、`/ready`、`/v1/setup-status` 保留为显式运维、设置与
+恢复入口，但不是普通同步的串行前置条件。
+
+请求是 closed object：
+
+```json
+{
+  "protocol_version": 1,
+  "required_capabilities": ["causal_versions", "source_relations", "wake_observation"]
+}
+```
+
+响应是 closed result，字段如下：
+
+| 字段 | 合同 |
+|------|------|
+| `protocol_version` / `server_version` / `ready` | 协议字面量、服务端发布版本与当前同步 readiness |
+| `capabilities` | H14 source wire 精确三项 `causal_versions`,`wake_observation`,`source_relations`；H27 前任何额外项（尤其 `causal_sync_v2`）均 mismatch |
+| `principal` | `{membership_id, device_id, role}`；全部从 session/ACL 派生，客户端不得提供 |
+| `directory_generation` | 成员/设备目录结构 generation；认证活动时间不得使它变化 |
+| `limits` | `{pull_page_max_entities, commit_batch_max_units, media_max_bytes}` |
+| `compression` | `{pull_response:["identity"]}`；H16 才可扩展 gzip 行为 |
+| `retry_hints` | `{retry_after:true}`；仅声明服务器可提供 Retry-After，H15 才拥有退避算法 |
+
+客户端必须先验证 protocol、required capabilities、ready 与 principal/session 精确一致，再读目录、
+pull、reconcile 或 commit。`directory_generation` 与本地缓存相同则不得下载成员目录；不同则读取一次
+`GET /v1/family/members`，且其顶层 `directory_generation` 必须与握手一致后才能原子替换本地
+generation+directory。用户显式刷新成员目录不受缓存命中抑制。
+
+protocol/capability mismatch 返回 HTTP 409、`not_ready` 返回 HTTP 503；二者使用
+`{"status":"rejected","error":{"code":"...","retryable":false}}`。认证失败沿用 session
+认证错误并允许既有 refresh-once seam；最终 auth/mismatch/not-ready 都必须在 mutation 前终止。
+
 ---
 
 ## 2. 删除编码（单一同构）
@@ -459,7 +495,7 @@ Pointer 前缀不同把它们当不相交。
 
 resolution 可用 `resolution_mutation_id` 取代 `mutation_id`，两者不得同时出现。closed code：
 `unknown_field|missing_field|wrong_type|non_canonical_value|invalid_domain|content_drift|`
-`unauthenticated|forbidden|capability_mismatch|invalid_snapshot_token|snapshot_expired|snapshot_stale|`
+`unauthenticated|forbidden|capability_mismatch|not_ready|invalid_snapshot_token|snapshot_expired|snapshot_stale|`
 `invalid_choice|duplicate_choice|incomplete_choices|missing_restore_base|incomplete_restore_base|`
 `missing_restore_media|cas_mismatch`。认证/ACL/能力/canonical/token/choice/restore/CAS 错误不得被
 客户端当弱网盲重试；状态改变或取得新 snapshot/session/capability 后才可发起新操作。

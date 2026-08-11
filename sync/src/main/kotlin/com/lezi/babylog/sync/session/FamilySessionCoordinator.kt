@@ -100,7 +100,10 @@ internal sealed interface FamilySessionOutcome {
         val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.NotRequired,
     ) : FamilySessionOutcome
     data class MemberLoginGrantCreated(val grant: MemberLoginGrant) : FamilySessionOutcome
-    data class MembersListed(val members: List<FamilyMember>) : FamilySessionOutcome
+    data class MembersListed(
+        val generation: String,
+        val members: List<FamilyMember>,
+    ) : FamilySessionOutcome
     data class PendingMemberRenamesListed(
         val requests: List<PendingMemberRenameRequest>,
     ) : FamilySessionOutcome
@@ -529,10 +532,10 @@ internal class FamilySessionCoordinator(
 
     private suspend fun listMembers(): FamilySessionOutcome =
         withAllowedSession { session ->
-            val members = backend.members(session)
-            val refreshed = replica.convergeAuthenticatedSelfMembership(session, members)
+            val directory = backend.memberDirectory(session)
+            val refreshed = replica.convergeAuthenticatedSelfMembership(session, directory.members)
             onSessionObserved(refreshed)
-            FamilySessionOutcome.MembersListed(members)
+            FamilySessionOutcome.MembersListed(directory.generation, directory.members)
         }
 
     private suspend fun listPendingMemberRenames(): FamilySessionOutcome =

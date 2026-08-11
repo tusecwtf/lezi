@@ -1027,6 +1027,199 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
 }
 
 #[tokio::test]
+async fn authenticated_sync_handshake_derives_principal_and_transport_contract() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "handshake-owner-device",
+        "handshake-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": [
+                "causal_versions",
+                "source_relations",
+                "wake_observation",
+            ],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["protocol_version"], json!(1));
+    assert_eq!(body["server_version"], json!(VERSION));
+    assert_eq!(body["ready"], json!(true));
+    assert_eq!(body["principal"]["membership_id"], owner["membership_id"]);
+    assert_eq!(body["principal"]["device_id"], owner["device_id"]);
+    assert_eq!(body["principal"]["role"], json!("owner"));
+    assert!(body["directory_generation"]
+        .as_str()
+        .is_some_and(|value| value.len() == 64));
+    assert_eq!(body["limits"]["pull_page_max_entities"], json!(200));
+    assert_eq!(body["limits"]["commit_batch_max_units"], json!(64));
+    assert_eq!(body["limits"]["media_max_bytes"], json!(8));
+    assert_eq!(body["compression"]["pull_response"], json!(["identity"]));
+    assert_eq!(body["retry_hints"]["retry_after"], json!(true));
+    assert_eq!(
+        body["capabilities"],
+        json!(["causal_versions", "wake_observation", "source_relations"]),
+    );
+}
+
+#[tokio::test]
+async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "handshake-fail-owner-device",
+        "handshake-fail-owner-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (auth_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        None,
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": [
+                "causal_versions", "source_relations", "wake_observation"
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(auth_status, StatusCode::UNAUTHORIZED);
+
+    for required_capabilities in [
+        json!([]),
+        json!(["causal_versions"]),
+        json!([
+            "causal_versions",
+            "source_relations",
+            "wake_observation",
+            "future_extra",
+        ]),
+        json!([
+            "causal_versions",
+            "source_relations",
+            "wake_observation",
+            "causal_sync_v2",
+        ]),
+    ] {
+        let (mismatch_status, mismatch) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/sync/handshake",
+            Some(token),
+            json!({
+                "protocol_version": 1,
+                "required_capabilities": required_capabilities,
+            }),
+        )
+        .await;
+        assert_eq!(mismatch_status, StatusCode::CONFLICT, "{mismatch}");
+        assert_eq!(mismatch["status"], json!("rejected"));
+        assert_eq!(mismatch["error"]["code"], json!("capability_mismatch"));
+        assert_eq!(mismatch["error"]["retryable"], json!(false));
+    }
+
+    fs::remove_dir_all(rig.directory.path().join("media")).unwrap();
+    fs::write(rig.directory.path().join("media"), b"not-a-directory").unwrap();
+    let (not_ready_status, not_ready) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": [
+                "causal_versions", "source_relations", "wake_observation"
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(
+        not_ready_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{not_ready}",
+    );
+    assert_eq!(not_ready["status"], json!("rejected"));
+    assert_eq!(not_ready["error"]["code"], json!("not_ready"));
+    assert_eq!(not_ready["error"]["retryable"], json!(false));
+}
+
+#[tokio::test]
+async fn member_directory_generation_changes_only_with_directory_structure() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "handshake-generation-owner",
+        "handshake-generation-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let handshake_body = json!({
+        "protocol_version": 1,
+        "required_capabilities": [
+            "causal_versions", "source_relations", "wake_observation"
+        ],
+    });
+
+    let (_, first) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        handshake_body.clone(),
+    )
+    .await;
+    rig.now.fetch_add(30, Ordering::SeqCst);
+    let (_, after_authenticated_activity) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        handshake_body.clone(),
+    )
+    .await;
+    assert_eq!(
+        after_authenticated_activity["directory_generation"],
+        first["directory_generation"],
+    );
+
+    approve_new_member(&rig.app, token, "handshake-generation-member").await;
+    let (_, changed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        handshake_body,
+    )
+    .await;
+    assert_ne!(
+        changed["directory_generation"],
+        first["directory_generation"]
+    );
+
+    let (members_status, members) = get_json(&rig.app, "/v1/family/members", Some(token)).await;
+    assert_eq!(members_status, StatusCode::OK, "{members}");
+    assert_eq!(
+        members["directory_generation"],
+        changed["directory_generation"],
+    );
+}
+
+#[tokio::test]
 async fn disaster_restore_rejects_a_configured_server_even_with_the_root_password() {
     let root = "correct-root-password";
     let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
@@ -5538,9 +5731,17 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
         get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     assert_eq!(owner_status, StatusCode::OK);
     let now = rig.now.load(Ordering::SeqCst);
+    let directory_generation = owner_view["directory_generation"].clone();
+    assert_eq!(
+        directory_generation.as_str().map(str::len),
+        Some(64),
+        "{owner_view}"
+    );
     assert_eq!(
         owner_view,
-        json!({"members":[
+        json!({
+            "directory_generation": directory_generation,
+            "members":[
             {
                 "display_name":"妈妈",
                 "role":"owner",
@@ -5567,14 +5768,17 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                     "is_current":false,
                 }],
             },
-        ]})
+            ],
+        })
     );
     let (member_status, member_view) =
         get_json(&rig.app, "/v1/family/members", Some(member_token)).await;
     assert_eq!(member_status, StatusCode::OK);
     assert_eq!(
         member_view,
-        json!({"members":[
+        json!({
+            "directory_generation": directory_generation,
+            "members":[
             {
                 "display_name":"妈妈",
                 "role":"owner",
@@ -5595,7 +5799,8 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                     "is_current":true,
                 }],
             },
-        ]})
+            ],
+        })
     );
     let visible_members = |body: &Value| {
         body["members"]

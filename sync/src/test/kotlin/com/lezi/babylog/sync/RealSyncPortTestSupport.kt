@@ -81,6 +81,8 @@ import com.lezi.babylog.sync.backend.AuthorityDisposition
 import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
+import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
+import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CanonicalRecordAuthor
@@ -94,6 +96,7 @@ import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.DisasterRestoreBatch
 import com.lezi.babylog.sync.backend.DisasterRestoreMediaSpec
 import com.lezi.babylog.sync.backend.DisasterRestoreStatus
+import com.lezi.babylog.sync.backend.FamilyMemberDirectorySnapshot
 import com.lezi.babylog.sync.backend.MemberLoginGrant
 import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
@@ -101,6 +104,7 @@ import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
 import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.ReconcileUnitDraft
+import com.lezi.babylog.sync.backend.REQUIRED_CAUSAL_WIRE_CAPABILITIES
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -108,6 +112,10 @@ import com.lezi.babylog.sync.backend.SessionBootstrapResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.backend.SyncHandshakePrincipal
+import com.lezi.babylog.sync.backend.SyncHandshakeCompression
+import com.lezi.babylog.sync.backend.SyncHandshakeLimits
+import com.lezi.babylog.sync.backend.SyncHandshakeRetryHints
 import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
 import com.lezi.babylog.sync.engine.AtomicBundleId
@@ -152,6 +160,21 @@ internal fun localBaby() = BabyEntity(
     themeColorArgb = 0,
     clientUuid = "baby-local",
     updatedAt = 100,
+)
+
+internal fun sourceCausalHandshake(
+    principal: SyncHandshakePrincipal,
+    directoryGeneration: String,
+) = AuthenticatedSyncHandshake(
+    protocolVersion = AUTHENTICATED_SYNC_PROTOCOL_VERSION,
+    serverVersion = "test",
+    ready = true,
+    capabilities = REQUIRED_CAUSAL_WIRE_CAPABILITIES,
+    principal = principal,
+    directoryGeneration = directoryGeneration,
+    limits = SyncHandshakeLimits(200, 64, 10L * 1024 * 1024),
+    compression = SyncHandshakeCompression(setOf("identity")),
+    retryHints = SyncHandshakeRetryHints(retryAfter = true),
 )
 
 internal fun localCarePlan(babyId: Long) = CarePlanEntity(
@@ -268,6 +291,11 @@ internal class RecordingSyncBackend : SyncBackend {
     var createFailure: Throwable? = null
     var membersFailure: Throwable? = null
     var nextMembers: List<FamilyMember>? = null
+    var nextDirectoryGeneration = "directory-test"
+    var nextHandshake: AuthenticatedSyncHandshake? = null
+    var handshakeFailure: Throwable? = null
+    var handshakeCalls = 0
+    var handshakeGate: CompletableDeferred<Unit>? = null
     var rejectMemberAvatarPointers = false
     var enforceBundleReferences = false
     var beforeGetMediaReturn: (suspend () -> Unit)? = null
@@ -401,6 +429,21 @@ internal class RecordingSyncBackend : SyncBackend {
         anonymousReadyGate?.await()
         anonymousReadyFailure?.let { throw it }
         return anonymousReadyResult
+    }
+
+    override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake {
+        handshakeCalls++
+        syncOrder += "handshake"
+        handshakeGate?.await()
+        handshakeFailure?.let { throw it }
+        return nextHandshake ?: sourceCausalHandshake(
+            principal = SyncHandshakePrincipal(
+                membershipId = session.membershipId,
+                deviceId = session.deviceId,
+                role = session.role,
+            ),
+            directoryGeneration = nextDirectoryGeneration,
+        )
     }
 
     override suspend fun startDisasterRestore(
@@ -861,7 +904,7 @@ internal class RecordingSyncBackend : SyncBackend {
         },
     )
 
-    override suspend fun members(session: SyncSession): List<FamilyMember> {
+    private suspend fun members(session: SyncSession): List<FamilyMember> {
         memberCalls++
         membersFailure?.let { throw it }
         return nextMembers ?: listOf(
@@ -873,6 +916,9 @@ internal class RecordingSyncBackend : SyncBackend {
             ),
         )
     }
+
+    override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot =
+        FamilyMemberDirectorySnapshot(nextDirectoryGeneration, members(session))
 
     override suspend fun updateMyDisplayName(
         session: SyncSession,
@@ -1083,6 +1129,7 @@ internal class MemorySyncPreferences(
     private val state = MutableStateFlow(initial)
     private val endpointState = MutableStateFlow<TrustedEndpointProfile?>(null)
     private val memberDirectoryState = MutableStateFlow<List<FamilyMember>>(emptyList())
+    override val familyMemberDirectoryGeneration = MutableStateFlow("")
     private val lastHealthyState = MutableStateFlow<Long?>(null)
     private val pendingMemberState = MutableStateFlow<PendingMemberLogin?>(null)
     private val disasterRestoreState = MutableStateFlow<DisasterRestoreCheckpoint?>(null)
@@ -1125,12 +1172,27 @@ internal class MemorySyncPreferences(
     }
 
     override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
+        familyMemberDirectoryGeneration.value = ""
         memberDirectoryState.value = members.map {
             it.copy(devices = null)
         }
     }
 
+    override suspend fun saveFamilyMemberDirectorySnapshot(
+        generation: String,
+        members: List<FamilyMember>,
+    ) {
+        familyMemberDirectoryGeneration.value = generation
+        memberDirectoryState.value = members.map { it.copy(devices = null) }
+    }
+
+    fun seedFamilyMemberDirectory(generation: String, members: List<FamilyMember>) {
+        familyMemberDirectoryGeneration.value = generation
+        memberDirectoryState.value = members
+    }
+
     override suspend fun clearFamilyMemberDirectory() {
+        familyMemberDirectoryGeneration.value = ""
         memberDirectoryState.value = emptyList()
     }
 

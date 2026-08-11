@@ -6,6 +6,9 @@ import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
 import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_VERSIONS
+import com.lezi.babylog.sync.session.CAPABILITY_SOURCE_RELATIONS
+import com.lezi.babylog.sync.session.CAPABILITY_WAKE_OBSERVATION
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 
@@ -438,6 +441,51 @@ data class DisasterRestoreStatus(
     val committed: Boolean get() = status == "committed"
 }
 
+internal const val AUTHENTICATED_SYNC_PROTOCOL_VERSION = 1
+
+/** Frozen H14 source-sync capability set requested by every authenticated handshake. */
+internal val REQUIRED_CAUSAL_WIRE_CAPABILITIES = setOf(
+    CAPABILITY_CAUSAL_VERSIONS,
+    CAPABILITY_WAKE_OBSERVATION,
+    CAPABILITY_SOURCE_RELATIONS,
+)
+
+data class SyncHandshakePrincipal(
+    val membershipId: String,
+    val deviceId: String,
+    val role: FamilyRole,
+)
+
+data class SyncHandshakeLimits(
+    val pullPageMaxEntities: Int,
+    val commitBatchMaxUnits: Int,
+    val mediaMaxBytes: Long,
+)
+
+data class SyncHandshakeCompression(val pullResponse: Set<String>)
+
+data class SyncHandshakeRetryHints(val retryAfter: Boolean)
+
+data class AuthenticatedSyncHandshake(
+    val protocolVersion: Int,
+    val serverVersion: String,
+    val ready: Boolean,
+    val capabilities: Set<String>,
+    val principal: SyncHandshakePrincipal,
+    val directoryGeneration: String,
+    val limits: SyncHandshakeLimits,
+    val compression: SyncHandshakeCompression,
+    val retryHints: SyncHandshakeRetryHints,
+)
+
+data class FamilyMemberDirectorySnapshot(
+    val generation: String,
+    val members: List<FamilyMember>,
+)
+
+class SyncHandshakeRejectedException(val code: String) :
+    IllegalStateException("同步握手被服务器拒绝：$code")
+
 interface SyncBackend {
     /** Trusted TLS only; never sends family credentials or client data. */
     suspend fun anonymousHealth(endpoint: TrustedEndpointProfile): AnonymousHealth =
@@ -622,6 +670,8 @@ interface SyncBackend {
     ): SessionBootstrapResult = throw UnsupportedOperationException("Member login grant claim is not implemented")
 
     suspend fun pull(session: SyncSession): PullResult
+
+    suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake
     suspend fun reconcile(
         session: SyncSession,
         units: List<ReconcileUnitDraft>,
@@ -698,7 +748,7 @@ interface SyncBackend {
         request: SourceRelationResolveGroupRequest,
     ): SourceRelationResult = throw UnsupportedOperationException("Source relation resolve-group is not implemented")
 
-    suspend fun members(session: SyncSession): List<FamilyMember>
+    suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot
     /** Owner updates immediately; ordinary Member receives a pending approval request. */
     suspend fun updateMyDisplayName(
         session: SyncSession,

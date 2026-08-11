@@ -41,9 +41,6 @@ import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
-import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_VERSIONS
-import com.lezi.babylog.sync.session.CAPABILITY_SOURCE_RELATIONS
-import com.lezi.babylog.sync.session.CAPABILITY_WAKE_OBSERVATION
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncPreferences
 import com.lezi.babylog.sync.session.SyncSession
@@ -69,13 +66,6 @@ private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val DEFAULT_UPLOAD_WRITE_STALL_TIMEOUT_MILLIS = 30_000L
 /** Attached on authenticated family requests so the server can gate minSupported later. */
 internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"
-
-/** Wire §1 causal capability keys required for [HttpSyncBackend.supportsCausalWire]. */
-internal val REQUIRED_CAUSAL_WIRE_CAPABILITIES = setOf(
-    CAPABILITY_CAUSAL_VERSIONS,
-    CAPABILITY_WAKE_OBSERVATION,
-    CAPABILITY_SOURCE_RELATIONS,
-)
 
 internal fun interface SyncHttpConnectionFactory {
     fun open(url: URL): HttpURLConnection
@@ -131,7 +121,6 @@ class HttpSyncBackend internal constructor(
             (value as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
                 ?: throw IllegalArgumentException("health.capabilities[$index] 无效")
         }.toSet()
-        lastAdvertisedCapabilities = capabilities
         return AnonymousHealth(
             version = json.requiredNonBlankString("version", "health"),
             capabilities = capabilities,
@@ -820,6 +809,30 @@ class HttpSyncBackend internal constructor(
         return caps.containsAll(REQUIRED_CAUSAL_WIRE_CAPABILITIES)
     }
 
+    override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake {
+        val json = try {
+            post(
+                session.baseUrl,
+                "/v1/sync/handshake",
+                session.accessToken,
+                buildJsonObject {
+                    put("protocol_version", AUTHENTICATED_SYNC_PROTOCOL_VERSION)
+                    put("required_capabilities", buildJsonArray {
+                        REQUIRED_CAUSAL_WIRE_CAPABILITIES.sorted().forEach {
+                            add(JsonPrimitive(it))
+                        }
+                    })
+                },
+            )
+        } catch (failure: SyncHttpException) {
+            if (failure.statusCode != 401) throw decodeSyncHandshakeFailure(failure)
+            throw failure
+        }
+        val result = decodeAuthenticatedSyncHandshake(json)
+        lastAdvertisedCapabilities = result.capabilities
+        return result
+    }
+
     override suspend fun causalReconcile(
         session: SyncSession,
         units: List<CausalMutationUnit>,
@@ -1167,9 +1180,10 @@ class HttpSyncBackend internal constructor(
         )
     }
 
-    override suspend fun members(session: SyncSession): List<FamilyMember> {
+    override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot {
         val json = get(session.baseUrl, "/v1/family/members", session.accessToken)
-        return json.requiredArray("members", "members").mapIndexed { index, memberElement ->
+        json.requireExactKeys(setOf("directory_generation", "members"), "members")
+        val members = json.requiredArray("members", "members").mapIndexed { index, memberElement ->
             val member = memberElement as? JsonObject
                 ?: throw IllegalArgumentException("members[$index] 不是对象")
             val devices = member["devices"]?.let { deviceElement ->
@@ -1220,6 +1234,12 @@ class HttpSyncBackend internal constructor(
                 ),
             )
         }
+        val generation = json.requiredNonBlankString("directory_generation", "members")
+        require(SHA256_HEX_PATTERN.matches(generation)) { "members.directory_generation 无效" }
+        return FamilyMemberDirectorySnapshot(
+            generation = generation,
+            members = members,
+        )
     }
 
     private fun JsonObject.toPendingMemberRenameRequest(
@@ -2379,6 +2399,10 @@ private fun JsonObject.requiredArray(key: String, context: String): JsonArray =
     get(key) as? JsonArray
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
 
+private fun JsonObject.requiredObject(key: String, context: String): JsonObject =
+    get(key) as? JsonObject
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+
 private fun JsonObject.requiredString(key: String, context: String): String {
     val primitive = get(key) as? JsonPrimitive
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
@@ -2400,9 +2424,19 @@ private fun JsonObject.optionalString(key: String, context: String): String? =
         else -> throw IllegalArgumentException("$context.$key 无效")
     }
 
-private fun JsonObject.requiredLong(key: String, context: String): Long =
-    get(key)?.jsonPrimitive?.longOrNull
+private fun JsonObject.requiredLong(key: String, context: String): Long {
+    val primitive = get(key) as? JsonPrimitive
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+    require(!primitive.isString) { "$context 响应 $key 必须是数字" }
+    return primitive.longOrNull
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+}
+
+private fun JsonObject.requiredInt(key: String, context: String): Int {
+    val value = requiredLong(key, context)
+    require(value in Int.MIN_VALUE..Int.MAX_VALUE) { "$context 响应 $key 超出 Int 范围" }
+    return value.toInt()
+}
 
 private fun JsonObject.toAppUpdateMetadata(): AppUpdateMetadata {
     val context = "app-update"
@@ -2428,9 +2462,13 @@ private fun JsonObject.toAppUpdateMetadata(): AppUpdateMetadata {
     )
 }
 
-private fun JsonObject.requiredBoolean(key: String, context: String): Boolean =
-    get(key)?.jsonPrimitive?.booleanOrNull
+private fun JsonObject.requiredBoolean(key: String, context: String): Boolean {
+    val primitive = get(key) as? JsonPrimitive
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+    require(!primitive.isString) { "$context 响应 $key 必须是布尔值" }
+    return primitive.booleanOrNull
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+}
 
 private fun JsonObject.requiredNullableString(key: String, context: String): String? {
     require(key in this) { "$context 响应缺少 $key" }
@@ -2514,6 +2552,140 @@ internal fun syncHttpCodeOrNull(responseBody: String): String? {
             ?.takeIf(String::isNotEmpty)
             ?.take(64)
     }.getOrNull()
+}
+
+internal fun decodeSyncHandshakeFailure(failure: SyncHttpException): SyncHandshakeRejectedException {
+    val root = runCatching { Json.parseToJsonElement(failure.responseBody).jsonObject }
+        .getOrElse { throw failure }
+    root.requireExactKeys(setOf("status", "error"), "sync_handshake rejection")
+    require(root.requiredString("status", "sync_handshake rejection") == "rejected") {
+        "sync_handshake rejection.status 无效"
+    }
+    val error = root.requiredObject("error", "sync_handshake rejection")
+    error.requireExactKeys(setOf("code", "retryable"), "sync_handshake rejection.error")
+    require(!error.requiredBoolean("retryable", "sync_handshake rejection.error")) {
+        "sync_handshake rejection.error.retryable 必须为 false"
+    }
+    val code = error.requiredString("code", "sync_handshake rejection.error")
+    val expectedStatus = when (code) {
+        "capability_mismatch" -> 409
+        "not_ready" -> 503
+        else -> throw failure
+    }
+    require(failure.statusCode == expectedStatus) {
+        "sync_handshake rejection HTTP/code 映射无效"
+    }
+    return SyncHandshakeRejectedException(code)
+}
+
+internal fun decodeAuthenticatedSyncHandshake(json: JsonObject): AuthenticatedSyncHandshake {
+    val context = "sync_handshake"
+    json.requireExactKeys(
+        setOf(
+            "protocol_version",
+            "server_version",
+            "ready",
+            "capabilities",
+            "principal",
+            "directory_generation",
+            "limits",
+            "compression",
+            "retry_hints",
+        ),
+        context,
+    )
+    require(json.requiredInt("protocol_version", context) == AUTHENTICATED_SYNC_PROTOCOL_VERSION) {
+        "$context.protocol_version 无效"
+    }
+    require(json.requiredBoolean("ready", context)) { "$context.ready 必须为 true" }
+    val serverVersion = json.requiredNonBlankString("server_version", context)
+    require(serverVersion.length <= 64) { "$context.server_version 过长" }
+    val capabilities = json.requiredUniqueStringSet("capabilities", context, maxItems = 64)
+    require(capabilities == REQUIRED_CAUSAL_WIRE_CAPABILITIES) {
+        "$context.capabilities 必须精确匹配 source causal 能力"
+    }
+    val principal = json.requiredObject("principal", context).also {
+        it.requireExactKeys(setOf("membership_id", "device_id", "role"), "$context.principal")
+    }
+    val limits = json.requiredObject("limits", context).also {
+        it.requireExactKeys(
+            setOf("pull_page_max_entities", "commit_batch_max_units", "media_max_bytes"),
+            "$context.limits",
+        )
+    }
+    val pullLimit = limits.requiredInt("pull_page_max_entities", "$context.limits")
+    val commitLimit = limits.requiredInt("commit_batch_max_units", "$context.limits")
+    val mediaLimit = limits.requiredLong("media_max_bytes", "$context.limits")
+    require(pullLimit in 1..200) { "$context.limits.pull_page_max_entities 无效" }
+    require(commitLimit in 1..64) { "$context.limits.commit_batch_max_units 无效" }
+    require(mediaLimit in 1..MAX_SYNC_MEDIA_RESPONSE_BYTES.toLong()) {
+        "$context.limits.media_max_bytes 无效"
+    }
+    val compression = json.requiredObject("compression", context).also {
+        it.requireExactKeys(setOf("pull_response"), "$context.compression")
+    }
+    val pullCompression = compression.requiredUniqueStringSet(
+        "pull_response",
+        "$context.compression",
+        maxItems = 1,
+    )
+    require(pullCompression == setOf("identity")) {
+        "$context.compression.pull_response 无效"
+    }
+    val retryHints = json.requiredObject("retry_hints", context).also {
+        it.requireExactKeys(setOf("retry_after"), "$context.retry_hints")
+    }
+    require(retryHints.requiredBoolean("retry_after", "$context.retry_hints")) {
+        "$context.retry_hints.retry_after 必须为 true"
+    }
+    val directoryGeneration = json.requiredNonBlankString("directory_generation", context)
+    require(SHA256_HEX_PATTERN.matches(directoryGeneration)) {
+        "$context.directory_generation 无效"
+    }
+    return AuthenticatedSyncHandshake(
+        protocolVersion = AUTHENTICATED_SYNC_PROTOCOL_VERSION,
+        serverVersion = serverVersion,
+        ready = true,
+        capabilities = capabilities,
+        principal = SyncHandshakePrincipal(
+            membershipId = principal.requiredNonBlankString("membership_id", "$context.principal"),
+            deviceId = principal.requiredNonBlankString("device_id", "$context.principal"),
+            role = when (principal.requiredString("role", "$context.principal")) {
+                "owner" -> FamilyRole.Owner
+                "member" -> FamilyRole.Member
+                else -> throw IllegalArgumentException("$context.principal.role 无效")
+            },
+        ),
+        directoryGeneration = directoryGeneration,
+        limits = SyncHandshakeLimits(pullLimit, commitLimit, mediaLimit),
+        compression = SyncHandshakeCompression(pullCompression),
+        retryHints = SyncHandshakeRetryHints(retryAfter = true),
+    )
+}
+
+private val SHA256_HEX_PATTERN = Regex("[0-9a-f]{64}")
+
+private fun JsonObject.requireExactKeys(expected: Set<String>, context: String) {
+    require(keys == expected) { "$context keys 无效" }
+}
+
+private fun JsonObject.requiredUniqueStringSet(
+    key: String,
+    context: String,
+    maxItems: Int,
+): Set<String> {
+    val values = requiredArray(key, context).mapIndexed { index, value ->
+        val string = (value as? JsonPrimitive)?.contentOrNull?.trim()
+            ?: throw IllegalArgumentException("$context.$key[$index] 无效")
+        require((value as JsonPrimitive).isString && string.isNotEmpty() && string.length <= 64) {
+            "$context.$key[$index] 无效"
+        }
+        string
+    }
+    require(values.size in 1..maxItems && values.distinct().size == values.size) {
+        "$context.$key 重复或越界"
+    }
+    return values.toSet()
 }
 
 internal class SyncResponseTooLargeException(

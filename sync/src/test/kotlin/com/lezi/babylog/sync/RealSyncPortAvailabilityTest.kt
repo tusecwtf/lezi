@@ -30,10 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
@@ -45,9 +43,7 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.contentOrNull
@@ -162,7 +158,7 @@ class RealSyncPortAvailabilityTest {
     }
 
     @Test
-    fun cancelledAvailabilityProbeRestoresStateAndLocalWriteCanProbeAgain() = runTest {
+    fun cancelledAvailabilityProbeRestoresStateAndExplicitProbeCanRunAgain() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
@@ -186,11 +182,8 @@ class RealSyncPortAvailabilityTest {
         val healthCallsBeforeRecovery = rig.backend.anonymousHealthCalls
         val readyCallsBeforeRecovery = rig.backend.anonymousReadyCalls
         rig.backend.anonymousHealthGate = null
-        rig.port.notifyLocalChanges()
-
-        val recovered = rig.port.availability()
-            .filter { it is FamilyServerAvailability.Available }
-            .first()
+        val recovered = rig.port.probeServerAvailability(AvailabilityProbeReason.LocalChanges)
+            .getOrThrow()
         assertThat(recovered).isInstanceOf(FamilyServerAvailability.Available::class.java)
         assertThat(rig.backend.anonymousHealthCalls).isEqualTo(healthCallsBeforeRecovery + 1)
         assertThat(rig.backend.anonymousReadyCalls).isEqualTo(readyCallsBeforeRecovery + 1)
@@ -223,7 +216,7 @@ class RealSyncPortAvailabilityTest {
     }
 
     @Test
-    fun networkRecoveredProbesAreDebouncedWhileTheLinkFlaps() = runTest {
+    fun networkRecoveredSyncUsesAuthenticatedHandshakeWithoutAnonymousProbe() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a"),
             setupProbe = SetupProbe { _, trusted ->
@@ -231,36 +224,14 @@ class RealSyncPortAvailabilityTest {
             },
         )
         rig.awaitStartupRecovery()
-        val firstProbeGate = CompletableDeferred<Unit>()
-        val firstProbeStarted = CompletableDeferred<Unit>()
-        val secondProbeGate = CompletableDeferred<Unit>()
-        rig.backend.anonymousHealthGate = firstProbeGate
-        rig.backend.anonymousHealthStarted = firstProbeStarted
         rig.backend.pullStarted = CompletableDeferred()
 
-        try {
-            rig.port.notifyNetworkRecovered()
-            firstProbeStarted.await()
-            assertThat(rig.port.availability().first())
-                .isInstanceOf(FamilyServerAvailability.Checking::class.java)
+        rig.port.notifyNetworkRecovered()
+        rig.backend.pullStarted!!.await()
 
-            rig.backend.anonymousHealthGate = secondProbeGate
-            rig.port.notifyNetworkRecovered()
-            firstProbeGate.complete(Unit)
-            rig.backend.pullStarted!!.await()
-
-            val secondProbeStarted = withContext(Dispatchers.IO) {
-                withTimeoutOrNull(250) {
-                    while (rig.backend.anonymousHealthCalls < 2) delay(5)
-                    true
-                } ?: false
-            }
-            assertThat(secondProbeStarted).isFalse()
-            assertThat(rig.backend.anonymousHealthCalls).isEqualTo(1)
-        } finally {
-            firstProbeGate.complete(Unit)
-            secondProbeGate.complete(Unit)
-        }
+        assertThat(rig.backend.handshakeCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(0)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(0)
     }
 
     @Test

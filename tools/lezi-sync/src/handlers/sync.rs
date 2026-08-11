@@ -14,18 +14,103 @@ use crate::model::{
     validate_bundle_media_for_root, Entity, EntityValidationContext, RawEntity,
     MAX_BUNDLE_MEDIA_ENTITIES,
 };
+use crate::readiness::is_ready;
 use crate::store::{
     CausalMediaItem, CausalMutation, ConflictDetailPage, ConflictDetailPageRequest,
     ConflictResolutionChoice, PullPage, PulledEntity, ReconcileResult, ReconcileUnit,
-    ResolveConflictInput, StoreError,
+    ResolveConflictInput, StoreError, MAX_CAUSAL_UNITS,
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
-    MAX_ENTITY_FUTURE_SKEW_MILLIS,
+    MAX_ENTITY_FUTURE_SKEW_MILLIS, PULL_PAGE_ENTITY_LIMIT, SETUP_PROTOCOL_VERSION,
+    SOURCE_SYNC_HANDSHAKE_CAPABILITIES,
 };
 
 const MAX_RECONCILE_UNITS: usize = 64;
 const MAX_RECONCILE_REQUEST_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuthenticatedHandshakeRequest {
+    protocol_version: u16,
+    required_capabilities: Vec<String>,
+}
+
+fn terminal_handshake_rejection(code: &str) -> Value {
+    json!({
+        "status": "rejected",
+        "error": { "code": code, "retryable": false },
+    })
+}
+
+/// One authenticated sync preflight after endpoint trust and session setup.
+/// Operational health/setup routes remain available but are not prerequisites
+/// for ordinary client synchronization.
+pub(crate) async fn authenticated_handshake(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<AuthenticatedHandshakeRequest>, JsonRejection>,
+) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let request = json_body(body)?;
+    let advertised = SOURCE_SYNC_HANDSHAKE_CAPABILITIES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let required = request
+        .required_capabilities
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if request.protocol_version != SETUP_PROTOCOL_VERSION
+        || required.len() != request.required_capabilities.len()
+        || required != advertised
+    {
+        return Ok((
+            axum::http::StatusCode::CONFLICT,
+            Json(terminal_handshake_rejection("capability_mismatch")),
+        ));
+    }
+    if !is_ready(&state).await {
+        return Ok((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(terminal_handshake_rejection("not_ready")),
+        ));
+    }
+    let store = state.store.clone();
+    let family_id = principal.family_id.clone();
+    let membership_id = principal.membership_id.clone();
+    let viewer_is_owner = principal.role == "owner";
+    let directory_generation = run_blocking(move || {
+        Ok(store
+            .family_directory_snapshot(&family_id, &membership_id, viewer_is_owner)?
+            .generation)
+    })
+    .await?;
+    Ok((
+        axum::http::StatusCode::OK,
+        Json(json!({
+            "protocol_version": SETUP_PROTOCOL_VERSION,
+            "server_version": state.version,
+            "ready": true,
+            "capabilities": SOURCE_SYNC_HANDSHAKE_CAPABILITIES,
+            "principal": {
+                "membership_id": principal.membership_id,
+                "device_id": principal.device_id,
+                "role": principal.role,
+            },
+            "directory_generation": directory_generation,
+            "limits": {
+                "pull_page_max_entities": PULL_PAGE_ENTITY_LIMIT,
+                "commit_batch_max_units": MAX_CAUSAL_UNITS,
+                "media_max_bytes": state.max_media_bytes,
+            },
+            "compression": { "pull_response": ["identity"] },
+            "retry_hints": { "retry_after": true },
+        })),
+    ))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

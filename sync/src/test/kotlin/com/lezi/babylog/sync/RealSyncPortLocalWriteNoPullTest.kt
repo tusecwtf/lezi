@@ -553,7 +553,7 @@ class RealSyncPortLocalWriteNoPullTest {
     }
 
     @Test
-    fun unhealthyLeaseLocalWriteDoesNotCallCausalSettleAndKeepsDirty() = runTest {
+    fun handshakeFailureStopsSyncWhenAvailableWithoutAnonymousProbeOrMutation() = runTest {
         val session = joinedSession("family-a").copy(pullCursor = 9)
         val rig = SyncRig(
             session = session,
@@ -573,8 +573,7 @@ class RealSyncPortLocalWriteNoPullTest {
                 baseVersion = "v-r0",
             ),
         )
-        // Force availability failure before any sync work.
-        rig.backend.anonymousHealthFailure = java.io.IOException("lease expired / unreachable")
+        rig.backend.handshakeFailure = java.io.IOException("unreachable")
 
         val result = rig.port.syncWhenAvailable(SyncTrigger.LocalWrite)
 
@@ -582,15 +581,11 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.handshakeCalls).isEqualTo(1)
+        assertThat(rig.backend.anonymousHealthCalls).isEqualTo(0)
+        assertThat(rig.backend.anonymousReadyCalls).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(9)
         assertThat(requireNotNull(rig.records.getByClientUuid("record-lease")).syncDirty).isTrue()
-        val availability = rig.port.availability().first()
-        // Probe may leave Unavailable or the failure may be the currently-unavailable wrapper.
-        assertThat(
-            availability is FamilyServerAvailability.Unavailable ||
-                availability is FamilyServerAvailability.Disabled ||
-                availability is FamilyServerAvailability.Checking,
-        ).isTrue()
     }
 
     @Test
@@ -610,7 +605,7 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(result.exceptionOrNull()).isInstanceOf(IllegalStateException::class.java)
         assertThat(result.exceptionOrNull()).hasMessageThat().contains("因果同步协议")
         assertThat(rig.backend.pullCount).isEqualTo(1)
-        assertThat(rig.backend.syncOrder.first()).isEqualTo("pull:2")
+        assertThat(rig.backend.syncOrder.take(2)).containsExactly("handshake", "pull:2").inOrder()
         assertThat(rig.backend.causalReconciledUnits).isEmpty()
     }
 }

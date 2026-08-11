@@ -1623,7 +1623,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.pullCount).isEqualTo(1)
         assertThat(rig.backend.syncOrder)
-            .containsExactly("pull:5", "reconcile:1", "stage:baby")
+            .containsExactly("handshake", "pull:5", "reconcile:1", "stage:baby")
             .inOrder()
         // Incremental pull may advance cursor only when the server reports a new cursor;
         // empty RecordingSyncBackend pull keeps the session cursor at the requested value.

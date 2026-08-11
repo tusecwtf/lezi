@@ -44,6 +44,10 @@ import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
+import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
+import com.lezi.babylog.sync.backend.REQUIRED_CAUSAL_WIRE_CAPABILITIES
+import com.lezi.babylog.sync.backend.SyncHandshakeRejectedException
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
@@ -189,17 +193,24 @@ internal class ReplicaSyncEngine(
         mediaFileCleanup.cleanupPendingTombstones()
         val mediaEditGuard = captureLocalMediaEditGuard()
         val plan = SyncPlan.forTrigger(trigger)
-        // LocalWrite no-pull plan applies only with causal wire; otherwise pull first.
-        // Spec / ADR-0020: no-pull before causal base/three-way/branch is rejected.
-        val doPull = plan.pull || !backend.supportsCausalWire()
         var current = preferences.session.first()
         requireRemoteAllowed(current)
-        // Intentional LocalWrite precondition: authenticated members directory for
-        // self-membership convergence (not an incremental entity pull / cursor advance).
-        current = convergeAuthenticatedSelfMembership(
-            current,
-            backend.members(current),
-        )
+        val handshake = backend.authenticatedHandshake(current)
+        handshake.requireCompatible(current)
+        if (preferences.familyMemberDirectoryGeneration.first() != handshake.directoryGeneration) {
+            val directory = backend.memberDirectory(current)
+            check(directory.generation == handshake.directoryGeneration) {
+                "member directory changed during authenticated sync handshake"
+            }
+            current = convergeAuthenticatedSelfMembership(current, directory.members)
+            preferences.saveFamilyMemberDirectorySnapshot(
+                generation = directory.generation,
+                members = directory.members,
+            )
+        }
+        // LocalWrite no-pull plan applies only with the capabilities frozen by this handshake.
+        // Spec / ADR-0020: no-pull before causal base/three-way/branch is rejected.
+        val doPull = plan.pull || !backend.supportsCausalWire()
         var recovered = false
         // When doPull is false (LocalWrite + causal): freeze dirty roots → settle only.
         // Do not incremental-pull and do not advance the pull cursor; full cycles still pull.
@@ -256,6 +267,26 @@ internal class ReplicaSyncEngine(
         // bytes and their retry marker are reclaimed here.
         mediaFileCleanup.cleanupPendingTombstones()
         return ReplicaSyncOutcome.Synchronized
+    }
+
+    private fun AuthenticatedSyncHandshake.requireCompatible(session: SyncSession) {
+        if (!ready) throw SyncHandshakeRejectedException("not_ready")
+        if (
+            protocolVersion != AUTHENTICATED_SYNC_PROTOCOL_VERSION ||
+            capabilities != REQUIRED_CAUSAL_WIRE_CAPABILITIES
+        ) {
+            throw SyncHandshakeRejectedException("capability_mismatch")
+        }
+        if (
+            principal.membershipId != session.membershipId ||
+            principal.deviceId != session.deviceId ||
+            principal.role != session.role
+        ) {
+            throw SyncHandshakeRejectedException("unauthenticated")
+        }
+        if (directoryGeneration.isBlank()) {
+            throw SyncHandshakeRejectedException("capability_mismatch")
+        }
     }
 
     override suspend fun applyInitialEntities(

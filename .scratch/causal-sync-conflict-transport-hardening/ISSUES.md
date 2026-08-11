@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H13 and R12/R17/R18/R19 are implemented; H14 is the serial frontier
+Status: in-progress — H01–H14 and R12/R17/R18/R19 are implemented; H15 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -38,7 +38,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 11 | [`11-provider-roots-commit-first`](./issues/11-provider-roots-commit-first.md) | implemented (review/final gates pass; device Room residual) | 10 |
 | 12 | [`12-careplan-no-media-commit-first`](./issues/12-careplan-no-media-commit-first.md) | implemented (review/final gates pass; device Room residual) | 11 |
 | 13 | [`13-wake-observation-commit-first`](./issues/13-wake-observation-commit-first.md) | implemented (review/final gates pass; device Room residual) | 11 |
-| 14 | [`14-authenticated-sync-handshake`](./issues/14-authenticated-sync-handshake.md) | ready-for-agent | 12, 13 |
+| 14 | [`14-authenticated-sync-handshake`](./issues/14-authenticated-sync-handshake.md) | implemented (review/final gates pass; device instrumentation residual) | 12, 13 |
 | 15 | [`15-retry-after-full-jitter`](./issues/15-retry-after-full-jitter.md) | ready-for-agent | 14 |
 | 16 | [`16-gzip-bounded-pull`](./issues/16-gzip-bounded-pull.md) | ready-for-agent | 14, 15 |
 | 17 | [`17-streaming-preimage-receipt`](./issues/17-streaming-preimage-receipt.md) | ready-for-agent | 14, 15 |
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H13 is implemented. H14 is the next executable DAG frontier; H14–H43 remain open and follow
+H14 is implemented. H15 is the next executable DAG frontier; H15–H43 remain open and follow
 the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.

@@ -298,8 +298,6 @@ class RealSyncPort @Inject constructor(
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)
-    private val pendingAvailabilityReason =
-        AtomicReference(AvailabilityProbeReason.LocalChanges)
     private val lastAcceptedNetworkRecoveredAtMillis = AtomicReference<Long?>(null)
     @Volatile private var cachedSession = SyncSession()
 
@@ -344,36 +342,6 @@ class RealSyncPort @Inject constructor(
                     SyncTrigger.Foreground
                 } else {
                     SyncTrigger.LocalWrite
-                }
-                val probeReason = pendingAvailabilityReason.getAndSet(
-                    AvailabilityProbeReason.LocalChanges,
-                )
-                val availability = probeServerAvailability(probeReason).getOrNull()
-                if (availability !is FamilyServerAvailability.Available) {
-                    if (trigger != SyncTrigger.LocalWrite) {
-                        scheduledRetryNeedsPull = true
-                    }
-                    val unavailable = availability as? FamilyServerAvailability.Unavailable
-                    if (unavailable != null) {
-                        val forced = probeReason == AvailabilityProbeReason.Foreground ||
-                            probeReason == AvailabilityProbeReason.NetworkRecovered ||
-                            probeReason == AvailabilityProbeReason.PullToRefresh
-                        if (scheduledRetry?.isActive != true || forced) {
-                            scheduledRetry?.cancel()
-                            val retryDelay =
-                                (unavailable.nextProbeAtMillis - clock.nowMillis()).coerceAtLeast(0)
-                            scheduledRetry = processScope.launch {
-                                delay(retryDelay)
-                                if (foregroundState.isForeground()) {
-                                    pendingAvailabilityReason.set(
-                                        AvailabilityProbeReason.RetryDeadline,
-                                    )
-                                    syncSignal.trySend(Unit)
-                                }
-                            }
-                        }
-                    }
-                    continue
                 }
                 scheduledRetry?.cancel()
                 scheduledRetry = null
@@ -658,12 +626,6 @@ class RealSyncPort @Inject constructor(
         if (trigger != SyncTrigger.LocalWrite) {
             pullRequested.set(true)
         }
-        pendingAvailabilityReason.accumulateAndGet(trigger.toAvailabilityProbeReason()) {
-                current,
-                incoming,
-            ->
-            mergeAvailabilityProbeReason(current, incoming)
-        }
         syncSignal.trySend(Unit)
     }
 
@@ -686,7 +648,6 @@ class RealSyncPort @Inject constructor(
             if (lastAcceptedNetworkRecoveredAtMillis.compareAndSet(lastAccepted, now)) break
         }
         pullRequested.set(true)
-        pendingAvailabilityReason.set(AvailabilityProbeReason.NetworkRecovered)
         syncSignal.trySend(Unit)
     }
 
@@ -1255,11 +1216,14 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
         val remote = executeFamily(FamilySessionCommand.ListMembers)
-        val members = remote.getOrElse { return Result.failure(it) }
-            .let { (it as FamilySessionOutcome.MembersListed).members }
+        val directory = remote.getOrElse { return Result.failure(it) }
+            .let { it as FamilySessionOutcome.MembersListed }
         return try {
-            preferences.saveFamilyMemberDirectory(members)
-            Result.success(members)
+            preferences.saveFamilyMemberDirectorySnapshot(
+                generation = directory.generation,
+                members = directory.members,
+            )
+            Result.success(directory.members)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
@@ -1308,11 +1272,6 @@ class RealSyncPort @Inject constructor(
         ).map { Unit }
 
     override suspend fun syncWhenAvailable(trigger: SyncTrigger): Result<Unit> {
-        val availability = probeServerAvailability(trigger.toAvailabilityProbeReason())
-            .getOrElse { return Result.failure(it) }
-        if (availability !is FamilyServerAvailability.Available) {
-            return Result.failure(FamilyServerCurrentlyUnavailableException())
-        }
         return sync(trigger)
     }
 
@@ -2331,26 +2290,6 @@ private val REQUIRED_HEALTH_CAPABILITIES = setOf(
 /** Reauth keeps the family replica/identity; only a true leave/unconfigure retires force UI. */
 private fun SyncSession.retainsFamilyIdentityForReauth(): Boolean =
     reauthRequired && familyId.isNotBlank() && membershipId.isNotBlank() && baseUrl.isNotBlank()
-
-private fun SyncTrigger.toAvailabilityProbeReason(): AvailabilityProbeReason = when (this) {
-    SyncTrigger.Foreground -> AvailabilityProbeReason.Foreground
-    SyncTrigger.PullToRefresh -> AvailabilityProbeReason.PullToRefresh
-    SyncTrigger.LocalWrite -> AvailabilityProbeReason.LocalChanges
-}
-
-private fun mergeAvailabilityProbeReason(
-    current: AvailabilityProbeReason,
-    incoming: AvailabilityProbeReason,
-): AvailabilityProbeReason = if (incoming.priority >= current.priority) incoming else current
-
-private val AvailabilityProbeReason.priority: Int
-    get() = when (this) {
-        AvailabilityProbeReason.LocalChanges -> 0
-        AvailabilityProbeReason.RetryDeadline -> 1
-        AvailabilityProbeReason.Foreground -> 2
-        AvailabilityProbeReason.PullToRefresh -> 3
-        AvailabilityProbeReason.NetworkRecovered -> 4
-    }
 
 private inline fun <reified T : Throwable> Throwable.causeChainContains(): Boolean =
     generateSequence(this) { it.cause }.any { it is T }

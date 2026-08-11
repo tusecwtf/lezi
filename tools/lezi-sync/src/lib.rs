@@ -82,6 +82,23 @@ pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
 pub const CAPABILITY_WAKE_OBSERVATION: &str = "wake_observation";
 /// Non-destructive source relations API surface (wire §1 / §12).
 pub const CAPABILITY_SOURCE_RELATIONS: &str = "source_relations";
+/// Capabilities owned by the authenticated sync handshake. H27 will replace
+/// this source-generation set with the single `causal_sync_v2` activation.
+pub const HEALTH_CAPABILITIES: &[&str] = &[
+    CAPABILITY_ATOMIC_BUNDLE,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    CAPABILITY_DISASTER_RESTORE,
+    CAPABILITY_AUTHORITATIVE_RECONCILE,
+    CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
+    CAPABILITY_CAUSAL_VERSIONS,
+    CAPABILITY_WAKE_OBSERVATION,
+    CAPABILITY_SOURCE_RELATIONS,
+];
+pub const SOURCE_SYNC_HANDSHAKE_CAPABILITIES: &[&str] = &[
+    CAPABILITY_CAUSAL_VERSIONS,
+    CAPABILITY_WAKE_OBSERVATION,
+    CAPABILITY_SOURCE_RELATIONS,
+];
 /// 0.3.13 causal generation: production requires verified app-update with
 /// version_code and min_supported_version_code at least this floor (versionCode 20).
 const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 20;
@@ -728,6 +745,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             post(identity::claim_member_login_grant),
         )
         .route("/v1/session/refresh", post(identity::refresh_session))
+        .route("/v1/sync/handshake", post(sync::authenticated_handshake))
         .route(
             "/v1/family/members",
             get(list_family_members).post(add_family_member),

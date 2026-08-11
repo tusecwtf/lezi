@@ -55,7 +55,7 @@ class ReplicaSyncEnginePushReplanTest {
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         // Without causal wire LocalWrite still pulls (no-pull is capability-gated).
         assertThat(rig.backend.syncOrder)
-            .containsExactly("pull:0", "reconcile:1", "stage:baby")
+            .containsExactly("handshake", "pull:0", "reconcile:1", "stage:baby")
             .inOrder()
     }
 

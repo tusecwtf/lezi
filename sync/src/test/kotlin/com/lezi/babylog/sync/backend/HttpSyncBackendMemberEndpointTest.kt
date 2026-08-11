@@ -343,7 +343,7 @@ class HttpSyncBackendMemberEndpointTest {
                     server.accept().use { socket ->
                         captured.complete(readRequest(socket))
                         val body = (
-                            "{\"members\":[" +
+                            "{\"directory_generation\":\"${"a".repeat(64)}\",\"members\":[" +
                             "{\"display_name\":\"妈妈\",\"role\":\"owner\",\"is_self\":true," +
                                 "\"membership_id\":\"membership-owner-uuid\",\"devices\":[{" +
                                 "\"device_id\":\"device-owner-uuid\",\"device_name\":\"我的 Pixel\"," +
@@ -367,7 +367,7 @@ class HttpSyncBackendMemberEndpointTest {
             }
 
             try {
-                val members = loopbackBackend().members(testSession(server))
+                val members = loopbackBackend().memberDirectory(testSession(server)).members
                 val request = captured.get(2, TimeUnit.SECONDS)
 
                 assertThat(members).containsExactly(
@@ -415,7 +415,7 @@ class HttpSyncBackendMemberEndpointTest {
                     server.accept().use { socket ->
                         readRequest(socket)
                         val body =
-                            """{"members":[{"display_name":"旧客户端","role":"future_admin"},42]}"""
+                            """{"directory_generation":"${"a".repeat(64)}","members":[{"display_name":"旧客户端","role":"future_admin"},42]}"""
                                 .toByteArray(Charsets.UTF_8)
                         socket.getOutputStream().use { output ->
                             output.write(
@@ -434,7 +434,7 @@ class HttpSyncBackendMemberEndpointTest {
 
             try {
                 val failure = runCatching {
-                    loopbackBackend().members(testSession(server))
+                    loopbackBackend().memberDirectory(testSession(server))
                 }.exceptionOrNull()
                 assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
                 assertThat(failure).hasMessageThat().contains("role")

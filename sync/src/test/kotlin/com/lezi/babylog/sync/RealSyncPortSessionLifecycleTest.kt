@@ -431,7 +431,8 @@ class RealSyncPortSessionLifecycleTest {
         val rig = SyncRig(session = configured)
         rig.awaitStartupRecovery()
         val automaticSyncGate = CompletableDeferred<Unit>()
-        rig.backend.anonymousHealthGate = automaticSyncGate
+        rig.backend.handshakeGate = automaticSyncGate
+        rig.backend.pullStarted = CompletableDeferred()
         rig.backend.nextPull = PullResult(
             entities = emptyList(),
             cursor = 7,
@@ -454,13 +455,14 @@ class RealSyncPortSessionLifecycleTest {
         rig.foreground.setForeground(false)
         automaticSyncGate.complete(Unit)
         rig.foreground.setForeground(true)
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        rig.backend.pullStarted!!.await()
+        rig.port.status().filter { it == SyncStatus.Idle }.first()
 
         assertThat(created.reclaimed).isFalse()
         assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.backend.pullCursors).containsExactly(0L)
         assertThat(rig.backend.syncOrder)
-            .containsExactly("pull:0", "reconcile:1", "stage:baby")
+            .containsExactly("handshake", "pull:0", "reconcile:1", "stage:baby")
             .inOrder()
         assertThat(rig.port.session().first().pullCursor).isEqualTo(7L)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
@@ -475,7 +477,8 @@ class RealSyncPortSessionLifecycleTest {
         val rig = SyncRig(session = configured)
         rig.awaitStartupRecovery()
         val automaticSyncGate = CompletableDeferred<Unit>()
-        rig.backend.anonymousHealthGate = automaticSyncGate
+        rig.backend.handshakeGate = automaticSyncGate
+        rig.backend.pullStarted = CompletableDeferred()
         rig.backend.pullFailures += SyncHttpException(503)
         rig.babies.seed(localBaby())
 
@@ -496,7 +499,8 @@ class RealSyncPortSessionLifecycleTest {
         rig.foreground.setForeground(false)
         automaticSyncGate.complete(Unit)
         rig.foreground.setForeground(true)
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+        rig.backend.pullStarted!!.await()
+        rig.port.status().filter { it == SyncStatus.Error }.first()
 
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
         assertThat(rig.backend.pullCursors).containsExactly(0L)
