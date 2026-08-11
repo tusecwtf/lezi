@@ -16155,6 +16155,16 @@ fn causal_formula_root(baby_id: Uuid, note: &str, amount_ml: i64, updated_at: i6
     causal_formula_root_at(baby_id, note, amount_ml, 1_700_000_100, updated_at)
 }
 
+fn causal_baby_root(nickname: &str, avatar_media_uuid: Option<Uuid>, updated_at: i64) -> Value {
+    json!({
+        "nickname": nickname,
+        "sex": "female",
+        "birthday": "2025-01-02",
+        "avatar_media_uuid": avatar_media_uuid,
+        "updated_at": updated_at
+    })
+}
+
 fn causal_sleep_root(baby_id: Uuid, start: i64, updated_at: i64) -> Value {
     json!({
         "baby_client_uuid": baby_id,
@@ -20312,6 +20322,314 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
         row_b.get("conflict_summary").is_some() && !row_b["conflict_summary"].is_null(),
         "delete branch must surface conflict_summary: {row_b}"
     );
+}
+
+#[tokio::test]
+async fn causal_member_cannot_commit_baby_avatar_root() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (_owner, member) =
+        two_joined_clients(&rig.app, "causal-avatar-owner", "causal-avatar-member").await;
+    let member_token = member["access_token"].as_str().unwrap();
+
+    let denied_baby = Uuid::new_v4();
+    let denied_avatar = Uuid::new_v4();
+    let denied_bytes = b"member-avatar-must-not-publish";
+    let denied_sha = hex::encode(Sha256::digest(denied_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, member_token, denied_avatar, denied_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, denied) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            denied_baby,
+            causal_baby_root("禁止创建", Some(denied_avatar), 10),
+            vec![causal_media_item(
+                denied_avatar,
+                "avatar",
+                &denied_sha,
+                denied_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{denied}");
+    assert_eq!(denied["results"][0]["status"], "rejected", "{denied}");
+    assert_eq!(denied["results"][0]["code"], "forbidden_baby", "{denied}");
+}
+
+#[tokio::test]
+async fn causal_baby_avatar_exact_commit_replay_keeps_stable_version_and_bytes() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-avatar-replay-owner",
+        "causal-avatar-replay-create-request-0001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let baby_id = Uuid::new_v4();
+    let avatar_id = Uuid::new_v4();
+    let avatar_bytes = b"owner-avatar-exact-bytes";
+    let avatar_sha = hex::encode(Sha256::digest(avatar_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, owner_token, avatar_id, avatar_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        baby_id,
+        causal_baby_root("年年", Some(avatar_id), 20),
+        vec![causal_media_item(
+            avatar_id,
+            "avatar",
+            &avatar_sha,
+            avatar_bytes.len(),
+        )],
+        false,
+    );
+    let (status, created) =
+        causal_commit_units(&rig.app, owner_token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["results"][0]["status"], "accepted", "{created}");
+    let v1 = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, replay) = causal_commit_units(&rig.app, owner_token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "accepted", "{replay}");
+    assert_eq!(replay["results"][0]["stable_version_id"], v1);
+
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{avatar_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        avatar_bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn causal_deleted_baby_stable_keeps_avatar_branch_evidence_auditable() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-avatar-branch-owner",
+        "causal-avatar-branch-create-request-0001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let avatar_id = Uuid::new_v4();
+    let avatar_bytes = b"owner-avatar-branch-bytes";
+    let avatar_sha = hex::encode(Sha256::digest(avatar_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, owner_token, avatar_id, avatar_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            baby_id,
+            causal_baby_root("年年", Some(avatar_id), 20),
+            vec![causal_media_item(
+                avatar_id,
+                "avatar",
+                &avatar_sha,
+                avatar_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let v1 = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "baby",
+            baby_id,
+            causal_baby_root("年年", None, 30),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+
+    let (status, avatar_branch) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "baby",
+            baby_id,
+            causal_baby_root("岁岁", Some(avatar_id), 40),
+            vec![causal_media_item(
+                avatar_id,
+                "avatar",
+                &avatar_sha,
+                avatar_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{avatar_branch}");
+    assert_eq!(
+        avatar_branch["results"][0]["status"], "branched",
+        "{avatar_branch}"
+    );
+    let conflict_id = avatar_branch["results"][0]["conflict_id"].as_str().unwrap();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["stable"]["deleted"], true);
+    assert_eq!(detail["stable"]["media"], json!([]));
+    assert!(detail["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["deleted"] == false
+            && branch["root"]["avatar_media_uuid"] == avatar_id.to_string()
+            && branch["media"][0]["media_uuid"] == avatar_id.to_string()
+            && branch["media"][0]["sha256"] == avatar_sha
+            && branch["media"][0]["byte_size"] == avatar_bytes.len()));
+
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let baby = find_entity(&pull, baby_id);
+    assert!(
+        !baby["deleted_at"].is_null(),
+        "stable stays deleted: {baby}"
+    );
+    assert!(baby["payload"]["avatar_media_uuid"].is_null());
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{avatar_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn causal_deleted_baby_clears_avatar_reachability() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-avatar-delete-owner",
+        "causal-avatar-delete-create-request-0001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    let deleted_baby = Uuid::new_v4();
+    let orphan_avatar = Uuid::new_v4();
+    let orphan_bytes = b"deleted-baby-avatar-evidence";
+    let orphan_sha = hex::encode(Sha256::digest(orphan_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, owner_token, orphan_avatar, orphan_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            deleted_baby,
+            causal_baby_root("待删除", Some(orphan_avatar), 50),
+            vec![causal_media_item(
+                orphan_avatar,
+                "avatar",
+                &orphan_sha,
+                orphan_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let delete_base = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(delete_base),
+            "baby",
+            deleted_baby,
+            causal_baby_root("待删除", None, 60),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let tombstone = find_entity(&pull, deleted_baby);
+    assert!(!tombstone["deleted_at"].is_null(), "{tombstone}");
+    assert!(tombstone["payload"]["avatar_media_uuid"].is_null());
+    let media_tombstone = find_entity(&pull, orphan_avatar);
+    assert!(
+        !media_tombstone["deleted_at"].is_null(),
+        "{media_tombstone}"
+    );
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{orphan_avatar}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 /// Independent media additions merge; same-media delete/edit branches; bytes retained.

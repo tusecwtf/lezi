@@ -804,7 +804,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun babyWithActiveAvatarRetainsSourceReconcileUntilMediaMigration() = runTest {
+    fun ownerBabyWithActiveAvatarPreparesReceiptThenCommitsWithoutReconcile() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 45)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -818,6 +818,8 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 avatarPath = "avatars/provider.jpg",
             ),
         )
+        val avatarBytes = byteArrayOf(7, 5, 3, 1)
+        rig.mediaFiles.preparedUploadBytes["avatars/provider.jpg"] = avatarBytes
         rig.media.seed(
             MediaAssetEntity(
                 clientUuid = "00000000-0000-4000-8000-000000000245",
@@ -835,12 +837,13 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(45)
-        assertThat(rig.backend.causalReconciledUnits.single().single().entityType)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits.single().single().entityType)
             .isEqualTo("baby")
-        assertThat(rig.backend.causalReconciledUnits.single().single().media).hasSize(1)
+        assertThat(rig.backend.causalCommittedUnits.single().single().media).hasSize(1)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(avatarBytes)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly(
-                "causal_reconcile:1",
                 "causal_media_preimage:00000000-0000-4000-8000-000000000245",
                 "causal_commit:1",
             )
@@ -848,7 +851,53 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun deletedBabyWithTombstonedOrOrphanAvatarUsesSourceRepairWithoutEnvelope() = runTest {
+    fun dirtyAvatarElevatesItsCleanBabyIntoOneSyntheticCommitFirstRoot() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 46)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val avatarUuid = "00000000-0000-4000-8000-000000000248"
+        val avatarUri = "avatars/synthetic-root.jpg"
+        val avatarBytes = byteArrayOf(1, 4, 9, 16)
+        rig.mediaFiles.preparedUploadBytes[avatarUri] = avatarBytes
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-synthetic-avatar-root",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby-synthetic",
+                updatedAt = 140,
+                avatarMediaUuid = avatarUuid,
+                avatarPath = avatarUri,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = avatarUri,
+                mime = "image/jpeg",
+                createdAt = 140,
+                updatedAt = 150,
+                syncDirty = true,
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        val committed = rig.backend.causalCommittedUnits.single().single()
+        assertThat(committed.entityType).isEqualTo("baby")
+        assertThat(committed.clientUuid).isEqualTo("baby-synthetic-avatar-root")
+        assertThat(committed.media.map { it.mediaUuid }).containsExactly(avatarUuid)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(avatarBytes)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(46)
+        assertThat(rig.babies.getByClientUuid("baby-synthetic-avatar-root")?.syncDirty)
+            .isFalse()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
+    }
+
+    @Test
+    fun deletedBabyWithTombstonedOrOrphanAvatarCommitsFrozenRootWithoutReachableMedia() = runTest {
         data class Case(
             val name: String,
             val mediaUuid: String,
@@ -898,19 +947,20 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                     syncDirty = case.initiallyDirty,
                 ),
             )
-            rig.backend.onCausalReconcile = { units ->
+            rig.backend.onCausalCommit = { units ->
                 assertThat(units.map { it.entityType }).containsExactly("baby")
                 assertThat(units.single().media).isEmpty()
-                assertThat(rig.conflictDetails.getFrozenMutation("baby", babyUuid)).isNull()
+                assertThat(units.single().rootJson).contains("\"avatar_media_uuid\":null")
+                assertThat(rig.conflictDetails.getFrozenMutation("baby", babyUuid)).isNotNull()
             }
 
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
             assertThat(rig.backend.pullCount).isEqualTo(0)
             assertThat(rig.preferences.current().pullCursor).isEqualTo(47)
-            assertThat(rig.backend.causalReconciledUnits).hasSize(1)
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
             assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
-                .containsExactly("causal_reconcile:1", "causal_commit:1")
+                .containsExactly("causal_commit:1")
                 .inOrder()
             assertThat(rig.conflictDetails.getFrozenMutation("baby", babyUuid)).isNull()
             with(requireNotNull(rig.media.getByClientUuid(case.mediaUuid))) {

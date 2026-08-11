@@ -58,6 +58,8 @@ internal val CAUSAL_ROOT_TYPES = setOf(
     "wake_observation",
 )
 
+private val MEDIA_COMMIT_FIRST_ROOT_TYPES = setOf("baby", "record")
+
 /**
  * One frozen causal atomic unit. Migrated roots restore one immutable Room-backed
  * envelope; roots not yet migrated retain the source reconcile path.
@@ -191,8 +193,8 @@ internal class CausalSettlement(
         }
         val sourceReconcile = frozen - directCommit.toSet() - mediaCommitUnknown.toSet()
         if (sourceReconcile.isEmpty()) return
-        require(sourceReconcile.none { it.mutation.entityType == "record" }) {
-            "Record source reconcile was retired by its media commit-first migration"
+        require(sourceReconcile.none { it.mutation.entityType in MEDIA_COMMIT_FIRST_ROOT_TYPES }) {
+            "Migrated media roots must not use source reconcile"
         }
         reconcileFirst(session, sourceReconcile)
     }
@@ -241,7 +243,7 @@ internal class CausalSettlement(
                 val settled = settleCommitFirstAcceptedOrMerged(unit, version) ?: return
                 if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
-                    settleRecordMediaCandidates(unit)
+                    settleMigratedMediaCandidates(unit)
                 }
                 requireNotNull(mediaSettlementJournal).markTerminal(
                     unit.mutation.mutationId,
@@ -262,7 +264,7 @@ internal class CausalSettlement(
                 ) ?: return
                 if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
-                    settleRecordMediaCandidates(unit)
+                    settleMigratedMediaCandidates(unit)
                 }
                 conflictSummaryDao.upsert(
                     ConflictSummaryEntity(
@@ -440,7 +442,7 @@ internal class CausalSettlement(
                 val settled = settleCommitFirstAcceptedOrMerged(unit, version) ?: return
                 if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
-                    settleRecordMediaCandidates(unit)
+                    settleMigratedMediaCandidates(unit)
                 }
                 cache.deleteFrozenMutation(
                     unit.mutation.entityType,
@@ -470,7 +472,7 @@ internal class CausalSettlement(
                 ) ?: return
                 if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
-                    settleRecordMediaCandidates(unit)
+                    settleMigratedMediaCandidates(unit)
                 }
                 conflictSummaryDao.upsert(
                     ConflictSummaryEntity(
@@ -502,9 +504,9 @@ internal class CausalSettlement(
         }
     }
 
-    /** H21 owns Record tombstone media; Baby/Wake/CarePlan remain pending for later tickets. */
-    private suspend fun settleRecordMediaCandidates(unit: FrozenCausalUnit) {
-        if (unit.mutation.entityType != "record") return
+    /** H21/H22 own Record and Baby media; Wake/CarePlan remain pending for later tickets. */
+    private suspend fun settleMigratedMediaCandidates(unit: FrozenCausalUnit) {
+        if (unit.mutation.entityType !in MEDIA_COMMIT_FIRST_ROOT_TYPES) return
         unit.candidates.filter { it.entityType == "media" }.forEach { media ->
             mediaDao.markSynced(media.clientUuid, media.updatedAt)
         }
@@ -806,7 +808,7 @@ internal class CausalSettlement(
                 durableMediaCommitUnknown =
                     journal.phase == CausalMediaSettlementPhase.CommitUnknown,
                 durableCommitFirst =
-                    journal.mutation.entityType == "record" &&
+                    journal.mutation.entityType in MEDIA_COMMIT_FIRST_ROOT_TYPES &&
                         journal.phase == CausalMediaSettlementPhase.Pending,
             )
         }
@@ -906,7 +908,7 @@ internal class CausalSettlement(
             contentHash = contentHash,
             candidates = candidates,
             mediaSnapshot = frozenMedia.revisions,
-            durableCommitFirst = entityType == "record",
+            durableCommitFirst = entityType in MEDIA_COMMIT_FIRST_ROOT_TYPES,
         )
     }
 
@@ -970,9 +972,6 @@ internal class CausalSettlement(
             val current = loadCommitFirstLocal(entityType, clientUuid) ?: return@run null
             if (!current.syncDirty || current.contentEpoch != contentEpoch) return@run null
             if (entityType == "baby" && babyDao.getByClientUuid(clientUuid)?.familyAuthority != true) {
-                return@run null
-            }
-            if (entityType == "baby" && hasBabyMediaPublishOrRepairEvidence(clientUuid, candidates)) {
                 return@run null
             }
             if (loadActiveCausalMedia(entityType, clientUuid).isNotEmpty()) return@run null
@@ -1416,22 +1415,6 @@ internal class CausalSettlement(
         }
         "custom_item" -> emptyList()
         else -> emptyList()
-    }
-
-    /**
-     * H11 owns only a complete empty Baby manifest. A deleted root can still have
-     * a dirty tombstoned avatar or a pre-fix live orphan that capture must repair;
-     * both remain on the media-aware source path until H22.
-     */
-    private suspend fun hasBabyMediaPublishOrRepairEvidence(
-        clientUuid: String,
-        candidates: List<PublishCandidate>,
-    ): Boolean {
-        if (candidates.any { it.entityType == "media" }) return true
-        val baby = babyDao.getByClientUuid(clientUuid) ?: return false
-        return mediaDao.listAllIncludingDeleted().any { media ->
-            media.babyId == baby.id && (media.syncDirty || media.deletedAt == null)
-        }
     }
 
     /** H12 owns only a complete empty CarePlan manifest; all media stays on H23's source path. */

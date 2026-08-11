@@ -383,6 +383,143 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
+    fun lostAvatarCommitResponseReplaysExactBabyMutationWithoutUploadingAgain() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 75)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val avatarUuid = "00000000-0000-4000-8000-000000000041"
+        val avatarUri = "/private/baby-avatar-lost-response.jpg"
+        val originalBytes = byteArrayOf(9, 7, 5, 3, 1)
+        rig.mediaFiles.preparedUploadBytes[avatarUri] = originalBytes
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-avatar-lost-response",
+                avatarMediaUuid = avatarUuid,
+                avatarPath = avatarUri,
+                familyAuthority = true,
+                syncDirty = true,
+                baseVersion = "v-baby-live",
+                updatedAt = 200,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                babyId = babyId,
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                localUri = avatarUri,
+                mime = "image/jpeg",
+                createdAt = 100,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        var commitAttempts = 0
+        var firstMutation: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            commitAttempts += 1
+            val unit = units.single()
+            if (firstMutation == null) {
+                firstMutation = unit
+                throw java.io.IOException("avatar commit response lost")
+            }
+            assertThat(unit).isEqualTo(firstMutation)
+        }
+
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
+                .exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        rig.mediaFiles.preparedUploadBytes[avatarUri] = byteArrayOf(2, 4, 6, 8)
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(commitAttempts).isEqualTo(2)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits.last().single())
+            .isEqualTo(requireNotNull(firstMutation))
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(avatarUuid)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second)
+            .isEqualTo(originalBytes)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(75)
+        assertThat(rig.babies.getByClientUuid("baby-avatar-lost-response")?.syncDirty)
+            .isFalse()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
+    }
+
+    @Test
+    fun branchedBabyAvatarKeepsExactSpoolAndConflictEvidenceAuditable() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 76)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val avatarUuid = "00000000-0000-4000-8000-000000000042"
+        val avatarUri = "/private/baby-avatar-branch.jpg"
+        val avatarBytes = byteArrayOf(6, 2, 6, 4)
+        rig.mediaFiles.preparedUploadBytes[avatarUri] = avatarBytes
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-avatar-branch",
+                avatarMediaUuid = avatarUuid,
+                avatarPath = avatarUri,
+                familyAuthority = true,
+                syncDirty = true,
+                baseVersion = "v-baby-base",
+                updatedAt = 300,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                babyId = babyId,
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                localUri = avatarUri,
+                mime = "image/jpeg",
+                createdAt = 100,
+                updatedAt = 300,
+                syncDirty = true,
+            ),
+        )
+        var mutationId: String? = null
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            mutationId = unit.mutationId
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-baby-stable",
+                        stableRootJson = unit.rootJson,
+                        stableMedia = unit.media,
+                        conflictId = "conflict-baby-avatar",
+                        branchVersionId = "branch-baby-avatar",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(avatarBytes)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(76)
+        with(requireNotNull(rig.babies.getByClientUuid("baby-avatar-branch"))) {
+            assertThat(syncDirty).isFalse()
+            assertThat(openConflictId).isEqualTo("conflict-baby-avatar")
+            assertThat(localBranchVersionId).isEqualTo("branch-baby-avatar")
+        }
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.syncDirty).isFalse()
+        assertThat(rig.conflictSummaries.get("conflict-baby-avatar")).isNotNull()
+        assertThat(
+            rig.conflictDetails.getFrozenMediaSpoolManifest(requireNotNull(mutationId)),
+        ).isNotNull()
+        assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
+    }
+
+    @Test
     fun openConflictProcessDeathRestoresPartialReceiptsBeforeMutationIdRotation() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }

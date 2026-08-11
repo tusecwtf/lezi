@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H21 and R12/R17/R18/R19 are implemented; H22 is the serial frontier
+Status: in-progress — H01–H22 and R12/R17/R18/R19 are implemented; H23 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -46,7 +46,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 19 | [`19-server-receipt-media-commit`](./issues/19-server-receipt-media-commit.md) | implemented (review/final gates pass) | 17 |
 | 20 | [`20-android-media-settlement`](./issues/20-android-media-settlement.md) | implemented (review/final gates pass; device Room instrumentation residual) | 18, 19 |
 | 21 | [`21-record-media-commit-first`](./issues/21-record-media-commit-first.md) | implemented (review/final gates pass; device Room instrumentation residual) | 20 |
-| 22 | [`22-baby-avatar-commit-first`](./issues/22-baby-avatar-commit-first.md) | ready-for-agent | 21 |
+| 22 | [`22-baby-avatar-commit-first`](./issues/22-baby-avatar-commit-first.md) | implemented (review/final gates pass; device Room instrumentation residual) | 21 |
 | 23 | [`23-careplan-media-commit-first`](./issues/23-careplan-media-commit-first.md) | ready-for-agent | 22 |
 | 24 | [`24-server-media-staging-gc`](./issues/24-server-media-staging-gc.md) | ready-for-agent | 19, 23, R19 |
 | 25 | [`25-commit-response-contraction`](./issues/25-commit-response-contraction.md) | ready-for-agent | 12, 13, 23 |
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H21 is implemented. H22 is the next executable DAG frontier; H22–H43 remain open and follow
+H22 is implemented. H23 is the next executable DAG frontier; H23–H43 remain open and follow
 the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.

@@ -179,6 +179,88 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
         }
     }
 
+    /** Real Room proof for the H22 Baby + avatar frozen-envelope transaction. */
+    @Test
+    fun babyAvatarCommitsExactSpoolBytesAndSettlesRoomAtomically() = runBlocking {
+        sourceDirectory.mkdirs()
+        val sourceFile = File(sourceDirectory, "baby-avatar.jpg")
+        Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).also { bitmap ->
+            sourceFile.outputStream().use { output ->
+                assertThat(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)).isTrue()
+            }
+            bitmap.recycle()
+        }
+        val exactBytes = sourceFile.readBytes()
+        val database = database()
+        try {
+            val babyId = database.babyDao().upsert(
+                BabyEntity(
+                    familyId = 1,
+                    nickname = "头像宝宝",
+                    birthdayEpochDay = 1,
+                    themeColorArgb = 0,
+                    avatarMediaUuid = AVATAR_MEDIA_ID,
+                    avatarPath = sourceFile.relativeTo(context.filesDir).path,
+                    clientUuid = AVATAR_BABY_ID,
+                    updatedAt = 200,
+                    syncDirty = true,
+                    familyAuthority = true,
+                    baseVersion = "v-baby-avatar-0",
+                    mutationId = AVATAR_MUTATION_ID,
+                ),
+            )
+            database.mediaAssetDao().upsert(
+                MediaAssetEntity(
+                    babyId = babyId,
+                    clientUuid = AVATAR_MEDIA_ID,
+                    kind = "avatar",
+                    localUri = sourceFile.relativeTo(context.filesDir).path,
+                    mime = "image/jpeg",
+                    createdAt = 200,
+                    updatedAt = 200,
+                    syncDirty = true,
+                ),
+            )
+            val backend = DeviceCausalBackend()
+
+            settlement(
+                database = database,
+                backend = backend,
+                spool = fileSpool(AndroidSyncMediaFileStore(context)),
+            ).settle(
+                SESSION,
+                listOf(
+                    PublishCandidate(
+                        planId = 1,
+                        entityType = "baby",
+                        clientUuid = AVATAR_BABY_ID,
+                        payloadJson = "{}",
+                        updatedAt = 200,
+                    ),
+                    PublishCandidate(
+                        planId = 2,
+                        entityType = "media",
+                        clientUuid = AVATAR_MEDIA_ID,
+                        payloadJson = "{}",
+                        updatedAt = 200,
+                        localMediaUri = sourceFile.relativeTo(context.filesDir).path,
+                    ),
+                ),
+            )
+
+            assertThat(backend.uploadedBytes.single()).isEqualTo(exactBytes)
+            assertThat(database.babyDao().getByClientUuid(AVATAR_BABY_ID)?.syncDirty).isFalse()
+            assertThat(database.mediaAssetDao().getByClientUuid(AVATAR_MEDIA_ID)?.syncDirty)
+                .isFalse()
+            assertThat(
+                database.conflictSnapshotCacheDao()
+                    .getFrozenMediaSpoolManifest(AVATAR_MUTATION_ID),
+            ).isNull()
+        } finally {
+            database.close()
+        }
+    }
+
     private suspend fun seedFacts(database: LeziDatabase, sourceFile: File) {
         val babyId = database.babyDao().upsert(
             BabyEntity(
@@ -279,7 +361,7 @@ private class DeviceCausalBackend : SyncBackend {
     override suspend fun causalReconcile(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ): CausalBatchResult = error("Record media must not use source reconcile")
+    ): CausalBatchResult = error("Migrated media roots must not use source reconcile")
 
     override suspend fun putCausalMediaPreimage(
         session: SyncSession,
@@ -405,3 +487,6 @@ private const val MUTATION_ID = "00000000-0000-4000-8000-000000000018"
 private const val MEDIA_ID = "00000000-0000-4000-8000-000000000180"
 private const val RECORD_ID = "00000000-0000-4000-8000-000000000181"
 private const val BABY_ID = "00000000-0000-4000-8000-000000000182"
+private const val AVATAR_MUTATION_ID = "00000000-0000-4000-8000-000000000028"
+private const val AVATAR_MEDIA_ID = "00000000-0000-4000-8000-000000000280"
+private const val AVATAR_BABY_ID = "00000000-0000-4000-8000-000000000282"
