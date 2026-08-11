@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::DefaultBodyLimit;
-use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::header::{AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -1271,6 +1271,7 @@ pub struct ApiError {
     detail: Value,
     authenticate: bool,
     code: Option<&'static str>,
+    retry_after_seconds: Option<u64>,
 }
 
 impl ApiError {
@@ -1280,6 +1281,7 @@ impl ApiError {
             detail: detail.into(),
             authenticate: false,
             code: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -1293,6 +1295,7 @@ impl ApiError {
             detail: Value::String("Invalid or revoked token".to_owned()),
             authenticate: true,
             code: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -1302,6 +1305,7 @@ impl ApiError {
             detail: detail.into(),
             authenticate: false,
             code: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -1311,6 +1315,7 @@ impl ApiError {
             detail: detail.into(),
             authenticate: true,
             code: Some(code),
+            retry_after_seconds: None,
         }
     }
 
@@ -1325,6 +1330,7 @@ impl ApiError {
             detail: detail.into(),
             authenticate: false,
             code: Some(CLIENT_UPDATE_REQUIRED_CODE),
+            retry_after_seconds: None,
         }
     }
 
@@ -1346,6 +1352,7 @@ impl ApiError {
             }),
             authenticate: false,
             code: Some(saturation.code()),
+            retry_after_seconds: Some(DEFAULT_RATE_LIMIT_WINDOW_SECONDS as u64),
         }
     }
 
@@ -1398,6 +1405,13 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        if let Some(seconds) = self.retry_after_seconds {
+            response.headers_mut().insert(
+                RETRY_AFTER,
+                HeaderValue::from_str(&seconds.to_string())
+                    .expect("retry-after seconds are a valid header"),
+            );
         }
         response
     }

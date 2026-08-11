@@ -171,6 +171,13 @@ causal reconcile/commit（`confirmed|publish|conflict_preview|rejected` /
 generation/cursor 证明失效时才走全量实体快照。浅层待同步数量按未终态 atomic units 投影，
 静止且完整落库的周期必须把冻结集收敛到零；健康探测成功本身不能清状态。
 
+普通同步传输的自动重试统一位于 `sync/backend/retry` 深 module：handshake/detail 使用
+3s connect、10s response、3 attempts、30s elapsed；pull/commit/resolution 使用
+3s/20s/3/60s。合法 Retry-After 优先，否则执行 capped exponential full jitter；只重放幂等的
+冻结请求；policy deadline 透传到 HTTP adapter，让晚启动 attempt 收缩 socket timeout 并到期
+disconnect，且不再由 `RealSyncPort` 另建 30s/2min/10min 广域同步调度。stale/expired resolution
+保留旧事实并转 ConflictSnapshot refresh；auth/capability/ACL/canonical 为终态。
+
 履行权威的本机派生结算统一由 `core:database/fulfillment` 的
 `FulfillmentAuthoritySettlement` 自持 Room 事务：domain 本机完成与 sync pull apply 只传
 CarePlan portable identity；Module 在同一事务读取完整候选证据、计算 adoption patches，并重链

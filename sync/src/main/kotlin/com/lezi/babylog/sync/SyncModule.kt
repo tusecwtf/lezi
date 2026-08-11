@@ -18,6 +18,7 @@ import com.lezi.babylog.sync.appupdate.LOCAL_DATA_CONTRACT_VERSION_METADATA
 import com.lezi.babylog.sync.backend.HttpSyncBackend
 import com.lezi.babylog.sync.backend.RefreshingSyncBackend
 import com.lezi.babylog.sync.backend.SyncBackend
+import com.lezi.babylog.sync.backend.retry.RetryingSyncBackend
 import com.lezi.babylog.sync.media.AndroidSyncMediaFileStore
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.session.DataStoreSyncPreferences
@@ -57,7 +58,9 @@ abstract class SyncModule {
             http: HttpSyncBackend,
             preferences: SyncPreferences,
             clock: PolicyClock,
-        ): SyncBackend = RefreshingSyncBackend(http, preferences, clock)
+        ): SyncBackend = RetryingSyncBackend(
+            RefreshingSyncBackend(http, preferences, clock),
+        )
 
         @Provides
         @Singleton

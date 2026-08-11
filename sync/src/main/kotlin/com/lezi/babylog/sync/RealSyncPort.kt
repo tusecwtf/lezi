@@ -33,12 +33,10 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -90,7 +88,6 @@ import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncDecision
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
-import com.lezi.babylog.sync.engine.ForegroundSyncRetryPolicy
 import com.lezi.babylog.sync.engine.NoOpCarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.NoOpFamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.engine.ReplicaSyncEngine
@@ -329,46 +326,14 @@ class RealSyncPort @Inject constructor(
             }
         }
         processScope.launch {
-            var consecutiveRetryableFailures = 0
-            var scheduledRetry: Job? = null
-            var scheduledRetryNeedsPull = false
             for (ignored in syncSignal) {
                 if (!foregroundState.isForeground()) continue
-                if (scheduledRetryNeedsPull) {
-                    pullRequested.set(true)
-                }
-                scheduledRetryNeedsPull = false
                 val trigger = if (pullRequested.getAndSet(false)) {
                     SyncTrigger.Foreground
                 } else {
                     SyncTrigger.LocalWrite
                 }
-                scheduledRetry?.cancel()
-                scheduledRetry = null
-                val result = sync(trigger)
-                val failure = result.exceptionOrNull()
-                if (failure == null) {
-                    consecutiveRetryableFailures = 0
-                    continue
-                }
-                val retryDelay = ForegroundSyncRetryPolicy.delayMillis(
-                    failure = failure,
-                    consecutiveFailures = consecutiveRetryableFailures,
-                )
-                if (retryDelay == null || !foregroundState.isForeground()) {
-                    consecutiveRetryableFailures = 0
-                    continue
-                }
-                consecutiveRetryableFailures += 1
-                val retryNeedsPull = trigger != SyncTrigger.LocalWrite
-                scheduledRetryNeedsPull = retryNeedsPull
-                scheduledRetry = processScope.launch {
-                    delay(retryDelay)
-                    if (foregroundState.isForeground()) {
-                        if (retryNeedsPull) pullRequested.set(true)
-                        syncSignal.trySend(Unit)
-                    }
-                }
+                sync(trigger)
             }
         }
     }

@@ -17032,15 +17032,29 @@ async fn causal_commit_http_returns_typed_saturation_and_allows_exact_replay() {
         "{oversized_body}"
     );
 
-    let (status, saturated, _) = commit_causal_record(
-        &rig.app,
-        token,
-        baby_id,
+    let saturated_unit = causal_unit(
         Uuid::new_v4(),
         None,
-        "over-budget",
+        "record",
+        Uuid::new_v4(),
+        causal_formula_root(baby_id, "over-budget", 100, 20),
+        vec![],
+        false,
+    );
+    let response = request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        Body::from(json!({ "units": [saturated_unit] }).to_string()),
+        Some("application/json"),
+        &[],
     )
     .await;
+    let status = response.status();
+    assert_eq!(response.headers()["retry-after"], "60");
+    let saturated: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{saturated}");
     assert_eq!(saturated["code"], "causal_commit_principal_rate_limited");
     assert_eq!(saturated["detail"]["scope"], "principal");

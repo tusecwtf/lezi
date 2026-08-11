@@ -83,6 +83,31 @@ protocol/capability mismatch 返回 HTTP 409、`not_ready` 返回 HTTP 503；二
 `{"status":"rejected","error":{"code":"...","retryable":false}}`。认证失败沿用 session
 认证错误并允许既有 refresh-once seam；最终 auth/mismatch/not-ready 都必须在 mutation 前终止。
 
+### 1.3 前台传输重试（H15）
+
+自动重试只有一个 typed policy owner，并且只包裹本身可幂等重放的 authenticated
+handshake、ConflictSnapshot detail page、pull、frozen mutation commit 与 choice-only resolution。
+source reconcile 不进入该 owner；media prepare 只在 H15 冻结预算，由 H17 接入。重试不创建后台任务，
+不改写 mutation/resolution identity，不清 Room pending 或旧 ConflictSnapshot 事实。
+
+| operation | connect timeout | response timeout | total attempts | elapsed hard cap |
+|-----------|-----------------|------------------|----------------|------------------|
+| handshake / detail | 3 s | 10 s | 3 | 30 s |
+| pull / commit / resolution | 3 s | 20 s | 3 | 60 s |
+| media prepare（H17 接入） | 5 s | 90 s | 3 | 240 s |
+
+HTTP 408、429、非 terminal 5xx 与 I/O/timeout 可重试。合法 `Retry-After`（非负 delta-seconds
+或 RFC 1123 HTTP-date）优先；非法/溢出值回退到 `base=1 s`、`cap=10 s` 的 exponential
+full jitter。服务器提示或 jitter delay 若超出剩余 elapsed budget，则本轮立即结束，不裁剪提示、
+不扩张预算；晚启动请求的 connect/response timeout 必须收缩到剩余预算，并在 deadline 主动断开
+阻塞 I/O，恰好到达上限也不得返回晚成功。401/403、refresh 后仍失败的 auth、capability、ACL、
+canonical/domain、token/choice/restore/CAS 以及 `not_ready` 是终态，直到 session/capability/
+snapshot 等外部状态改变。
+
+`snapshot_stale|snapshot_expired` 终止本次 resolution mutation，并交给 H09 的 refresh 状态机；
+旧事实/快照保持只读证据，不得标为永久失败或删除。retry telemetry 只允许 operation、错误类别、
+已完成 attempts 与 delay，不得记录 family/root/成员/护理内容。
+
 ---
 
 ## 2. 删除编码（单一同构）
@@ -329,7 +354,8 @@ Admission saturation 是 HTTP 429，不进入 §9.5 的 terminal `retryable=fals
 | `causal_open_branch_limit_reached` | `root` | 既有 conflict resolution 关闭 branch |
 
 body 沿用 `{ "code": code, "detail": { "scope": scope, "retryable": true } }`；不得含家庭事实、
-root UUID 或成员显示信息。Retry-After 与客户端 full-jitter 消费由 H15 实现，本票不提前接线。
+root UUID 或成员显示信息。响应携带 `Retry-After: 60`；客户端按 §1.3 消费，不得在 header/body
+中追加 root UUID、成员显示信息或家庭事实。
 
 ---
 

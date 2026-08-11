@@ -40,6 +40,9 @@ import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.backend.retry.SyncRetryAttemptContext
+import com.lezi.babylog.sync.backend.retry.SyncRetryBudgetExceededException
+import com.lezi.babylog.sync.backend.retry.SyncRetryOperation
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncPreferences
@@ -82,6 +85,12 @@ private object DefaultSyncHttpConnectionFactory : SyncHttpConnectionFactory {
 private data class JsonTransportResponse(
     val json: JsonObject,
     val encodedBytes: Int,
+)
+
+private data class BoundedHttpResponse(
+    val code: Int,
+    val bytes: ByteArray,
+    val retryAfterHeader: String?,
 )
 
 class HttpSyncBackend internal constructor(
@@ -636,10 +645,13 @@ class HttpSyncBackend internal constructor(
     override suspend fun pull(session: SyncSession): PullResult {
         session.requireCurrentReplicaTransport()
         val generation = URLEncoder.encode(session.pullGeneration, Charsets.UTF_8.name())
-        val json = get(
-            session.baseUrl,
-            "/v1/pull?cursor=${session.pullCursor}&generation=$generation",
-            session.accessToken,
+        val json = requestJson(
+            base = session.baseUrl,
+            path = "/v1/pull?cursor=${session.pullCursor}&generation=$generation",
+            method = "GET",
+            token = session.accessToken,
+            body = null,
+            retryOperation = SyncRetryOperation.Pull,
         )
         return PullResult(
             entities = json.entities("pull"),
@@ -811,11 +823,12 @@ class HttpSyncBackend internal constructor(
 
     override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake {
         val json = try {
-            post(
-                session.baseUrl,
-                "/v1/sync/handshake",
-                session.accessToken,
-                buildJsonObject {
+            requestJson(
+                base = session.baseUrl,
+                path = "/v1/sync/handshake",
+                method = "POST",
+                token = session.accessToken,
+                body = buildJsonObject {
                     put("protocol_version", AUTHENTICATED_SYNC_PROTOCOL_VERSION)
                     put("required_capabilities", buildJsonArray {
                         REQUIRED_CAUSAL_WIRE_CAPABILITIES.sorted().forEach {
@@ -823,9 +836,14 @@ class HttpSyncBackend internal constructor(
                         }
                     })
                 },
+                retryOperation = SyncRetryOperation.Handshake,
             )
         } catch (failure: SyncHttpException) {
-            if (failure.statusCode != 401) throw decodeSyncHandshakeFailure(failure)
+            if (failure.statusCode != 401) {
+                runCatching { decodeSyncHandshakeFailure(failure) }
+                    .getOrNull()
+                    ?.let { throw it }
+            }
             throw failure
         }
         val result = decodeAuthenticatedSyncHandshake(json)
@@ -841,7 +859,12 @@ class HttpSyncBackend internal constructor(
     override suspend fun causalCommit(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ): CausalBatchResult = postCausalBatch(session, "/v1/causal/commit", units)
+    ): CausalBatchResult = postCausalBatch(
+        session,
+        "/v1/causal/commit",
+        units,
+        SyncRetryOperation.Commit,
+    )
 
     override suspend fun declareSourceRelation(
         session: SyncSession,
@@ -931,6 +954,7 @@ class HttpSyncBackend internal constructor(
             body = null,
             successLimitBytes = ConflictSnapshotPaging.MAX_ENCODED_PAGE_BYTES,
             successResponseKind = "冲突详情页",
+            retryOperation = SyncRetryOperation.ConflictDetail,
         )
         val snapshot = response.json.toConflictSnapshot("conflict snapshot").also { snapshot ->
             require(snapshot.conflictId == id) { "conflict snapshot.conflict_id 与请求不一致" }
@@ -970,11 +994,13 @@ class HttpSyncBackend internal constructor(
                 },
             )
         }
-        val json = post(
-            session.baseUrl,
-            "/v1/conflicts/$encoded/resolve",
-            session.accessToken,
-            body,
+        val json = requestJson(
+            base = session.baseUrl,
+            path = "/v1/conflicts/$encoded/resolve",
+            method = "POST",
+            token = session.accessToken,
+            body = body,
+            retryOperation = SyncRetryOperation.Resolution,
         )
         return json.toConflictResolveResult("conflict resolve").also { result ->
             val responseMutationId = when (result) {
@@ -1013,6 +1039,7 @@ class HttpSyncBackend internal constructor(
         session: SyncSession,
         path: String,
         units: List<CausalMutationUnit>,
+        retryOperation: SyncRetryOperation? = null,
     ): CausalBatchResult {
         session.requireCurrentReplicaTransport()
         require(units.isNotEmpty() && units.size <= MAX_CAUSAL_UNITS) {
@@ -1022,11 +1049,12 @@ class HttpSyncBackend internal constructor(
         require(expectedKeys.size == units.size) { "因果同步请求 key 必须唯一" }
         val expectedByMutation = units.associateBy(CausalMutationUnit::mutationId)
         require(expectedByMutation.size == units.size) { "因果同步 mutation_id 必须唯一" }
-        val response = post(
-            session.baseUrl,
-            path,
-            session.accessToken,
-            buildJsonObject {
+        val response = requestJson(
+            base = session.baseUrl,
+            path = path,
+            method = "POST",
+            token = session.accessToken,
+            body = buildJsonObject {
                 put("generation", session.pullGeneration)
                 put("units", buildJsonArray {
                     units.forEach { unit ->
@@ -1034,6 +1062,7 @@ class HttpSyncBackend internal constructor(
                     }
                 })
             },
+            retryOperation = retryOperation,
         )
         return try {
             parseCausalBatchResult(
@@ -1436,6 +1465,7 @@ class HttpSyncBackend internal constructor(
         body: JsonObject?,
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
+        retryOperation: SyncRetryOperation? = null,
     ): JsonObject = requestJsonWithEvidence(
         base = base,
         path = path,
@@ -1444,6 +1474,7 @@ class HttpSyncBackend internal constructor(
         body = body,
         extraHeaders = extraHeaders,
         trustedEndpoint = trustedEndpoint,
+        retryOperation = retryOperation,
     ).json
 
     private suspend fun requestJsonWithEvidence(
@@ -1456,10 +1487,28 @@ class HttpSyncBackend internal constructor(
         trustedEndpoint: TrustedEndpointProfile? = null,
         successLimitBytes: Int = MAX_SYNC_JSON_RESPONSE_BYTES,
         successResponseKind: String = "JSON",
+        retryOperation: SyncRetryOperation? = null,
     ): JsonTransportResponse {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
-            val connection = open(base, path, method, token, extraHeaders, resolvedEndpoint)
+            val retryAttempt = currentCoroutineContext()[SyncRetryAttemptContext]
+                ?.takeIf { it.operation == retryOperation }
+            val remainingMillis = retryAttempt?.remainingMillis()?.also {
+                if (it <= 0) throw SyncRetryBudgetExceededException(requireNotNull(retryOperation))
+            }
+            val connection = open(
+                base,
+                path,
+                method,
+                token,
+                extraHeaders,
+                resolvedEndpoint,
+                retryOperation,
+                remainingMillis,
+            )
+            val deadlineWatchdog = remainingMillis?.let {
+                RetryDeadlineDisconnectWatchdog(connection, it)
+            }
             try {
                 if (body != null) {
                     connection.doOutput = true
@@ -1468,19 +1517,26 @@ class HttpSyncBackend internal constructor(
                         it.write(body.toString())
                     }
                 }
-                val (code, bytes) = readBoundedBody(
+                val (code, bytes, retryAfterHeader) = readBoundedBody(
                     connection = connection,
                     successLimitBytes = successLimitBytes,
                     successResponseKind = successResponseKind,
                 )
                 val text = bytes.toString(Charsets.UTF_8)
-                if (code !in 200..299) throw SyncHttpException(code, text)
+                if (code !in 200..299) {
+                    throw SyncHttpException(
+                        statusCode = code,
+                        responseBody = text,
+                        retryAfterHeader = retryAfterHeader,
+                    )
+                }
                 require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
                 JsonTransportResponse(
                     json = Json.parseToJsonElement(text).jsonObject,
                     encodedBytes = bytes.size,
                 )
             } finally {
+                deadlineWatchdog?.close()
                 connection.disconnect()
             }
         }
@@ -1512,13 +1568,17 @@ class HttpSyncBackend internal constructor(
                     )
                     connection.outputStream.use { it.write(body) }
                 }
-                val (code, bytes) = readBoundedBody(
+                val (code, bytes, retryAfterHeader) = readBoundedBody(
                     connection = connection,
                     successLimitBytes = successLimitBytes,
                     successResponseKind = successResponseKind,
                 )
                 if (code !in 200..299) {
-                    throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
+                    throw SyncHttpException(
+                        code,
+                        bytes.toString(Charsets.UTF_8),
+                        retryAfterHeader,
+                    )
                 }
                 bytes
             } finally {
@@ -1590,13 +1650,15 @@ class HttpSyncBackend internal constructor(
                 } finally {
                     writeWatchdog.close()
                 }
-                val (code, bytes) = readBoundedBody(
+                val (code, bytes, retryAfterHeader) = readBoundedBody(
                     connection = connection,
                     successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
                     successResponseKind = "JSON",
                 )
                 val text = bytes.toString(Charsets.UTF_8)
-                if (code !in 200..299) throw SyncHttpException(code, text)
+                if (code !in 200..299) {
+                    throw SyncHttpException(code, text, retryAfterHeader)
+                }
                 require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
                 Json.parseToJsonElement(text).jsonObject
             } finally {
@@ -1612,6 +1674,8 @@ class HttpSyncBackend internal constructor(
         token: String?,
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
+        retryOperation: SyncRetryOperation? = null,
+        remainingMillis: Long? = null,
     ): HttpURLConnection =
         connectionFactory.open(URL("${base.trimEnd('/')}$path")).apply {
             trustedEndpoint?.spkiSha256?.let { pin ->
@@ -1621,8 +1685,14 @@ class HttpSyncBackend internal constructor(
                 sslSocketFactory = pinnedSslContext(pin).socketFactory
             }
             requestMethod = method
-            connectTimeout = 8_000
-            readTimeout = 8_000
+            connectTimeout = boundedHttpTimeout(
+                retryOperation?.budget?.connectTimeoutMillis ?: 8_000,
+                remainingMillis,
+            )
+            readTimeout = boundedHttpTimeout(
+                retryOperation?.budget?.responseTimeoutMillis ?: 8_000,
+                remainingMillis,
+            )
             useCaches = false
             instanceFollowRedirects = false
             if (!token.isNullOrBlank()) {
@@ -1642,8 +1712,9 @@ class HttpSyncBackend internal constructor(
         connection: HttpURLConnection,
         successLimitBytes: Int,
         successResponseKind: String,
-    ): Pair<Int, ByteArray> {
+    ): BoundedHttpResponse {
         val code = connection.responseCode
+        val retryAfterHeader = connection.getHeaderField("Retry-After")
         val success = code in 200..299
         val limitBytes = if (success) successLimitBytes else MAX_SYNC_ERROR_RESPONSE_BYTES
         val responseKind = if (success) successResponseKind else "错误"
@@ -1659,7 +1730,39 @@ class HttpSyncBackend internal constructor(
                 declaredBytes = declaredBytes,
             )
         } ?: byteArrayOf()
-        return code to bytes
+        return BoundedHttpResponse(code, bytes, retryAfterHeader)
+    }
+}
+
+private fun boundedHttpTimeout(configuredMillis: Int, remainingMillis: Long?): Int {
+    if (remainingMillis == null) return configuredMillis
+    require(remainingMillis > 0) { "同步重试剩余预算必须大于 0" }
+    return minOf(configuredMillis.toLong(), remainingMillis, Int.MAX_VALUE.toLong())
+        .toInt()
+        .coerceAtLeast(1)
+}
+
+/** Disconnects blocking HttpURLConnection I/O at the retry owner's elapsed deadline. */
+private class RetryDeadlineDisconnectWatchdog(
+    private val connection: HttpURLConnection,
+    timeoutMillis: Long,
+) : AutoCloseable {
+    private val active = AtomicBoolean(true)
+    private val timer = Timer("lezi-sync-retry-deadline", true)
+    private val task = object : TimerTask() {
+        override fun run() {
+            if (active.compareAndSet(true, false)) connection.disconnect()
+        }
+    }
+
+    init {
+        require(timeoutMillis > 0)
+        timer.schedule(task, timeoutMillis)
+    }
+
+    override fun close() {
+        if (active.compareAndSet(true, false)) task.cancel()
+        timer.cancel()
     }
 }
 
@@ -1875,7 +1978,7 @@ private fun JsonObject.entities(context: String): List<SyncEntity> =
         )
     }
 
-private const val MAX_CAUSAL_UNITS = 64
+internal const val MAX_CAUSAL_UNITS = 64
 
 private fun CausalMutationUnit.toCausalJson(): JsonObject = buildJsonObject {
     put("mutation_id", mutationId)
@@ -2516,6 +2619,7 @@ private fun JsonObject.requiredStringArray(key: String, context: String): List<S
 internal class SyncHttpException(
     val statusCode: Int,
     val responseBody: String = "",
+    val retryAfterHeader: String? = null,
 ) : IllegalStateException(formatSyncHttpFailure(statusCode, responseBody))
 
 /**
