@@ -301,6 +301,100 @@ class ReplicaSyncEnginePullCheckpointTest {
     }
 
     @Test
+    fun skippedPullPageFailsBeforeRoomApplyOrCheckpoint() = runTest {
+        val session = joinedReplicaSession().copy(pullCursor = 4)
+        val rig = ReplicaEngineRig(session)
+        rig.backend.nextPullPageIndexOverride = 1
+        rig.backend.nextPull = PullResult(
+            entities = listOf(remoteReplicaBaby()),
+            cursor = 5,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("page_index")
+        assertThat(rig.babies.getByClientUuid("baby-remote")).isNull()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
+    }
+
+    @Test
+    fun repeatedEntityOnLaterPageKeepsTheLastCommittedPageCheckpoint() = runTest {
+        val rig = ReplicaEngineRig(joinedReplicaSession())
+        rig.backend.pullResults += PullResult(
+            entities = listOf(remoteReplicaBaby()),
+            cursor = 1,
+            generation = "generation-a",
+            hasMore = true,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = listOf(remoteReplicaBaby().copy(updatedAt = 200)),
+            cursor = 2,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        val failure = runCatching {
+            rig.engine.synchronize(rig.preferences.current(), SyncTrigger.PullToRefresh)
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("重复返回实体")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+        assertThat(rig.babies.getByClientUuid("baby-remote")?.updatedAt).isEqualTo(100)
+    }
+
+    @Test
+    fun failedSecondPageRetriesFromTheLastDurableCursor() = runTest {
+        val rig = ReplicaEngineRig(joinedReplicaSession())
+        rig.backend.pullResults += PullResult(
+            entities = listOf(remoteReplicaBaby()),
+            cursor = 1,
+            generation = "generation-a",
+            hasMore = true,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "device",
+                    clientUuid = "unsupported-page-two-entity",
+                    payloadJson = "{}",
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        val firstFailure = runCatching {
+            rig.engine.synchronize(rig.preferences.current(), SyncTrigger.PullToRefresh)
+        }.exceptionOrNull()
+
+        assertThat(firstFailure).hasMessageThat().contains("device")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+        assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
+
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 2,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        val retryOutcome = rig.engine.synchronize(
+            rig.preferences.current(),
+            SyncTrigger.PullToRefresh,
+        )
+
+        assertThat(retryOutcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.pullCursors).containsExactly(0L, 1L, 1L).inOrder()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
+    }
+
+    @Test
     fun pullResponseRequiresTheExactCurrentGenerationBeforeApplyOrCheckpoint() = runTest {
         listOf("", "generation-b").forEach { returnedGeneration ->
             val session = joinedReplicaSession().copy(pullCursor = 4)

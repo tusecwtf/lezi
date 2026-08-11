@@ -48,6 +48,8 @@ import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
 import com.lezi.babylog.sync.backend.REQUIRED_CAUSAL_WIRE_CAPABILITIES
 import com.lezi.babylog.sync.backend.SyncHandshakeRejectedException
+import com.lezi.babylog.sync.backend.PullTransportContract
+import com.lezi.babylog.sync.backend.requireValidPage
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
@@ -197,6 +199,7 @@ internal class ReplicaSyncEngine(
         requireRemoteAllowed(current)
         val handshake = backend.authenticatedHandshake(current)
         handshake.requireCompatible(current)
+        val pullTransport = handshake.pullTransport()
         if (preferences.familyMemberDirectoryGeneration.first() != handshake.directoryGeneration) {
             val directory = backend.memberDirectory(current)
             check(directory.generation == handshake.directoryGeneration) {
@@ -216,10 +219,19 @@ internal class ReplicaSyncEngine(
         // Do not incremental-pull and do not advance the pull cursor; full cycles still pull.
         if (doPull) {
             try {
-                current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
+                current = pullAllPages(
+                    current,
+                    pullTransport = pullTransport,
+                    mediaEditGuard = mediaEditGuard,
+                )
             } catch (error: SyncHttpException) {
                 val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-                current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                current = recoverFullResync(
+                    current,
+                    checkpoint,
+                    pullTransport,
+                    mediaEditGuard,
+                )
                 recovered = true
             }
         }
@@ -240,12 +252,18 @@ internal class ReplicaSyncEngine(
                         resetCursor = 0,
                         serverGeneration = error.serverGeneration,
                     ),
+                    pullTransport,
                     mediaEditGuard,
                 )
                 recovered = true
             } catch (error: SyncHttpException) {
                 val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-                current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                current = recoverFullResync(
+                    current,
+                    checkpoint,
+                    pullTransport,
+                    mediaEditGuard,
+                )
                 recovered = true
             }
             // Creator-ack and peer convergence require pull; only cycles that pulled do it.
@@ -254,10 +272,19 @@ internal class ReplicaSyncEngine(
                 !recovered
             ) {
                 try {
-                    pullAllPages(current, mediaEditGuard = mediaEditGuard)
+                    pullAllPages(
+                        current,
+                        pullTransport = pullTransport,
+                        mediaEditGuard = mediaEditGuard,
+                    )
                 } catch (error: SyncHttpException) {
                     val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
-                    current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                    current = recoverFullResync(
+                        current,
+                        checkpoint,
+                        pullTransport,
+                        mediaEditGuard,
+                    )
                     recovered = true
                 }
             }
@@ -1471,6 +1498,7 @@ internal class ReplicaSyncEngine(
     private suspend fun recoverFullResync(
         previous: SyncSession,
         checkpoint: FullResyncCheckpoint,
+        pullTransport: PullTransportContract,
         mediaEditGuard: LocalMediaEditGuard,
     ): SyncSession {
         resetLocalSyncReceipts(
@@ -1483,6 +1511,7 @@ internal class ReplicaSyncEngine(
             initial = current,
             reconcileMemberAvatars = current.role == FamilyRole.Member,
             deferCursorUntilComplete = true,
+            pullTransport = pullTransport,
             mediaEditGuard = mediaEditGuard,
         )
         val captured = captureLocalChanges(current)
@@ -1496,6 +1525,7 @@ internal class ReplicaSyncEngine(
         current = preferences.session.first()
         return pullAllPages(
             initial = current,
+            pullTransport = pullTransport,
             mediaEditGuard = mediaEditGuard,
         )
     }
@@ -1511,6 +1541,7 @@ internal class ReplicaSyncEngine(
         initial: SyncSession,
         reconcileMemberAvatars: Boolean = false,
         deferCursorUntilComplete: Boolean = false,
+        pullTransport: PullTransportContract,
         mediaEditGuard: LocalMediaEditGuard,
     ): SyncSession {
         var current = initial
@@ -1520,15 +1551,21 @@ internal class ReplicaSyncEngine(
             null
         }
         var pageCount = 0
+        val observedEntityKeys = mutableSetOf<Pair<String, String>>()
         var hasObservedFamilyName = false
         var observedFamilyName: String? = null
         do {
-            require(pageCount < MAX_PULL_PAGE_COUNT) {
-                "家庭服务器同步超过 $MAX_PULL_PAGE_COUNT 页上限，请稍后重试"
+            require(pageCount < pullTransport.budget.maxPages) {
+                "家庭服务器同步超过 ${pullTransport.budget.maxPages} 页上限，请稍后重试"
             }
-            pageCount++
             requireRemoteAllowed(current)
-            val pulled = backend.pull(current)
+            val pageRequest = pullTransport.page(pageCount)
+            val pulled = backend.pull(current, pageRequest).requireValidPage(pageRequest)
+            pageCount++
+            val pageKeys = pulled.entities.map { it.type to it.clientUuid }
+            require(pageKeys.none(observedEntityKeys::contains)) {
+                "家庭服务器在连续 pull 页重复返回实体"
+            }
             require(pulled.cursor >= current.pullCursor) {
                 "家庭服务器返回了倒退的同步 cursor"
             }
@@ -1563,6 +1600,7 @@ internal class ReplicaSyncEngine(
                 pulled.entities,
                 mediaEditGuard = mediaEditGuard,
             )
+            observedEntityKeys += pageKeys
             val acknowledgedCreators = authoritativeCreatorAcknowledgements(
                 pending = preferences.session.first().pendingCreatorAcknowledgements,
                 entities = pulled.entities,
@@ -3031,6 +3069,5 @@ private val CURRENT_ENTITY_TYPES = ENTITY_ORDER.toSet()
 internal const val PUSH_ROOT_BATCH_SIZE = 200
 internal const val MAX_PUSH_BATCH_SIZE = 1_000
 /** Normal home libraries are far smaller; reaching this many pages is anomalous. */
-private const val MAX_PULL_PAGE_COUNT = 500
 private const val MAX_AUTHORITY_RECONCILE_UNITS = 64
 private const val MAX_AUTHORITY_SETTLEMENT_PASSES = 8

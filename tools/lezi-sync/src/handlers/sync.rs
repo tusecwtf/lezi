@@ -1,11 +1,16 @@
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::sync::Arc;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, VARY};
+use axum::http::{HeaderMap, HeaderValue};
+use axum::response::Response;
 use axum::Json;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -22,7 +27,8 @@ use crate::store::{
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
-    MAX_ENTITY_FUTURE_SKEW_MILLIS, PULL_PAGE_ENTITY_LIMIT, SETUP_PROTOCOL_VERSION,
+    MAX_ENTITY_FUTURE_SKEW_MILLIS, PULL_MAX_PAGES, PULL_PAGE_ENTITY_LIMIT,
+    PULL_PAGE_MAX_ENCODED_BYTES, PULL_PAGE_TARGET_BYTES, SETUP_PROTOCOL_VERSION,
     SOURCE_SYNC_HANDSHAKE_CAPABILITIES,
 };
 
@@ -103,10 +109,13 @@ pub(crate) async fn authenticated_handshake(
             "directory_generation": directory_generation,
             "limits": {
                 "pull_page_max_entities": PULL_PAGE_ENTITY_LIMIT,
+                "pull_page_max_encoded_bytes": PULL_PAGE_MAX_ENCODED_BYTES,
+                "pull_page_max_decoded_bytes": PULL_PAGE_TARGET_BYTES,
+                "pull_max_pages": PULL_MAX_PAGES,
                 "commit_batch_max_units": MAX_CAUSAL_UNITS,
                 "media_max_bytes": state.max_media_bytes,
             },
-            "compression": { "pull_response": ["identity"] },
+            "compression": { "pull_response": ["gzip", "identity"] },
             "retry_hints": { "retry_after": true },
         })),
     ))
@@ -792,6 +801,9 @@ fn map_source_relation_error(error: StoreError) -> ApiError {
 pub(crate) struct PullQuery {
     cursor: i64,
     generation: String,
+    // H16 adds the monotonic page proof additively while source capability remains active.
+    #[serde(default)]
+    page_index: usize,
 }
 
 #[derive(Serialize)]
@@ -799,15 +811,21 @@ struct PullResponse<E> {
     entities: E,
     cursor: i64,
     generation: String,
+    page_index: usize,
     has_more: bool,
     family_name: Option<String>,
 }
 
-fn pull_response_value(page: PullPage, generation: &str) -> Result<Value, serde_json::Error> {
+fn pull_response_value(
+    page: PullPage,
+    generation: &str,
+    page_index: usize,
+) -> Result<Value, serde_json::Error> {
     serde_json::to_value(PullResponse {
         entities: page.entities,
         cursor: page.cursor,
         generation: generation.to_owned(),
+        page_index,
         has_more: page.has_more,
         family_name: page.family_name,
     })
@@ -824,6 +842,8 @@ fn pull_response_size(
         entities: Vec::<PulledEntity>::new(),
         cursor: current,
         generation: generation.to_owned(),
+        // Budget the largest accepted page index for every response.
+        page_index: PULL_MAX_PAGES - 1,
         // `false` is one byte longer than `true`, so it safely budgets either.
         has_more: false,
         family_name: family_name.clone(),
@@ -843,12 +863,78 @@ fn media_owner_key(entity: &PulledEntity) -> Option<(&'static str, &str)> {
         .flatten()
 }
 
+#[derive(Clone, Copy)]
+enum PullResponseEncoding {
+    Gzip,
+    Identity,
+}
+
+fn negotiated_pull_response_encoding(
+    headers: &HeaderMap,
+) -> Result<PullResponseEncoding, ApiError> {
+    let Some(value) = headers.get(ACCEPT_ENCODING) else {
+        return Ok(PullResponseEncoding::Identity);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| ApiError::unprocessable("pull Accept-Encoding must be valid header text"))?;
+    let mut gzip_quality = None;
+    let mut identity_quality = None;
+    let mut wildcard_quality = None;
+    for item in raw.split(',') {
+        let mut parts = item.split(';');
+        let token = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
+        if token.is_empty() {
+            return Err(ApiError::unprocessable(
+                "pull Accept-Encoding contains an empty coding",
+            ));
+        }
+        let mut quality = 1.0_f32;
+        for parameter in parts {
+            let (name, raw_value) = parameter.trim().split_once('=').ok_or_else(|| {
+                ApiError::unprocessable("pull Accept-Encoding parameter is invalid")
+            })?;
+            if !name.trim().eq_ignore_ascii_case("q") {
+                return Err(ApiError::unprocessable(
+                    "pull Accept-Encoding parameter is unsupported",
+                ));
+            }
+            quality = raw_value
+                .trim()
+                .parse::<f32>()
+                .map_err(|_| ApiError::unprocessable("pull Accept-Encoding quality is invalid"))?;
+            if !quality.is_finite() || !(0.0..=1.0).contains(&quality) {
+                return Err(ApiError::unprocessable(
+                    "pull Accept-Encoding quality is invalid",
+                ));
+            }
+        }
+        match token.as_str() {
+            "gzip" => gzip_quality = Some(quality),
+            "identity" => identity_quality = Some(quality),
+            "*" => wildcard_quality = Some(quality),
+            _ => {}
+        }
+    }
+    let gzip = gzip_quality.or(wildcard_quality).unwrap_or(0.0);
+    let identity = identity_quality.or(wildcard_quality).unwrap_or(0.0);
+    if gzip > 0.0 && gzip >= identity {
+        Ok(PullResponseEncoding::Gzip)
+    } else if identity > 0.0 {
+        Ok(PullResponseEncoding::Identity)
+    } else {
+        Err(ApiError::unprocessable(
+            "pull Accept-Encoding must allow gzip or identity",
+        ))
+    }
+}
+
 /// HTTP route entrypoint — see module visibility rule on `handlers`.
 pub(crate) async fn pull_entities(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     query: Result<Query<PullQuery>, QueryRejection>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let principal = authenticate(&state, &headers).await?;
     require_supported_client(&state, &headers).await?;
     let query = query
@@ -857,6 +943,11 @@ pub(crate) async fn pull_entities(
     if query.cursor < 0 {
         return Err(ApiError::unprocessable("cursor must be non-negative"));
     }
+    if query.page_index >= PULL_MAX_PAGES {
+        return Err(ApiError::unprocessable(
+            "page_index exceeds negotiated pull budget",
+        ));
+    }
     if query.generation != state.generation {
         return Err(ApiError::conflict_value(
             state
@@ -864,8 +955,9 @@ pub(crate) async fn pull_entities(
                 .await?,
         ));
     }
+    let response_encoding = negotiated_pull_response_encoding(&headers)?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let guard = family_lock.lock().await;
     let blocking_state = state.clone();
     let family_id = principal.family_id.clone();
     let cursor = query.cursor;
@@ -944,7 +1036,54 @@ pub(crate) async fn pull_entities(
         Ok(page)
     })
     .await?;
-    Ok(Json(pull_response_value(page, &state.generation).map_err(
-        |_| ApiError::internal("failed to serialize pull response"),
-    )?))
+    drop(guard);
+    let generation = state.generation.clone();
+    let page_index = query.page_index;
+    let (encoded, is_gzip) = run_blocking(move || {
+        let value = pull_response_value(page, &generation, page_index)
+            .map_err(|_| ApiError::internal("failed to serialize pull response"))?;
+        let decoded = serde_json::to_vec(&value)
+            .map_err(|_| ApiError::internal("failed to serialize pull response"))?;
+        if decoded.len() > PULL_PAGE_TARGET_BYTES {
+            return Err(ApiError::internal(
+                "pull decoded page exceeded negotiated budget",
+            ));
+        }
+        let (encoded, is_gzip) = match response_encoding {
+            PullResponseEncoding::Gzip => {
+                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                encoder
+                    .write_all(&decoded)
+                    .map_err(|_| ApiError::internal("failed to encode pull response"))?;
+                (
+                    encoder
+                        .finish()
+                        .map_err(|_| ApiError::internal("failed to encode pull response"))?,
+                    true,
+                )
+            }
+            PullResponseEncoding::Identity => (decoded, false),
+        };
+        if encoded.len() > PULL_PAGE_MAX_ENCODED_BYTES {
+            return Err(ApiError::internal(
+                "pull encoded page exceeded negotiated budget",
+            ));
+        }
+        Ok((encoded, is_gzip))
+    })
+    .await?;
+    let mut response = Response::new(Body::from(encoded));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+    if is_gzip {
+        response
+            .headers_mut()
+            .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    Ok(response)
 }

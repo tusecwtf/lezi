@@ -5,13 +5,17 @@ import com.lezi.babylog.sync.MemorySyncPreferences
 import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.FakeSyncBackend
+import com.lezi.babylog.sync.backend.FROZEN_PULL_PAGE_BUDGET
+import com.lezi.babylog.sync.backend.PullPageRequest
 import com.lezi.babylog.sync.backend.PullResult
+import com.lezi.babylog.sync.backend.PullResponseEncoding
 import com.lezi.babylog.sync.backend.ReauthRequiredException
 import com.lezi.babylog.sync.backend.RefreshingSyncBackend
 import com.lezi.babylog.sync.backend.SessionRefreshResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncHandshakePrincipal
 import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.backend.testPullPage
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.PolicyClock
@@ -30,6 +34,40 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Test
 
 class RetryingSyncBackendTest {
+    @Test
+    fun pullRetriesPreserveTheExactNegotiatedPageRequest() = runTest {
+        val request = PullPageRequest(
+            pageIndex = 37,
+            encoding = PullResponseEncoding.Gzip,
+            budget = FROZEN_PULL_PAGE_BUDGET.copy(
+                maxEntities = 123,
+                maxEncodedBytes = 4_096,
+                maxDecodedBytes = 2_048,
+                maxPages = 40,
+            ),
+        )
+        val observed = mutableListOf<PullPageRequest>()
+        val delegate = object : SyncBackend by FakeSyncBackend() {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
+                observed += page
+                if (observed.size == 1) throw SyncHttpException(503)
+                return PullResult(emptyList(), 1, "generation", false, page.pageIndex)
+            }
+        }
+        val backend = RetryingSyncBackend(
+            delegate,
+            random = SyncRetryRandom { 0 },
+            delay = SyncRetryDelay { },
+        )
+
+        val result = backend.pull(SyncSession(), request)
+
+        assertThat(result.pageIndex).isEqualTo(37)
+        assertThat(observed).containsExactly(request, request).inOrder()
+        assertThat(observed[0]).isSameInstanceAs(request)
+        assertThat(observed[1]).isSameInstanceAs(request)
+    }
+
     @Test
     fun handshakeHonorsValidRetryAfterBeforeRetrying() = runTest {
         val clock = FakeRetryClock(epochMillis = 1_700_000_000_000L)
@@ -140,7 +178,7 @@ class RetryingSyncBackendTest {
         }
         val delegate = object : SyncBackend by FakeSyncBackend() {
             override suspend fun authenticatedHandshake(session: SyncSession) = fail("handshake")
-            override suspend fun pull(session: SyncSession) = fail("pull")
+            override suspend fun pull(session: SyncSession, page: PullPageRequest) = fail("pull")
             override suspend fun causalCommit(
                 session: SyncSession,
                 units: List<CausalMutationUnit>,
@@ -169,7 +207,7 @@ class RetryingSyncBackendTest {
         val resolve = ConflictResolveRequest("token", "mutation", emptyList())
 
         runCatching { backend.authenticatedHandshake(session) }
-        runCatching { backend.pull(session) }
+        runCatching { backend.pull(session, testPullPage()) }
         runCatching { backend.causalCommit(session, listOf(mutation())) }
         runCatching {
             backend.fetchConflictSnapshotPage(
@@ -267,8 +305,8 @@ class RetryingSyncBackendTest {
             var attempts = 0
             val clock = FakeRetryClock(1_700_000_000_000L)
             val delegate = object : SyncBackend by FakeSyncBackend() {
-                override suspend fun pull(session: SyncSession) =
-                    if (++attempts == 1) throw firstFailure else FakeSyncBackend().pull(session)
+                override suspend fun pull(session: SyncSession, page: PullPageRequest) =
+                    if (++attempts == 1) throw firstFailure else FakeSyncBackend().pull(session, page)
             }
             val backend = RetryingSyncBackend(
                 delegate,
@@ -277,7 +315,7 @@ class RetryingSyncBackendTest {
                 SyncRetryDelay { clock.advance(it) },
             )
 
-            backend.pull(SyncSession())
+            backend.pull(SyncSession(), testPullPage())
             assertThat(attempts).isEqualTo(2)
         }
 
@@ -304,9 +342,9 @@ class RetryingSyncBackendTest {
         var attempts = 0
         val events = mutableListOf<SyncRetryEvent>()
         val delegate = object : SyncBackend by FakeSyncBackend() {
-            override suspend fun pull(session: SyncSession): PullResult {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
                 if (++attempts == 1) throw SocketTimeoutException("read timed out")
-                return FakeSyncBackend().pull(session)
+                return FakeSyncBackend().pull(session, page)
             }
         }
 
@@ -315,7 +353,7 @@ class RetryingSyncBackendTest {
             random = SyncRetryRandom { 0 },
             delay = SyncRetryDelay { },
             events = SyncRetryEventSink(events::add),
-        ).pull(SyncSession())
+        ).pull(SyncSession(), testPullPage())
 
         assertThat(events).containsExactly(
             SyncRetryEvent(SyncRetryOperation.Pull, SyncRetryFailureCategory.Timeout, 1, 0),
@@ -328,7 +366,7 @@ class RetryingSyncBackendTest {
         val events = mutableListOf<SyncRetryEvent>()
         var attempts = 0
         val delegate = object : SyncBackend by FakeSyncBackend() {
-            override suspend fun pull(session: SyncSession): Nothing {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): Nothing {
                 attempts += 1
                 throw IOException("transport wrapper", IllegalStateException("middle", cancellation))
             }
@@ -340,7 +378,7 @@ class RetryingSyncBackendTest {
             events = SyncRetryEventSink(events::add),
         )
 
-        val failure = runCatching { backend.pull(SyncSession()) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(SyncSession(), testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isSameInstanceAs(cancellation)
         assertThat(attempts).isEqualTo(1)
@@ -356,7 +394,7 @@ class RetryingSyncBackendTest {
         val delays = mutableListOf<Long>()
         val events = mutableListOf<SyncRetryEvent>()
         val delegate = object : SyncBackend by FakeSyncBackend() {
-            override suspend fun pull(session: SyncSession): PullResult {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
                 delegateCalls += 1
                 return try {
                     awaitCancellation()
@@ -379,7 +417,7 @@ class RetryingSyncBackendTest {
         val failure = runCatching {
             withTimeout(20) {
                 try {
-                    backend.pull(SyncSession())
+                    backend.pull(SyncSession(), testPullPage())
                 } catch (cancelled: CancellationException) {
                     escapedCancellation = cancelled
                     throw cancelled
@@ -405,7 +443,7 @@ class RetryingSyncBackendTest {
         var attempts = 0
         val events = mutableListOf<SyncRetryEvent>()
         val delegate = object : SyncBackend by FakeSyncBackend() {
-            override suspend fun pull(session: SyncSession): Nothing {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): Nothing {
                 attempts += 1
                 throw first
             }
@@ -417,7 +455,7 @@ class RetryingSyncBackendTest {
             events = SyncRetryEventSink(events::add),
         )
 
-        assertThat(runCatching { backend.pull(SyncSession()) }.exceptionOrNull())
+        assertThat(runCatching { backend.pull(SyncSession(), testPullPage()) }.exceptionOrNull())
             .isSameInstanceAs(first)
         assertThat(attempts).isEqualTo(1)
         assertThat(events).isEmpty()
@@ -449,7 +487,7 @@ class RetryingSyncBackendTest {
         var pullCalls = 0
         var refreshCalls = 0
         val delegate = object : SyncBackend by FakeSyncBackend() {
-            override suspend fun pull(session: SyncSession): PullResult {
+            override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
                 pullCalls += 1
                 throw SyncHttpException(401)
             }
@@ -481,7 +519,7 @@ class RetryingSyncBackendTest {
             events = SyncRetryEventSink(events::add),
         )
 
-        val failure = runCatching { backend.pull(session) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(session, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(ReauthRequiredException::class.java)
         assertThat(refreshCalls).isEqualTo(1)
@@ -508,15 +546,15 @@ class RetryingSyncBackendTest {
         val events = mutableListOf<SyncRetryEvent>()
         var attempts = 0
         val delegate = object : SyncBackend by FakeSyncBackend() {
-            override suspend fun pull(session: SyncSession) =
-                if (++attempts == 1) throw SyncHttpException(429) else FakeSyncBackend().pull(session)
+            override suspend fun pull(session: SyncSession, page: PullPageRequest) =
+                if (++attempts == 1) throw SyncHttpException(429) else FakeSyncBackend().pull(session, page)
         }
         RetryingSyncBackend(
             delegate,
             random = SyncRetryRandom { 0 },
             delay = SyncRetryDelay { },
             events = SyncRetryEventSink(events::add),
-        ).pull(SyncSession())
+        ).pull(SyncSession(), testPullPage())
 
         assertThat(events).containsExactly(
             SyncRetryEvent(SyncRetryOperation.Pull, SyncRetryFailureCategory.Throttled, 1, 0),

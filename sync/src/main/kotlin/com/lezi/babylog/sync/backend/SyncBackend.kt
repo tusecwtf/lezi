@@ -80,9 +80,56 @@ data class PullResult(
     val cursor: Long,
     val generation: String,
     val hasMore: Boolean,
+    /** Zero-based continuation index echoed by the ordinary pull page. */
+    val pageIndex: Int = 0,
     /** Current wire always contains family_name; null explicitly clears it. */
     val familyName: String? = null,
 )
+
+enum class PullResponseEncoding(val wireName: String) {
+    Gzip("gzip"),
+    Identity("identity"),
+}
+
+data class PullPageBudget(
+    val maxEntities: Int,
+    val maxEncodedBytes: Int,
+    val maxDecodedBytes: Int,
+    val maxPages: Int,
+)
+
+internal val FROZEN_PULL_PAGE_BUDGET = PullPageBudget(
+    maxEntities = 200,
+    maxEncodedBytes = 9 * 1024 * 1024,
+    maxDecodedBytes = 8 * 1024 * 1024,
+    maxPages = 500,
+)
+
+data class PullPageRequest(
+    val pageIndex: Int,
+    val encoding: PullResponseEncoding,
+    val budget: PullPageBudget,
+)
+
+internal fun PullResult.requireValidPage(request: PullPageRequest): PullResult {
+    require(pageIndex == request.pageIndex) {
+        "家庭服务器返回了跳页或重复的 pull page_index"
+    }
+    require(entities.size <= request.budget.maxEntities) {
+        "家庭服务器 pull 页超过 item 上限"
+    }
+    require(entities.map { it.type to it.clientUuid }.distinct().size == entities.size) {
+        "家庭服务器 pull 页包含重复实体"
+    }
+    return this
+}
+
+data class PullTransportContract(
+    val encoding: PullResponseEncoding,
+    val budget: PullPageBudget,
+) {
+    fun page(index: Int): PullPageRequest = PullPageRequest(index, encoding, budget)
+}
 
 /** Wire §4.6 causal media manifest item (no bytes). */
 data class CausalMediaItem(
@@ -458,9 +505,19 @@ data class SyncHandshakePrincipal(
 
 data class SyncHandshakeLimits(
     val pullPageMaxEntities: Int,
+    val pullPageMaxEncodedBytes: Int,
+    val pullPageMaxDecodedBytes: Int,
+    val pullMaxPages: Int,
     val commitBatchMaxUnits: Int,
     val mediaMaxBytes: Long,
-)
+) {
+    fun pullBudget(): PullPageBudget = PullPageBudget(
+        maxEntities = pullPageMaxEntities,
+        maxEncodedBytes = pullPageMaxEncodedBytes,
+        maxDecodedBytes = pullPageMaxDecodedBytes,
+        maxPages = pullMaxPages,
+    )
+}
 
 data class SyncHandshakeCompression(val pullResponse: Set<String>)
 
@@ -476,7 +533,17 @@ data class AuthenticatedSyncHandshake(
     val limits: SyncHandshakeLimits,
     val compression: SyncHandshakeCompression,
     val retryHints: SyncHandshakeRetryHints,
-)
+) {
+    fun pullTransport(): PullTransportContract {
+        require(compression.pullResponse == setOf("gzip", "identity")) {
+            "普通 pull compression 合同不兼容"
+        }
+        return PullTransportContract(
+            encoding = PullResponseEncoding.Gzip,
+            budget = limits.pullBudget(),
+        )
+    }
+}
 
 data class FamilyMemberDirectorySnapshot(
     val generation: String,
@@ -669,7 +736,8 @@ interface SyncBackend {
         deviceName: String,
     ): SessionBootstrapResult = throw UnsupportedOperationException("Member login grant claim is not implemented")
 
-    suspend fun pull(session: SyncSession): PullResult
+    /** H16 ordinary-pull transport seam; wrappers must preserve this exact immutable request. */
+    suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult
 
     suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake
     suspend fun reconcile(

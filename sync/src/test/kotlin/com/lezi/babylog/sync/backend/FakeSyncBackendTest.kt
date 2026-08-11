@@ -61,7 +61,9 @@ class FakeSyncBackendTest {
         assertThat(result.recordAuthors).containsExactly(
             CanonicalRecordAuthor("record-author", session.membershipId),
         )
-        val stored = backend.pull(session).entities.single { it.clientUuid == "record-author" }
+        val stored = backend.pull(session, testPullPage()).entities.single {
+            it.clientUuid == "record-author"
+        }
         assertThat(
             Json.parseToJsonElement(stored.payloadJson)
                 .jsonObject["created_by_membership_id"]
@@ -114,7 +116,7 @@ class FakeSyncBackendTest {
         )
 
         suspend fun assertPeerDoesNotSee(vararg clientUuids: String) {
-            val visible = backend.pull(member).entities.map { it.clientUuid }.toSet()
+            val visible = backend.pull(member, testPullPage()).entities.map { it.clientUuid }.toSet()
             clientUuids.forEach { uuid ->
                 assertThat(visible).doesNotContain(uuid)
             }
@@ -153,7 +155,7 @@ class FakeSyncBackendTest {
         )
         assertPeerDoesNotSee("record-dual", MEDIA_RECORD_DUAL)
         backend.commitBundle(owner, "bundle-record-dual")
-        val afterRecord = backend.pull(member).entities.map { it.clientUuid }.toSet()
+        val afterRecord = backend.pull(member, testPullPage()).entities.map { it.clientUuid }.toSet()
         assertThat(afterRecord).containsAtLeast("record-dual", MEDIA_RECORD_DUAL)
 
         // CarePlan package: incomplete → invisible; full commit → visible.
@@ -188,7 +190,7 @@ class FakeSyncBackendTest {
         )
         assertPeerDoesNotSee("plan-dual", MEDIA_PLAN_DUAL)
         backend.commitBundle(owner, "bundle-plan-dual")
-        val afterPlan = backend.pull(member).entities.map { it.clientUuid }.toSet()
+        val afterPlan = backend.pull(member, testPullPage()).entities.map { it.clientUuid }.toSet()
         assertThat(afterPlan).containsAtLeast("plan-dual", MEDIA_PLAN_DUAL)
     }
 
@@ -265,7 +267,7 @@ class FakeSyncBackendTest {
                 ),
             ),
         )
-        val afterAccept = backend.pull(member.copy(pullCursor = 0))
+        val afterAccept = backend.pull(member.copy(pullCursor = 0), testPullPage())
         val frozen = afterAccept.entities.single { it.clientUuid == "cand-member-f" }
         val frozenPayload = Json.parseToJsonElement(frozen.payloadJson).jsonObject
         assertThat(frozenPayload["submitter_membership_id"]?.jsonPrimitive?.content)
@@ -288,7 +290,7 @@ class FakeSyncBackendTest {
                 ),
             ),
         )
-        val afterReplay = backend.pull(owner.copy(pullCursor = 0))
+        val afterReplay = backend.pull(owner.copy(pullCursor = 0), testPullPage())
         val replayed = afterReplay.entities.single { it.clientUuid == "cand-member-f" }
         val replayPayload = Json.parseToJsonElement(replayed.payloadJson).jsonObject
         assertThat(replayPayload["submitter_membership_id"]?.jsonPrimitive?.content)

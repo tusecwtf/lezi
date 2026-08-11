@@ -136,7 +136,8 @@ class FakeSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
+    override suspend fun pull(session: SyncSession, page: PullPageRequest) =
+        pullRows(session.familyId, session.pullCursor).copy(pageIndex = page.pageIndex)
 
     override suspend fun authenticatedHandshake(session: SyncSession) =
         sourceCausalHandshake(

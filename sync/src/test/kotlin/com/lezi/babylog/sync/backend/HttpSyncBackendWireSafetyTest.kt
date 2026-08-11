@@ -53,7 +53,7 @@ class HttpSyncBackendWireSafetyTest {
 
         try {
             val failure = runCatching {
-                loopbackBackend().pull(testSession(server))
+                loopbackBackend().pull(testSession(server), testPullPage())
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(SyncResponseTooLargeException::class.java)
@@ -150,7 +150,7 @@ class HttpSyncBackendWireSafetyTest {
 
         try {
             val failure = runCatching {
-                loopbackBackend().pull(testSession(server))
+                loopbackBackend().pull(testSession(server), testPullPage())
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(SyncHttpException::class.java)

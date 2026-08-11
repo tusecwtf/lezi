@@ -6,6 +6,7 @@ import com.lezi.babylog.sync.backend.SyncHttpConnectionFactory
 import com.lezi.babylog.sync.backend.loopbackBackend
 import com.lezi.babylog.sync.backend.readRequest
 import com.lezi.babylog.sync.backend.testSession
+import com.lezi.babylog.sync.backend.testPullPage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -34,7 +35,7 @@ class HttpSyncBackendRetryFaultTest {
                     200,
                     "OK",
                     null,
-                    """{"entities":[],"cursor":0,"generation":"generation-a","has_more":false,"family_name":null}""",
+                    """{"entities":[],"cursor":0,"generation":"generation-a","page_index":0,"has_more":false,"family_name":null}""",
                 )
             }
             val clock = FaultClock()
@@ -50,7 +51,7 @@ class HttpSyncBackendRetryFaultTest {
             )
 
             try {
-                val result = backend.pull(testSession(server))
+                val result = backend.pull(testSession(server), testPullPage())
 
                 assertThat(result.entities).isEmpty()
                 assertThat(delays).containsExactly(1_000L)
@@ -101,7 +102,7 @@ class HttpSyncBackendRetryFaultTest {
             val handshake = JsonConnection(200, validHandshake())
             val pull = JsonConnection(
                 200,
-                """{"entities":[],"cursor":0,"generation":"generation-a","has_more":false,"family_name":null}""",
+                """{"entities":[],"cursor":0,"generation":"generation-a","page_index":0,"has_more":false,"family_name":null}""",
             )
             val connections = ArrayDeque(listOf(handshake, pull))
             val backend = HttpSyncBackend(
@@ -118,7 +119,7 @@ class HttpSyncBackendRetryFaultTest {
             )
 
             backend.authenticatedHandshake(session)
-            backend.pull(session)
+            backend.pull(session, testPullPage())
 
             assertThat(handshake.connectTimeout).isEqualTo(3_000)
             assertThat(handshake.readTimeout).isEqualTo(10_000)
@@ -235,7 +236,7 @@ class HttpSyncBackendRetryFaultTest {
     }
 
     private fun validHandshake(): String =
-        """{"protocol_version":1,"server_version":"0.3.14","ready":true,"capabilities":["causal_versions","wake_observation","source_relations"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["identity"]},"retry_hints":{"retry_after":true}}"""
+        """{"protocol_version":1,"server_version":"0.3.14","ready":true,"capabilities":["causal_versions","wake_observation","source_relations"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}"""
 
     private fun testSessionForDirectAdapter() = com.lezi.babylog.sync.session.SyncSession(
         serverHost = "family.example.com",

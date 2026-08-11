@@ -37,8 +37,8 @@ internal class RefreshingSyncBackend(
 ) : SyncBackend by delegate {
     private val sessionMutex = Mutex()
 
-    override suspend fun pull(session: SyncSession): PullResult =
-        authenticated(session, delegate::pull)
+    override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult =
+        authenticated(session) { delegate.pull(it, page) }
 
     override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake =
         authenticated(session, delegate::authenticatedHandshake)

@@ -102,6 +102,7 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
+import com.lezi.babylog.sync.backend.PullPageRequest
 import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.REQUIRED_CAUSAL_WIRE_CAPABILITIES
@@ -172,8 +173,15 @@ internal fun sourceCausalHandshake(
     capabilities = REQUIRED_CAUSAL_WIRE_CAPABILITIES,
     principal = principal,
     directoryGeneration = directoryGeneration,
-    limits = SyncHandshakeLimits(200, 64, 10L * 1024 * 1024),
-    compression = SyncHandshakeCompression(setOf("identity")),
+    limits = SyncHandshakeLimits(
+        pullPageMaxEntities = 200,
+        pullPageMaxEncodedBytes = 9 * 1024 * 1024,
+        pullPageMaxDecodedBytes = 8 * 1024 * 1024,
+        pullMaxPages = 500,
+        commitBatchMaxUnits = 64,
+        mediaMaxBytes = 10L * 1024 * 1024,
+    ),
+    compression = SyncHandshakeCompression(setOf("gzip", "identity")),
     retryHints = SyncHandshakeRetryHints(retryAfter = true),
 )
 
@@ -275,6 +283,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var afterPush: (() -> Unit)? = null
     var afterCommit: (suspend () -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
+    var nextPullPageIndexOverride: Int? = null
     var releasePull: CompletableDeferred<Unit>? = null
     var createStarted: CompletableDeferred<Unit>? = null
     var releaseCreate: CompletableDeferred<Unit>? = null
@@ -736,7 +745,7 @@ internal class RecordingSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun pull(session: SyncSession): PullResult {
+    override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
         pullCount++
         pullCursors += session.pullCursor
         syncOrder += "pull:${session.pullCursor}"
@@ -744,12 +753,12 @@ internal class RecordingSyncBackend : SyncBackend {
         releasePull?.await()
         pullFailures.removeFirstOrNull()?.let { throw it }
         beforePullReturn?.also { beforePullReturn = null }?.invoke()
-        return pullResults.removeFirstOrNull() ?: nextPull ?: PullResult(
+        return (pullResults.removeFirstOrNull() ?: nextPull ?: PullResult(
             entities = emptyList(),
             cursor = session.pullCursor,
             generation = session.pullGeneration,
             hasMore = false,
-        )
+        )).copy(pageIndex = nextPullPageIndexOverride ?: page.pageIndex)
     }
 
     override suspend fun reconcile(

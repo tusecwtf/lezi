@@ -19,6 +19,7 @@ import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.FamilyMemberDirectorySnapshot
+import com.lezi.babylog.sync.backend.PullPageRequest
 import com.lezi.babylog.sync.backend.PullResult
 import com.lezi.babylog.sync.backend.SessionBootstrapResult
 import com.lezi.babylog.sync.backend.SyncBackend
@@ -197,7 +198,7 @@ class RecordCommitFirstRoomReplayTest {
             familyName: String?,
         ): SessionBootstrapResult = unsupported()
 
-        override suspend fun pull(session: SyncSession): PullResult = unsupported()
+        override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult = unsupported()
         override suspend fun authenticatedHandshake(
             session: SyncSession,
         ): AuthenticatedSyncHandshake = unsupported()

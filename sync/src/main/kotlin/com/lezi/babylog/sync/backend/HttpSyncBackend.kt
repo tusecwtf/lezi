@@ -5,6 +5,7 @@ import com.lezi.babylog.sync.conflict.ConflictSnapshotPaging
 import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.conflict.toConflictSnapshot
 import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -16,6 +17,7 @@ import java.net.URLEncoder
 import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.GZIPInputStream
 import javax.inject.Inject
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
@@ -642,26 +644,35 @@ class HttpSyncBackend internal constructor(
         },
     ).toMemberClaimResult()
 
-    override suspend fun pull(session: SyncSession): PullResult {
+    override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
         session.requireCurrentReplicaTransport()
+        require(page.pageIndex in 0 until page.budget.maxPages) {
+            "普通 pull page_index 超出协商上限"
+        }
         val generation = URLEncoder.encode(session.pullGeneration, Charsets.UTF_8.name())
-        val json = requestJson(
+        val json = requestPullJson(
             base = session.baseUrl,
-            path = "/v1/pull?cursor=${session.pullCursor}&generation=$generation",
-            method = "GET",
+            path = "/v1/pull?cursor=${session.pullCursor}&generation=$generation" +
+                "&page_index=${page.pageIndex}",
             token = session.accessToken,
-            body = null,
-            retryOperation = SyncRetryOperation.Pull,
+            page = page,
         )
-        return PullResult(
-            entities = json.entities("pull"),
+        val entities = json.entities("pull")
+        val result = PullResult(
+            entities = entities,
             cursor = json.requiredLong("cursor", "pull"),
             generation = json.requiredNonBlankString("generation", "pull"),
             hasMore = requireNotNull(json["has_more"]?.jsonPrimitive?.booleanOrNull) {
                 "pull 响应缺少 has_more"
             },
+            pageIndex = json.requiredInt("page_index", "pull"),
             familyName = json.pullFamilyName(),
         )
+        json.requireExactKeys(
+            setOf("entities", "cursor", "generation", "page_index", "has_more", "family_name"),
+            "pull",
+        )
+        return result.requireValidPage(page)
     }
 
     override suspend fun reconcile(
@@ -1477,6 +1488,24 @@ class HttpSyncBackend internal constructor(
         retryOperation = retryOperation,
     ).json
 
+    private suspend fun requestPullJson(
+        base: String,
+        path: String,
+        token: String,
+        page: PullPageRequest,
+    ): JsonObject = requestJsonWithEvidence(
+        base = base,
+        path = path,
+        method = "GET",
+        token = token,
+        body = null,
+        extraHeaders = mapOf("Accept-Encoding" to page.encoding.wireName),
+        successLimitBytes = page.budget.maxEncodedBytes,
+        successResponseKind = "pull encoded JSON",
+        retryOperation = SyncRetryOperation.Pull,
+        pullPage = page,
+    ).json
+
     private suspend fun requestJsonWithEvidence(
         base: String,
         path: String,
@@ -1488,6 +1517,7 @@ class HttpSyncBackend internal constructor(
         successLimitBytes: Int = MAX_SYNC_JSON_RESPONSE_BYTES,
         successResponseKind: String = "JSON",
         retryOperation: SyncRetryOperation? = null,
+        pullPage: PullPageRequest? = null,
     ): JsonTransportResponse {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
@@ -1522,7 +1552,16 @@ class HttpSyncBackend internal constructor(
                     successLimitBytes = successLimitBytes,
                     successResponseKind = successResponseKind,
                 )
-                val text = bytes.toString(Charsets.UTF_8)
+                val decodedBytes = if (code in 200..299 && pullPage != null) {
+                    decodePullBody(
+                        encoded = bytes,
+                        contentEncoding = connection.getHeaderField("Content-Encoding"),
+                        page = pullPage,
+                    )
+                } else {
+                    bytes
+                }
+                val text = decodedBytes.toString(Charsets.UTF_8)
                 if (code !in 200..299) {
                     throw SyncHttpException(
                         statusCode = code,
@@ -1731,6 +1770,45 @@ class HttpSyncBackend internal constructor(
             )
         } ?: byteArrayOf()
         return BoundedHttpResponse(code, bytes, retryAfterHeader)
+    }
+}
+
+private fun decodePullBody(
+    encoded: ByteArray,
+    contentEncoding: String?,
+    page: PullPageRequest,
+): ByteArray {
+    val normalizedEncoding = contentEncoding?.trim()?.lowercase().orEmpty()
+    val stream = when (page.encoding) {
+        PullResponseEncoding.Identity -> {
+            require(normalizedEncoding.isEmpty() || normalizedEncoding == "identity") {
+                "pull Content-Encoding 与协商 identity 不一致"
+            }
+            ByteArrayInputStream(encoded)
+        }
+        PullResponseEncoding.Gzip -> {
+            require(normalizedEncoding == "gzip") {
+                "pull Content-Encoding 与协商 gzip 不一致"
+            }
+            try {
+                GZIPInputStream(ByteArrayInputStream(encoded))
+            } catch (error: IOException) {
+                throw IllegalArgumentException("pull gzip 截断或损坏", error)
+            }
+        }
+    }
+    return try {
+        stream.use {
+            it.readBytesUpTo(
+                limitBytes = page.budget.maxDecodedBytes,
+                responseKind = "pull decoded JSON",
+                declaredBytes = encoded.size.toLong(),
+            )
+        }
+    } catch (error: SyncResponseTooLargeException) {
+        throw error
+    } catch (error: IOException) {
+        throw IllegalArgumentException("pull gzip 截断或损坏", error)
     }
 }
 
@@ -2713,14 +2791,36 @@ internal fun decodeAuthenticatedSyncHandshake(json: JsonObject): AuthenticatedSy
     }
     val limits = json.requiredObject("limits", context).also {
         it.requireExactKeys(
-            setOf("pull_page_max_entities", "commit_batch_max_units", "media_max_bytes"),
+            setOf(
+                "pull_page_max_entities",
+                "pull_page_max_encoded_bytes",
+                "pull_page_max_decoded_bytes",
+                "pull_max_pages",
+                "commit_batch_max_units",
+                "media_max_bytes",
+            ),
             "$context.limits",
         )
     }
     val pullLimit = limits.requiredInt("pull_page_max_entities", "$context.limits")
+    val pullEncodedLimit = limits.requiredInt("pull_page_max_encoded_bytes", "$context.limits")
+    val pullDecodedLimit = limits.requiredInt("pull_page_max_decoded_bytes", "$context.limits")
+    val pullMaxPages = limits.requiredInt("pull_max_pages", "$context.limits")
     val commitLimit = limits.requiredInt("commit_batch_max_units", "$context.limits")
     val mediaLimit = limits.requiredLong("media_max_bytes", "$context.limits")
     require(pullLimit in 1..200) { "$context.limits.pull_page_max_entities 无效" }
+    require(pullEncodedLimit in 1..FROZEN_PULL_PAGE_BUDGET.maxEncodedBytes) {
+        "$context.limits.pull_page_max_encoded_bytes 无效"
+    }
+    require(pullDecodedLimit in 1..FROZEN_PULL_PAGE_BUDGET.maxDecodedBytes) {
+        "$context.limits.pull_page_max_decoded_bytes 无效"
+    }
+    require(pullEncodedLimit >= pullDecodedLimit) {
+        "$context.limits pull encoded 上限不得小于 decoded 上限"
+    }
+    require(pullMaxPages in 1..FROZEN_PULL_PAGE_BUDGET.maxPages) {
+        "$context.limits.pull_max_pages 无效"
+    }
     require(commitLimit in 1..64) { "$context.limits.commit_batch_max_units 无效" }
     require(mediaLimit in 1..MAX_SYNC_MEDIA_RESPONSE_BYTES.toLong()) {
         "$context.limits.media_max_bytes 无效"
@@ -2731,9 +2831,9 @@ internal fun decodeAuthenticatedSyncHandshake(json: JsonObject): AuthenticatedSy
     val pullCompression = compression.requiredUniqueStringSet(
         "pull_response",
         "$context.compression",
-        maxItems = 1,
+        maxItems = 2,
     )
-    require(pullCompression == setOf("identity")) {
+    require(pullCompression == setOf("gzip", "identity")) {
         "$context.compression.pull_response 无效"
     }
     val retryHints = json.requiredObject("retry_hints", context).also {
@@ -2761,7 +2861,14 @@ internal fun decodeAuthenticatedSyncHandshake(json: JsonObject): AuthenticatedSy
             },
         ),
         directoryGeneration = directoryGeneration,
-        limits = SyncHandshakeLimits(pullLimit, commitLimit, mediaLimit),
+        limits = SyncHandshakeLimits(
+            pullPageMaxEntities = pullLimit,
+            pullPageMaxEncodedBytes = pullEncodedLimit,
+            pullPageMaxDecodedBytes = pullDecodedLimit,
+            pullMaxPages = pullMaxPages,
+            commitBatchMaxUnits = commitLimit,
+            mediaMaxBytes = mediaLimit,
+        ),
         compression = SyncHandshakeCompression(pullCompression),
         retryHints = SyncHandshakeRetryHints(retryAfter = true),
     )

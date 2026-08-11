@@ -115,6 +115,8 @@ pub(crate) const SERVER_SECRET_BYTES: usize = 32;
 pub(crate) const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const PULL_PAGE_MAX_ENCODED_BYTES: usize = 9 * 1024 * 1024;
+pub(crate) const PULL_MAX_PAGES: usize = 500;
 pub(crate) const PULL_ENTITY_TARGET_BYTES: usize = PULL_PAGE_TARGET_BYTES / 3;
 const BOOTSTRAP_SECRET_HEADER: HeaderName = HeaderName::from_static("x-lezi-bootstrap-secret");
 /// Integer versionCode from authenticated clients; used to gate minSupported on sync paths.

@@ -70,8 +70,8 @@ endpoint trust 与家庭 session 已成立后，每个普通同步周期只发�
 | `capabilities` | H14 source wire 精确三项 `causal_versions`,`wake_observation`,`source_relations`；H27 前任何额外项（尤其 `causal_sync_v2`）均 mismatch |
 | `principal` | `{membership_id, device_id, role}`；全部从 session/ACL 派生，客户端不得提供 |
 | `directory_generation` | 成员/设备目录结构 generation；认证活动时间不得使它变化 |
-| `limits` | `{pull_page_max_entities, commit_batch_max_units, media_max_bytes}` |
-| `compression` | `{pull_response:["identity"]}`；H16 才可扩展 gzip 行为 |
+| `limits` | `{pull_page_max_entities:200,pull_page_max_encoded_bytes:9437184,pull_page_max_decoded_bytes:8388608,pull_max_pages:500,commit_batch_max_units,media_max_bytes}` |
+| `compression` | `{pull_response:["gzip","identity"]}`；客户端普通同步选择 `gzip`，显式 identity 仍是等价合同 |
 | `retry_hints` | `{retry_after:true}`；仅声明服务器可提供 Retry-After，H15 才拥有退避算法 |
 
 客户端必须先验证 protocol、required capabilities、ready 与 principal/session 精确一致，再读目录、
@@ -107,6 +107,33 @@ snapshot 等外部状态改变。
 `snapshot_stale|snapshot_expired` 终止本次 resolution mutation，并交给 H09 的 refresh 状态机；
 旧事实/快照保持只读证据，不得标为永久失败或删除。retry telemetry 只允许 operation、错误类别、
 已完成 attempts 与 delay，不得记录 family/root/成员/护理内容。
+
+### 1.4 gzip 有界普通增量 pull（H16）
+
+本节只冻结 `GET /v1/pull` 的普通增量页；ConflictSnapshot 的 receipt、opaque continuation 与
+分页预算仍由 §8/H18 独占，二者不得复用 token 或状态。H27 前本节也不激活 `causal_sync_v2`。
+
+客户端在一次已认证同步周期中复用 §1.2 握手所得合同，并为每页发送
+`cursor`、`generation` 与从 0 单调递增的 `page_index`。客户端进程重启或本轮失败后，以最后耐久
+checkpoint 的 cursor 开始新一轮，`page_index` 重新从 0 计数。服务端响应是 closed object：
+`{entities,cursor,generation,page_index,has_more,family_name}`，其中 `page_index` 必须精确回显。
+source capability 仍活动期间，服务端只为旧 source 客户端兼容缺失的 `page_index=0`；H16 客户端
+始终显式发送。
+
+每一页是一个完整 JSON envelope。客户端发送 `Accept-Encoding: gzip` 时服务端返回 gzip 与
+`Content-Encoding: gzip`；显式 `identity` 返回相同解码字节和事实。服务端总是返回
+`Vary: Accept-Encoding`，不接受协商集合以外的编码。预算按页同时成立：最多 200 entities、
+HTTP content 最多 9 MiB encoded bytes、解码后的完整 JSON 最多 8 MiB、每轮最多 500 页。
+服务端在 JSON 完整序列化后检查 decoded budget，再编码并检查 encoded budget；gzip 工作不占用
+family write mutex。客户端先限制 encoded body，再用有上限的流式解压限制 decoded body，最后才
+解析完整 envelope，禁止把 partial entity 暴露给 engine。
+
+下列任一情况整页 fail closed：未协商/不一致的 Content-Encoding，encoded 或 decoded 超预算，
+truncated/corrupt gzip 或 JSON，entity count 超预算，同页或连续页重复 `(type,client_uuid)`，
+重复/跳跃 `page_index`，cursor 倒退，`has_more=true` 但 cursor 未推进，或 generation 在分页中变化。
+客户端只有在完整页通过校验、该页事实的 Room transaction 提交且相关 media materialization 成功后，
+才耐久保存 cursor/generation/family_name checkpoint。此前崩溃或拒绝会从上一 checkpoint 重放；
+重放依靠既有 UUID/upsert 幂等语义，不得写入部分页或提前推进 cursor。
 
 ---
 

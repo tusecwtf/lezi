@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -9,9 +10,10 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, VARY};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
+use flate2::read::GzDecoder;
 use http_body_util::BodyExt;
 use lezi_sync::{build_app, build_apps, build_server_apps, RateLimitConfig, ServerConfig, VERSION};
 use rusqlite::Connection;
@@ -1064,14 +1066,138 @@ async fn authenticated_sync_handshake_derives_principal_and_transport_contract()
         .as_str()
         .is_some_and(|value| value.len() == 64));
     assert_eq!(body["limits"]["pull_page_max_entities"], json!(200));
+    assert_eq!(
+        body["limits"]["pull_page_max_encoded_bytes"],
+        json!(9 * 1024 * 1024)
+    );
+    assert_eq!(
+        body["limits"]["pull_page_max_decoded_bytes"],
+        json!(8 * 1024 * 1024)
+    );
+    assert_eq!(body["limits"]["pull_max_pages"], json!(500));
     assert_eq!(body["limits"]["commit_batch_max_units"], json!(64));
     assert_eq!(body["limits"]["media_max_bytes"], json!(8));
-    assert_eq!(body["compression"]["pull_response"], json!(["identity"]));
+    assert_eq!(
+        body["compression"]["pull_response"],
+        json!(["gzip", "identity"]),
+    );
     assert_eq!(body["retry_hints"]["retry_after"], json!(true));
     assert_eq!(
         body["capabilities"],
         json!(["causal_versions", "wake_observation", "source_relations"]),
     );
+}
+
+#[tokio::test]
+async fn ordinary_pull_negotiates_equivalent_bounded_gzip_and_identity_pages() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "gzip-pull-owner-device",
+        "gzip-pull-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let uri = format!("/v1/pull?cursor=0&generation={generation}&page_index=0");
+
+    let identity = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &uri,
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "identity")],
+    )
+    .await;
+    assert_eq!(identity.status(), StatusCode::OK);
+    assert!(identity.headers().get(CONTENT_ENCODING).is_none());
+    assert_eq!(identity.headers()[VARY], "Accept-Encoding");
+    let identity_bytes = identity.into_body().collect().await.unwrap().to_bytes();
+
+    let gzip = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &uri,
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "gzip")],
+    )
+    .await;
+    assert_eq!(gzip.status(), StatusCode::OK);
+    assert_eq!(gzip.headers()[CONTENT_ENCODING], "gzip");
+    assert_eq!(gzip.headers()[VARY], "Accept-Encoding");
+    let gzip_bytes = gzip.into_body().collect().await.unwrap().to_bytes();
+    assert!(gzip_bytes.len() <= 9 * 1024 * 1024);
+    let mut decoded = Vec::new();
+    GzDecoder::new(gzip_bytes.as_ref())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert!(decoded.len() <= 8 * 1024 * 1024);
+    assert_eq!(decoded, identity_bytes);
+    let page: Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(page["page_index"], 0);
+}
+
+#[tokio::test]
+async fn ordinary_pull_rejects_unsupported_encoding_and_out_of_budget_page_index() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "gzip-boundary-owner-device",
+        "gzip-boundary-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    for value in ["br", "gzip;q=0, identity;q=0", "gzip;q=bogus"] {
+        let response = request_with_headers(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/pull?cursor=0&generation={generation}&page_index=0"),
+            Some(token),
+            Body::empty(),
+            None,
+            &[(ACCEPT_ENCODING.as_str(), value)],
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{value}"
+        );
+    }
+
+    let last_allowed = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/pull?cursor=0&generation={generation}&page_index=499"),
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "identity")],
+    )
+    .await;
+    assert_eq!(last_allowed.status(), StatusCode::OK);
+    let last_allowed: Value =
+        serde_json::from_slice(&last_allowed.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(last_allowed["page_index"], 499);
+
+    let over_budget = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/pull?cursor=0&generation={generation}&page_index=500"),
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "identity")],
+    )
+    .await;
+    assert_eq!(over_budget.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

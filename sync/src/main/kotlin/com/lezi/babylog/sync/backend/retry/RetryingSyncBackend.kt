@@ -5,6 +5,7 @@ import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.ConflictResolveResult
 import com.lezi.babylog.sync.backend.MAX_CAUSAL_UNITS
+import com.lezi.babylog.sync.backend.PullPageRequest
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
 import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
@@ -25,8 +26,8 @@ internal class RetryingSyncBackend(
             delegate.authenticatedHandshake(session)
         }
 
-    override suspend fun pull(session: SyncSession) =
-        policy.execute(SyncRetryOperation.Pull) { delegate.pull(session) }
+    override suspend fun pull(session: SyncSession, page: PullPageRequest) =
+        policy.execute(SyncRetryOperation.Pull) { delegate.pull(session, page) }
 
     override suspend fun causalCommit(
         session: SyncSession,

@@ -15,6 +15,19 @@ import org.junit.Test
 
 class HttpSyncBackendHandshakeTest {
     @Test
+    fun handshakeAcceptsTheFrozenGzipPullNegotiation() {
+        val decoded = decodeAuthenticatedSyncHandshake(
+            validHandshakeJson().withRaw(
+                "compression",
+                """{"pull_response":["gzip","identity"]}""",
+            ),
+        )
+
+        assertThat(decoded.compression.pullResponse)
+            .containsExactly("gzip", "identity")
+    }
+
+    @Test
     fun authenticatedHandshakeAndDirectoryUseFrozenWireContracts() = runTest {
         val server = ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
         val requests = mutableListOf<String>()
@@ -129,9 +142,18 @@ class HttpSyncBackendHandshakeTest {
             "invalid pull bound" to JsonObject(
                 valid + ("limits" to JsonObject(limits + ("pull_page_max_entities" to JsonPrimitive(0)))),
             ),
+            "invalid encoded bound" to JsonObject(
+                valid + ("limits" to JsonObject(limits + ("pull_page_max_encoded_bytes" to JsonPrimitive(0)))),
+            ),
+            "encoded below decoded" to JsonObject(
+                valid + ("limits" to JsonObject(limits + ("pull_page_max_encoded_bytes" to JsonPrimitive(1024)))),
+            ),
+            "invalid page bound" to JsonObject(
+                valid + ("limits" to JsonObject(limits + ("pull_max_pages" to JsonPrimitive(0)))),
+            ),
             "invalid compression" to valid.withRaw(
                 "compression",
-                """{"pull_response":["gzip"]}""",
+                """{"pull_response":["br","identity"]}""",
             ),
         )
 
@@ -171,7 +193,7 @@ class HttpSyncBackendHandshakeTest {
     }
 
     private fun validHandshakeJson(): JsonObject = Json.parseToJsonElement(
-        """{"protocol_version":1,"server_version":"0.3.14","ready":true,"capabilities":["causal_versions","wake_observation","source_relations"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["identity"]},"retry_hints":{"retry_after":true}}""",
+        """{"protocol_version":1,"server_version":"0.3.14","ready":true,"capabilities":["causal_versions","wake_observation","source_relations"],"principal":{"membership_id":"membership-self","device_id":"device","role":"owner"},"directory_generation":"${"a".repeat(64)}","limits":{"pull_page_max_entities":200,"pull_page_max_encoded_bytes":9437184,"pull_page_max_decoded_bytes":8388608,"pull_max_pages":500,"commit_batch_max_units":64,"media_max_bytes":10485760},"compression":{"pull_response":["gzip","identity"]},"retry_hints":{"retry_after":true}}""",
     ).jsonObject
 
     private fun JsonObject.withRaw(key: String, raw: String): JsonObject = JsonObject(
