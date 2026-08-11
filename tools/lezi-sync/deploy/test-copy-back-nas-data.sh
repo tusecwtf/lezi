@@ -173,12 +173,56 @@ if ! grep -Eqi 'SKIP_VALIDATE|validate|lezi-sync binary|not found' "${test_root}
 fi
 pass=$((pass + 1))
 
+# live copy-back must bind schema-12 compatibility to one exact prebuilt package/image digest
+schema12_package="${test_root}/schema12-package"
+mkdir -p "${schema12_package}"
+schema12_image_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+printf '{\n  "image_id": "%s"\n}\n' "${schema12_image_id}" >"${schema12_package}/MANIFEST.json"
+
+if LEZI_OUT_DIR="${live_gate}" \
+  LEZI_CONFIRM_CONTAINER_STOPPED=1 LEZI_CONFIRM_DUAL_BACKUP=1 \
+  LEZI_COPY_BACK_DRY_RUN=0 \
+  LEZI_SYNC_BIN=/bin/true \
+  "${COPY_BACK}" 2>"${test_root}/err_live_schema"; then
+  fail "live must not proceed without an exact schema-12 package identity"
+fi
+grep -q 'LEZI_NAS_PACKAGE_DIR' "${test_root}/err_live_schema" \
+  || fail "live compatibility gate missing: $(cat "${test_root}/err_live_schema")"
+pass=$((pass + 1))
+
+if LEZI_OUT_DIR="${live_gate}" \
+  LEZI_CONFIRM_CONTAINER_STOPPED=1 LEZI_CONFIRM_DUAL_BACKUP=1 \
+  LEZI_COPY_BACK_DRY_RUN=0 LEZI_SYNC_BIN=/bin/true \
+  LEZI_NAS_PACKAGE_DIR="${schema12_package}" \
+  LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  "${COPY_BACK}" 2>"${test_root}/err_live_schema_mismatch"; then
+  fail "live must reject an attested digest that differs from the package manifest"
+fi
+grep -q 'does not exactly match' "${test_root}/err_live_schema_mismatch" \
+  || fail "image mismatch gate missing: $(cat "${test_root}/err_live_schema_mismatch")"
+pass=$((pass + 1))
+
+if LEZI_OUT_DIR="${live_gate}" \
+  LEZI_CONFIRM_CONTAINER_STOPPED=1 LEZI_CONFIRM_DUAL_BACKUP=1 \
+  LEZI_COPY_BACK_DRY_RUN=0 LEZI_SYNC_BIN=/bin/true \
+  LEZI_NAS_PACKAGE_DIR="${schema12_package}" \
+  LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID="${schema12_image_id}" \
+  "${COPY_BACK}" 2>"${test_root}/err_live_schema_match"; then
+  fail "fixture omits later live gates and must not complete"
+fi
+if ! grep -Eqi 'rsync is required|LEZI_NAS_BACKUP_PATH' "${test_root}/err_live_schema_match"; then
+  fail "matching artifact identity did not reach the next live-only gate: $(cat "${test_root}/err_live_schema_match")"
+fi
+pass=$((pass + 1))
+
 # Script source policy smoke
 grep -q 'SHIPPED_USER_VERSION=12' "${COPY_BACK}" || fail "script missing SHIPPED_USER_VERSION"
 grep -q 'SHIPPED_MIN_SECRET_BYTES=32' "${COPY_BACK}" || fail "script missing SHIPPED_MIN_SECRET_BYTES"
 grep -q 'rsync is required' "${COPY_BACK}" || fail "script must require rsync"
 grep -q 'sqlite3 is required' "${COPY_BACK}" || fail "script must require sqlite3"
 grep -q 'offline-migrate validate' "${COPY_BACK}" || fail "script must call validate"
+grep -q 'LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID' "${COPY_BACK}" \
+  || fail "script must bind live copy-back to a schema-12-compatible image digest"
 grep -q 'LEZI_NAS_BACKUP_PATH' "${COPY_BACK}" || fail "script must require NAS backup path"
 grep -q '10001' "${COPY_BACK}" || fail "script must handle uid 10001"
 pass=$((pass + 1))
@@ -190,7 +234,7 @@ for label in \
   "1. stop live container" \
   "2. confirm dual backup (local copy-out + NAS-side)" \
   "3. copy-back upgraded out/ to NAS data bind" \
-  "4. start current TLS deploy (CD)" \
+  "4. start schema-12-compatible TLS deploy (CD)" \
   "5. health/ready by actual protocol"
 do
   grep -Fq "${label}" "${runbook}" || fail "runbook missing shared label: ${label}"

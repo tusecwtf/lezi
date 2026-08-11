@@ -16,7 +16,6 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::store::Store;
 use crate::SERVER_SECRET_BYTES;
 
 use super::causal::validate_causal_integrity;
@@ -356,8 +355,8 @@ fn run_dry_run(input: &Path, new_root_password: &str) -> CliOutcome {
 /// Shared migrate → validate control flow (dry-run and migrate).
 ///
 /// Auto-detects source `lezi.db` user_version:
-/// - **3** → historical v3→current (requires new root password)
-/// - **11** → causal v11→v12 (preserves identity + server.secret; password unused)
+/// - **3** → historical v3→legacy schema 12 (requires new root password)
+/// - **11** → causal v11→legacy schema 12 (preserves identity + server.secret; password unused)
 fn migrate_and_validate(
     input: &Path,
     output: &Path,
@@ -467,7 +466,7 @@ fn unique_suffix() -> u128 {
 
 /// Preflight + contract checks for a migrated out/ data dir.
 ///
-/// Requires `lezi.db` with current schema shape and `server.secret` with at least
+/// Requires `lezi.db` with frozen legacy schema-12 shape and `server.secret` with at least
 /// [`SERVER_SECRET_BYTES`] (same gate as `load_or_create_server_secret`).
 /// This is the CLI preflight handoff for ticket 06; full `/ready` still needs TLS
 /// and process config at cutover.
@@ -485,7 +484,9 @@ pub(crate) fn validate_out_data_dir(out: &Path) -> Result<(), String> {
             db.display()
         ));
     }
-    Store::preflight_existing_schema(&db).map_err(|e| format!("preflight: {e}"))?;
+    super::schema_contract::LEGACY_SCHEMA_V12
+        .validate_path(&db)
+        .map_err(|e| format!("legacy schema-12 preflight: {e}"))?;
     let secret_path = out.join("server.secret");
     if !secret_path.try_exists().map_err(|e| e.to_string())? {
         return Err(format!(
@@ -655,7 +656,7 @@ media_files_copied={}\n",
 fn usage_text() -> String {
     format!(
         "\
-lezi-sync offline-migrate — private NAS v3→current offline pipeline (tickets 05–07)
+lezi-sync offline-migrate — private NAS v3/v11→legacy schema 12 pipeline (tickets 05–07)
 
 Subcommands:
   migrate   --in <backup_data_dir> --out <out_data_dir> --new-root-password <secret>
@@ -670,7 +671,7 @@ Notes:
   - --in is the local NAS copy-out backup; it is never modified.
   - --out must be independent of --in (not equal, not nested) and empty (or absent).
   - Password may also come from env {ENV_NEW_ROOT_PASSWORD} (≥{MIN_NEW_ROOT_PASSWORD_LEN} chars).
-  - validate = current-schema preflight + server.secret ≥ {SERVER_SECRET_BYTES} bytes (not full /ready).
+  - validate = frozen legacy schema-12 contract + server.secret ≥ {SERVER_SECRET_BYTES} bytes (not full /ready).
   - migrate/dry-run/validate do NOT stop the live NAS container and do NOT copy back.
   - copy-back-help prints the ticket-06 maintenance order; it does NOT execute live cutover (ticket 07).
   - live-cutover-help prints ticket-07 evidence + APK smoke checklist; it does NOT invent live success.
@@ -728,6 +729,7 @@ mod tests {
     use crate::offline_migrate::test_support::{
         open_v3_fixture, seed_baby_entity, seed_minimal_family, TEST_NEW_ROOT_PASSWORD,
     };
+    use rusqlite::Connection;
     use std::fs;
     use std::time::UNIX_EPOCH;
     use tempfile::tempdir;
@@ -806,6 +808,14 @@ mod tests {
     }
 
     #[test]
+    fn public_help_names_both_sources_and_frozen_legacy_target() {
+        let help = usage_text();
+        assert!(help.contains("v3/v11→legacy schema 12"), "{help}");
+        assert!(help.contains("frozen legacy schema-12 contract"), "{help}");
+        assert!(!help.contains("v3→current"), "{help}");
+    }
+
+    #[test]
     fn parse_missing_in_is_usage_error() {
         let err = parse_args(&args(&[
             "dry-run",
@@ -854,6 +864,7 @@ mod tests {
         write_v3_backup(&backup);
         let db = backup.join("lezi.db");
         let before = file_fingerprint(&db);
+        let before_db_bytes = fs::read(&db).unwrap();
         let before_secret = fs::read(backup.join("server.secret")).unwrap();
 
         let outcome = run(CliCommand::DryRun {
@@ -900,6 +911,11 @@ mod tests {
             "backup lezi.db must not be mutated"
         );
         assert_eq!(
+            before_db_bytes,
+            fs::read(&db).unwrap(),
+            "backup lezi.db must remain byte-identical"
+        );
+        assert_eq!(
             before_secret,
             fs::read(backup.join("server.secret")).unwrap(),
             "backup server.secret must not be mutated"
@@ -915,7 +931,10 @@ mod tests {
         let backup = dir.path().join("backup");
         let out = dir.path().join("out");
         write_v3_backup(&backup);
-        let before = file_fingerprint(&backup.join("lezi.db"));
+        let source_db = backup.join("lezi.db");
+        let before = file_fingerprint(&source_db);
+        let before_db_bytes = fs::read(&source_db).unwrap();
+        let before_secret_bytes = fs::read(backup.join("server.secret")).unwrap();
 
         let outcome = run(CliCommand::Migrate {
             input: backup.clone(),
@@ -932,7 +951,12 @@ mod tests {
             fs::read(backup.join("server.secret")).unwrap(),
             fs::read(out.join("server.secret")).unwrap()
         );
-        assert_eq!(before, file_fingerprint(&backup.join("lezi.db")));
+        assert_eq!(before, file_fingerprint(&source_db));
+        assert_eq!(before_db_bytes, fs::read(&source_db).unwrap());
+        assert_eq!(
+            before_secret_bytes,
+            fs::read(backup.join("server.secret")).unwrap()
+        );
     }
 
     #[test]
@@ -1051,6 +1075,35 @@ mod tests {
                 && bad.stderr.contains(&SERVER_SECRET_BYTES.to_string()),
             "{}",
             bad.stderr
+        );
+    }
+
+    #[test]
+    fn validate_rejects_wrong_legacy_target_version_and_shape() {
+        let dir = tempdir().unwrap();
+        let backup = dir.path().join("backup");
+        write_v3_backup(&backup);
+
+        let wrong_version = dir.path().join("wrong-version");
+        migrate_v3_data_dir(&backup, &wrong_version, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        Connection::open(wrong_version.join("lezi.db"))
+            .unwrap()
+            .pragma_update(None, "user_version", 13)
+            .unwrap();
+        let error = validate_out_data_dir(&wrong_version).expect_err("version must fail closed");
+        assert!(error.contains("user_version=13"), "{error}");
+        assert!(error.contains("expected legacy target 12"), "{error}");
+
+        let wrong_shape = dir.path().join("wrong-shape");
+        migrate_v3_data_dir(&backup, &wrong_shape, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        Connection::open(wrong_shape.join("lezi.db"))
+            .unwrap()
+            .execute("DROP INDEX entity_versions_root", [])
+            .unwrap();
+        let error = validate_out_data_dir(&wrong_shape).expect_err("shape must fail closed");
+        assert!(
+            error.contains("does not match frozen legacy schema 12"),
+            "{error}"
         );
     }
 

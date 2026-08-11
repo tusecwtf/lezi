@@ -19,7 +19,7 @@ Route handlers 按职责落在 crate-private 模块，**不**扩大
 | `src/members.rs` | 家庭成员与设备管理路由（既有内聚，不回并） |
 | `src/readiness.rs` | `/ready` 与 readiness 缓存 |
 | `src/store/{mod,schema,identity/*,pull,media,bundles}.rs` | SQLite 持久化；单一 `Store` 事务 façade；identity 再按 session/login/membership_admin/anonymize 分区；bundle 行与 LWW 加载器在 `bundles` |
-| `src/offline_migrate/` | 离线 v3→current 维护工具（非 live HTTP API；不并入 runtime store） |
+| `src/offline_migrate/` | 离线 v3/v11→legacy schema 12 维护工具（非 live HTTP API；不并入 runtime store） |
 
 HTTPS `/v1/*` 合同只对成员登录 grant 增加可选 `landing_url`；新的 8767 HTTP
 只有 `/join` 和 `/download/lezi.apk`。本 README 不宣称 live NAS 已验证。
@@ -38,8 +38,8 @@ fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQL
 
 | 源 `user_version` | 行为 |
 |---|---|
-| **3** | v3→current：需要 `--new-root-password` / `LEZI_MIGRATE_NEW_ROOT_PASSWORD`；**始终** 重生成 `server.secret`；会话/设备作废，Owner 用新 root 重登 |
-| **11** | v11→v12 因果切割：**保留** `server.secret` 与 identity/session 行；密码参数不使用；校验含因果 heads/投影闭包 |
+| **3** | v3→legacy schema 12：需要 `--new-root-password` / `LEZI_MIGRATE_NEW_ROOT_PASSWORD`；**始终** 重生成 `server.secret`；会话/设备作废，Owner 用新 root 重登 |
+| **11** | v11→legacy schema 12 因果切割：**保留** `server.secret` 与 identity/session 行；密码参数不使用；校验含因果 heads/投影闭包 |
 
 ```text
 $LEZI_DATA_DIR/
@@ -543,7 +543,7 @@ docker compose start
 权威路径、权限、状态矩阵和命令见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md) § Secret handling / Credential backup and restore。
 
-### 离线 v3→current 切割（`lezi-sync offline-migrate`）
+### 离线 v3/v11→legacy schema 12 切割（`lezi-sync offline-migrate`）
 
 **架构边界（权威）：** [ADR-0013](../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)
 ——离线 CLI 族 + 已授权**维护窗切割**；**不是** server startup / runtime 自动迁移，也
@@ -558,12 +558,17 @@ destructive fallback 或部分原地改写均被禁止。
 | 主题 | 合同 |
 |------|------|
 | 阶段 A — 离线准备（维护窗前） | 对独立备份：copy-out → `dry-run` / `migrate` / `validate` 于独立 `--out`；**不** stop 现网、**不**写 live bind |
-| 阶段 B — 维护窗切割（固定顺序，不得重排） | stop → dual backup confirm → copy-back → TLS CD → health/ready（见 runbook / `cutover_maintenance_steps`） |
-| 架构不变量 | 显式 CLI；固定源 v3→current；独立临时 `--out`；`validate` 后再切换；进程只开 current |
+| 阶段 B — 维护窗切割（固定顺序，不得重排） | stop → dual backup confirm → copy-back → schema-12-compatible TLS CD → health/ready（见 runbook / `cutover_maintenance_steps`） |
+| 架构不变量 | 显式 CLI；冻结 v3/v11→schema 12 目标；独立临时 `--out`；`validate` 后再切换；进程只开 current |
 | Secret | 运维选定 `LEZI_MIGRATE_NEW_ROOT_PASSWORD` / `--new-root-password`（≥16）；cutover 后作 `LEZI_BOOTSTRAP_SECRET`；**禁止**文档/日志打印明文；目标 `server.secret` 始终重生成 |
 | Data bind | 宿主路径 bind → `/data`；uid `10001:10001`；stop/rm **不**删宿主目录 |
 | 备份 / 回滚 | 本地 copy-out + NAS 侧双备份；失败恢复 **v3 copy-out** 与 pre-cutover 镜像，非半成品 `out/` |
-| 目标校验 | `offline-migrate validate --out`（current preflight + `server.secret` 长度；≠ 完整 `/ready`） |
+| 目标校验 | `offline-migrate validate --out`（冻结 schema-12 exact shape + `server.secret` 长度；≠ 完整 `/ready`） |
+
+该 legacy copy-back 只能配合已独立证明接受 schema 12 的 TLS image，并在写 NAS 前用
+`LEZI_NAS_PACKAGE_DIR` + `LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID` 绑定其预构建 package/config digest；后续 push
+必须使用 `LEZI_SKIP_PACKAGE=1` 复用并重验同一制品，不得在 copy-back 后重建。未来 live current 要求 schema 13 后，本命令不得把 v12
+`out/` 直接交给 current image；必须等待独立所有的 11/12→13 offline migration，R20 不实现该迁移。
 
 **权威运维 runbook（步骤与回滚）：**
 [`deploy/copy-back-tls-cutover-runbook.md`](deploy/copy-back-tls-cutover-runbook.md)

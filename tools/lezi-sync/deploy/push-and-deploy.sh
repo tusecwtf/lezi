@@ -31,6 +31,11 @@ allow_secret_recovery="${LEZI_ALLOW_SECRET_RECOVERY:-0}"
 allow_secret_reseed="${LEZI_ALLOW_SECRET_RESEED:-0}"
 forward_bootstrap_secret="${LEZI_FORWARD_BOOTSTRAP_SECRET:-0}"
 
+if [[ -n "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" && "${SKIP_PACKAGE}" != "1" ]]; then
+  echo "error: schema-12 cutover must set LEZI_SKIP_PACKAGE=1 and reuse the pre-attested package" >&2
+  exit 1
+fi
+
 if [[ "${NAS_REMOTE_DIR}" != /* \
     || ! "${NAS_REMOTE_DIR}" =~ ^/[A-Za-z0-9._/-]+$ \
     || "${NAS_REMOTE_DIR}" == *'//'* \
@@ -198,6 +203,12 @@ manifest_image_architecture="$(local_manifest_string architecture)"
 manifest_data_host_path="$(local_manifest_string data_host_path)"
 manifest_tls_host="$(local_manifest_string tls_host)"
 manifest_lan_apk_download_origin="$(local_manifest_string lan_apk_download_origin)"
+if [[ -n "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" ]]; then
+  if [[ "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID}" != "${manifest_image_id}" ]]; then
+    echo "error: package image_id drifted from LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID" >&2
+    exit 1
+  fi
+fi
 expected_data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
 expected_tls_host="${LEZI_TLS_HOST:-192.168.50.4}"
 expected_lan_apk_download_origin="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-http://${expected_tls_host}:8767}"

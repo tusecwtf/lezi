@@ -10,7 +10,7 @@
 //! - path constants [`COPY_BACK_RUNBOOK`] / [`COPY_BACK_SCRIPT`]
 
 use super::migrator::REAUTH_OPS_NOTE;
-use crate::store::DATABASE_SCHEMA_VERSION;
+use super::schema_contract::LEGACY_SCHEMA_V12;
 use crate::SERVER_SECRET_BYTES;
 
 /// Authoritative human runbook (repo-relative). Help points here; do not fork order.
@@ -43,8 +43,8 @@ pub(crate) enum CutoverMaintenanceStep {
     ConfirmDualBackup,
     /// Copy validated migrated `out/` onto the NAS data bind (no TLS start here).
     CopyBackUpgradedData,
-    /// Start current TLS image via existing CD (`push-and-deploy` / `remote-deploy`).
-    StartCurrentTlsDeploy,
+    /// Start a schema-12-compatible TLS image via the existing guarded CD path.
+    StartSchema12CompatibleTlsDeploy,
     /// Probe health/ready by **actual** protocol (HTTPS 8765 / loopback 8766 / drift HTTP).
     ProbeHealthReadyByActualProtocol,
 }
@@ -55,7 +55,7 @@ pub(crate) fn cutover_maintenance_steps() -> &'static [CutoverMaintenanceStep] {
         CutoverMaintenanceStep::StopLiveContainer,
         CutoverMaintenanceStep::ConfirmDualBackup,
         CutoverMaintenanceStep::CopyBackUpgradedData,
-        CutoverMaintenanceStep::StartCurrentTlsDeploy,
+        CutoverMaintenanceStep::StartSchema12CompatibleTlsDeploy,
         CutoverMaintenanceStep::ProbeHealthReadyByActualProtocol,
     ]
 }
@@ -66,13 +66,14 @@ pub(crate) fn cutover_step_labels() -> &'static [&'static str] {
         "1. stop live container",
         "2. confirm dual backup (local copy-out + NAS-side)",
         "3. copy-back upgraded out/ to NAS data bind",
-        "4. start current TLS deploy (CD)",
+        "4. start schema-12-compatible TLS deploy (CD)",
         "5. health/ready by actual protocol",
     ]
 }
 
 /// Ops pointer + fixed checklist. Does **not** claim live cutover success (ticket 07).
 pub(crate) fn cutover_help_text() -> String {
+    let legacy_target_version = LEGACY_SCHEMA_V12.user_version();
     format!(
         "\
 # Copy-back + TLS cutover (ticket 06) — maintenance-window runbook
@@ -98,7 +99,7 @@ pub(crate) fn cutover_help_text() -> String {
 #   LAN HTTPS endpoint   {DEFAULT_LAN_HTTPS_ENDPOINT}
 #   Container ready      docker exec lezi-sync lezi-sync healthcheck ({DEFAULT_LOOPBACK_HTTP_READY}/ready inside container; not published on host)
 #   Pre-TLS drift probe  {PRE_TLS_HTTP_PROBE}/health (plaintext still possible until cutover)
-#   Expected out/ schema user_version={DATABASE_SCHEMA_VERSION}
+#   Expected legacy out/ schema user_version={legacy_target_version}
 #   server.secret min bytes={SERVER_SECRET_BYTES}
 #   data bind uid        10001:10001 (required after copy-back)
 #
@@ -106,7 +107,8 @@ pub(crate) fn cutover_help_text() -> String {
 #   - local copy-out backup/ kept (read-only preferred)
 #   - out/ from `offline-migrate migrate` then `validate` (copy-back-ready; full preflight)
 #   - record migration-time new root password (= post-cutover LEZI_BOOTSTRAP_SECRET)
-#   - CD package ready (linux/amd64 image + package-nas); deploy only after user confirms replace
+#   - schema-12-compatible TLS package ready; deploy only after user confirms replace
+#   - after live current requires schema 13, stop: 11/12→13 is not implemented by this flow
 #   - Step 0: docker inspect image id + docker save pre-cutover image tar BEFORE stop/rm
 #
 # Step 1 — stop live container (on NAS, data bind kept):
@@ -122,30 +124,36 @@ pub(crate) fn cutover_help_text() -> String {
 # Step 3 — copy-back upgraded data:
 #   LEZI_OUT_DIR=/path/to/validated-out \\
 #   LEZI_CONFIRM_CONTAINER_STOPPED=1 LEZI_CONFIRM_DUAL_BACKUP=1 \\
+#   LEZI_NAS_PACKAGE_DIR=/absolute/prebuilt/package \\
+#   LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID=sha256:<attested-config-digest> \\
 #   LEZI_NAS_BACKUP_PATH=/remote/v3-snapshot \\
 #     bash {COPY_BACK_SCRIPT}
 #   Optional: LEZI_COPY_BACK_DRY_RUN=1 (local gates + print plan; no network write)
-#   Gates: sqlite3 user_version={DATABASE_SCHEMA_VERSION}, offline-migrate validate --out,
+#   Gates: sqlite3 user_version={legacy_target_version}, offline-migrate validate --out,
 #          rsync only (scp refused), remote container absent, staging+rename swap,
 #          chown/verify uid 10001. Never copy backup's old server.secret.
 #   tls/ is AbsentOrCreateAtCutover — do not require tls/ inside out/; CD init-tls creates it.
 #
-# Step 4 — start current TLS deploy (existing CD; requires explicit operator confirm):
+# Step 4 — start a schema-12-compatible TLS deploy (requires explicit operator confirm):
 #   MANDATORY for this cutover (container already removed in step 1 — no live inherit):
 #     export LEZI_BOOTSTRAP_SECRET='…migration-time new root password…'
 #     export LEZI_FORWARD_BOOTSTRAP_SECRET=1
 #     export LEZI_ALLOW_SECRET_RESEED=1
 #     export LEZI_ALLOW_TLS_BOOTSTRAP=1
+#     export LEZI_NAS_PACKAGE_DIR=/absolute/prebuilt/package
+#     export LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID=sha256:<attested-config-digest>
+#     export LEZI_SKIP_PACKAGE=1
 #     # same value as LEZI_MIGRATE_NEW_ROOT_PASSWORD / --new-root-password
 #     # NEVER inherit pre-cutover container env; NEVER leave unset for cutover
-#     # Unset all four after cutover so ordinary CD returns to guarded live inherit.
-#   cd tools/lezi-sync && ./build-image.sh && ./deploy/push-and-deploy.sh
-#   Or LEZI_SKIP_PACKAGE=1 only when dist/ embeds the intended image plus current
-#   guarded helpers and valid SHA256SUMS.
+#     # Unset all seven exports above after cutover so ordinary CD cannot reuse cutover pins.
+#   cd tools/lezi-sync && ./deploy/push-and-deploy.sh
+#   The push revalidates the exact package and rejects a different image digest; do not rebuild.
 #   push-and-deploy forwards LEZI_BOOTSTRAP_SECRET into remote-deploy only when
 #   LEZI_FORWARD_BOOTSTRAP_SECRET=1 (opt-in; ordinary CD never injects a local secret).
 #   Protocol cutover risk: live may still be HTTP :8765; current tree publishes HTTPS :8765
 #   + container-internal HTTP :8766 (not on host) and creates persistent tls/ under the data bind.
+#   Future boundary: if the selected image requires schema 13, abort before copy-back and
+#   follow the separately owned H27/H28 path; this legacy command does not implement 11/12→13.
 #
 # Step 5 — health/ready (probe actual protocol; do not assume):
 #   Client-facing success = LAN HTTPS (required for APK TOFU):
@@ -194,6 +202,7 @@ mod tests {
     const COPY_BACK_SCRIPT_SRC: &str = include_str!("../../deploy/copy-back-nas-data.sh");
     const COPY_BACK_RUNBOOK_SRC: &str =
         include_str!("../../deploy/copy-back-tls-cutover-runbook.md");
+    const PUSH_AND_DEPLOY_SRC: &str = include_str!("../../deploy/push-and-deploy.sh");
 
     #[test]
     fn cutover_step_order_is_stop_dual_backup_copy_back_tls_health() {
@@ -203,7 +212,7 @@ mod tests {
                 CutoverMaintenanceStep::StopLiveContainer,
                 CutoverMaintenanceStep::ConfirmDualBackup,
                 CutoverMaintenanceStep::CopyBackUpgradedData,
-                CutoverMaintenanceStep::StartCurrentTlsDeploy,
+                CutoverMaintenanceStep::StartSchema12CompatibleTlsDeploy,
                 CutoverMaintenanceStep::ProbeHealthReadyByActualProtocol,
             ]
         );
@@ -277,7 +286,7 @@ mod tests {
         );
         // Expected schema for out/
         assert!(
-            text.contains(&DATABASE_SCHEMA_VERSION.to_string()),
+            text.contains(&LEGACY_SCHEMA_V12.user_version().to_string()),
             "help should mention target user_version: {text}"
         );
     }
@@ -359,11 +368,12 @@ mod tests {
 
     #[test]
     fn copy_back_script_shipped_constants_match_rust() {
-        let expected_ver = format!("SHIPPED_USER_VERSION={DATABASE_SCHEMA_VERSION}");
+        let expected_version = LEGACY_SCHEMA_V12.user_version();
+        let expected_ver = format!("SHIPPED_USER_VERSION={expected_version}");
         let expected_secret = format!("SHIPPED_MIN_SECRET_BYTES={SERVER_SECRET_BYTES}");
         assert!(
             COPY_BACK_SCRIPT_SRC.contains(&expected_ver),
-            "script must ship user_version={DATABASE_SCHEMA_VERSION}: missing {expected_ver}"
+            "script must ship legacy user_version={expected_version}: missing {expected_ver}"
         );
         assert!(
             COPY_BACK_SCRIPT_SRC.contains(&expected_secret),
@@ -404,6 +414,27 @@ mod tests {
         assert!(
             COPY_BACK_SCRIPT_SRC.contains("10001"),
             "script must chown/verify uid 10001"
+        );
+    }
+
+    #[test]
+    fn frozen_v12_copy_back_requires_schema12_compatible_image() {
+        let help = cutover_help_text();
+        assert!(help.contains("LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID=sha256:"));
+        assert!(help.contains("LEZI_SKIP_PACKAGE=1"));
+        assert!(help.contains("11/12→13") && help.contains("not implemented"));
+        assert!(
+            COPY_BACK_SCRIPT_SRC.contains("LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID"),
+            "copy-back must bind schema-12 compatibility to an exact image digest"
+        );
+        assert!(
+            COPY_BACK_RUNBOOK_SRC.contains("schema-12-compatible TLS image"),
+            "runbook must pin the image contract instead of following live current"
+        );
+        assert!(
+            PUSH_AND_DEPLOY_SRC.contains("LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID")
+                && PUSH_AND_DEPLOY_SRC.contains("LEZI_SKIP_PACKAGE=1"),
+            "push must reuse and re-attest the exact pre-copy-back artifact"
         );
     }
 }

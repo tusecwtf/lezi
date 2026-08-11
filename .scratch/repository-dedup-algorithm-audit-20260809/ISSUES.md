@@ -1,6 +1,6 @@
 # 2026-08-09 全库重复、残留与算法审查 — issues
 
-Status: implemented — tickets 01–19 implemented; causal hardening continues independently
+Status: implemented — tickets 01–20 implemented; causal hardening continues independently
 
 Spec: [`spec.md`](./spec.md)
 
@@ -50,12 +50,13 @@ post-0.3.13/01 implementation stabilizes
 | 17 | [Batch-load bounded conflict heads](./issues/17-bounded-conflict-head-loader.md) | P1 | implemented | 12 + causal hardening 01 |
 | 18 | [Persist snapshot receipts with bounded pagination](./issues/18-conflict-snapshot-receipt-pagination.md) | P1 | implemented | 17 + causal hardening 01 |
 | 19 | [Bound resolution queries and retain conflict metadata](./issues/19-resolution-metadata-retention.md) | P1 | implemented | 18 + causal hardening 04 (implemented) |
+| 20 | [Version offline migration schema contracts](./issues/20-version-offline-migration-schema-contracts.md) | P1 | implemented | — |
 
 ## Frontier
 
-本 tracker 的 01–19 已全部实现。跨 tracker 的下一张串行 frontier 是
-[`causal-sync-conflict-transport-hardening/05`](../causal-sync-conflict-transport-hardening/issues/05-record-snapshot-room-projection.md)；
-causal hardening 05–43 仍是独立未完成范围，不能因本 tracker 完成而标记为已实现。
+R20 已实现，本 tracker 01–20 全部 implemented。跨 tracker 的下一张 serial frontier 是
+[`causal-sync-conflict-transport-hardening/24`](../causal-sync-conflict-transport-hardening/issues/24-server-media-staging-gc.md)
+；R20 只解除其 future-current schema coupling，不代表 H24 已实现。
 
 ## Excluded as already owned
 

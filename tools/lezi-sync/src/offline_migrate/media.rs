@@ -1,4 +1,4 @@
-//! Media path layout + file authority for offline v3→current data-dir migration.
+//! Media path layout + file authority for offline v3→legacy-schema-12 data-dir migration.
 //!
 //! Ticket 03 public seams (crate-internal):
 //! - [`media_file_relative_path`] — current server layout under a data dir
@@ -54,7 +54,7 @@ fn canonical_media_path_ids(
     Ok((family_id, media_uuid))
 }
 
-/// One-shot offline: v3 data dir (`lezi.db` + optional `media/`) → current data dir.
+/// One-shot offline: v3 data dir (`lezi.db` + optional `media/`) → frozen schema-12 data dir.
 ///
 /// - Transforms `source/lezi.db` via [`migrate_v3_database`] (ops new root password).
 /// - Wipes any pre-existing `dest/media`, then copies only authority media files
@@ -493,10 +493,11 @@ fn atomic_write_media_file(dest_path: &Path, bytes: &[u8]) -> Result<(), Migrate
 mod tests {
     use super::*;
     use crate::model::{normalized_display_name_key, Entity, EntityValidationContext, RawEntity};
+    use crate::offline_migrate::schema_contract::LEGACY_SCHEMA_V12;
     use crate::offline_migrate::test_support::{
         baby_payload_json, open_v3_fixture, TEST_NEW_ROOT_PASSWORD,
     };
-    use crate::store::{self, Store, DATABASE_SCHEMA_VERSION};
+    use crate::store;
     use crate::DEFAULT_MAX_MEDIA_BYTES;
     use rusqlite::{params, Connection};
     use serde_json::{json, Map, Value};
@@ -775,12 +776,14 @@ mod tests {
         assert_eq!(report.committed_bundles, 1);
         assert_eq!(report.families, 1);
 
-        Store::preflight_existing_schema(&dest.join("lezi.db")).expect("preflight");
+        LEGACY_SCHEMA_V12
+            .validate_path(&dest.join("lezi.db"))
+            .expect("preflight");
         let version: i64 = Connection::open(dest.join("lezi.db"))
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(version, LEGACY_SCHEMA_V12.user_version());
 
         // Live media_path + media_file_is_ready contract (UUID parse, size>0, declared match).
         assert_media_ready_like_server(&dest, FAM, MEDIA, Some(media_bytes().len() as u64));

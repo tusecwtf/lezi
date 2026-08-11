@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H23 and R12/R17/R18/R19 are implemented; H24 is the serial frontier
+Status: in-progress — H01–H23 and R12/R17/R18/R19/R20 are implemented; H24 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -48,7 +48,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 21 | [`21-record-media-commit-first`](./issues/21-record-media-commit-first.md) | implemented (review/final gates pass; device Room instrumentation residual) | 20 |
 | 22 | [`22-baby-avatar-commit-first`](./issues/22-baby-avatar-commit-first.md) | implemented (review/final gates pass; device Room instrumentation residual) | 21 |
 | 23 | [`23-careplan-media-commit-first`](./issues/23-careplan-media-commit-first.md) | implemented (review/final gates pass; device Room instrumentation residual) | 22 |
-| 24 | [`24-server-media-staging-gc`](./issues/24-server-media-staging-gc.md) | ready-for-agent | 19, 23, R19 |
+| 24 | [`24-server-media-staging-gc`](./issues/24-server-media-staging-gc.md) | ready-for-agent | 19, 23, R19, R20 (implemented) |
 | 25 | [`25-commit-response-contraction`](./issues/25-commit-response-contraction.md) | ready-for-agent | 12, 13, 23 |
 | 26 | [`26-delete-legacy-reconcile`](./issues/26-delete-legacy-reconcile.md) | ready-for-agent | 25 |
 | 27 | [`27-final-schema-capability-activation`](./issues/27-final-schema-capability-activation.md) | ready-for-agent | 09, 15, 16, 23, 24, 25, 26, R19 |

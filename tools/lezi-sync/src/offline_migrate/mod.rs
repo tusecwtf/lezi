@@ -1,15 +1,15 @@
-//! Private offline v3→current migration contract (family NAS ops only).
+//! Private offline v3/v11→legacy schema 12 migration contract (family NAS ops only).
 //!
 //! Crate-internal inventory + one-shot migrator. **Not** wired into
 //! lezi-sync startup; daily open remains fail-closed on the current schema only.
 //!
 //! ## Surface (by ticket)
 //!
-//! - **02** — [`migrator::migrate_v3_database`] transforms v3 `lezi.db` → current.
+//! - **02** — [`migrator::migrate_v3_database`] transforms v3 `lezi.db` → frozen schema 12.
 //! - **03** — [`media::migrate_v3_data_dir`] + [`media::media_file_relative_path`].
 //! - **04** — same DB call requires an ops-provided **new root password**; writes
 //!   `families.owner_root_fingerprint` and regenerates `server.secret` beside the
-//!   dest DB so current lezi-sync can `/ready` and owner can re-login.
+//!   dest DB so the current==12 server can `/ready` and owner can re-login.
 //! - **05** — [`cli`] (`lezi-sync offline-migrate …`): copy-out help, dry-run,
 //!   migrate `--in`/`--out`, validate out/ preflight, process exit codes.
 //! - **06** — [`cutover`]: fixed maintenance-window step order, copy-back help,
@@ -47,6 +47,7 @@ pub(crate) mod inventory;
 pub(crate) mod live_cutover;
 pub(crate) mod media;
 pub(crate) mod migrator;
+pub(crate) mod schema_contract;
 pub(crate) mod v11;
 
 #[cfg(test)]

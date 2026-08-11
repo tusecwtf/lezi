@@ -1,6 +1,6 @@
 //! Causal v12 finalization: deterministic base versions + closed-sleep WakeObservation.
 //!
-//! Used by both the historical v3→current path and the v11→v12 offline migrator.
+//! Used by both frozen historical paths, v3→12 and v11→12.
 //! Not a runtime / startup upgrade path.
 
 use std::collections::{BTreeMap, BTreeSet};

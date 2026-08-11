@@ -5,7 +5,7 @@
 #   1. stop live container
 #   2. confirm dual backup (local copy-out + NAS-side)
 #   3. copy-back upgraded out/          ← this script
-#   4. start current TLS deploy (CD)    ← NOT this script
+#   4. start schema-12-compatible TLS deploy (CD) ← NOT this script
 #   5. health/ready by actual protocol  ← NOT this script
 #
 # Does NOT start the container, does NOT run init-tls, does NOT claim live cutover
@@ -15,6 +15,8 @@
 #   LEZI_OUT_DIR                     migrate --out directory (must pass offline-migrate validate)
 #   LEZI_CONFIRM_CONTAINER_STOPPED=1 operator + remote probe: container absent
 #   LEZI_CONFIRM_DUAL_BACKUP=1       operator asserts dual backup intent
+#   LEZI_NAS_PACKAGE_DIR              exact prebuilt package to reuse for deploy
+#   LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID exact attested image config digest from its manifest
 #   LEZI_NAS_BACKUP_PATH             remote path to NAS-side v3 snapshot (non-dry-run)
 #
 # Optional env (defaults match AGENTS.md / measured family control plane):
@@ -32,8 +34,8 @@
 #                        swap + chown. 1 = always docker path; 0 = host-only.
 #   LEZI_COPY_BACK_DOCKER_IMAGE  default alpine:3.20 (pulled if missing)
 #
-# Shipped gates (kept equal to Rust DATABASE_SCHEMA_VERSION / SERVER_SECRET_BYTES
-# by offline_migrate::cutover unit test — do not free-float without updating that test):
+# Shipped gates (legacy target version is frozen independently; secret bytes remain
+# aligned with the runtime gate by offline_migrate::cutover contract tests):
 #   SHIPPED_USER_VERSION=12
 #   SHIPPED_MIN_SECRET_BYTES=32
 #
@@ -99,7 +101,7 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
 fi
 UV="$(sqlite3 "${OUT}/lezi.db" 'PRAGMA user_version;')"
 if [[ "${UV}" != "${EXPECTED_USER_VERSION}" ]]; then
-  die "expected PRAGMA user_version=${EXPECTED_USER_VERSION} on out/ (got ${UV}); refuse copy-back of non-current schema"
+  die "expected frozen legacy PRAGMA user_version=${EXPECTED_USER_VERSION} on out/ (got ${UV}); refuse copy-back of a different schema contract"
 fi
 # Residual WAL/SHM beside out/ must not exist (migrator cleans; refuse dirty handoff).
 for side in lezi.db-wal lezi.db-shm lezi.db-journal; do
@@ -167,18 +169,33 @@ echo "  dry_run=          ${LEZI_COPY_BACK_DRY_RUN}" >&2
 echo "  user_version_exp= ${EXPECTED_USER_VERSION}" >&2
 echo "  nas_backup=       ${LEZI_NAS_BACKUP_PATH:-"(dry-run may omit)"}" >&2
 echo "  transport=        rsync --delete via staging+rename (scp refused)" >&2
-echo "  next after copy:  export LEZI_BOOTSTRAP_SECRET=<migration new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_SECRET_RESEED=1 LEZI_ALLOW_TLS_BOOTSTRAP=1; push-and-deploy (no inherit; explicit persistent-secret replacement; one-time TLS create)" >&2
+echo "  next after copy:  start only the attested schema-12-compatible TLS image; 11/12→13 is not implemented here" >&2
+echo "  deploy env:       export LEZI_BOOTSTRAP_SECRET=<migration new root password> LEZI_FORWARD_BOOTSTRAP_SECRET=1 LEZI_ALLOW_SECRET_RESEED=1 LEZI_ALLOW_TLS_BOOTSTRAP=1; guarded push-and-deploy" >&2
 echo "  ticket 07 owns live cutover success claims" >&2
 
 if [[ "${LEZI_COPY_BACK_DRY_RUN}" == "1" ]]; then
   echo "copy-back dry-run ok (no network write)"
   echo "out=${OUT}"
   echo "nas=${NAS_SSH}:${LEZI_DATA_HOST_PATH}/"
-  echo "next: LEZI_COPY_BACK_DRY_RUN=0 + LEZI_NAS_BACKUP_PATH=… then rsync staging swap; then CD TLS with LEZI_BOOTSTRAP_SECRET + LEZI_FORWARD_BOOTSTRAP_SECRET=1 + LEZI_ALLOW_SECRET_RESEED=1 + LEZI_ALLOW_TLS_BOOTSTRAP=1"
+  echo "next: bind the prebuilt package with LEZI_NAS_PACKAGE_DIR + LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID, then set LEZI_COPY_BACK_DRY_RUN=0 + LEZI_NAS_BACKUP_PATH=…; push must reuse it with LEZI_SKIP_PACKAGE=1"
   exit 0
 fi
 
 # --- live path only below ---
+if [[ -z "${LEZI_NAS_PACKAGE_DIR:-}" || ! -d "${LEZI_NAS_PACKAGE_DIR}" || -L "${LEZI_NAS_PACKAGE_DIR}" ]]; then
+  die "LEZI_NAS_PACKAGE_DIR must name the real prebuilt schema-12-compatible package directory"
+fi
+if [[ ! "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  die "LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID must be the attested sha256 config digest for the schema-12-compatible image"
+fi
+manifest="${LEZI_NAS_PACKAGE_DIR}/MANIFEST.json"
+[[ -f "${manifest}" ]] || die "schema-12-compatible package is missing MANIFEST.json: ${manifest}"
+mapfile -t manifest_image_ids < <(
+  sed -nE 's/^[[:space:]]*"image_id"[[:space:]]*:[[:space:]]*"([^"]*)"[[:space:]]*,?[[:space:]]*$/\1/p' "${manifest}"
+)
+if [[ "${#manifest_image_ids[@]}" -ne 1 || "${manifest_image_ids[0]}" != "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID}" ]]; then
+  die "schema-12-compatible image digest does not exactly match package MANIFEST.json"
+fi
 if ! command -v rsync >/dev/null 2>&1; then
   die "rsync is required for live copy-back (scp fallback refused: no --delete mirror; residual WAL/SHM risk)"
 fi

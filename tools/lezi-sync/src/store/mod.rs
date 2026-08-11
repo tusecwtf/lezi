@@ -73,7 +73,9 @@ pub use source_relations::{
 #[allow(unused_imports)]
 use self::{CausalBatchResult as _, ConflictDetailPage as _, ResolveConflictResult as _};
 pub(crate) use identity::anonymize_membership_authorship_fields;
-pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION, VERSIONED_ENTITY_TYPES};
+pub(crate) use schema::VERSIONED_ENTITY_TYPES;
+#[cfg(test)]
+pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
 
 /// Shared chunk size for IN-list entity/media queries (media + bundle LWW loaders).
 pub(in crate::store) const ENTITY_QUERY_CHUNK_SIZE: usize = 400;

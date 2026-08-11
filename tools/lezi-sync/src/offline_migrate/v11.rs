@@ -1,4 +1,4 @@
-//! Offline v11 → current (v12) copy-out migrator.
+//! Offline v11 → frozen legacy schema-12 copy-out migrator.
 //!
 //! Preserves identity shells (devices/sessions/credentials material in DB),
 //! family facts, and server.secret. Mints causal base versions and converts
@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
-use crate::store::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
-
 use super::causal::{finalize_causal_v12, validate_causal_integrity_with_media};
 use super::inventory::AuthoritativeFailure;
 use super::migrator::{remove_db_files, MigrateError, MigrateReport};
+use super::schema_contract::LEGACY_SCHEMA_V12;
 
 /// Source schema version for the causal cutover path.
 pub(crate) const SOURCE_V11_USER_VERSION: i64 = 11;
@@ -23,7 +22,7 @@ pub(crate) const SOURCE_V11_USER_VERSION: i64 = 11;
 /// Frozen v11 schema (pre-causal) — exact shape of DATABASE_SCHEMA_VERSION=11.
 pub(crate) const SOURCE_V11_SCHEMA_SQL: &str = include_str!("source_v11_schema.sql");
 
-/// Copy-out migrate a v11 `lezi.db` into a current-schema dest DB.
+/// Copy-out migrate a v11 `lezi.db` into a frozen legacy schema-12 dest DB.
 ///
 /// - Source opened read-only; never mutated.
 /// - Dest must not already exist (fail closed non-empty target).
@@ -71,8 +70,9 @@ pub(crate) fn migrate_v11_database(
             PRAGMA journal_mode = DELETE;
             ",
         )?;
-        dest.execute_batch(CURRENT_SCHEMA_SQL)?;
-        dest.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+        LEGACY_SCHEMA_V12
+            .initialize(&dest)
+            .map_err(|error| MigrateError::Internal(error.to_string()))?;
 
         let mut report = MigrateReport::default();
         {
@@ -111,7 +111,7 @@ pub(crate) fn migrate_v11_database(
     }
 }
 
-/// Full data-dir migrate: v11 `lezi.db` + media + server.secret → current out/.
+/// Full data-dir migrate: v11 `lezi.db` + media + server.secret → frozen schema-12 out/.
 ///
 /// Copies authority media bytes **before** causal finalize so wake media UUIDs
 /// derive from on-disk sha256 and legacy→wake hard copies succeed.
@@ -530,7 +530,7 @@ mod tests {
         migration_base_version_id, validate_causal_integrity, validate_causal_integrity_with_media,
         wake_observation_client_uuid,
     };
-    use crate::store::{Store, DATABASE_SCHEMA_VERSION};
+    use crate::offline_migrate::schema_contract::LEGACY_SCHEMA_V12;
     use rusqlite::{params, Connection};
     use serde_json::json;
     use std::fs;
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v11_mints_base_versions_and_opens_as_current() {
+    fn migrate_v11_mints_base_versions_into_frozen_schema12() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("source.db");
         let dest = dir.path().join("out").join("lezi.db");
@@ -610,6 +610,7 @@ mod tests {
             1,
         );
         drop(conn);
+        let source_bytes = fs::read(&source).unwrap();
 
         let report = migrate_v11_database(&source, &dest, None).expect("migrate");
         assert_eq!(report.families, 1);
@@ -619,7 +620,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            DATABASE_SCHEMA_VERSION
+            LEGACY_SCHEMA_V12.user_version()
         );
         // Source untouched.
         assert_eq!(
@@ -629,7 +630,8 @@ mod tests {
                 .unwrap(),
             SOURCE_V11_USER_VERSION
         );
-        Store::preflight_existing_schema(&dest).unwrap();
+        assert_eq!(source_bytes, fs::read(&source).unwrap());
+        LEGACY_SCHEMA_V12.validate_path(&dest).unwrap();
         let dest_conn = Connection::open(&dest).unwrap();
         validate_causal_integrity(&dest_conn).unwrap();
         let heads: i64 = dest_conn

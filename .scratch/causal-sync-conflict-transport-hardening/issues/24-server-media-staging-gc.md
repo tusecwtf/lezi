@@ -2,7 +2,7 @@
 
 **What to build:** 为 media receipt/staging 建立 TTL、consumed、orphan、branched/live reachability policy 与有界批次 GC，支持 crash/restart 且不删可达证据。
 
-**Blocked by:** 19、23；[`external 19`](../../repository-dedup-algorithm-audit-20260809/issues/19-resolution-metadata-retention.md)
+**Blocked by:** 19、23；[`external 19`](../../repository-dedup-algorithm-audit-20260809/issues/19-resolution-metadata-retention.md)；[`external R20`](../../repository-dedup-algorithm-audit-20260809/issues/20-version-offline-migration-schema-contracts.md)（implemented）
 
 **Status:** ready-for-agent
 

@@ -1,4 +1,4 @@
-//! One-shot offline migrator: measured v3 `lezi.db` → current schema `lezi.db`.
+//! One-shot offline migrator: measured v3 `lezi.db` → frozen legacy schema-12 `lezi.db`.
 //!
 //! **Not** wired into server startup. Reads a backup source read-only; writes an
 //! independent dest via temp+rename so failures leave no copy-back-ready partial.
@@ -30,7 +30,7 @@ use crate::model::{
     RawEntity,
 };
 use crate::owner_root_fingerprint;
-use crate::store::{self, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
+use crate::store;
 use crate::{
     write_server_secret, DEFAULT_MAX_MEDIA_BYTES, MIN_BOOTSTRAP_SECRET_LEN, SERVER_SECRET_BYTES,
 };
@@ -41,6 +41,7 @@ use super::inventory::{
     AuthoritativeFailure, StagingCascade, ALLOWED_ENTITY_TYPES, ALLOWED_MEDIA_PUBLICATION_SOURCES,
     BUNDLE_STATUS_COMMITTED, SOURCE_USER_VERSION,
 };
+use super::schema_contract::LEGACY_SCHEMA_V12;
 
 /// Minimum length for the migration-time new root password.
 /// Alias of crate-level [`MIN_BOOTSTRAP_SECRET_LEN`] (same rule as `LEZI_BOOTSTRAP_SECRET`).
@@ -131,7 +132,7 @@ impl MigrateError {
     }
 }
 
-/// Transform a v3 source database into a current-schema destination database.
+/// Transform a v3 source database into a frozen legacy schema-12 destination database.
 ///
 /// - Source is opened read-only and never mutated.
 /// - Destination is written via a sibling temp file and renamed only on full success.
@@ -177,8 +178,9 @@ pub(crate) fn migrate_v3_database(
             PRAGMA journal_mode = DELETE;
             ",
         )?;
-        dest.execute_batch(CURRENT_SCHEMA_SQL)?;
-        dest.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+        LEGACY_SCHEMA_V12
+            .initialize(&dest)
+            .map_err(|error| MigrateError::Internal(error.to_string()))?;
 
         let report = transfer_all(&source, &mut dest, &fingerprint)?;
         dest.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -1344,19 +1346,14 @@ fn copy_media_publications(
 mod tests {
     use super::*;
     use crate::offline_migrate::inventory::{target_only_empty_tables, BUNDLE_STATUS_STAGING};
+    use crate::offline_migrate::schema_contract::LEGACY_SCHEMA_V12;
     use crate::offline_migrate::test_support::{
         open_v3_fixture, seed_baby_entity, seed_minimal_family, TEST_NEW_ROOT_PASSWORD,
     };
     use crate::owner_root_fingerprint;
-    use crate::store::{Store, DATABASE_SCHEMA_VERSION};
-    use crate::{build_app, ServerConfig};
-    use axum::body::Body;
-    use axum::http::{Method, Request, StatusCode};
-    use axum::Router;
     use rusqlite::Connection;
     use serde_json::{json, Value};
     use tempfile::tempdir;
-    use tower::ServiceExt;
 
     fn record_payload(baby_uuid: &str) -> Map<String, Value> {
         json!({
@@ -1494,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_success_opens_with_current_preflight_and_keeps_business_rows() {
+    fn schema12_output_matches_frozen_contract_and_keeps_business_rows() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("source.db");
         let dest = dir.path().join("out").join("lezi.db");
@@ -1515,15 +1512,13 @@ mod tests {
         assert_eq!(report.discarded_bundle_media, 1);
         assert_eq!(report.discarded_publications, 1);
 
-        Store::preflight_existing_schema(&dest).expect("preflight");
-        let store = Store::open(&dest).expect("open");
-        store.health_check().expect("health");
+        LEGACY_SCHEMA_V12.validate_path(&dest).expect("preflight");
 
         let conn = Connection::open(&dest).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(version, LEGACY_SCHEMA_V12.user_version());
 
         let family_name: String = conn
             .query_row("SELECT name FROM families WHERE id = 'fam-1'", [], |r| {
@@ -2378,18 +2373,6 @@ mod tests {
             dest_content_hash, source_bundle_content_hash,
             "anonymize must change content_hash from source when root author is cleared"
         );
-
-        // Current hard_delete / members API must not need to re-clean departed rows.
-        Store::preflight_existing_schema(&dest).expect("preflight");
-        let store = Store::open(&dest).expect("open");
-        let hard_delete_err = store.hard_delete_membership("fam-1", departed_id, 1_800_000_000);
-        assert!(
-            matches!(
-                hard_delete_err,
-                Err(crate::store::StoreError::MembershipNotFound)
-            ),
-            "departed id is already gone: {hard_delete_err:?}"
-        );
     }
 
     #[test]
@@ -2577,9 +2560,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Ticket 04 — root password reset + current server open
-    // Public seams: migrate_v3_database(password), server.secret, fingerprint,
-    // build_app ready/setup-status, owner login with new root only.
+    // Ticket 04 — root password reset in the frozen legacy output.
+    // Public seams: migrate_v3_database(password), server.secret, fingerprint.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2674,147 +2656,5 @@ mod tests {
         assert!(REAUTH_OPS_NOTE.contains("LEZI_BOOTSTRAP_SECRET"));
         assert_eq!(MIN_NEW_ROOT_PASSWORD_LEN, crate::MIN_BOOTSTRAP_SECRET_LEN);
         assert_eq!(MIN_NEW_ROOT_PASSWORD_LEN, 16);
-    }
-
-    async fn oneshot_json(
-        app: &Router,
-        method: Method,
-        uri: &str,
-        body: Option<Value>,
-        extra_headers: &[(&str, &str)],
-    ) -> (StatusCode, Value) {
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
-        use axum::extract::ConnectInfo;
-        use axum::http::header::CONTENT_TYPE;
-
-        let has_body = body.is_some();
-        let payload = body
-            .map(|v| Body::from(serde_json::to_vec(&v).unwrap()))
-            .unwrap_or_else(Body::empty);
-        let mut builder = Request::builder().method(method).uri(uri);
-        if has_body {
-            builder = builder.header(CONTENT_TYPE, "application/json");
-        }
-        for (name, value) in extra_headers {
-            builder = builder.header(*name, *value);
-        }
-        let mut request = builder.body(payload).unwrap();
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            43210,
-        )));
-        let response = app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let value = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-        };
-        (status, value)
-    }
-
-    #[tokio::test]
-    async fn migrated_out_is_ready_configured_and_owner_logs_in_with_new_root_only() {
-        let dir = tempdir().unwrap();
-        let source = dir.path().join("backup").join("lezi.db");
-        let out = dir.path().join("out");
-        let dest = out.join("lezi.db");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        {
-            let conn = open_v3_fixture(&source);
-            seed_minimal_family(&conn);
-            seed_baby_entity(&conn);
-        }
-
-        migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
-        Store::preflight_existing_schema(&dest).expect("preflight");
-
-        let mut config = ServerConfig::new(&out);
-        config.bootstrap_secret = Some(TEST_NEW_ROOT_PASSWORD.to_owned());
-        config.generation = Some("migrate-gen".to_owned());
-        let app = build_app(config).expect("build_app on migrated data");
-
-        let (ready_status, _) = oneshot_json(&app, Method::GET, "/ready", None, &[]).await;
-        assert_eq!(ready_status, StatusCode::OK, "migrated data must be /ready");
-
-        let (setup_status, setup) =
-            oneshot_json(&app, Method::GET, "/v1/setup-status", None, &[]).await;
-        assert_eq!(setup_status, StatusCode::OK, "{setup}");
-        assert_eq!(setup["family_state"], "configured");
-
-        // Wrong root password cannot open owner login.
-        let (bad_status, bad_body) = oneshot_json(
-            &app,
-            Method::POST,
-            "/v1/owner/login",
-            Some(json!({
-                "login_request_id": "migrate-owner-login-wrong-00000001",
-                "device_name": "旧手机",
-            })),
-            &[("x-lezi-bootstrap-secret", "wrong-root-password!")],
-        )
-        .await;
-        assert_eq!(bad_status, StatusCode::UNAUTHORIZED, "{bad_body}");
-        assert!(bad_body.get("access_token").is_none());
-
-        // New root password establishes a device session.
-        let (ok_status, logged_in) = oneshot_json(
-            &app,
-            Method::POST,
-            "/v1/owner/login",
-            Some(json!({
-                "login_request_id": "migrate-owner-login-ok-00000000001",
-                "device_name": "管理员手机",
-            })),
-            &[("x-lezi-bootstrap-secret", TEST_NEW_ROOT_PASSWORD)],
-        )
-        .await;
-        assert_eq!(ok_status, StatusCode::OK, "{logged_in}");
-        let access = logged_in["access_token"]
-            .as_str()
-            .expect("access_token present");
-        assert!(!access.is_empty());
-        assert_eq!(logged_in["membership_id"], "mem-owner");
-        assert!(logged_in["device_id"].as_str().is_some());
-
-        // Session works for an authenticated read.
-        let (members_status, members) = oneshot_json(
-            &app,
-            Method::GET,
-            "/v1/family/members",
-            None,
-            &[("authorization", &format!("Bearer {access}"))],
-        )
-        .await;
-        assert_eq!(members_status, StatusCode::OK, "{members}");
-        assert!(!members["members"].as_array().unwrap().is_empty());
-
-        // Legacy credential material has no session path on the target schema.
-        let conn = Connection::open(&dest).unwrap();
-        let legacy_tables: i64 = conn
-            .query_row(
-                "
-                SELECT COUNT(*) FROM sqlite_master
-                WHERE type = 'table'
-                  AND name IN ('membership_credentials', 'invites')
-                ",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_tables, 0);
-        let active_devices_before_login_only: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM devices WHERE status = 'active'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        // Exactly the one device from successful owner login above.
-        assert_eq!(active_devices_before_login_only, 1);
     }
 }
