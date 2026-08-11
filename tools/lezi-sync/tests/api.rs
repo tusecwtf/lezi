@@ -16647,6 +16647,350 @@ async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstone
 }
 
 #[tokio::test]
+async fn care_plan_three_attachments_publish_only_after_all_receipts_and_replay_exactly() {
+    let rig = Rig::with_config(|config| config.max_media_bytes = 64 * 1024);
+    let owner = create_family(
+        &rig.app,
+        "care-plan-media-owner",
+        "care-plan-media-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4();
+    let mutation_id = Uuid::new_v4();
+    let media = [
+        (Uuid::new_v4(), b"plan-photo-one".as_slice()),
+        (Uuid::new_v4(), b"plan-photo-two-longer".as_slice()),
+        (Uuid::new_v4(), b"plan-photo-three-exact".as_slice()),
+    ];
+    for (media_id, bytes) in media.iter().take(2) {
+        let (status, prepared) = put_causal_media_bytes(&rig.app, token, *media_id, bytes).await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+    }
+    let mut plan_root = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_root["updated_at"] = json!(30);
+    let mutation = causal_unit(
+        mutation_id,
+        None,
+        "care_plan",
+        plan_id,
+        plan_root,
+        media
+            .iter()
+            .map(|(media_id, bytes)| {
+                causal_media_item(
+                    *media_id,
+                    "plan",
+                    &hex::encode(Sha256::digest(bytes)),
+                    bytes.len(),
+                )
+            })
+            .collect(),
+        false,
+    );
+
+    let (status, incomplete) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{incomplete}");
+    assert_eq!(incomplete["results"][0]["status"], "rejected");
+    assert_eq!(incomplete["results"][0]["code"], "missing_media_bytes");
+    let pull = pull_entities(&rig.app, token, generation).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != plan_id.to_string()
+            && media
+                .iter()
+                .all(|(media_id, _)| row["client_uuid"] != media_id.to_string())
+    }));
+
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media[2].0, media[2].1).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, committed) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["results"][0]["status"], "accepted");
+    assert_eq!(
+        committed["results"][0]["stable_media"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+    );
+
+    let (status, replayed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["results"][0]["stable_version_id"],
+        committed["results"][0]["stable_version_id"],
+    );
+    assert_eq!(
+        replayed["results"][0]["request_hash"],
+        committed["results"][0]["request_hash"],
+    );
+    for (media_id, expected) in media {
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            expected,
+        );
+    }
+}
+
+#[tokio::test]
+async fn care_plan_attachment_waits_for_fact_respects_acl_and_retains_tombstoned_fact() {
+    let rig = Rig::with_config(|config| config.max_media_bytes = 64 * 1024);
+    let (owner, member) =
+        two_joined_clients(&rig.app, "care-plan-acl-owner", "care-plan-acl-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"dependency-bound-plan-photo";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, owner_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mut plan_root = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_root["status"] = json!("completed");
+    plan_root["fulfilled_record_client_uuid"] = json!(record_id);
+    plan_root["fulfilled_at"] = json!(1_700_000_100_i64);
+    plan_root["updated_at"] = json!(30);
+    let plan = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "care_plan",
+        plan_id,
+        plan_root,
+        vec![causal_media_item(media_id, "plan", &sha, bytes.len())],
+        false,
+    );
+
+    let (status, blocked) = causal_commit_units(&rig.app, owner_token, vec![plan.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{blocked}");
+    assert_eq!(blocked["results"][0]["status"], "rejected");
+    assert_eq!(blocked["results"][0]["code"], "invalid_reference");
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != plan_id.to_string() && row["client_uuid"] != media_id.to_string()
+    }));
+
+    let (status, record) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "fulfilled", 120, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    let record_version = record["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, accepted) = causal_commit_units(&rig.app, owner_token, vec![plan]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+    let stable_version = accepted["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut foreign_edit = care_plan_payload(&baby_id.to_string(), "formula");
+    foreign_edit["note"] = json!("foreign edit");
+    foreign_edit["updated_at"] = json!(40);
+    let (status, forbidden) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&stable_version),
+            "care_plan",
+            plan_id,
+            foreign_edit,
+            vec![causal_media_item(media_id, "plan", &sha, bytes.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{forbidden}");
+    assert_eq!(forbidden["results"][0]["status"], "rejected");
+    assert_eq!(forbidden["results"][0]["code"], "forbidden_care_plan");
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(member_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice(),
+    );
+
+    let (status, record_tombstone) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&record_version),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "fulfilled", 120, 50),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record_tombstone}");
+    assert_eq!(record_tombstone["results"][0]["status"], "accepted");
+    let mut plan_tombstone = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_tombstone["status"] = json!("completed");
+    plan_tombstone["fulfilled_record_client_uuid"] = json!(record_id);
+    plan_tombstone["fulfilled_at"] = json!(1_700_000_100_i64);
+    plan_tombstone["updated_at"] = json!(60);
+    let (status, deleted_plan) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&stable_version),
+            "care_plan",
+            plan_id,
+            plan_tombstone,
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted_plan}");
+    assert_eq!(deleted_plan["results"][0]["status"], "accepted");
+}
+
+#[tokio::test]
+async fn deleted_care_plan_keeps_attachment_branch_bytes_auditable_but_unreachable() {
+    let rig = Rig::with_config(|config| config.max_media_bytes = 64 * 1024);
+    let owner = create_family(
+        &rig.app,
+        "care-plan-branch-owner",
+        "care-plan-branch-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"care-plan-branch-exact-bytes";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mut live_root = care_plan_payload(&baby_id.to_string(), "formula");
+    live_root["updated_at"] = json!(20);
+    let media = causal_media_item(media_id, "plan", &sha, bytes.len());
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "care_plan",
+            plan_id,
+            live_root.clone(),
+            vec![media.clone()],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let v1 = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let mut tombstone_root = live_root.clone();
+    tombstone_root["updated_at"] = json!(30);
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(v1),
+            "care_plan",
+            plan_id,
+            tombstone_root,
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted");
+
+    live_root["note"] = json!("stale attachment edit");
+    live_root["updated_at"] = json!(40);
+    let (status, branched) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(v1),
+            "care_plan",
+            plan_id,
+            live_root,
+            vec![media],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{branched}");
+    assert_eq!(branched["results"][0]["status"], "branched", "{branched}");
+    let conflict_id = branched["results"][0]["conflict_id"].as_str().unwrap();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["stable"]["deleted"], true);
+    assert_eq!(detail["stable"]["media"], json!([]));
+    assert!(detail["branches"].as_array().unwrap().iter().any(|branch| {
+        branch["deleted"] == false
+            && branch["media"][0]["media_uuid"] == media_id.to_string()
+            && branch["media"][0]["sha256"] == sha
+            && branch["media"][0]["byte_size"] == bytes.len()
+    }));
+    let pull = pull_entities(&rig.app, token, generation).await;
+    assert!(!find_entity(&pull, plan_id)["deleted_at"].is_null());
+    assert!(!find_entity(&pull, media_id)["deleted_at"].is_null());
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     let rig = Rig::new();
     let (owner, member) = two_joined_clients(

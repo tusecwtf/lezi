@@ -1673,6 +1673,32 @@ fn validate_mutation_content(
     Ok(canonical_root)
 }
 
+/// H23 causal CarePlan publication waits for its fulfilled fact. Legacy bundle
+/// ingress keeps its historical forward-reference product flow.
+fn validate_care_plan_fulfilled_record_ready(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    entity_type: &str,
+    root: &Map<String, Value>,
+) -> Result<(), StoreError> {
+    if entity_type != "care_plan" {
+        return Ok(());
+    }
+    let Some(record_uuid) = root
+        .get("fulfilled_record_client_uuid")
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    if load_stable(tx, family_id, "record", record_uuid)?.is_some() {
+        Ok(())
+    } else {
+        Err(StoreError::UnresolvedReference(
+            "care_plan fulfilled_record_client_uuid does not exist".to_owned(),
+        ))
+    }
+}
+
 /// Bind commit metadata to the durable preimage receipt before any version,
 /// projection, branch, or terminal mutation receipt is written.
 fn claim_media_receipts(
@@ -1909,7 +1935,14 @@ fn evaluate_unit(
     let incoming_media = media_sorted(mutation.media.clone());
     let incoming_deleted = mutation.deleted;
     let package = canonical_package(mutation, &incoming_root, &incoming_media, ctx.now)?;
-    if let Err(error) = validate_canonical_package_ingress(ctx.tx, ctx.principal, &package) {
+    if let Err(error) = validate_care_plan_fulfilled_record_ready(
+        ctx.tx,
+        &ctx.principal.family_id,
+        &mutation.entity_type,
+        &incoming_root,
+    )
+    .and_then(|()| validate_canonical_package_ingress(ctx.tx, ctx.principal, &package))
+    {
         let code = match error {
             StoreError::Sqlite(_)
             | StoreError::Json(_)

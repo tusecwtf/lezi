@@ -2,6 +2,7 @@ package com.lezi.babylog.sync.engine
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
@@ -587,6 +588,272 @@ class ReplicaSyncEngineCausalSettlementTest {
             .containsExactly(firstMutation.mutationId)
         assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(firstMutation.mutationId))
             .isNull()
+    }
+
+    @Test
+    fun carePlanThreeAttachmentPartialPreparePublishesOnlyAfterAllReceipts() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 77)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val planUuid = "plan-three-attachment-partial"
+        val mediaUuids = (1..3).map { index ->
+            "00000000-0000-4000-8000-00000000005$index"
+        }
+        seedCarePlanMedia(
+            rig = rig,
+            babyUuid = "00000000-0000-4000-8000-000000000050",
+            plan = localReplicaCarePlan(planUuid, "membership-a", 200).copy(
+                syncDirty = true,
+                baseVersion = "v-plan",
+            ),
+            sources = mediaUuids.mapIndexed { index, mediaUuid ->
+                CarePlanMediaSource(
+                    uuid = mediaUuid,
+                    uri = "/private/plan-partial-$index.jpg",
+                    bytes = byteArrayOf(index.toByte(), 3, 2, 1),
+                )
+            },
+        )
+        var interrupted = false
+        rig.backend.onCausalMediaPreimage = { mediaUuid ->
+            if (mediaUuid == mediaUuids[1] && !interrupted) {
+                interrupted = true
+                throw java.io.IOException("second plan attachment interrupted")
+            }
+        }
+
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
+                .exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        val pendingRow = rig.conflictDetails.listFrozenMediaSpoolManifests().single()
+        val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.snapshotJson))
+        assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.Pending)
+        assertThat(pending.receipts.map { it.mediaUuid }).containsExactly(mediaUuids.first())
+
+        rig.newEngine().synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        val committed = rig.backend.causalCommittedUnits.single().single()
+        assertThat(committed.entityType).isEqualTo("care_plan")
+        assertThat(committed.clientUuid).isEqualTo(planUuid)
+        assertThat(committed.media.map { it.mediaUuid })
+            .containsExactlyElementsIn(mediaUuids)
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactlyElementsIn(mediaUuids)
+            .inOrder()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.listPendingSync()).isEmpty()
+        assertThat(rig.immutableMediaSpool.discardedMutationIds)
+            .containsExactly(committed.mutationId)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(77)
+    }
+
+    @Test
+    fun lostCarePlanMediaResponseReplaysExactGroupBeforeReplanningLaterEdit() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 78)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val planUuid = "plan-media-response-lost"
+        val mediaUuid = "00000000-0000-4000-8000-000000000061"
+        val mediaUri = "/private/plan-response-lost.jpg"
+        val originalBytes = byteArrayOf(1, 4, 9, 16)
+        seedCarePlanMedia(
+            rig = rig,
+            babyUuid = "00000000-0000-4000-8000-000000000066",
+            plan = localReplicaCarePlan(planUuid, "membership-a", 100).copy(
+                note = "epoch-1",
+                syncDirty = true,
+                baseVersion = "v-plan-base",
+            ),
+            sources = listOf(CarePlanMediaSource(mediaUuid, mediaUri, originalBytes)),
+        )
+        var attempts = 0
+        var frozen: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            attempts += 1
+            val unit = units.single()
+            if (frozen == null) {
+                frozen = unit
+                throw java.io.IOException("care plan media response lost")
+            }
+            assertThat(unit).isEqualTo(frozen)
+        }
+
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
+                .exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        val edited = requireNotNull(rig.carePlans.getByClientUuid(planUuid))
+        rig.carePlans.update(
+            edited.copy(note = "epoch-2", updatedAt = 200, syncDirty = true, mutationId = null),
+        )
+        rig.mediaFiles.preparedUploadBytes[mediaUri] = byteArrayOf(2, 3, 5, 7)
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(attempts).isEqualTo(2)
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(mediaUuid)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second)
+            .isEqualTo(originalBytes)
+        with(requireNotNull(rig.carePlans.getByClientUuid(planUuid))) {
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isNotNull()
+        }
+        assertThat(rig.immutableMediaSpool.discardedMutationIds)
+            .containsExactly(requireNotNull(frozen).mutationId)
+
+        rig.backend.onCausalCommit = null
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val replanned = rig.backend.causalCommittedUnits.last().single()
+        assertThat(replanned.mutationId).isNotEqualTo(requireNotNull(frozen).mutationId)
+        assertThat(replanned.rootJson).contains("epoch-2")
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(mediaUuid, mediaUuid)
+            .inOrder()
+        assertThat(rig.backend.causalMediaPreimageBytes.last().second)
+            .isEqualTo(byteArrayOf(2, 3, 5, 7))
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.syncDirty).isFalse()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(78)
+    }
+
+    @Test
+    fun branchedCarePlanMediaKeepsExactSpoolAndStopsBlindResend() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 79)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val planUuid = "plan-media-branch"
+        val mediaUuid = "00000000-0000-4000-8000-000000000062"
+        val mediaBytes = byteArrayOf(8, 6, 7, 5)
+        val mediaUri = "/private/plan-branch.jpg"
+        seedCarePlanMedia(
+            rig = rig,
+            babyUuid = "00000000-0000-4000-8000-000000000067",
+            plan = localReplicaCarePlan(planUuid, "membership-a", 100).copy(
+                syncDirty = true,
+                baseVersion = "v-plan-base",
+            ),
+            sources = listOf(CarePlanMediaSource(mediaUuid, mediaUri, mediaBytes)),
+        )
+        var mutationId: String? = null
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            mutationId = unit.mutationId
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-plan-stable",
+                        stableRootJson = unit.rootJson,
+                        stableMedia = unit.media,
+                        conflictId = "conflict-plan-media",
+                        branchVersionId = "branch-plan-media",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        val commits = rig.backend.causalCommittedUnits.size
+        val uploads = rig.backend.causalMediaPreimageBytes.size
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits).hasSize(commits)
+        assertThat(rig.backend.causalMediaPreimageBytes).hasSize(uploads)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(mediaBytes)
+        with(requireNotNull(rig.carePlans.getByClientUuid(planUuid))) {
+            assertThat(syncDirty).isFalse()
+            assertThat(openConflictId).isEqualTo("conflict-plan-media")
+            assertThat(localBranchVersionId).isEqualTo("branch-plan-media")
+        }
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.conflictSummaries.get("conflict-plan-media")).isNotNull()
+        val row = requireNotNull(
+            rig.conflictDetails.getFrozenMediaSpoolManifest(requireNotNull(mutationId)),
+        )
+        assertThat(decodeCausalMediaSettlementOrNull(row.snapshotJson)?.phase)
+            .isEqualTo(CausalMediaSettlementPhase.Branched)
+        assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(79)
+    }
+
+    @Test
+    fun carePlanTombstoneAndRemovedMediaCommitTogetherAndRemainAuditable() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 80)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000068",
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        val planUuid = "plan-media-tombstone"
+        val planId = rig.carePlans.seed(
+            localReplicaCarePlan(planUuid, "membership-a", 200).copy(
+                babyId = babyId,
+                deletedAt = 200,
+                syncDirty = true,
+                baseVersion = "v-plan-live",
+            ),
+        )
+        val mediaUuid = "00000000-0000-4000-8000-000000000063"
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "/private/deleted-plan-media.jpg",
+                createdAt = 100,
+                updatedAt = 200,
+                deletedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            assertThat(unit.entityType).isEqualTo("care_plan")
+            assertThat(unit.deleted).isTrue()
+            assertThat(unit.media).isEmpty()
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-plan-live",
+                        stableRootJson = unit.rootJson,
+                        stableMedia = emptyList(),
+                        conflictId = "conflict-delete-plan-media",
+                        branchVersionId = "branch-delete-plan-media",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
+        assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.openConflictId)
+            .isEqualTo("conflict-delete-plan-media")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isEqualTo(200)
+        assertThat(rig.conflictSummaries.get("conflict-delete-plan-media")?.branchVersionIdsJson)
+            .contains("branch-delete-plan-media")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(80)
     }
 
     @Test
@@ -2027,6 +2294,43 @@ class ReplicaSyncEngineCausalSettlementTest {
         envelopes = recordUuids.map { uuid ->
             rig.conflictDetails.getFrozenMutation("record", uuid)
         },
+    )
+
+    private suspend fun seedCarePlanMedia(
+        rig: ReplicaEngineRig,
+        babyUuid: String,
+        plan: CarePlanEntity,
+        sources: List<CarePlanMediaSource>,
+    ) {
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = babyUuid,
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val planId = rig.carePlans.seed(plan.copy(babyId = babyId))
+        sources.forEach { source ->
+            rig.mediaFiles.preparedUploadBytes[source.uri] = source.bytes
+            rig.media.seed(
+                MediaAssetEntity(
+                    carePlanId = planId,
+                    clientUuid = source.uuid,
+                    kind = "log",
+                    localUri = source.uri,
+                    createdAt = plan.updatedAt,
+                    updatedAt = plan.updatedAt,
+                    syncDirty = true,
+                ),
+            )
+        }
+    }
+
+    private data class CarePlanMediaSource(
+        val uuid: String,
+        val uri: String,
+        val bytes: ByteArray,
     )
 }
 

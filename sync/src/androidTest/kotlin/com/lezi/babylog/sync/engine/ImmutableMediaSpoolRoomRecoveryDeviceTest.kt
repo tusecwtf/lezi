@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.DatabaseModule
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.LeziDatabase
@@ -261,6 +262,114 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
         }
     }
 
+    /** Real Room success-path proof for H23 CarePlan attachment settlement. */
+    @Test
+    fun carePlanThreeAttachmentsCommitExactSpoolBytesAndSettleRoom() = runBlocking {
+        sourceDirectory.mkdirs()
+        val sourceFiles = (0 until 3).map { index ->
+            File(sourceDirectory, "care-plan-$index.jpg").also { file ->
+                Bitmap.createBitmap(index + 2, 2, Bitmap.Config.ARGB_8888).also { bitmap ->
+                    file.outputStream().use { output ->
+                        assertThat(bitmap.compress(Bitmap.CompressFormat.JPEG, 90 + index, output))
+                            .isTrue()
+                    }
+                    bitmap.recycle()
+                }
+            }
+        }
+        val exactBytes = sourceFiles.map(File::readBytes)
+        val database = database()
+        try {
+            val babyId = database.babyDao().upsert(
+                BabyEntity(
+                    familyId = 1,
+                    nickname = "计划宝宝",
+                    birthdayEpochDay = 1,
+                    themeColorArgb = 0,
+                    clientUuid = CARE_PLAN_BABY_ID,
+                    updatedAt = 300,
+                    syncDirty = false,
+                    familyAuthority = true,
+                    baseVersion = "v-care-plan-baby",
+                ),
+            )
+            val planId = database.carePlanDao().upsert(
+                CarePlanEntity(
+                    clientUuid = CARE_PLAN_ID,
+                    babyId = babyId,
+                    type = "formula",
+                    scheduledAt = 9_000_000_000_000,
+                    scheduledZoneId = "Asia/Shanghai",
+                    payloadJson = """{"amount_ml":120}""",
+                    createdByMembershipId = "membership-a",
+                    updatedAt = 300,
+                    syncDirty = true,
+                    baseVersion = "v-care-plan-0",
+                    mutationId = CARE_PLAN_MUTATION_ID,
+                ),
+            )
+            val mediaIds = sourceFiles.mapIndexed { index, file ->
+                "00000000-0000-4000-8000-00000000029${index + 1}".also { mediaUuid ->
+                    database.mediaAssetDao().upsert(
+                        MediaAssetEntity(
+                            carePlanId = planId,
+                            clientUuid = mediaUuid,
+                            kind = "log",
+                            localUri = file.relativeTo(context.filesDir).path,
+                            mime = "image/jpeg",
+                            createdAt = 300,
+                            updatedAt = 300,
+                            syncDirty = true,
+                        ),
+                    )
+                }
+            }
+            val backend = DeviceCausalBackend()
+
+            settlement(
+                database = database,
+                backend = backend,
+                spool = fileSpool(AndroidSyncMediaFileStore(context)),
+            ).settle(
+                SESSION,
+                listOf(
+                    PublishCandidate(
+                        planId = planId,
+                        entityType = "care_plan",
+                        clientUuid = CARE_PLAN_ID,
+                        payloadJson = "{}",
+                        updatedAt = 300,
+                    ),
+                ) + mediaIds.mapIndexed { index, mediaUuid ->
+                    PublishCandidate(
+                        planId = planId + index + 1L,
+                        entityType = "media",
+                        clientUuid = mediaUuid,
+                        payloadJson = "{}",
+                        updatedAt = 300,
+                        localMediaUri = sourceFiles[index].relativeTo(context.filesDir).path,
+                    )
+                },
+            )
+
+            assertThat(backend.uploadedBytes).hasSize(3)
+            backend.uploadedBytes.zip(exactBytes).forEach { (actual, expected) ->
+                assertThat(actual).isEqualTo(expected)
+            }
+            assertThat(database.carePlanDao().getByClientUuid(CARE_PLAN_ID)?.syncDirty).isFalse()
+            mediaIds.forEach { mediaUuid ->
+                assertThat(database.mediaAssetDao().getByClientUuid(mediaUuid)?.syncDirty)
+                    .isFalse()
+            }
+            assertThat(
+                database.conflictSnapshotCacheDao()
+                    .getFrozenMediaSpoolManifest(CARE_PLAN_MUTATION_ID),
+            ).isNull()
+        } finally {
+            database.close()
+        }
+    }
+
     private suspend fun seedFacts(database: LeziDatabase, sourceFile: File) {
         val babyId = database.babyDao().upsert(
             BabyEntity(
@@ -490,3 +599,6 @@ private const val BABY_ID = "00000000-0000-4000-8000-000000000182"
 private const val AVATAR_MUTATION_ID = "00000000-0000-4000-8000-000000000028"
 private const val AVATAR_MEDIA_ID = "00000000-0000-4000-8000-000000000280"
 private const val AVATAR_BABY_ID = "00000000-0000-4000-8000-000000000282"
+private const val CARE_PLAN_MUTATION_ID = "00000000-0000-4000-8000-000000000029"
+private const val CARE_PLAN_ID = "00000000-0000-4000-8000-000000000290"
+private const val CARE_PLAN_BABY_ID = "00000000-0000-4000-8000-000000000292"

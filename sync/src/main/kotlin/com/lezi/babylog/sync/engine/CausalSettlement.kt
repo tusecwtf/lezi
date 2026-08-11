@@ -58,7 +58,7 @@ internal val CAUSAL_ROOT_TYPES = setOf(
     "wake_observation",
 )
 
-private val MEDIA_COMMIT_FIRST_ROOT_TYPES = setOf("baby", "record")
+private val MEDIA_COMMIT_FIRST_ROOT_TYPES = setOf("baby", "record", "care_plan")
 
 /**
  * One frozen causal atomic unit. Migrated roots restore one immutable Room-backed
@@ -504,7 +504,7 @@ internal class CausalSettlement(
         }
     }
 
-    /** H21/H22 own Record and Baby media; Wake/CarePlan remain pending for later tickets. */
+    /** H21-H23 share settlement for Record, Baby, and CarePlan media; Wake stays pending. */
     private suspend fun settleMigratedMediaCandidates(unit: FrozenCausalUnit) {
         if (unit.mutation.entityType !in MEDIA_COMMIT_FIRST_ROOT_TYPES) return
         unit.candidates.filter { it.entityType == "media" }.forEach { media ->
@@ -832,6 +832,8 @@ internal class CausalSettlement(
             // A complete empty manifest that cannot yet satisfy its dependency
             // order must wait; falling through would resurrect reconcile-first.
             if (!hasCarePlanMediaPublishOrRepairEvidence(clientUuid, candidates)) return null
+            val cache = conflictSnapshotCacheDao ?: return null
+            if (!carePlanDependenciesReady(clientUuid, cache)) return null
         } else if (entityType in COMMIT_FIRST_ROOT_TYPES) {
             freezeEmptyMediaCommitEnvelope(
                 entityType = entityType,
@@ -1417,7 +1419,7 @@ internal class CausalSettlement(
         else -> emptyList()
     }
 
-    /** H12 owns only a complete empty CarePlan manifest; all media stays on H23's source path. */
+    /** Distinguishes a pending attachment/tombstone group from a dependency-blocked empty plan. */
     private suspend fun hasCarePlanMediaPublishOrRepairEvidence(
         clientUuid: String,
         candidates: List<PublishCandidate>,

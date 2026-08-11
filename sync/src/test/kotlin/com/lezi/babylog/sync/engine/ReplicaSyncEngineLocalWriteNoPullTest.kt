@@ -266,6 +266,54 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
+    fun carePlanAttachmentWaitsForFulfilledRecordBeforePrepareOrCommit() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 45)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000216",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val planUuid = "plan-media-missing-record"
+        val planId = rig.carePlans.seed(
+            localReplicaCarePlan(planUuid, "membership-a", updatedAt = 140).copy(
+                babyId = babyId,
+                status = "completed",
+                fulfilledRecordClientUuid = "00000000-0000-4000-8000-000000000217",
+                fulfilledAt = 130,
+                syncDirty = true,
+                baseVersion = "v-plan",
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = "00000000-0000-4000-8000-000000000218",
+                kind = "log",
+                carePlanId = planId,
+                localUri = "plans/missing-record.jpg",
+                mime = "image/jpeg",
+                createdAt = 140,
+                updatedAt = 140,
+                syncDirty = true,
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.conflictDetails.listFrozenMediaSpoolManifests()).isEmpty()
+        with(requireNotNull(rig.carePlans.getByClientUuid(planUuid))) {
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+        }
+    }
+
+    @Test
     fun completedCarePlanDefersCrossBabyFulfilledRecordWithoutDurableSnapshot() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 45)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
@@ -382,7 +430,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 syncDirty = true,
             ),
         )
-        rig.carePlans.seed(
+        val planId = rig.carePlans.seed(
             localReplicaCarePlan("plan-with-dependencies", "membership-a", 130).copy(
                 babyId = babyId,
                 type = "custom",
@@ -395,6 +443,21 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 syncDirty = true,
             ),
         )
+        val attachmentUuid = "00000000-0000-4000-8000-000000000223"
+        val attachmentUri = "/private/plan-with-dependencies.jpg"
+        val attachmentBytes = byteArrayOf(2, 2, 3, 5)
+        rig.mediaFiles.preparedUploadBytes[attachmentUri] = attachmentBytes
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                clientUuid = attachmentUuid,
+                kind = "log",
+                localUri = attachmentUri,
+                createdAt = 130,
+                updatedAt = 130,
+                syncDirty = true,
+            ),
+        )
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
@@ -402,6 +465,10 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             .containsExactly("baby", "custom_item", "record", "care_plan")
             .inOrder()
         assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(attachmentUuid)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second)
+            .isEqualTo(attachmentBytes)
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(47)
         assertThat(
@@ -425,6 +492,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             assertThat(fulfilledRecordClientUuid)
                 .isEqualTo("00000000-0000-4000-8000-000000000222")
         }
+        assertThat(rig.media.getByClientUuid(attachmentUuid)?.syncDirty).isFalse()
     }
 
     @Test
@@ -551,7 +619,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun carePlanContentDriftRetainsFrozenEnvelopeAndAttachmentRetainsSourcePath() = runTest {
+    fun carePlanContentDriftRetainsFrozenEnvelope() = runTest {
         val (session, rig, uuid) = seedDirtyCarePlan(
             pullCursor = 50,
             clientUuid = "plan-content-drift",
@@ -580,7 +648,10 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.conflictDetails.getFrozenMutation("care_plan", uuid)).isNotNull()
         assertThat(requireNotNull(rig.carePlans.getByClientUuid(uuid)).syncDirty).isTrue()
         assertThat(rig.backend.causalReconciledUnits).isEmpty()
+    }
 
+    @Test
+    fun carePlanAttachmentPreparesReceiptThenCommitsWithoutReconcile() = runTest {
         val mediaSession = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 51)
         val mediaRig = ReplicaEngineRig(mediaSession).also { it.backend.enableCausal = true }
         val babyId = mediaRig.babies.seed(
@@ -613,17 +684,14 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
         assertThat(mediaRig.backend.pullCount).isEqualTo(0)
         assertThat(mediaRig.preferences.current().pullCursor).isEqualTo(51)
-        val reconciled = mediaRig.backend.causalReconciledUnits.single().single()
-        assertThat(reconciled.entityType).isEqualTo("care_plan")
-        assertThat(reconciled.media.map { it.mediaUuid })
-            .containsExactly("00000000-0000-4000-8000-000000000251")
-        assertThat(reconciled.media.single().role).isEqualTo("plan")
+        assertThat(mediaRig.backend.causalReconciledUnits).isEmpty()
         val committed = mediaRig.backend.causalCommittedUnits.single().single()
         assertThat(committed.entityType).isEqualTo("care_plan")
-        assertThat(committed.media).isEqualTo(reconciled.media)
+        assertThat(committed.media.map { it.mediaUuid })
+            .containsExactly("00000000-0000-4000-8000-000000000251")
+        assertThat(committed.media.single().role).isEqualTo("plan")
         assertThat(mediaRig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly(
-                "causal_reconcile:1",
                 "causal_media_preimage:00000000-0000-4000-8000-000000000251",
                 "causal_commit:1",
             )
