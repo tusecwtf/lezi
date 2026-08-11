@@ -119,8 +119,9 @@ private class AuthorityCasMismatchException : IllegalStateException()
  *
  * [SyncTrigger.LocalWrite] declares [SyncPlan.pull]=false. That no-pull plan is applied only
  * when [SyncBackend.supportsCausalWire] is true: freeze current dirty atomic roots and settle
- * via the same causal reconcile→commit (or legacy fulfillment) seam without incremental pull
- * or pull-cursor advance. Without causal wire capability, mutable roots fail closed after
+ * through each root's causal settlement seam without incremental pull or pull-cursor
+ * advance. H10 no-media Records commit first; roots awaiting their migration ticket keep
+ * the source reconcile path. Without causal wire capability, mutable roots fail closed after
  * the safety pull; only immutable FulfillmentCandidate evidence retains the historical path.
  * Authenticated [SyncBackend.members] + self-membership
  * convergence remains a deliberate LocalWrite precondition (roster, not pull cursor).
@@ -296,7 +297,7 @@ internal class ReplicaSyncEngine(
         var candidates = initialCandidates
         for (pass in 0 until MAX_AUTHORITY_SETTLEMENT_PASSES) {
             // Causal roots (baby/record/care_plan/custom_item/wake + media manifests)
-            // settle via reconcile/commit with exact mutation CAS — not LWW updatedAt.
+            // settle via the per-root causal path with exact mutation CAS — not LWW updatedAt.
             val causalSlice = candidates.filter {
                 it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
             }

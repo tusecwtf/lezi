@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
+import com.lezi.babylog.core.database.causal.RecordCommitFirstSettlement
 import com.lezi.babylog.core.database.causal.toAppliedColumns
 import kotlinx.coroutines.flow.Flow
 
@@ -680,6 +681,117 @@ interface RecordDao {
         )
         update(written)
         return written
+    }
+
+    /**
+     * Assigns the identity for a newly persisted commit-first envelope.
+     * The caller owns the surrounding Room transaction that also persists the
+     * immutable envelope; [contentEpoch] is the optimistic fact CAS.
+     */
+    @Transaction
+    suspend fun freezeCommitFirstEpoch(
+        clientUuid: String,
+        contentEpoch: Long,
+        newMutationId: String,
+    ): RecordEntity? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        if (!current.syncDirty || current.updatedAt != contentEpoch) return null
+        val written = current.copy(mutationId = newMutationId)
+        update(written)
+        return written
+    }
+
+    /**
+     * Settles an accepted/merged frozen envelope without overwriting a newer
+     * local fact epoch. A superseding edit remains dirty and drops only the old
+     * mutation identity so the next freeze mints a new envelope.
+     */
+    @Transaction
+    suspend fun settleCommitFirstAcceptedOrMerged(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        newBaseVersion: String,
+    ): RecordCommitFirstSettlement? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        if (current.updatedAt == expectedContentEpoch) {
+            if (current.mutationId != expectedMutationId) return null
+            val settled = com.lezi.babylog.core.database.causal.acknowledgeAcceptedOrMerged(
+                current = current.toCausalMutationState(),
+                expectedMutationId = expectedMutationId,
+                expectedContentEpoch = expectedContentEpoch,
+                newBaseVersion = newBaseVersion,
+            ) ?: return null
+            val cols = settled.toAppliedColumns()
+            update(
+                current.copy(
+                    baseVersion = cols.baseVersion,
+                    mutationId = cols.mutationId,
+                    syncDirty = cols.syncDirty,
+                    openConflictId = cols.openConflictId,
+                    localBranchVersionId = cols.localBranchVersionId,
+                    familyPublishedUpdatedAt = expectedContentEpoch,
+                ),
+            )
+            return RecordCommitFirstSettlement.CurrentEpoch
+        }
+        if (!current.syncDirty || current.updatedAt < expectedContentEpoch) return null
+        if (current.mutationId != null && current.mutationId != expectedMutationId) return null
+        update(
+            current.copy(
+                baseVersion = newBaseVersion,
+                mutationId = null,
+                familyPublishedUpdatedAt = expectedContentEpoch,
+            ),
+        )
+        return RecordCommitFirstSettlement.SupersededEpoch
+    }
+
+    /** Same CAS policy as [settleCommitFirstAcceptedOrMerged] for a durable branch. */
+    @Transaction
+    suspend fun settleCommitFirstBranched(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        conflictId: String,
+        branchVersionId: String,
+        stableBaseVersion: String,
+    ): RecordCommitFirstSettlement? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        if (current.updatedAt == expectedContentEpoch) {
+            if (current.mutationId != expectedMutationId) return null
+            val settled = com.lezi.babylog.core.database.causal.acknowledgeBranched(
+                current = current.toCausalMutationState(),
+                expectedMutationId = expectedMutationId,
+                expectedContentEpoch = expectedContentEpoch,
+                conflictId = conflictId,
+                branchVersionId = branchVersionId,
+                stableBaseVersion = stableBaseVersion,
+            ) ?: return null
+            val cols = settled.toAppliedColumns()
+            update(
+                current.copy(
+                    baseVersion = cols.baseVersion,
+                    mutationId = cols.mutationId,
+                    syncDirty = cols.syncDirty,
+                    openConflictId = cols.openConflictId,
+                    localBranchVersionId = cols.localBranchVersionId,
+                ),
+            )
+            return RecordCommitFirstSettlement.CurrentEpoch
+        }
+        if (!current.syncDirty || current.updatedAt < expectedContentEpoch) return null
+        if (current.mutationId != null && current.mutationId != expectedMutationId) return null
+        update(
+            current.copy(
+                baseVersion = stableBaseVersion,
+                mutationId = null,
+                syncDirty = true,
+                openConflictId = conflictId,
+                localBranchVersionId = branchVersionId,
+            ),
+        )
+        return RecordCommitFirstSettlement.SupersededEpoch
     }
 
     /** Exact CAS accepted/merged ack for the frozen mutation epoch. */

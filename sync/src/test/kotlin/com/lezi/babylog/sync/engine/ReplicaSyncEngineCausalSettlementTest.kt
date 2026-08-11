@@ -1,17 +1,19 @@
 package com.lezi.babylog.sync.engine
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
-import com.lezi.babylog.sync.backend.CausalReconcileStatus
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.PullConflictSummary
 import com.lezi.babylog.sync.backend.PullResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.SyncSession
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -19,13 +21,13 @@ import org.junit.runners.Parameterized
 
 /**
  * Public seam: [ReplicaSyncEngine.synchronize] with [RecordingSyncBackend] causal
- * reconcile/commit — freeze, proof fail-closed, accepted/merged/branched CAS,
+ * commit-first/source reconcile — freeze, proof fail-closed, accepted/merged/branched CAS,
  * dirty pull protection, generation recovery.
  */
 class ReplicaSyncEngineCausalSettlementTest {
 
     @Test
-    fun causalSettlementDrainsWireBoundedBatches() = runTest {
+    fun recordCommitFirstDrainsWireBoundedBatchesWithoutReconcile() = runTest {
         for (rootCount in listOf(1, 64, 65, 129)) {
             val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
             val rig = ReplicaEngineRig(
@@ -54,76 +56,22 @@ class ReplicaSyncEngineCausalSettlementTest {
                     ),
                 )
             }
-            rig.backend.onCausalReconcile = { units ->
-                require(units.size in 1..64) { "wire batch exceeded 64 roots" }
-            }
             rig.backend.onCausalCommit = { units ->
                 require(units.size in 1..64) { "wire batch exceeded 64 roots" }
-                val reconcileBatch = rig.backend.causalReconciledUnits[
-                    rig.backend.causalCommittedUnits.lastIndex
-                ]
-                assertThat(units.map { it.mutationId })
-                    .containsExactlyElementsIn(reconcileBatch.map { it.mutationId })
-                    .inOrder()
             }
 
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-            assertThat(rig.backend.causalReconciledUnits.map(List<*>::size))
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            assertThat(rig.backend.causalCommittedUnits.map(List<*>::size))
                 .containsExactlyElementsIn(
                     (0 until rootCount step 64).map { start ->
                         minOf(64, rootCount - start)
                     },
                 )
                 .inOrder()
-            assertThat(rig.backend.causalCommittedUnits.map(List<*>::size))
-                .containsExactlyElementsIn(rig.backend.causalReconciledUnits.map(List<*>::size))
-                .inOrder()
             assertThat(rig.records.listPendingSync()).isEmpty()
         }
-    }
-
-    @Test
-    fun laterCausalBatchFailureRetainsOnlyUnprovenRootsPending() = runTest {
-        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(
-            session = session,
-            allowHistoricalMutableRootEvidence = false,
-        ).also { it.backend.enableCausal = true }
-        val babyId = rig.babies.seed(
-            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
-        )
-        repeat(65) { index ->
-            rig.records.seed(
-                RecordEntity(
-                    clientUuid = "record-partial-$index",
-                    babyId = babyId,
-                    type = "formula",
-                    timestamp = index.toLong(),
-                    payloadJson = """{"amount_ml":60}""",
-                    schemaVersion = 2,
-                    updatedAt = index + 1L,
-                    syncDirty = true,
-                    baseVersion = "v$index",
-                ),
-            )
-        }
-        var reconcileBatch = 0
-        rig.backend.onCausalReconcile = {
-            reconcileBatch += 1
-            if (reconcileBatch == 2) throw java.io.IOException("second batch unavailable")
-        }
-
-        assertThat(
-            runCatching {
-                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-            }.exceptionOrNull(),
-        ).isInstanceOf(java.io.IOException::class.java)
-
-        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
-        assertThat(rig.backend.causalCommittedUnits.single()).hasSize(64)
-        assertThat(rig.records.listPendingSync().map(RecordEntity::clientUuid))
-            .containsExactly("record-partial-64")
     }
 
     @Test
@@ -163,9 +111,7 @@ class ReplicaSyncEngineCausalSettlementTest {
             }.exceptionOrNull(),
         ).isInstanceOf(java.io.IOException::class.java)
 
-        assertThat(rig.backend.causalReconciledUnits.map(List<*>::size))
-            .containsExactly(64, 1)
-            .inOrder()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits.map(List<*>::size))
             .containsExactly(64, 1)
             .inOrder()
@@ -317,14 +263,17 @@ class ReplicaSyncEngineCausalSettlementTest {
                     baseVersion = "v0",
                 ),
             )
-            rig.backend.onCausalReconcile = { units ->
+            val sentinelMediaUuid = seedProofCollateralMedia(rig, babyId, "hash-$index")
+            var frozenState: DirectProofDurableState? = null
+            rig.backend.onCausalCommit = { units ->
                 val unit = units.single()
-                rig.backend.nextCausalReconcile = CausalBatchResult(
+                frozenState = directProofDurableState(rig, listOf(uuid), sentinelMediaUuid)
+                rig.backend.nextCausalCommit = CausalBatchResult(
                     generation = session.pullGeneration,
                     cursor = session.pullCursor,
                     results = listOf(
                         CausalUnitResult(
-                            status = CausalReconcileStatus.CONFIRMED,
+                            status = CausalCommitStatus.ACCEPTED,
                             mutationId = unit.mutationId,
                             requestHash = corrupt(causalMutationContentHash(unit)),
                             generation = session.pullGeneration,
@@ -335,17 +284,16 @@ class ReplicaSyncEngineCausalSettlementTest {
                     ),
                 )
             }
-            rig.backend.pullFailures += java.io.IOException("stop authority recovery")
 
-            assertThat(
-                runCatching {
-                    rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-                }.exceptionOrNull(),
-            ).isNotNull()
+            val failure = runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(IllegalStateException::class.java)
 
-            val row = requireNotNull(rig.records.getByClientUuid(uuid))
-            assertThat(row.syncDirty).isTrue()
-            assertThat(row.baseVersion).isEqualTo("v0")
+            assertThat(directProofDurableState(rig, listOf(uuid), sentinelMediaUuid))
+                .isEqualTo(requireNotNull(frozenState))
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
         }
     }
 
@@ -374,13 +322,17 @@ class ReplicaSyncEngineCausalSettlementTest {
                 ),
             )
         }
-        rig.backend.onCausalReconcile = { units ->
-            rig.backend.nextCausalReconcile = CausalBatchResult(
+        val recordUuids = listOf("record-order-0", "record-order-1")
+        val sentinelMediaUuid = seedProofCollateralMedia(rig, babyId, "order")
+        var frozenState: DirectProofDurableState? = null
+        rig.backend.onCausalCommit = { units ->
+            frozenState = directProofDurableState(rig, recordUuids, sentinelMediaUuid)
+            rig.backend.nextCausalCommit = CausalBatchResult(
                 generation = session.pullGeneration,
                 cursor = session.pullCursor,
                 results = units.reversed().map { unit ->
                     CausalUnitResult(
-                        status = CausalReconcileStatus.CONFIRMED,
+                        status = CausalCommitStatus.ACCEPTED,
                         mutationId = unit.mutationId,
                         requestHash = causalMutationContentHash(unit),
                         generation = session.pullGeneration,
@@ -391,14 +343,15 @@ class ReplicaSyncEngineCausalSettlementTest {
                 },
             )
         }
-        rig.backend.pullFailures += java.io.IOException("stop authority recovery")
 
-        assertThat(
-            runCatching {
-                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-            }.exceptionOrNull(),
-        ).isNotNull()
-        assertThat(rig.records.listPendingSync()).hasSize(2)
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(directProofDurableState(rig, recordUuids, sentinelMediaUuid))
+            .isEqualTo(requireNotNull(frozenState))
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
     }
 
     @Test
@@ -436,14 +389,17 @@ class ReplicaSyncEngineCausalSettlementTest {
                     baseVersion = "v0",
                 ),
             )
-            rig.backend.onCausalReconcile = { units ->
+            val sentinelMediaUuid = seedProofCollateralMedia(rig, babyId, "projection-$index")
+            var frozenState: DirectProofDurableState? = null
+            rig.backend.onCausalCommit = { units ->
                 val unit = units.single()
-                rig.backend.nextCausalReconcile = CausalBatchResult(
+                frozenState = directProofDurableState(rig, listOf(uuid), sentinelMediaUuid)
+                rig.backend.nextCausalCommit = CausalBatchResult(
                     generation = session.pullGeneration,
                     cursor = session.pullCursor,
                     results = listOf(
                         CausalUnitResult(
-                            status = CausalReconcileStatus.CONFIRMED,
+                            status = CausalCommitStatus.ACCEPTED,
                             mutationId = unit.mutationId,
                             requestHash = causalMutationContentHash(unit),
                             generation = session.pullGeneration,
@@ -456,14 +412,15 @@ class ReplicaSyncEngineCausalSettlementTest {
                     ),
                 )
             }
-            rig.backend.pullFailures += java.io.IOException("stop authority recovery")
 
-            assertThat(
-                runCatching {
-                    rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-                }.exceptionOrNull(),
-            ).isNotNull()
-            assertThat(rig.records.getByClientUuid(uuid)!!.syncDirty).isTrue()
+            val failure = runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+            assertThat(directProofDurableState(rig, listOf(uuid), sentinelMediaUuid))
+                .isEqualTo(requireNotNull(frozenState))
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
         }
     }
 
@@ -522,34 +479,34 @@ class ReplicaSyncEngineCausalSettlementTest {
         )
         for (status in listOf(CausalCommitStatus.ACCEPTED, CausalCommitStatus.MERGED)) {
             for (case in cases) {
-            val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-            val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
-            val babyId = rig.babies.seed(
-                localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
-            )
-            rig.records.seed(case.record(babyId))
-            rig.backend.onCausalCommit = { units ->
-                val unit = units.single()
-                rig.backend.nextCausalCommit = CausalBatchResult(
-                    generation = session.pullGeneration,
-                    cursor = session.pullCursor,
-                    results = listOf(
-                        CausalUnitResult(
-                            status = status,
-                            mutationId = unit.mutationId,
-                            requestHash = causalMutationContentHash(unit),
-                            generation = session.pullGeneration,
-                            stableVersionId = "v1",
-                            stableRootJson = case.clearStableField(unit.rootJson),
-                            stableMedia = unit.media,
-                        ),
-                    ),
+                val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+                val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+                val babyId = rig.babies.seed(
+                    localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
                 )
-            }
+                rig.records.seed(case.record(babyId))
+                rig.backend.onCausalCommit = { units ->
+                    val unit = units.single()
+                    rig.backend.nextCausalCommit = CausalBatchResult(
+                        generation = session.pullGeneration,
+                        cursor = session.pullCursor,
+                        results = listOf(
+                            CausalUnitResult(
+                                status = status,
+                                mutationId = unit.mutationId,
+                                requestHash = causalMutationContentHash(unit),
+                                generation = session.pullGeneration,
+                                stableVersionId = "v1",
+                                stableRootJson = case.clearStableField(unit.rootJson),
+                                stableMedia = unit.media,
+                            ),
+                        ),
+                    )
+                }
 
-            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-            case.assertCleared(requireNotNull(rig.records.getByClientUuid(case.uuid)))
+                case.assertCleared(requireNotNull(rig.records.getByClientUuid(case.uuid)))
             }
         }
     }
@@ -654,93 +611,6 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
-    fun freezeMutationIdStableAcrossRetryAndClearsOnAccepted() = runTest {
-        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(
-            session = session,
-            allowHistoricalMutableRootEvidence = false,
-        ).also { it.backend.enableCausal = true }
-        val babyId = rig.babies.seed(
-            localReplicaBaby().copy(syncDirty = false, familyAuthority = true, baseVersion = "v-baby"),
-        )
-        rig.records.seed(
-            RecordEntity(
-                clientUuid = "record-causal-1",
-                babyId = babyId,
-                type = "formula",
-                timestamp = 100,
-                payloadJson = """{"amount_ml":90}""",
-                schemaVersion = 2,
-                updatedAt = 100,
-                syncDirty = true,
-                baseVersion = "v-r0",
-            ),
-        )
-
-        var firstMutationId: String? = null
-        rig.backend.onCausalReconcile = { units ->
-            firstMutationId = units.single().mutationId
-            assertThat(units.single().baseVersion).isEqualTo("v-r0")
-            assertThat(units.single().entityType).isEqualTo("record")
-            assertThat(units.single().clientUuid).isEqualTo("record-causal-1")
-            assertThat(units.single().rootJson).contains("\"amount_ml\"")
-        }
-        rig.backend.onCausalCommit = { units ->
-            assertThat(units.single().mutationId).isEqualTo(firstMutationId)
-        }
-
-        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-
-        val settled = requireNotNull(rig.records.getByClientUuid("record-causal-1"))
-        assertThat(settled.syncDirty).isFalse()
-        assertThat(settled.mutationId).isNull()
-        assertThat(settled.baseVersion).isEqualTo("v-${firstMutationId!!.take(8)}")
-        assertThat(settled.openConflictId).isNull()
-        assertThat(rig.backend.causalReconciledUnits).hasSize(1)
-        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
-
-        // Retry same content epoch reuses mutation id (freeze) — no dirty work left.
-        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-        assertThat(rig.backend.causalReconciledUnits).hasSize(1)
-    }
-
-    @Test
-    fun confirmedExactMutationClearsPendingWithoutCommit() = runTest {
-        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(
-            session = session,
-            allowHistoricalMutableRootEvidence = false,
-        ).also { it.backend.enableCausal = true }
-        val babyId = rig.babies.seed(
-            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
-        )
-        rig.records.seed(
-            RecordEntity(
-                clientUuid = "record-confirmed",
-                babyId = babyId,
-                type = "formula",
-                timestamp = 100,
-                payloadJson = """{"amount_ml":60}""",
-                schemaVersion = 2,
-                updatedAt = 50,
-                syncDirty = true,
-                baseVersion = "v-stable",
-                mutationId = "mut-confirmed",
-            ),
-        )
-        rig.backend.causalReconcileConfirmed = true
-        // Default confirmed status with base_version as stable_version_id.
-
-        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-
-        val row = requireNotNull(rig.records.getByClientUuid("record-confirmed"))
-        assertThat(row.syncDirty).isFalse()
-        assertThat(row.mutationId).isNull()
-        assertThat(row.baseVersion).isEqualTo("v-stable")
-        assertThat(rig.backend.causalCommittedUnits).isEmpty()
-    }
-
-    @Test
     fun branchedReceiptBecomesUnresolvedConflictNotBlindResend() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
@@ -761,23 +631,6 @@ class ReplicaSyncEngineCausalSettlementTest {
                 baseVersion = "v-base",
             ),
         )
-        rig.backend.onCausalReconcile = { units ->
-            val unit = units.single()
-            rig.backend.nextCausalReconcile = CausalBatchResult(
-                generation = session.pullGeneration,
-                cursor = session.pullCursor,
-                results = listOf(
-                    CausalUnitResult(
-                        status = CausalReconcileStatus.CONFLICT_PREVIEW,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
-                        generation = session.pullGeneration,
-                        stableVersionId = "v-base",
-                        stableRootJson = unit.rootJson,
-                    ),
-                ),
-            )
-        }
         rig.backend.onCausalCommit = { units ->
             val unit = units.single()
             rig.backend.nextCausalCommit = CausalBatchResult(
@@ -842,28 +695,32 @@ class ReplicaSyncEngineCausalSettlementTest {
                 baseVersion = "v0",
             ),
         )
-        rig.backend.onCausalReconcile = {
-            rig.backend.nextCausalReconcile = CausalBatchResult(
+        val recordUuids = listOf("record-proof")
+        val sentinelMediaUuid = seedProofCollateralMedia(rig, babyId, "missing-key")
+        var frozenState: DirectProofDurableState? = null
+        rig.backend.onCausalCommit = {
+            frozenState = directProofDurableState(rig, recordUuids, sentinelMediaUuid)
+            rig.backend.nextCausalCommit = CausalBatchResult(
                 generation = session.pullGeneration,
                 cursor = session.pullCursor,
                 results = emptyList(),
             )
         }
 
-        try {
+        val failure = runCatching {
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-            error("expected fail closed")
-        } catch (_: Exception) {
-            // AuthorityProofException or require failure — both retain dirty.
-        }
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
 
-        val row = requireNotNull(rig.records.getByClientUuid("record-proof"))
-        assertThat(row.syncDirty).isTrue()
-        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(directProofDurableState(rig, recordUuids, sentinelMediaUuid))
+            .isEqualTo(requireNotNull(frozenState))
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
     }
 
     @Test
-    fun concurrentLocalEditAfterFreezeDoesNotApplyStaleAcceptedCas() = runTest {
+    fun concurrentLocalEditKeepsNewFactAndUsesOldTerminalAsNextBase() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -883,6 +740,7 @@ class ReplicaSyncEngineCausalSettlementTest {
                 baseVersion = "v0",
             ),
         )
+        var frozenMutationId: String? = null
         rig.backend.onCausalCommit = { units ->
             // User edits while commit is in flight.
             val current = requireNotNull(rig.records.getByClientUuid("record-cas-race"))
@@ -895,6 +753,7 @@ class ReplicaSyncEngineCausalSettlementTest {
                 ),
             )
             val unit = units.single()
+            frozenMutationId = unit.mutationId
             rig.backend.nextCausalCommit = CausalBatchResult(
                 generation = session.pullGeneration,
                 cursor = session.pullCursor,
@@ -904,7 +763,7 @@ class ReplicaSyncEngineCausalSettlementTest {
                         mutationId = unit.mutationId,
                         requestHash = causalMutationContentHash(unit),
                         generation = session.pullGeneration,
-                        stableVersionId = "v-stale",
+                        stableVersionId = "v-epoch-1",
                         stableRootJson = unit.rootJson,
                     ),
                 ),
@@ -917,7 +776,19 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(row.note).isEqualTo("epoch-2")
         assertThat(row.updatedAt).isEqualTo(200)
         assertThat(row.syncDirty).isTrue()
-        assertThat(row.baseVersion).isNotEqualTo("v-stale")
+        assertThat(row.mutationId).isNull()
+        assertThat(row.baseVersion).isEqualTo("v-epoch-1")
+
+        rig.backend.onCausalCommit = null
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val nextEnvelope = rig.backend.causalCommittedUnits.last().single()
+        assertThat(nextEnvelope.mutationId).isNotEqualTo(requireNotNull(frozenMutationId))
+        assertThat(nextEnvelope.baseVersion).isEqualTo("v-epoch-1")
+        assertThat(nextEnvelope.rootJson).contains("\"note\":\"epoch-2\"")
+        val settled = requireNotNull(rig.records.getByClientUuid("record-cas-race"))
+        assertThat(settled.note).isEqualTo("epoch-2")
+        assertThat(settled.syncDirty).isFalse()
     }
 
     @Test
@@ -970,14 +841,14 @@ class ReplicaSyncEngineCausalSettlementTest {
             hasMore = false,
         )
         // Reject settlement so pending stays; pull must still not clobber content.
-        rig.backend.onCausalReconcile = { units ->
+        rig.backend.onCausalCommit = { units ->
             val unit = units.single()
-            rig.backend.nextCausalReconcile = CausalBatchResult(
+            rig.backend.nextCausalCommit = CausalBatchResult(
                 generation = session.pullGeneration,
                 cursor = session.pullCursor,
                 results = listOf(
                     CausalUnitResult(
-                        status = CausalReconcileStatus.REJECTED,
+                        status = CausalCommitStatus.REJECTED,
                         mutationId = unit.mutationId,
                         requestHash = causalMutationContentHash(unit),
                         generation = session.pullGeneration,
@@ -1046,7 +917,7 @@ class ReplicaSyncEngineCausalSettlementTest {
             generation = session.pullGeneration,
             hasMore = false,
         )
-        rig.backend.onCausalReconcile = { units ->
+        rig.backend.onCausalCommit = { units ->
             val mutation = units.single()
             assertThat(mutation.baseVersion).isEqualTo("v-upgrade-baseline")
             assertThat(mutation.rootJson).contains("离线保留")
@@ -1123,7 +994,7 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
-    fun generationDriftOnCausalReconcileTriggersFullResyncPath() = runTest {
+    fun generationDriftOnRecordCommitTriggersFullResyncPath() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -1143,16 +1014,16 @@ class ReplicaSyncEngineCausalSettlementTest {
             ),
         )
         var driftedOnce = false
-        rig.backend.onCausalReconcile = { units ->
+        rig.backend.onCausalCommit = { units ->
             if (!driftedOnce) {
                 driftedOnce = true
                 val unit = units.single()
-                rig.backend.nextCausalReconcile = CausalBatchResult(
+                rig.backend.nextCausalCommit = CausalBatchResult(
                     generation = "other-generation",
                     cursor = session.pullCursor,
                     results = listOf(
                         CausalUnitResult(
-                            status = CausalReconcileStatus.PUBLISH,
+                            status = CausalCommitStatus.ACCEPTED,
                             mutationId = unit.mutationId,
                             requestHash = "h",
                             generation = "other-generation",
@@ -1173,8 +1044,20 @@ class ReplicaSyncEngineCausalSettlementTest {
         val row = requireNotNull(rig.records.getByClientUuid("record-gen"))
         assertThat(row.clientUuid).isEqualTo("record-gen")
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("other-generation")
-        // After recovery the engine re-settles; accepted commit may clear dirty.
-        assertThat(rig.backend.causalReconciledUnits.size).isAtLeast(2)
+        // Full recovery dirties the provider Baby, which intentionally remains on
+        // the source reconcile path until H11. The no-media Record still retries
+        // directly from its durable envelope and settles its terminal.
+        assertThat(rig.backend.pullCount).isAtLeast(1)
+        assertThat(rig.backend.causalReconciledUnits.flatten().map { it.entityType })
+            .containsExactly("baby")
+        val recordCommits = rig.backend.causalCommittedUnits.flatten()
+            .filter { it.entityType == "record" }
+        assertThat(recordCommits).hasSize(2)
+        assertThat(recordCommits.all { it.media.isEmpty() }).isTrue()
+        assertThat(row.syncDirty).isFalse()
+        assertThat(row.mutationId).isNull()
+        assertThat(row.baseVersion).isNotNull()
+        assertThat(rig.conflictDetails.getFrozenMutation("record", "record-gen")).isNull()
     }
 
     @Test
@@ -1253,25 +1136,6 @@ class ReplicaSyncEngineCausalSettlementTest {
                 baseVersion = "v-base",
             ),
         )
-        rig.backend.onCausalReconcile = { units ->
-            val unit = units.single()
-            rig.backend.nextCausalReconcile = CausalBatchResult(
-                generation = session.pullGeneration,
-                cursor = session.pullCursor,
-                results = listOf(
-                    CausalUnitResult(
-                        status = CausalReconcileStatus.CONFLICT_PREVIEW,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
-                        generation = session.pullGeneration,
-                        stableVersionId = "v-base",
-                        stableRootJson = unit.rootJson
-                            .replace("\"note\":\"local note\"", "\"note\":\"remote\"")
-                            .replace("\"updated_at\":200", "\"updated_at\":50"),
-                    ),
-                ),
-            )
-        }
         rig.backend.onCausalCommit = { units ->
             val unit = units.single()
             rig.backend.nextCausalCommit = CausalBatchResult(
@@ -1331,7 +1195,7 @@ class ReplicaSyncEngineCausalSettlementTest {
             ),
         )
         var frozenRoot: String? = null
-        rig.backend.onCausalReconcile = { units ->
+        rig.backend.onCausalCommit = { units ->
             frozenRoot = units.single().rootJson
         }
 
@@ -1432,6 +1296,51 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(causalMutationContentHash(unit))
             .isEqualTo("ff2cec4612265f208e3c3a06029fdd1e24c0d75a2081c89e8468812720e9a83a")
     }
+
+    private data class DirectProofDurableState(
+        val session: SyncSession,
+        val babies: List<BabyEntity>,
+        val records: List<RecordEntity>,
+        val collateralMedia: MediaAssetEntity?,
+        val envelopes: List<ConflictSnapshotCacheEntity?>,
+    )
+
+    private suspend fun seedProofCollateralMedia(
+        rig: ReplicaEngineRig,
+        babyId: Long,
+        suffix: String,
+    ): String {
+        val uuid = "proof-collateral-$suffix"
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = uuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "proof/$suffix.jpg",
+                mime = "image/jpeg",
+                createdAt = 1,
+                updatedAt = 1,
+                syncDirty = false,
+            ),
+        )
+        return uuid
+    }
+
+    private suspend fun directProofDurableState(
+        rig: ReplicaEngineRig,
+        recordUuids: List<String>,
+        collateralMediaUuid: String,
+    ): DirectProofDurableState = DirectProofDurableState(
+        session = rig.preferences.current(),
+        babies = rig.babies.listAllIncludingDeleted(),
+        records = recordUuids.map { uuid ->
+            requireNotNull(rig.records.getByClientUuid(uuid))
+        },
+        collateralMedia = rig.media.getByClientUuid(collateralMediaUuid),
+        envelopes = recordUuids.map { uuid ->
+            rig.conflictDetails.getFrozenMutation("record", uuid)
+        },
+    )
 }
 
 @RunWith(Parameterized::class)
@@ -1665,7 +1574,11 @@ class ReplicaSyncEngineCausalRootTypesTest(
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        assertThat(rig.backend.causalReconciledUnits).isNotEmpty()
+        if (entityType == "record") {
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        } else {
+            assertThat(rig.backend.causalReconciledUnits).isNotEmpty()
+        }
         assertThat(rig.backend.causalCommittedUnits).isNotEmpty()
         when (entityType) {
             "baby" -> {

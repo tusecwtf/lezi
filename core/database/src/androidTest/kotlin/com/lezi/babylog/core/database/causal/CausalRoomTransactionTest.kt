@@ -100,6 +100,114 @@ class CausalRoomTransactionTest {
     }
 
     @Test
+    fun recordEnvelopeFreezeAndSupersededSettlementAreAtomic() = runBlocking {
+        val records = database.recordDao()
+        val envelopes = database.conflictSnapshotCacheDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-commit-first",
+                babyId = 1,
+                type = "formula",
+                timestamp = 10,
+                note = "epoch-1",
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-base",
+            ),
+        )
+
+        RoomDatabaseTransactionRunner(database).run {
+            assertThat(
+                records.freezeCommitFirstEpoch(
+                    clientUuid = "record-commit-first",
+                    contentEpoch = 100,
+                    newMutationId = "00000000-0000-4000-8000-000000000010",
+                )?.mutationId,
+            ).isEqualTo("00000000-0000-4000-8000-000000000010")
+            envelopes.putFrozenMutation(
+                entityType = "record",
+                clientUuid = "record-commit-first",
+                canonicalEnvelopeJson = "{\"proof\":\"frozen\"}",
+                contentEpoch = 100,
+            )
+        }
+        assertThat(
+            envelopes.getFrozenMutation("record", "record-commit-first")?.snapshotJson,
+        ).isEqualTo("{\"proof\":\"frozen\"}")
+
+        val frozen = requireNotNull(records.getByClientUuid("record-commit-first"))
+        records.update(
+            frozen.copy(
+                note = "epoch-2",
+                updatedAt = 200,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+        RoomDatabaseTransactionRunner(database).run {
+            assertThat(
+                records.settleCommitFirstAcceptedOrMerged(
+                    clientUuid = "record-commit-first",
+                    expectedMutationId = "00000000-0000-4000-8000-000000000010",
+                    expectedContentEpoch = 100,
+                    newBaseVersion = "v-epoch-1",
+                ),
+            ).isEqualTo(RecordCommitFirstSettlement.SupersededEpoch)
+            envelopes.deleteFrozenMutation("record", "record-commit-first")
+        }
+
+        val pending = requireNotNull(records.getByClientUuid("record-commit-first"))
+        assertThat(pending.note).isEqualTo("epoch-2")
+        assertThat(pending.updatedAt).isEqualTo(200)
+        assertThat(pending.syncDirty).isTrue()
+        assertThat(pending.mutationId).isNull()
+        assertThat(pending.baseVersion).isEqualTo("v-epoch-1")
+        assertThat(envelopes.getFrozenMutation("record", "record-commit-first")).isNull()
+    }
+
+    @Test
+    fun recordEnvelopeFreezeRollsBackIdentityWhenCacheWriteFails() = runBlocking {
+        val records = database.recordDao()
+        val envelopes = database.conflictSnapshotCacheDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-freeze-rollback",
+                babyId = 1,
+                type = "formula",
+                timestamp = 10,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(
+            runCatching {
+                RoomDatabaseTransactionRunner(database).run {
+                    checkNotNull(
+                        records.freezeCommitFirstEpoch(
+                            clientUuid = "record-freeze-rollback",
+                            contentEpoch = 100,
+                            newMutationId = "00000000-0000-4000-8000-000000000011",
+                        ),
+                    )
+                    envelopes.putFrozenMutation(
+                        entityType = "record",
+                        clientUuid = "record-freeze-rollback",
+                        canonicalEnvelopeJson = "{\"proof\":\"never-visible\"}",
+                        contentEpoch = 100,
+                    )
+                    error("cache persistence failed")
+                }
+            }.exceptionOrNull(),
+        ).isNotNull()
+
+        assertThat(records.getByClientUuid("record-freeze-rollback")?.mutationId).isNull()
+        assertThat(
+            envelopes.getFrozenMutation("record", "record-freeze-rollback"),
+        ).isNull()
+    }
+
+    @Test
     fun allCausalRootDaosRejectStaleCapturedEpochWithoutDowngrade() = runBlocking {
         database.babyDao().upsert(
             BabyEntity(

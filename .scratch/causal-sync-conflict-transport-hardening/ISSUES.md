@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H09 and R12/R17/R18/R19 are implemented; H10 is the serial frontier
+Status: in-progress — H01–H10 and R12/R17/R18/R19 are implemented; H11 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -34,7 +34,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 07 | [`07-family-conflict-inbox`](./issues/07-family-conflict-inbox.md) | implemented (review/local gates pass; device interaction residual) | 06 |
 | 08 | [`08-conflict-page-persistence`](./issues/08-conflict-page-persistence.md) | implemented (review/local gates pass; device Room residual) | 05, R18 |
 | 09 | [`09-conflict-freshness-refresh-ui`](./issues/09-conflict-freshness-refresh-ui.md) | implemented (review/local gates pass; device interaction residual) | 06, 07, 08, R19 |
-| 10 | [`10-record-frozen-envelope-commit-first`](./issues/10-record-frozen-envelope-commit-first.md) | ready-for-agent | 05 |
+| 10 | [`10-record-frozen-envelope-commit-first`](./issues/10-record-frozen-envelope-commit-first.md) | implemented (review/final gates pass; device Room residual) | 05 |
 | 11 | [`11-provider-roots-commit-first`](./issues/11-provider-roots-commit-first.md) | ready-for-agent | 10 |
 | 12 | [`12-careplan-no-media-commit-first`](./issues/12-careplan-no-media-commit-first.md) | ready-for-agent | 11 |
 | 13 | [`13-wake-observation-commit-first`](./issues/13-wake-observation-commit-first.md) | ready-for-agent | 11 |
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H09 is implemented. H10 is the next executable DAG frontier; H10–H43 remain open and follow
+H10 is implemented. H11 is the next executable DAG frontier; H11–H43 remain open and follow
 the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.

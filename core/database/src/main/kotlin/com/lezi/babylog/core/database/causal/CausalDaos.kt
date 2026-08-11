@@ -304,12 +304,50 @@ interface ConflictSnapshotCacheDao {
 
     @Query("DELETE FROM conflict_detail_cache")
     suspend fun deleteAll()
+
+    /**
+     * Durable pre-H27 storage for one immutable commit-first mutation envelope.
+     *
+     * Room 28 owns the final dedicated envelope table. Until that adjacent
+     * migration lands, a private non-UUID row in the existing cache table keeps
+     * the envelope in the same Room transaction as its product fact. Inbox and
+     * conflict joins only use canonical conflict UUIDs, so this row is invisible
+     * outside the transport module.
+     */
+    suspend fun getFrozenMutation(
+        entityType: String,
+        clientUuid: String,
+    ): ConflictSnapshotCacheEntity? = get(frozenMutationCacheKey(entityType, clientUuid))
+
+    suspend fun putFrozenMutation(
+        entityType: String,
+        clientUuid: String,
+        canonicalEnvelopeJson: String,
+        contentEpoch: Long,
+    ) {
+        upsert(
+            ConflictSnapshotCacheEntity(
+                conflictId = frozenMutationCacheKey(entityType, clientUuid),
+                snapshotJson = canonicalEnvelopeJson,
+                cachedAt = contentEpoch,
+            ),
+        )
+    }
+
+    suspend fun deleteFrozenMutation(entityType: String, clientUuid: String) {
+        delete(frozenMutationCacheKey(entityType, clientUuid))
+    }
 }
 
 const val CONFLICT_SNAPSHOT_STAGE_KEY_PREFIX = "conflict-page-stage:"
 
 fun conflictSnapshotStageCacheKey(conflictId: String): String =
     "$CONFLICT_SNAPSHOT_STAGE_KEY_PREFIX$conflictId"
+
+const val FROZEN_MUTATION_KEY_PREFIX = "frozen-mutation:"
+
+fun frozenMutationCacheKey(entityType: String, clientUuid: String): String =
+    "$FROZEN_MUTATION_KEY_PREFIX$entityType:$clientUuid"
 
 @Dao
 interface SuspectedDuplicateGroupDao {

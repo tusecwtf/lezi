@@ -19,7 +19,7 @@ import org.junit.Test
 class RealSyncPortLocalWriteNoPullTest {
 
     @Test
-    fun localWriteCausalOrderIsReconcileThenCommitWithNoPullAndUnchangedCursor() = runTest {
+    fun localWriteNoMediaRecordCommitsWithoutReconcilePullOrCursorAdvance() = runTest {
         val session = joinedSession("family-a").copy(pullCursor = 12)
         val rig = SyncRig(
             session = session,
@@ -62,13 +62,19 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("pull:") }).isEmpty()
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
-            .containsExactly("causal_reconcile:1", "causal_commit:1")
-            .inOrder()
+            .containsExactly("causal_commit:1")
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
+        assertThat(rig.backend.causalCommittedUnits.single().single().media).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(12)
         assertThat(rig.records.getByClientUuid("record-peer-should-wait")).isNull()
         val settled = requireNotNull(rig.records.getByClientUuid("record-facade-fast"))
         assertThat(settled.syncDirty).isFalse()
         assertThat(settled.mutationId).isNull()
+        assertThat(settled.baseVersion).isNotNull()
+        assertThat(
+            rig.conflictDetails.getFrozenMutation("record", "record-facade-fast"),
+        ).isNull()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 

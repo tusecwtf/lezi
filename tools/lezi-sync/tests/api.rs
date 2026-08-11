@@ -15214,31 +15214,33 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     assert_eq!(status, StatusCode::OK, "{baby_body}");
     assert_eq!(baby_body["results"][0]["status"], "accepted");
 
+    let record_mutation_id = Uuid::new_v4().to_string();
+    let record_unit = json!({
+        "mutation_id": record_mutation_id,
+        "base_version": null,
+        "entity_type": "record",
+        "client_uuid": record_id,
+        "root": {
+            "baby_client_uuid": baby_id,
+            "type": "formula",
+            "custom_item_client_uuid": null,
+            "timestamp": 100,
+            "end_timestamp": null,
+            "note": "a",
+            "payload_json": {"amount_ml": 100},
+            "schema_version": 2,
+            "updated_at": 20
+        },
+        "media": [],
+        "deleted": false
+    });
     let (status, rec_body) = json_request(
         &rig.app,
         Method::POST,
         "/v1/causal/commit",
         Some(token),
         json!({
-            "units": [{
-                "mutation_id": Uuid::new_v4().to_string(),
-                "base_version": null,
-                "entity_type": "record",
-                "client_uuid": record_id,
-                "root": {
-                    "baby_client_uuid": baby_id,
-                    "type": "formula",
-                    "custom_item_client_uuid": null,
-                    "timestamp": 100,
-                    "end_timestamp": null,
-                    "note": "a",
-                    "payload_json": {"amount_ml": 100},
-                    "schema_version": 2,
-                    "updated_at": 20
-                },
-                "media": [],
-                "deleted": false
-            }]
+            "units": [record_unit.clone()]
         }),
     )
     .await;
@@ -15248,6 +15250,38 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
         .as_str()
         .unwrap()
         .to_owned();
+
+    // Lost HTTP response retry: exact frozen no-media envelope replays the same
+    // terminal version; mutation-id reuse with payload drift fails closed.
+    let (status, replay) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({"units": [record_unit.clone()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "accepted");
+    assert_eq!(replay["results"][0]["stable_version_id"], v1);
+    assert_eq!(
+        replay["results"][0]["request_hash"],
+        rec_body["results"][0]["request_hash"]
+    );
+
+    let mut drift = record_unit;
+    drift["root"]["note"] = json!("payload-drift");
+    let (status, rejected) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({"units": [drift]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "content_drift");
 
     let generation = created["generation"].as_str().unwrap_or("generation-a");
     let (status, pull) = get_json(

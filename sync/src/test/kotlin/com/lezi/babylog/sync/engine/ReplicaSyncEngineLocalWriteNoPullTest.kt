@@ -19,8 +19,8 @@ import org.junit.Test
 
 /**
  * Public seam: [ReplicaSyncEngine.synchronize] + [SyncPlan.forTrigger] for LocalWrite
- * no-pull plan under causal wire — freeze dirty roots → causal reconcile/(media preimage)/
- * commit, never pull, never advance the incremental pull cursor; full cycles still pull.
+ * no-pull plan under causal wire — freeze eligible dirty roots → causal commit,
+ * never pull, never advance the incremental pull cursor; full cycles still pull.
  * Without causal capability LocalWrite retains pull (no unsafe LWW no-pull).
  */
 class ReplicaSyncEngineLocalWriteNoPullTest {
@@ -34,7 +34,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun localWriteCausalOrderIsReconcileThenCommitWithNoPullAndUnchangedCursor() = runTest {
+    fun localWriteNoMediaRecordCommitsWithoutReconcilePullOrCursorAdvance() = runTest {
         val (session, rig, recordUuid) = seedDirtyRecord(
             pullCursor = 7,
             clientUuid = "record-localwrite-fast",
@@ -59,14 +59,13 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("pull:") }).isEmpty()
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
-            .containsExactly("causal_reconcile:1", "causal_commit:1")
-            .inOrder()
+            .containsExactly("causal_commit:1")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(7)
         assertThat(rig.records.getByClientUuid("record-peer-unrelated")).isNull()
         val settled = requireNotNull(rig.records.getByClientUuid(recordUuid))
         assertThat(settled.syncDirty).isFalse()
         assertThat(settled.mutationId).isNull()
-        assertThat(rig.backend.causalReconciledUnits).hasSize(1)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).hasSize(1)
     }
 
@@ -142,25 +141,6 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 clientUuid = "record-${case.name}",
                 note = "local-${case.name}",
             )
-            if (case.expectConflict) {
-                rig.backend.onCausalReconcile = { units ->
-                    val unit = units.single()
-                    rig.backend.nextCausalReconcile = CausalBatchResult(
-                        generation = session.pullGeneration,
-                        cursor = 999,
-                        results = listOf(
-                            CausalUnitResult(
-                                status = CausalReconcileStatus.CONFLICT_PREVIEW,
-                                mutationId = unit.mutationId,
-                                requestHash = causalMutationContentHash(unit),
-                                generation = session.pullGeneration,
-                                stableVersionId = "v-base",
-                                stableRootJson = unit.rootJson,
-                            ),
-                        ),
-                    )
-                }
-            }
             rig.backend.onCausalCommit = { units ->
                 val unit = units.single()
                 rig.backend.nextCausalCommit = CausalBatchResult(
@@ -247,36 +227,51 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun concurrentLocalEditAfterLocalWriteFreezeEntersNextCycle() = runTest {
+    fun lostCommitResponseReplaysFrozenEnvelopeBeforeFreezingNewerRecordEpoch() = runTest {
         val (session, rig, uuid) = seedDirtyRecord(
-            pullCursor = 2,
-            clientUuid = "record-epoch",
+            pullCursor = 12,
+            clientUuid = "record-durable-replay",
             note = "epoch-1",
         )
-        var frozenMutationId: String? = null
+        var firstEnvelope: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
         rig.backend.onCausalCommit = { units ->
-            frozenMutationId = units.single().mutationId
-            val current = requireNotNull(rig.records.getByClientUuid(uuid))
-            rig.records.update(
-                current.copy(
-                    note = "epoch-2",
-                    updatedAt = 200,
-                    syncDirty = true,
-                    mutationId = null,
-                ),
-            )
-            val unit = units.single()
+            firstEnvelope = units.single()
+            throw java.io.IOException("response lost after durable commit")
+        }
+
+        assertThat(
+            runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        val frozen = requireNotNull(firstEnvelope)
+        assertThat(
+            rig.conflictDetails.getFrozenMutation("record", uuid),
+        ).isNotNull()
+
+        val beforeEdit = requireNotNull(rig.records.getByClientUuid(uuid))
+        rig.records.update(
+            beforeEdit.copy(
+                note = "epoch-2",
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.onCausalCommit = { units ->
+            val replay = units.single()
+            assertThat(replay).isEqualTo(frozen)
             rig.backend.nextCausalCommit = CausalBatchResult(
                 generation = session.pullGeneration,
-                cursor = session.pullCursor,
+                cursor = 999,
                 results = listOf(
                     CausalUnitResult(
                         status = CausalCommitStatus.ACCEPTED,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
+                        mutationId = replay.mutationId,
+                        requestHash = causalMutationContentHash(replay),
                         generation = session.pullGeneration,
-                        stableVersionId = "v-stale",
-                        stableRootJson = unit.rootJson,
+                        stableVersionId = "v-epoch-1",
+                        stableRootJson = replay.rootJson,
+                        stableMedia = replay.media,
                     ),
                 ),
             )
@@ -284,28 +279,71 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        assertThat(rig.backend.pullCount).isEqualTo(0)
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
-        val mid = requireNotNull(rig.records.getByClientUuid(uuid))
-        assertThat(mid.note).isEqualTo("epoch-2")
-        assertThat(mid.syncDirty).isTrue()
-        assertThat(mid.baseVersion).isNotEqualTo("v-stale")
+        val afterReplay = requireNotNull(rig.records.getByClientUuid(uuid))
+        assertThat(afterReplay.note).isEqualTo("epoch-2")
+        assertThat(afterReplay.updatedAt).isEqualTo(200)
+        assertThat(afterReplay.syncDirty).isTrue()
+        assertThat(afterReplay.mutationId).isNull()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(12)
+        assertThat(rig.conflictDetails.getFrozenMutation("record", uuid)).isNull()
 
         rig.backend.onCausalCommit = null
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
-        val second = rig.backend.causalCommittedUnits.last().single()
-        assertThat(second.mutationId).isNotEqualTo(frozenMutationId)
-        val done = requireNotNull(rig.records.getByClientUuid(uuid))
-        assertThat(done.note).isEqualTo("epoch-2")
-        assertThat(done.syncDirty).isFalse()
-        assertThat(rig.backend.pullCount).isEqualTo(0)
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
+
+        val nextEnvelope = rig.backend.causalCommittedUnits.last().single()
+        assertThat(nextEnvelope.mutationId).isNotEqualTo(frozen.mutationId)
+        assertThat(nextEnvelope.baseVersion).isEqualTo("v-epoch-1")
+        assertThat(nextEnvelope.rootJson).contains("\"note\":\"epoch-2\"")
+        val settled = requireNotNull(rig.records.getByClientUuid(uuid))
+        assertThat(settled.syncDirty).isFalse()
+        assertThat(settled.note).isEqualTo("epoch-2")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(12)
     }
 
     @Test
-    fun localWriteCoBatchedSleepAndWakeResettlesWakeAfterSleepAccepted() = runTest {
-        // First reconcile rejects wake (missing_sleep_reference) while sleep publishes;
-        // residual replan in the same LocalWrite cycle must accept wake without a second trigger.
+    fun contentDriftRejectRetainsFrozenRecordEnvelopeForExactRetry() = runTest {
+        val (session, rig, uuid) = seedDirtyRecord(
+            pullCursor = 13,
+            clientUuid = "record-content-drift",
+        )
+        var rejected: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            rejected = unit
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.REJECTED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        code = "content_drift",
+                        reason = "mutation id reused with different canonical content",
+                    ),
+                ),
+            )
+        }
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().contains("content_drift")
+
+        val row = requireNotNull(rig.records.getByClientUuid(uuid))
+        assertThat(row.syncDirty).isTrue()
+        assertThat(row.mutationId).isEqualTo(requireNotNull(rejected).mutationId)
+        assertThat(rig.conflictDetails.getFrozenMutation("record", uuid)).isNotNull()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(13)
+    }
+
+    @Test
+    fun localWriteCoBatchedSleepCommitsBeforeWakeSourceReconcile() = runTest {
+        // H10 owns only the no-media Record. The dependent Wake stays on the
+        // source reconcile path, but sees the accepted sleep in the same cycle.
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 6)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -344,27 +382,15 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             ),
         )
 
-        var reconcilePass = 0
         rig.backend.onCausalReconcile = { units ->
-            reconcilePass += 1
+            assertThat(units.map { it.entityType }).containsExactly("wake_observation")
             val results = units.map { unit ->
-                when {
-                    unit.entityType == "wake_observation" && reconcilePass == 1 ->
-                        CausalUnitResult(
-                            status = CausalReconcileStatus.REJECTED,
-                            mutationId = unit.mutationId,
-                            requestHash = causalMutationContentHash(unit),
-                            generation = session.pullGeneration,
-                            code = "missing_sleep_reference",
-                            reason = "sleep not yet stable",
-                        )
-                    else -> CausalUnitResult(
-                        status = CausalReconcileStatus.PUBLISH,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
-                        generation = session.pullGeneration,
-                    )
-                }
+                CausalUnitResult(
+                    status = CausalReconcileStatus.PUBLISH,
+                    mutationId = unit.mutationId,
+                    requestHash = causalMutationContentHash(unit),
+                    generation = session.pullGeneration,
+                )
             }
             rig.backend.nextCausalReconcile = CausalBatchResult(
                 generation = session.pullGeneration,
@@ -377,10 +403,11 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(6)
-        // Two settle passes: sleep+wake then residual wake.
-        assertThat(reconcilePass).isEqualTo(2)
-        assertThat(rig.backend.causalReconciledUnits).hasSize(2)
-        assertThat(rig.backend.causalCommittedUnits).isNotEmpty()
+        assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
+            .containsExactly("causal_commit:1", "causal_reconcile:1", "causal_commit:1")
+            .inOrder()
+        assertThat(rig.backend.causalReconciledUnits).hasSize(1)
+        assertThat(rig.backend.causalCommittedUnits).hasSize(2)
         val sleep = requireNotNull(rig.records.getByClientUuid(sleepUuid))
         val wake = requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))
         assertThat(sleep.syncDirty).isFalse()
@@ -415,7 +442,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             pullCursor = 11,
             clientUuid = "record-unreachable",
         )
-        rig.backend.onCausalReconcile = {
+        rig.backend.onCausalCommit = {
             throw java.io.IOException("endpoint unreachable")
         }
 
@@ -428,7 +455,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(11)
         val row = requireNotNull(rig.records.getByClientUuid(uuid))
         assertThat(row.syncDirty).isTrue()
-        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
     }
 
     @Test
@@ -438,13 +465,13 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             clientUuid = "record-cancel",
         )
         val gate = CompletableDeferred<Unit>()
-        rig.backend.onCausalReconcile = {
+        rig.backend.onCausalCommit = {
             gate.await()
         }
         val job = async {
             rig.engine.synchronize(session, SyncTrigger.LocalWrite)
         }
-        // Let reconcile start then cancel.
+        // Let commit start then cancel.
         kotlinx.coroutines.yield()
         job.cancel()
         val thrown = runCatching { job.await() }.exceptionOrNull()
@@ -454,7 +481,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(8)
         assertThat(requireNotNull(rig.records.getByClientUuid(uuid)).syncDirty).isTrue()
-        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
     }
 
     private fun seedDirtyRecord(

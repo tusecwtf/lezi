@@ -32,6 +32,12 @@ data class AppliedCausalMutationColumns(
     val localBranchVersionId: String?,
 )
 
+/** Whether a durable Record terminal settled the frozen fact or a later local edit. */
+enum class RecordCommitFirstSettlement {
+    CurrentEpoch,
+    SupersededEpoch,
+}
+
 fun CausalRootMutationState.toAppliedColumns(): AppliedCausalMutationColumns =
     AppliedCausalMutationColumns(
         baseVersion = baseVersion,
