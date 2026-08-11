@@ -52,6 +52,7 @@ import com.lezi.babylog.sync.backend.PullTransportContract
 import com.lezi.babylog.sync.backend.requireValidPage
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilySessionReplica
@@ -143,6 +144,7 @@ internal class ReplicaSyncEngine(
     private val familyDao: FamilyDao,
     private val clock: PolicyClock,
     private val mediaFiles: SyncMediaFileStore,
+    private val immutableMediaSpool: ImmutableMediaSpool,
     private val mediaFileCleanup: ReferenceAwareMediaFileCleanup,
     private val transactionRunner: DatabaseTransactionRunner,
     private val carePlanAppliedListener: CarePlanFamilyAppliedListener,
@@ -181,7 +183,7 @@ internal class ReplicaSyncEngine(
         wakeObservationDao = wakeObservationDao,
         conflictSummaryDao = conflictSummaryDao,
         conflictSnapshotCacheDao = conflictSnapshotCacheDao,
-        mediaFiles = mediaFiles,
+        immutableMediaSpool = immutableMediaSpool,
         transactionRunner = transactionRunner,
         requireRemoteAllowed = requireRemoteAllowed,
         protectDirtyCausalRoots = !allowHistoricalMutableRootEvidence,
@@ -2210,7 +2212,8 @@ internal class ReplicaSyncEngine(
     private suspend fun captureLocalChanges(
         session: SyncSession,
     ): CapturedLocalChanges {
-        repairTechnicalMediaBeforeCapture(session)
+        val spooledMedia = causalSettlement.recoverImmutableMediaSpool()
+        repairTechnicalMediaBeforeCapture(session, spooledMedia)
         val candidates = mutableListOf<PublishCandidate>()
         fun enqueue(entity: SyncEntity, localMediaUri: String? = null) {
             candidates += PublishCandidate(
@@ -2430,7 +2433,10 @@ internal class ReplicaSyncEngine(
      * copy remain authoritative. Rows with no business owner are safe to hard
      * delete; their paths are reclaimed through the reference-aware file gate.
      */
-    private suspend fun repairTechnicalMediaBeforeCapture(session: SyncSession) {
+    private suspend fun repairTechnicalMediaBeforeCapture(
+        session: SyncSession,
+        spooledMedia: Set<String>,
+    ) {
         val orphanPaths = mutableSetOf<String>()
         // Authority settle can include a clean media row when its owning root is pending (and
         // the first settle after disaster recovery can cover an entirely clean restored set).
@@ -2441,6 +2447,7 @@ internal class ReplicaSyncEngine(
             // repair path must not inspect, normalize, tombstone, or delete it;
             // H18/H20 will own its immutable spool and receipt settlement.
             if (snapshot.kind == "wake") continue
+            if (snapshot.clientUuid in spooledMedia) continue
             val inspected = snapshot.localUri
                 .takeIf(String::isNotBlank)
                 ?.let { mediaFiles.inspect(it) }

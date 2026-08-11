@@ -289,6 +289,12 @@ class RealSyncPortReconnectTest {
             },
         )
         rig.backend.nextOwnerLoginFamilyId = "family-a"
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 5L,
+            generation = "generation-after-reconnect",
+            hasMore = false,
+        )
 
         val joined = rig.port.reconnectOwner(
             endpoint = candidate,
@@ -298,7 +304,35 @@ class RealSyncPortReconnectTest {
 
         assertThat(joined.familyId).isEqualTo("family-a")
         assertThat(TrustedEndpointProfile.systemPki(joined.baseUrl)).isEqualTo(candidate)
-        assertThat(rig.preferences.current()).isEqualTo(joined)
+        val persisted = rig.preferences.current()
+        assertThat(
+            persisted.copy(
+                pullCursor = joined.pullCursor,
+                pullGeneration = joined.pullGeneration,
+                lastSuccessAt = joined.lastSuccessAt,
+            ),
+        ).isEqualTo(joined)
+        assertThat(persisted.familyId).isEqualTo(joined.familyId)
+        assertThat(persisted.deviceId).isEqualTo(joined.deviceId)
+        assertThat(persisted.membershipId).isEqualTo(joined.membershipId)
+        assertThat(persisted.role).isEqualTo(joined.role)
+        assertThat(persisted.accessToken).isEqualTo(joined.accessToken)
+        assertThat(persisted.refreshToken).isEqualTo(joined.refreshToken)
+        assertThat(persisted.accessExpiresAtEpochSeconds)
+            .isEqualTo(joined.accessExpiresAtEpochSeconds)
+        assertThat(persisted.reauthRequired).isEqualTo(joined.reauthRequired)
+        assertThat(persisted.isJoined).isEqualTo(joined.isJoined)
+        assertThat(TrustedEndpointProfile.systemPki(persisted.baseUrl)).isEqualTo(candidate)
+        if (persisted.pullCursor > joined.pullCursor) {
+            assertThat(persisted.pullCursor).isEqualTo(5L)
+            assertThat(persisted.pullGeneration).isEqualTo("generation-after-reconnect")
+            assertThat(persisted.lastSuccessAt).isNotNull()
+            joined.lastSuccessAt?.let { assertThat(persisted.lastSuccessAt).isAtLeast(it) }
+        } else {
+            assertThat(persisted.pullCursor).isEqualTo(joined.pullCursor)
+            assertThat(persisted.pullGeneration).isEqualTo(joined.pullGeneration)
+            assertThat(persisted.lastSuccessAt).isEqualTo(joined.lastSuccessAt)
+        }
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
         assertThat(rig.preferences.familyMemberDirectory.first()).isEmpty()
     }

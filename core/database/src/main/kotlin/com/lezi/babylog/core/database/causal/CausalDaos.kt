@@ -426,6 +426,29 @@ interface ConflictSnapshotCacheDao {
     suspend fun deleteFrozenMutation(entityType: String, clientUuid: String) {
         delete(frozenMutationCacheKey(entityType, clientUuid))
     }
+
+    @Query(
+        "SELECT * FROM conflict_detail_cache " +
+            "WHERE conflictId LIKE 'frozen-media-spool:%' ORDER BY conflictId ASC",
+    )
+    suspend fun listFrozenMediaSpoolManifests(): List<ConflictSnapshotCacheEntity>
+
+    suspend fun getFrozenMediaSpoolManifest(mutationId: String): ConflictSnapshotCacheEntity? =
+        get(frozenMediaSpoolCacheKey(mutationId))
+
+    suspend fun putFrozenMediaSpoolManifest(
+        mutationId: String,
+        canonicalManifestJson: String,
+        contentEpoch: Long,
+    ) {
+        upsert(
+            ConflictSnapshotCacheEntity(
+                conflictId = frozenMediaSpoolCacheKey(mutationId),
+                snapshotJson = canonicalManifestJson,
+                cachedAt = contentEpoch,
+            ),
+        )
+    }
 }
 
 const val CONFLICT_SNAPSHOT_STAGE_KEY_PREFIX = "conflict-page-stage:"
@@ -437,6 +460,11 @@ const val FROZEN_MUTATION_KEY_PREFIX = "frozen-mutation:"
 
 fun frozenMutationCacheKey(entityType: String, clientUuid: String): String =
     "$FROZEN_MUTATION_KEY_PREFIX$entityType:$clientUuid"
+
+const val FROZEN_MEDIA_SPOOL_KEY_PREFIX = "frozen-media-spool:"
+
+fun frozenMediaSpoolCacheKey(mutationId: String): String =
+    "$FROZEN_MEDIA_SPOOL_KEY_PREFIX$mutationId"
 
 @Dao
 interface SuspectedDuplicateGroupDao {

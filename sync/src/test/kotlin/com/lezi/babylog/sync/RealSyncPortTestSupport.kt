@@ -128,6 +128,11 @@ import com.lezi.babylog.sync.media.PreparedMedia
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
+import com.lezi.babylog.sync.media.ImmutableMediaSpool
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolGroup
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolItem
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolSource
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
@@ -263,6 +268,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var onReconcile: (suspend (List<ReconcileUnitDraft>) -> Unit)? = null
     val causalReconciledUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
+    val causalMediaPreimageBytes = mutableListOf<Pair<String, ByteArray>>()
     var nextCausalReconcile: CausalBatchResult? = null
     var nextCausalCommit: CausalBatchResult? = null
     val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
@@ -805,15 +811,18 @@ internal class RecordingSyncBackend : SyncBackend {
     ) {
         // Recording backend accepts preimages as no-ops; production Http stages bytes.
         syncOrder += "causal_media_preimage:$mediaUuid"
+        val uploaded = java.io.ByteArrayOutputStream()
         source.openStream().use { stream ->
             var remaining = source.contentLength
             val buf = ByteArray(8_192)
             while (remaining > 0) {
                 val n = stream.read(buf)
                 if (n < 0) break
+                uploaded.write(buf, 0, n)
                 remaining -= n
             }
         }
+        causalMediaPreimageBytes += mediaUuid to uploaded.toByteArray()
     }
 
     override suspend fun causalReconcile(
@@ -1544,6 +1553,9 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     var afterInspect: (suspend () -> Unit)? = null
     var afterPrepareUpload: (suspend () -> Unit)? = null
     var afterSaveDownloaded: (suspend () -> Unit)? = null
+    val prepareUploadCounts = mutableMapOf<String, Int>()
+    val preparedUploadBytes = mutableMapOf<String, ByteArray>()
+    val prepareUploadFailures = mutableSetOf<String>()
 
     override suspend fun inspect(localUri: String): LocalMediaInfo? {
         afterInspect?.also { afterInspect = null }?.invoke()
@@ -1552,8 +1564,10 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     }
 
     override suspend fun prepareUpload(localUri: String): PreparedMedia {
+        prepareUploadCounts[localUri] = (prepareUploadCounts[localUri] ?: 0) + 1
+        check(localUri !in prepareUploadFailures) { "injected media source loss" }
         afterPrepareUpload?.also { afterPrepareUpload = null }?.invoke()
-        return testPreparedMedia(byteArrayOf(1))
+        return testPreparedMedia(preparedUploadBytes[localUri] ?: byteArrayOf(1))
     }
 
     override suspend fun saveDownloaded(
@@ -1588,6 +1602,80 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
         reclaim.forEach {
             deleted += it
             existing -= it
+        }
+    }
+}
+
+internal class TestImmutableMediaSpool(
+    private val mediaFiles: SyncMediaFileStore,
+) : ImmutableMediaSpool {
+    private val groups = linkedMapOf<String, ImmutableMediaSpoolGroup>()
+    private val expectedItemCounts = linkedMapOf<String, Int>()
+    private val bytes = linkedMapOf<Pair<String, String>, ByteArray>()
+
+    override suspend fun freezeGroup(
+        mutationId: String,
+        sources: List<ImmutableMediaSpoolSource>,
+    ): ImmutableMediaSpoolGroup {
+        expectedItemCounts[mutationId] = sources.size
+        val existing = groups[mutationId]?.items.orEmpty().associateBy { it.mediaUuid }
+        val items = mutableListOf<ImmutableMediaSpoolItem>()
+        sources.sortedBy(ImmutableMediaSpoolSource::mediaUuid).forEachIndexed { slot, source ->
+            val item = existing[source.mediaUuid]?.also { item ->
+                require(item.slot == slot && item.role == source.role)
+            } ?: mediaFiles.prepareUpload(source.localUri).use { prepared ->
+                val content = prepared.file.readBytes()
+                bytes[mutationId to source.mediaUuid] = content
+                ImmutableMediaSpoolItem(
+                    mediaUuid = source.mediaUuid,
+                    slot = slot,
+                    role = source.role,
+                    sha256 = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(content)
+                        .joinToString("") { "%02x".format(it) },
+                    byteSize = content.size.toLong(),
+                    mime = prepared.mime,
+                    width = prepared.width?.toLong(),
+                    height = prepared.height?.toLong(),
+                )
+            }
+            items += item
+            groups[mutationId] = ImmutableMediaSpoolGroup(mutationId, items.toList())
+        }
+        return requireNotNull(groups[mutationId])
+    }
+
+    override suspend fun recoverGroup(mutationId: String): ImmutableMediaSpoolRecovery? =
+        groups[mutationId]?.let { group ->
+            if (group.items.size == expectedItemCounts[mutationId]) {
+                ImmutableMediaSpoolRecovery.Complete(group)
+            } else {
+                ImmutableMediaSpoolRecovery.Partial(group)
+            }
+        }
+
+    override suspend fun open(
+        mutationId: String,
+        item: ImmutableMediaSpoolItem,
+    ): SyncMediaUploadSource = com.lezi.babylog.sync.backend.TestMediaUploadSource(
+        content = requireNotNull(bytes[mutationId to item.mediaUuid]),
+        mime = item.mime,
+    )
+
+    override suspend fun recoverAndSweep(
+        retainedMutationIds: Set<String>,
+    ): Map<String, ImmutableMediaSpoolRecovery> {
+        groups.keys.filter { it !in retainedMutationIds }.forEach { mutationId ->
+            groups.remove(mutationId)
+            expectedItemCounts.remove(mutationId)
+            bytes.keys.filter { it.first == mutationId }.forEach(bytes::remove)
+        }
+        return groups.mapValues { (mutationId, group) ->
+            if (group.items.size == expectedItemCounts[mutationId]) {
+                ImmutableMediaSpoolRecovery.Complete(group)
+            } else {
+                ImmutableMediaSpoolRecovery.Partial(group)
+            }
         }
     }
 }
@@ -1694,6 +1782,7 @@ internal class SyncRig(
         },
     )
     val mediaFiles = TestMediaFileStore()
+    val immutableMediaSpool = TestImmutableMediaSpool(mediaFiles)
     val transactions = RecordingTransactionRunner()
     val fulfillmentAuthoritySettlement =
         com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement(
@@ -1733,6 +1822,7 @@ internal class SyncRig(
         clock = clock,
         foregroundState = foreground,
         mediaFiles = mediaFiles,
+        immutableMediaSpool = immutableMediaSpool,
         mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactions,
         pendingReplicaCleanupStore = pendingReplicaCleanup,
@@ -2743,6 +2833,7 @@ internal class MemoryMediaReferenceDao : com.lezi.babylog.core.database.causal.M
     override suspend fun deleteAll() {
         items.clear()
     }
+
 }
 
 internal class MemoryFamilyDao : FamilyDao {
@@ -2889,6 +2980,14 @@ internal class MemoryConflictSnapshotCacheDao :
     override suspend fun deleteAll() {
         items.clear()
     }
+
+    override suspend fun listFrozenMediaSpoolManifests(): List<
+        com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
+    > = items.filter {
+        it.conflictId.startsWith(
+            com.lezi.babylog.core.database.causal.FROZEN_MEDIA_SPOOL_KEY_PREFIX,
+        )
+    }.sortedBy { it.conflictId }
 }
 
 internal class MemorySourceRelationDao : SourceRelationDao() {

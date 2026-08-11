@@ -17,6 +17,7 @@ import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.CommitFirstSettlementEpoch
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
+import com.lezi.babylog.core.database.causal.frozenMediaSpoolCacheKey
 import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.sync.backend.AuthorityProofException
 import com.lezi.babylog.sync.backend.CausalBatchResult
@@ -26,7 +27,14 @@ import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.CausalReconcileStatus
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.SyncBackend
-import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.media.ImmutableMediaSpool
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolGroup
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolItem
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery
+import com.lezi.babylog.sync.media.ImmutableMediaSpoolSource
+import com.lezi.babylog.sync.media.CausalMediaPolicy
+import com.lezi.babylog.sync.media.decodeImmutableMediaSpoolGroup
+import com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup
 import com.lezi.babylog.sync.session.SyncSession
 import java.security.MessageDigest
 import java.util.UUID
@@ -80,6 +88,16 @@ private data class CausalMediaRevision(
     val updatedAt: Long,
 )
 
+private fun ImmutableMediaSpoolItem.toCausalMediaItem() = CausalMediaItem(
+    mediaUuid = mediaUuid,
+    role = role.wireName,
+    sha256 = sha256,
+    byteSize = byteSize,
+    mime = mime,
+    width = width,
+    height = height,
+)
+
 /** Local immutable-envelope proof failure: never trigger authority recovery or pull. */
 private class FrozenCommitProofException(message: String) : IllegalStateException(message)
 
@@ -97,11 +115,48 @@ internal class CausalSettlement(
     private val wakeObservationDao: WakeObservationDao,
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao? = null,
-    private val mediaFiles: SyncMediaFileStore,
+    private val immutableMediaSpool: ImmutableMediaSpool,
     private val transactionRunner: DatabaseTransactionRunner,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
     private val protectDirtyCausalRoots: Boolean = true,
 ) {
+    /**
+     * Cold-start gate: sidecars for pending/Room-referenced mutations are recovered before the
+     * mutable source repair path runs; everything else is an unreferenced local orphan.
+     */
+    suspend fun recoverImmutableMediaSpool(): Set<String> {
+        val cache = conflictSnapshotCacheDao ?: return emptySet()
+        val roomGroups = cache.listFrozenMediaSpoolManifests().map { row ->
+            val group = decodeImmutableMediaSpoolGroup(row.snapshotJson)
+            require(row.conflictId == frozenMediaSpoolCacheKey(group.mutationId)) {
+                "Room media spool key does not bind its payload mutation"
+            }
+            group.mutationId to group
+        }
+        require(roomGroups.map { it.first }.distinct().size == roomGroups.size) {
+            "Room media spool contains duplicate payload mutations"
+        }
+        val roomGroupsByMutation = roomGroups.toMap()
+        val pendingMutationIds = buildSet {
+            babyDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
+            recordDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
+            carePlanDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
+            customItemDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
+            wakeObservationDao.listPendingSync().mapNotNullTo(this) { it.mutationId }
+        }
+        val recovered = immutableMediaSpool.recoverAndSweep(
+            roomGroupsByMutation.keys + pendingMutationIds,
+        )
+        roomGroupsByMutation.forEach { (mutationId, manifest) ->
+            require((recovered[mutationId] as? ImmutableMediaSpoolRecovery.Complete)?.group == manifest) {
+                "Room media spool manifest lost its immutable sidecar evidence"
+            }
+        }
+        return recovered.values.flatMapTo(linkedSetOf()) { state ->
+            state.group.items.map(ImmutableMediaSpoolItem::mediaUuid)
+        }
+    }
+
     suspend fun settle(
         session: SyncSession,
         candidates: List<PublishCandidate>,
@@ -657,7 +712,12 @@ internal class CausalSettlement(
         if (state.openConflictId != null && !state.syncDirty) return null
 
         val rootJson = buildCausalRootJson(entityType, clientUuid) ?: return null
-        val frozenMedia = freezeCausalMedia(entityType, clientUuid) ?: return null
+        val frozenMedia = freezeCausalMedia(
+            entityType = entityType,
+            clientUuid = clientUuid,
+            mutationId = effectiveMutationId,
+            contentEpoch = contentEpoch,
+        ) ?: return null
         val mutation = CausalMutationUnit(
             mutationId = effectiveMutationId,
             baseVersion = state.baseVersion,
@@ -1084,19 +1144,75 @@ internal class CausalSettlement(
     private suspend fun freezeCausalMedia(
         entityType: String,
         clientUuid: String,
+        mutationId: String,
+        contentEpoch: Long,
     ): FrozenCausalMedia? {
         val assets = loadActiveCausalMedia(entityType, clientUuid)
         val revisions = assets.toCausalMediaRevisions()
-        val items = mutableListOf<CausalMediaItem>()
-        for (asset in assets) {
-            val item = toCausalMediaItem(asset, entityType) ?: return null
-            items += item
+        if (assets.isEmpty()) return FrozenCausalMedia(emptyList(), revisions)
+        val cache = conflictSnapshotCacheDao ?: return null
+        val expectedSources = assets.sortedBy(MediaAssetEntity::clientUuid).map { asset ->
+            ImmutableMediaSpoolSource(
+                mediaUuid = asset.clientUuid,
+                role = CausalMediaPolicy.roleForEntityType(entityType) ?: return null,
+                localUri = asset.localUri,
+            )
         }
+        val stored = cache.getFrozenMediaSpoolManifest(mutationId)?.let { row ->
+            decodeImmutableMediaSpoolGroup(row.snapshotJson).also { group ->
+                require(group.mutationId == mutationId) { "Room media spool manifest identity drift" }
+                require(row.cachedAt == contentEpoch) { "Room media spool manifest epoch drift" }
+            }
+        }
+        val sidecarOnly = if (stored == null) {
+            immutableMediaSpool.recoverGroup(mutationId)?.group
+        } else {
+            null
+        }
+        if (sidecarOnly != null && !sidecarOnly.items.all { item ->
+                expectedSources.any { source ->
+                    source.mediaUuid == item.mediaUuid && source.role == item.role
+                }
+            }
+        ) {
+            return null
+        }
+        val group = if (stored != null) {
+            require(
+                (immutableMediaSpool.recoverGroup(mutationId) as?
+                    ImmutableMediaSpoolRecovery.Complete)?.group == stored,
+            ) {
+                "Room media spool manifest does not match immutable sidecars"
+            }
+            stored
+        } else {
+            immutableMediaSpool.freezeGroup(mutationId, expectedSources).also { frozen ->
+                if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) {
+                    return null
+                }
+                transactionRunner.run {
+                    val current = requireNotNull(loadCommitFirstLocal(entityType, clientUuid)) {
+                        "media spool manifest lost its product fact"
+                    }
+                    require(current.mutationId == mutationId && current.contentEpoch == contentEpoch) {
+                        "media spool manifest lost its pending mutation owner"
+                    }
+                    cache.putFrozenMediaSpoolManifest(
+                        mutationId = mutationId,
+                        canonicalManifestJson = encodeImmutableMediaSpoolGroup(frozen),
+                        contentEpoch = contentEpoch,
+                    )
+                }
+            }
+        }
+        if (group.items.map { it.mediaUuid to it.role } !=
+            expectedSources.map { it.mediaUuid to it.role }
+        ) return null
         if (loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions() != revisions) {
             return null
         }
         return FrozenCausalMedia(
-            items = items.sortedBy(CausalMediaItem::mediaUuid),
+            items = group.items.map(ImmutableMediaSpoolItem::toCausalMediaItem),
             revisions = revisions,
         )
     }
@@ -1176,34 +1292,6 @@ internal class CausalSettlement(
                 unit.mutation.clientUuid,
             ).toCausalMediaRevisions() == unit.mediaSnapshot
 
-    private suspend fun toCausalMediaItem(
-        asset: MediaAssetEntity,
-        entityType: String,
-    ): CausalMediaItem? {
-        if (asset.clientUuid.isBlank()) return null
-        val role = when (entityType) {
-            "baby" -> "avatar"
-            "record" -> "log"
-            "care_plan" -> "plan"
-            "wake_observation" -> "wake"
-            else -> return null
-        }
-        val prepared = runCatching { mediaFiles.prepareUpload(asset.localUri) }.getOrNull()
-            ?: return null // Fail closed: never invent digests for unmaterialized media.
-        return prepared.use { media ->
-            val bytes = media.file.readBytes()
-            CausalMediaItem(
-                mediaUuid = asset.clientUuid,
-                role = role,
-                sha256 = sha256Hex(bytes),
-                byteSize = media.contentLength,
-                mime = media.mime,
-                width = media.width?.toLong(),
-                height = media.height?.toLong(),
-            )
-        }
-    }
-
     /**
      * Stage local media bytes into the authority media store before causal commit.
      * Mutation JSON carries only the manifest; server require_media_bytes_present
@@ -1215,38 +1303,27 @@ internal class CausalSettlement(
     ) {
         if (unit.mutation.media.isEmpty()) return
         requireRemoteAllowed(session)
+        val cache = requireNotNull(conflictSnapshotCacheDao) {
+            "causal media upload requires durable Room manifest storage"
+        }
+        val group = cache.getFrozenMediaSpoolManifest(unit.mutation.mutationId)?.let { row ->
+            decodeImmutableMediaSpoolGroup(row.snapshotJson)
+        } ?: throw AuthorityProofException(
+            session.pullGeneration,
+            IllegalArgumentException("因果媒体缺少不可变 spool manifest"),
+        )
+        require(group.items.map(ImmutableMediaSpoolItem::toCausalMediaItem) == unit.mutation.media) {
+            "因果媒体 spool manifest 与冻结 mutation 不一致"
+        }
         for (item in unit.mutation.media) {
-            val asset = mediaDao.getByClientUuid(item.mediaUuid)
-                ?: throw AuthorityProofException(
-                    session.pullGeneration,
-                    IllegalArgumentException("因果媒体本地元数据缺失: ${item.mediaUuid}"),
-                )
-            if (asset.localUri.isBlank()) {
-                throw AuthorityProofException(
-                    session.pullGeneration,
-                    IllegalArgumentException("因果媒体本地字节缺失: ${item.mediaUuid}"),
-                )
-            }
-            val prepared = runCatching { mediaFiles.prepareUpload(asset.localUri) }.getOrNull()
-                ?: throw AuthorityProofException(
-                    session.pullGeneration,
-                    IllegalArgumentException("因果媒体无法准备上传: ${item.mediaUuid}"),
-                )
-            prepared.use { media ->
-                require(media.contentLength == item.byteSize) {
-                    "因果媒体字节长度与冻结清单不一致"
-                }
-                val digest = sha256Hex(media.file.readBytes())
-                require(digest == item.sha256) {
-                    "因果媒体 sha256 与冻结清单不一致"
-                }
-                backend.putCausalMediaPreimage(
-                    session = session,
-                    mediaUuid = item.mediaUuid,
-                    source = media,
-                    sha256 = item.sha256,
-                )
-            }
+            val spoolItem = group.items.single { it.mediaUuid == item.mediaUuid }
+            val source = immutableMediaSpool.open(unit.mutation.mutationId, spoolItem)
+            backend.putCausalMediaPreimage(
+                session = session,
+                mediaUuid = item.mediaUuid,
+                source = source,
+                sha256 = item.sha256,
+            )
         }
     }
 
@@ -1793,15 +1870,8 @@ internal class CausalSettlement(
         ) {
             fail("因果 ${result.status} stable_media 必须唯一且 canonical 排序")
         }
-        val expectedRole = when (unit.mutation.entityType) {
-            "baby" -> "avatar"
-            "record" -> "log"
-            "care_plan" -> "plan"
-            "wake_observation" -> "wake"
-            "custom_item" -> null
-            else -> null
-        }
-        val maxMedia = if (unit.mutation.entityType == "baby") 1 else if (expectedRole == null) 0 else 3
+        val expectedRole = CausalMediaPolicy.roleForEntityType(unit.mutation.entityType)?.wireName
+        val maxMedia = CausalMediaPolicy.maxItemsForEntityType(unit.mutation.entityType)
         if (media.size > maxMedia || media.any {
                 it.role != expectedRole ||
                     !it.sha256.matches(LOWERCASE_SHA256) ||

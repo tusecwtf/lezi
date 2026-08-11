@@ -165,6 +165,7 @@ class PullCheckpointRoomReplayTest {
             familyDao = database.familyDao(),
             clock = PolicyClock { 1_000 },
             mediaFiles = mediaFiles,
+            immutableMediaSpool = NoMediaImmutableSpool,
             mediaFileCleanup = ReferenceAwareMediaFileCleanup(
                 database.mediaAssetDao(),
                 database.mediaReferenceDao(),

@@ -1539,7 +1539,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
             wakeObservationDao = rig.wakeObservations,
             conflictSummaryDao = rig.conflictSummaries,
             conflictSnapshotCacheDao = rig.conflictDetails,
-            mediaFiles = rig.mediaFiles,
+            immutableMediaSpool = rig.immutableMediaSpool,
             transactionRunner = rig.transactions,
             requireRemoteAllowed = {},
             protectDirtyCausalRoots = true,

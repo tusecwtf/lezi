@@ -47,6 +47,7 @@ import com.lezi.babylog.sync.MemoryWakeObservationDao
 import com.lezi.babylog.sync.RecordingSyncBackend
 import com.lezi.babylog.sync.RecordingTransactionRunner
 import com.lezi.babylog.sync.TestMediaFileStore
+import com.lezi.babylog.sync.TestImmutableMediaSpool
 
 internal class ReplicaEngineRig(
     session: SyncSession,
@@ -61,6 +62,7 @@ internal class ReplicaEngineRig(
     val media = MemoryMediaDao()
     val customItems = MemoryCustomItemDao()
     val mediaFiles = TestMediaFileStore()
+    val immutableMediaSpool = TestImmutableMediaSpool(mediaFiles)
     val transactions = RecordingTransactionRunner()
     val fulfillmentAuthoritySettlement =
         com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement(
@@ -98,6 +100,7 @@ internal class ReplicaEngineRig(
             override fun nowMillis(): Long = 1_000
         },
         mediaFiles = mediaFiles,
+        immutableMediaSpool = immutableMediaSpool,
         mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactions,
         carePlanAppliedListener = CarePlanFamilyAppliedListener { planClientUuids ->

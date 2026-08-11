@@ -5,6 +5,7 @@ import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.core.database.causal.ConflictInboxProjectionRow
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
+import com.lezi.babylog.core.database.causal.FROZEN_MEDIA_SPOOL_KEY_PREFIX
 import com.lezi.babylog.core.database.causal.MediaReferenceDao
 import com.lezi.babylog.core.database.causal.MediaReferenceEntity
 import com.lezi.babylog.core.database.causal.SourceRelationDao
@@ -135,6 +136,10 @@ internal class FakeConflictSnapshotCacheDao : ConflictSnapshotCacheDao {
     override suspend fun deleteAll() {
         items.clear()
     }
+
+    override suspend fun listFrozenMediaSpoolManifests(): List<ConflictSnapshotCacheEntity> =
+        items.filter { it.conflictId.startsWith(FROZEN_MEDIA_SPOOL_KEY_PREFIX) }
+            .sortedBy(ConflictSnapshotCacheEntity::conflictId)
 }
 
 internal class FakeSuspectedDuplicateGroupDao : SuspectedDuplicateGroupDao {

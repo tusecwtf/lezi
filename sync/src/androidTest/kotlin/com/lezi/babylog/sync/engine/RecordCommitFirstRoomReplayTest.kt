@@ -158,7 +158,7 @@ class RecordCommitFirstRoomReplayTest {
         wakeObservationDao = database.wakeObservationDao(),
         conflictSummaryDao = database.conflictSummaryDao(),
         conflictSnapshotCacheDao = database.conflictSnapshotCacheDao(),
-        mediaFiles = NoMediaFileStore,
+        immutableMediaSpool = NoMediaImmutableSpool,
         transactionRunner = DatabaseModule.transactionRunner(database),
         requireRemoteAllowed = {},
     )

@@ -95,6 +95,7 @@ import com.lezi.babylog.sync.engine.ReplicaSyncOutcome
 import com.lezi.babylog.sync.media.MediaPrepareException
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
@@ -159,6 +160,7 @@ class RealSyncPort @Inject constructor(
     private val clock: PolicyClock,
     private val foregroundState: ForegroundState,
     private val mediaFiles: SyncMediaFileStore,
+    private val immutableMediaSpool: ImmutableMediaSpool,
     private val mediaFileCleanup: ReferenceAwareMediaFileCleanup,
     private val transactionRunner: DatabaseTransactionRunner,
     private val pendingReplicaCleanupStore: PendingReplicaCleanupStore,
@@ -235,6 +237,7 @@ class RealSyncPort @Inject constructor(
         familyDao = familyDao,
         clock = clock,
         mediaFiles = mediaFiles,
+        immutableMediaSpool = immutableMediaSpool,
         mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactionRunner,
         carePlanAppliedListener = carePlanAppliedListener,

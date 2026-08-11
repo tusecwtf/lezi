@@ -993,12 +993,14 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             ),
         )
         val mediaUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        val localUri = "photos/localwrite-photo.jpg"
+        rig.mediaFiles.preparedUploadBytes[localUri] = byteArrayOf(7, 8, 9)
         rig.media.seed(
             MediaAssetEntity(
                 clientUuid = mediaUuid,
                 kind = "log",
                 recordId = recordId,
-                localUri = "photos/localwrite-photo.jpg",
+                localUri = localUri,
                 mime = "image/jpeg",
                 createdAt = 100,
                 updatedAt = 100,
@@ -1017,9 +1019,271 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 "causal_commit:1",
             )
             .inOrder()
+        assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         val settled = requireNotNull(rig.records.getByClientUuid("record-with-photo"))
         assertThat(settled.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+    }
+
+    @Test
+    fun lostMediaCommitResponseRetriesExactSpoolAfterSourceChanges() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 4)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-spool-retry",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":90}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-r0",
+            ),
+        )
+        val mediaUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee18"
+        val localUri = "content://mutable-photo"
+        val firstBytes = byteArrayOf(1, 3, 5, 7)
+        rig.mediaFiles.preparedUploadBytes[localUri] = firstBytes
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = mediaUuid,
+                kind = "log",
+                recordId = recordId,
+                localUri = localUri,
+                mime = "image/jpeg",
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        var commitAttempts = 0
+        rig.backend.onCausalCommit = {
+            commitAttempts += 1
+            if (commitAttempts == 1) throw java.io.IOException("commit response lost")
+        }
+
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
+                .exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        val firstMutation = rig.backend.causalCommittedUnits.single().single()
+        rig.mediaFiles.preparedUploadBytes[localUri] = byteArrayOf(9, 9, 9)
+        rig.mediaFiles.prepareUploadFailures += localUri
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits.last().single()).isEqualTo(firstMutation)
+        assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
+        assertThat(rig.backend.causalMediaPreimageBytes).hasSize(2)
+        assertThat(rig.backend.causalMediaPreimageBytes[0].second).isEqualTo(firstBytes)
+        assertThat(rig.backend.causalMediaPreimageBytes[1].second).isEqualTo(firstBytes)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
+    }
+
+    @Test
+    fun coldStartRebindsCompletePendingSidecarsBeforeRoomManifestAndPublish() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val mutationId = "00000000-0000-4000-8000-000000000018"
+        val recordUuid = "record-sidecar-rebind"
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":90}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-r0",
+                mutationId = mutationId,
+            ),
+        )
+        val mediaUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee19"
+        val localUri = "content://sidecar-only"
+        rig.mediaFiles.preparedUploadBytes[localUri] = byteArrayOf(4, 3, 2, 1)
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = mediaUuid,
+                kind = "log",
+                recordId = recordId,
+                localUri = localUri,
+                mime = "image/jpeg",
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.immutableMediaSpool.freezeGroup(
+            mutationId,
+            listOf(
+                com.lezi.babylog.sync.media.ImmutableMediaSpoolSource(
+                    mediaUuid = mediaUuid,
+                    role = com.lezi.babylog.sync.media.CausalMediaRole.Log,
+                    localUri = localUri,
+                ),
+            ),
+        )
+        assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
+        assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNotNull()
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second)
+            .isEqualTo(byteArrayOf(4, 3, 2, 1))
+        assertThat(rig.backend.causalCommittedUnits.single().single().clientUuid)
+            .isEqualTo(recordUuid)
+    }
+
+    @Test
+    fun coldStartRejectsRoomSpoolKeyThatDoesNotBindPayloadMutation() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val group = com.lezi.babylog.sync.media.ImmutableMediaSpoolGroup(
+            mutationId = "00000000-0000-4000-8000-000000000018",
+            items = listOf(
+                com.lezi.babylog.sync.media.ImmutableMediaSpoolItem(
+                    mediaUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee18",
+                    slot = 0,
+                    role = com.lezi.babylog.sync.media.CausalMediaRole.Log,
+                    sha256 = "0".repeat(64),
+                    byteSize = 1,
+                    mime = "image/jpeg",
+                    width = 1,
+                    height = 1,
+                ),
+            ),
+        )
+        rig.conflictDetails.upsert(
+            com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity(
+                conflictId = "frozen-media-spool:00000000-0000-4000-8000-000000000019",
+                snapshotJson = com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup(group),
+                cachedAt = 100,
+            ),
+        )
+
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(failure).hasMessageThat().contains("key does not bind")
+    }
+
+    @Test
+    fun removedRoomSlotLeavesPartialOrCompleteJournalAndPerformsNoNetworkWrite() = runTest {
+        listOf(false, true).forEach { completeJournal ->
+            val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+            val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+            val babyId = rig.babies.seed(
+                localReplicaBaby().copy(
+                    syncDirty = false,
+                    familyAuthority = true,
+                    baseVersion = "v-baby",
+                ),
+            )
+            val mutationId = if (completeJournal) {
+                "00000000-0000-4000-8000-000000000028"
+            } else {
+                "00000000-0000-4000-8000-000000000018"
+            }
+            val recordId = rig.records.seed(
+                RecordEntity(
+                    clientUuid = if (completeJournal) "record-complete-slot-drift" else "record-partial-slot-drift",
+                    babyId = babyId,
+                    type = "formula",
+                    timestamp = 100,
+                    payloadJson = """{"amount_ml":90}""",
+                    schemaVersion = 2,
+                    updatedAt = 100,
+                    syncDirty = true,
+                    baseVersion = "v-r0",
+                    mutationId = mutationId,
+                ),
+            )
+            val firstMediaUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee18"
+            val secondMediaUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeee19"
+            val firstUri = "content://first-$completeJournal"
+            val secondUri = "content://second-$completeJournal"
+            rig.mediaFiles.preparedUploadBytes[firstUri] = byteArrayOf(1, 2)
+            rig.mediaFiles.preparedUploadBytes[secondUri] = byteArrayOf(3, 4)
+            rig.media.seed(
+                MediaAssetEntity(
+                    clientUuid = firstMediaUuid,
+                    kind = "log",
+                    recordId = recordId,
+                    localUri = firstUri,
+                    mime = "image/jpeg",
+                    createdAt = 100,
+                    updatedAt = 100,
+                    syncDirty = false,
+                ),
+            )
+            rig.media.seed(
+                MediaAssetEntity(
+                    clientUuid = secondMediaUuid,
+                    kind = "log",
+                    recordId = recordId,
+                    localUri = secondUri,
+                    mime = "image/jpeg",
+                    createdAt = 100,
+                    updatedAt = 100,
+                    syncDirty = false,
+                ),
+            )
+            val sources = listOf(
+                com.lezi.babylog.sync.media.ImmutableMediaSpoolSource(
+                    firstMediaUuid,
+                    com.lezi.babylog.sync.media.CausalMediaRole.Log,
+                    firstUri,
+                ),
+                com.lezi.babylog.sync.media.ImmutableMediaSpoolSource(
+                    secondMediaUuid,
+                    com.lezi.babylog.sync.media.CausalMediaRole.Log,
+                    secondUri,
+                ),
+            )
+            if (!completeJournal) rig.mediaFiles.prepareUploadFailures += secondUri
+            val freeze = runCatching { rig.immutableMediaSpool.freezeGroup(mutationId, sources) }
+            assertThat(freeze.isSuccess).isEqualTo(completeJournal)
+            rig.mediaFiles.prepareUploadFailures.clear()
+            val removed = requireNotNull(rig.media.getByClientUuid(firstMediaUuid))
+            rig.media.update(removed.copy(deletedAt = 200, updatedAt = 200, syncDirty = false))
+
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
+            assertThat(rig.backend.causalCommittedUnits).isEmpty()
+            assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
+            val evidence = requireNotNull(rig.immutableMediaSpool.recoverGroup(mutationId))
+            assertThat(evidence.group.items.map { it.mediaUuid }).contains(firstMediaUuid)
+            if (completeJournal) {
+                assertThat(evidence)
+                    .isInstanceOf(com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery.Complete::class.java)
+            } else {
+                assertThat(evidence)
+                    .isInstanceOf(com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery.Partial::class.java)
+            }
+        }
     }
 
     @Test
