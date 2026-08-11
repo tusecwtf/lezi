@@ -33,7 +33,6 @@ import com.lezi.babylog.sync.media.ImmutableMediaSpoolItem
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolRecovery
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolSource
 import com.lezi.babylog.sync.media.CausalMediaPolicy
-import com.lezi.babylog.sync.media.decodeImmutableMediaSpoolGroup
 import com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup
 import com.lezi.babylog.sync.session.SyncSession
 import java.security.MessageDigest
@@ -74,6 +73,8 @@ private data class FrozenCausalUnit(
     val mediaSnapshot: List<CausalMediaRevision>,
     /** True only when [mutation] is owned by the durable commit-first envelope. */
     val durableCommitFirst: Boolean = false,
+    /** True only after every media receipt and the commit attempt are durable. */
+    val durableMediaCommitUnknown: Boolean = false,
 )
 
 private data class CausalMediaRevision(
@@ -120,14 +121,19 @@ internal class CausalSettlement(
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
     private val protectDirtyCausalRoots: Boolean = true,
 ) {
+    private val mediaSettlementJournal = conflictSnapshotCacheDao?.let { cache ->
+        CausalMediaSettlementJournalOwner(cache, immutableMediaSpool, transactionRunner)
+    }
+
     /**
      * Cold-start gate: sidecars for pending/Room-referenced mutations are recovered before the
      * mutable source repair path runs; everything else is an unreferenced local orphan.
      */
     suspend fun recoverImmutableMediaSpool(): Set<String> {
         val cache = conflictSnapshotCacheDao ?: return emptySet()
+        mediaSettlementJournal?.finishPendingCleanups()
         val roomGroups = cache.listFrozenMediaSpoolManifests().map { row ->
-            val group = decodeImmutableMediaSpoolGroup(row.snapshotJson)
+            val group = decodeFrozenMediaSpoolManifest(row.snapshotJson)
             require(row.conflictId == frozenMediaSpoolCacheKey(group.mutationId)) {
                 "Room media spool key does not bind its payload mutation"
             }
@@ -179,9 +185,107 @@ internal class CausalSettlement(
         if (directCommit.isNotEmpty()) {
             commitFirst(session, directCommit)
         }
-        val sourceReconcile = frozen - directCommit.toSet()
+        val mediaCommitUnknown = frozen.filter(FrozenCausalUnit::durableMediaCommitUnknown)
+        if (mediaCommitUnknown.isNotEmpty()) {
+            replayMediaCommitUnknown(session, mediaCommitUnknown)
+        }
+        val sourceReconcile = frozen - directCommit.toSet() - mediaCommitUnknown.toSet()
         if (sourceReconcile.isEmpty()) return
         reconcileFirst(session, sourceReconcile)
+    }
+
+    /** Lost-response recovery: replay the exact durable envelope before a superseding local edit. */
+    private suspend fun replayMediaCommitUnknown(
+        session: SyncSession,
+        frozen: List<FrozenCausalUnit>,
+    ) {
+        require(frozen.all { it.durableMediaCommitUnknown && it.mutation.media.isNotEmpty() })
+        requireRemoteAllowed(session)
+        val commit = backend.causalCommit(session, frozen.map(FrozenCausalUnit::mutation))
+        validateCausalProof(
+            session = session,
+            frozen = frozen,
+            batch = commit,
+            forCommit = true,
+            localFrozenProof = true,
+        )
+        val byMutation = commit.results.associateBy(CausalUnitResult::mutationId)
+        transactionRunner.run {
+            frozen.forEach { unit ->
+                applyDurableMediaResult(unit, byMutation.getValue(unit.mutation.mutationId))
+            }
+        }
+        frozen.forEach { unit ->
+            val result = byMutation.getValue(unit.mutation.mutationId)
+            if (result.status == CausalCommitStatus.ACCEPTED ||
+                result.status == CausalCommitStatus.MERGED
+            ) {
+                mediaSettlementJournal?.finishCleanup(unit.mutation.mutationId)
+            }
+        }
+    }
+
+    private suspend fun applyDurableMediaResult(
+        unit: FrozenCausalUnit,
+        result: CausalUnitResult,
+    ) {
+        val stableVersion = result.stableVersionId?.takeIf(String::isNotBlank)
+        when (result.status) {
+            CausalCommitStatus.ACCEPTED,
+            CausalCommitStatus.MERGED,
+            -> {
+                val version = stableVersion ?: error("accepted/merged 缺少 stable_version_id")
+                val settled = settleCommitFirstAcceptedOrMerged(unit, version) ?: return
+                if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
+                    applyStableProjectionAfterAck(unit, result)
+                    unit.candidates.filter { it.entityType == "media" }.forEach { media ->
+                        mediaDao.markSynced(media.clientUuid, media.updatedAt)
+                    }
+                }
+                requireNotNull(mediaSettlementJournal).markTerminal(
+                    unit.mutation.mutationId,
+                    result,
+                )
+            }
+            CausalCommitStatus.BRANCHED -> {
+                val conflictId = result.conflictId?.takeIf(String::isNotBlank)
+                    ?: error("branched 缺少 conflict_id")
+                val branchVersionId = result.branchVersionId?.takeIf(String::isNotBlank)
+                    ?: error("branched 缺少 branch_version_id")
+                val version = stableVersion ?: error("branched 缺少 stable_version_id")
+                val settled = settleCommitFirstBranched(
+                    unit,
+                    conflictId,
+                    branchVersionId,
+                    version,
+                ) ?: return
+                if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
+                    applyStableProjectionAfterAck(unit, result)
+                    unit.candidates.filter { it.entityType == "media" }.forEach { media ->
+                        mediaDao.markSynced(media.clientUuid, media.updatedAt)
+                    }
+                }
+                conflictSummaryDao.upsert(
+                    ConflictSummaryEntity(
+                        conflictId = conflictId,
+                        entityType = unit.mutation.entityType,
+                        clientUuid = unit.mutation.clientUuid,
+                        baseVersionId = unit.mutation.baseVersion,
+                        stableVersionId = version,
+                        status = "open",
+                        kind = "concurrent",
+                        branchVersionIdsJson = encodeBranchVersionIdsJson(listOf(branchVersionId)),
+                        updatedAt = unit.contentEpoch,
+                    ),
+                )
+                requireNotNull(mediaSettlementJournal).markTerminal(
+                    unit.mutation.mutationId,
+                    result,
+                )
+            }
+            CausalCommitStatus.REJECTED -> Unit
+            else -> error("未知因果 commit status: ${result.status}")
+        }
     }
 
     private suspend fun commitFirst(
@@ -252,6 +356,11 @@ internal class CausalSettlement(
         for (unit in publishable) {
             stageCausalMediaPreimages(session, unit)
         }
+        publishable.filter { it.mutation.media.isNotEmpty() }.forEach { unit ->
+            requireNotNull(mediaSettlementJournal) {
+                "causal media commit requires durable settlement journal"
+            }.markCommitUnknown(unit.mutation.mutationId)
+        }
         requireRemoteAllowed(session)
         val commit = backend.causalCommit(session, publishable.map(FrozenCausalUnit::mutation))
         validateCausalProof(session, publishable, commit, forCommit = true)
@@ -263,6 +372,15 @@ internal class CausalSettlement(
                     continue
                 }
                 applyCommitResult(unit, commitByMutation.getValue(unit.mutation.mutationId))
+            }
+        }
+        publishable.forEach { unit ->
+            val result = commitByMutation.getValue(unit.mutation.mutationId)
+            if (unit.mutation.media.isNotEmpty() &&
+                (result.status == CausalCommitStatus.ACCEPTED ||
+                    result.status == CausalCommitStatus.MERGED)
+            ) {
+                mediaSettlementJournal?.finishCleanup(unit.mutation.mutationId)
             }
         }
     }
@@ -648,6 +766,30 @@ internal class CausalSettlement(
         contentEpoch: Long,
         candidates: List<PublishCandidate>,
     ): FrozenCausalUnit? {
+        mediaSettlementJournal?.restoreUnsettled(entityType, clientUuid)?.let { journal ->
+            val current = loadCommitFirstLocal(entityType, clientUuid)
+                ?: error("durable media commit lost its product fact")
+            require(
+                current.syncDirty && current.contentEpoch >= journal.binding.contentEpoch,
+            ) { "durable media commit no longer owns a pending fact" }
+            val sameFactEpoch = current.contentEpoch == journal.binding.contentEpoch
+            if (journal.phase == CausalMediaSettlementPhase.Pending && !sameFactEpoch) {
+                return null
+            }
+            return FrozenCausalUnit(
+                mutation = journal.mutation,
+                contentEpoch = journal.binding.contentEpoch,
+                contentHash = journal.binding.requestHash,
+                candidates = if (sameFactEpoch) candidates else emptyList(),
+                mediaSnapshot = if (sameFactEpoch) {
+                    loadActiveCausalMedia(entityType, clientUuid).toCausalMediaRevisions()
+                } else {
+                    emptyList()
+                },
+                durableMediaCommitUnknown =
+                    journal.phase == CausalMediaSettlementPhase.CommitUnknown,
+            )
+        }
         if (entityType == "wake_observation") {
             freezeEmptyMediaCommitEnvelope(
                 entityType = entityType,
@@ -727,10 +869,21 @@ internal class CausalSettlement(
             media = frozenMedia.items,
             deleted = state.deleted,
         )
+        val contentHash = causalMutationContentHash(mutation)
+        frozenMedia.group?.let { group ->
+            requireNotNull(mediaSettlementJournal) {
+                "causal media freeze requires durable settlement journal"
+            }.bind(
+                mutation = mutation,
+                contentEpoch = contentEpoch,
+                requestHash = contentHash,
+                manifest = group,
+            )
+        }
         return FrozenCausalUnit(
             mutation = mutation,
             contentEpoch = contentEpoch,
-            contentHash = causalMutationContentHash(mutation),
+            contentHash = contentHash,
             candidates = candidates,
             mediaSnapshot = frozenMedia.revisions,
         )
@@ -1139,6 +1292,7 @@ internal class CausalSettlement(
     private data class FrozenCausalMedia(
         val items: List<CausalMediaItem>,
         val revisions: List<CausalMediaRevision>,
+        val group: ImmutableMediaSpoolGroup?,
     )
 
     private suspend fun freezeCausalMedia(
@@ -1149,7 +1303,7 @@ internal class CausalSettlement(
     ): FrozenCausalMedia? {
         val assets = loadActiveCausalMedia(entityType, clientUuid)
         val revisions = assets.toCausalMediaRevisions()
-        if (assets.isEmpty()) return FrozenCausalMedia(emptyList(), revisions)
+        if (assets.isEmpty()) return FrozenCausalMedia(emptyList(), revisions, null)
         val cache = conflictSnapshotCacheDao ?: return null
         val expectedSources = assets.sortedBy(MediaAssetEntity::clientUuid).map { asset ->
             ImmutableMediaSpoolSource(
@@ -1159,7 +1313,7 @@ internal class CausalSettlement(
             )
         }
         val stored = cache.getFrozenMediaSpoolManifest(mutationId)?.let { row ->
-            decodeImmutableMediaSpoolGroup(row.snapshotJson).also { group ->
+            decodeFrozenMediaSpoolManifest(row.snapshotJson).also { group ->
                 require(group.mutationId == mutationId) { "Room media spool manifest identity drift" }
                 require(row.cachedAt == contentEpoch) { "Room media spool manifest epoch drift" }
             }
@@ -1214,6 +1368,7 @@ internal class CausalSettlement(
         return FrozenCausalMedia(
             items = group.items.map(ImmutableMediaSpoolItem::toCausalMediaItem),
             revisions = revisions,
+            group = group,
         )
     }
 
@@ -1307,7 +1462,7 @@ internal class CausalSettlement(
             "causal media upload requires durable Room manifest storage"
         }
         val group = cache.getFrozenMediaSpoolManifest(unit.mutation.mutationId)?.let { row ->
-            decodeImmutableMediaSpoolGroup(row.snapshotJson)
+            decodeFrozenMediaSpoolManifest(row.snapshotJson)
         } ?: throw AuthorityProofException(
             session.pullGeneration,
             IllegalArgumentException("因果媒体缺少不可变 spool manifest"),
@@ -1317,13 +1472,18 @@ internal class CausalSettlement(
         }
         for (item in unit.mutation.media) {
             val spoolItem = group.items.single { it.mediaUuid == item.mediaUuid }
+            val existingReceipt = requireNotNull(mediaSettlementJournal) {
+                "causal media upload requires settlement journal"
+            }.preparedReceipt(unit.mutation.mutationId, spoolItem)
+            if (existingReceipt != null) continue
             val source = immutableMediaSpool.open(unit.mutation.mutationId, spoolItem)
-            backend.putCausalMediaPreimage(
+            val receipt = backend.putCausalMediaPreimage(
                 session = session,
                 mediaUuid = item.mediaUuid,
                 source = source,
                 sha256 = item.sha256,
             )
+            mediaSettlementJournal.recordPrepared(unit.mutation.mutationId, receipt)
         }
     }
 
@@ -1356,6 +1516,9 @@ internal class CausalSettlement(
         applyStableProjectionAfterAck(unit, result)
         unit.candidates.filter { it.entityType == "media" }.forEach { media ->
             mediaDao.markSynced(media.clientUuid, media.updatedAt)
+        }
+        if (unit.mutation.media.isNotEmpty()) {
+            requireNotNull(mediaSettlementJournal).markTerminal(unit.mutation.mutationId, result)
         }
     }
 
@@ -1434,6 +1597,9 @@ internal class CausalSettlement(
                 updatedAt = unit.contentEpoch,
             ),
         )
+        if (unit.mutation.media.isNotEmpty()) {
+            requireNotNull(mediaSettlementJournal).markTerminal(unit.mutation.mutationId, result)
+        }
         // A commit response is not a complete ConflictSnapshot receipt. Persist
         // only the pull/list summary; detail is fetched and projected losslessly.
     }

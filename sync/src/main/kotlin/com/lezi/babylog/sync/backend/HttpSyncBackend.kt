@@ -1029,12 +1029,12 @@ class HttpSyncBackend internal constructor(
         mediaUuid: String,
         source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
         sha256: String,
-    ) {
+    ): CausalMediaPreimageReceipt {
         session.requireCurrentReplicaTransport()
         require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
             "因果媒体 sha256 无效"
         }
-        requestJsonStream(
+        val response = requestJsonStream(
             base = session.baseUrl,
             path = "/v1/causal/media/$mediaUuid",
             method = "PUT",
@@ -1045,6 +1045,7 @@ class HttpSyncBackend internal constructor(
             ),
             retryOperation = SyncRetryOperation.MediaPrepare,
         )
+        return response.toCausalMediaPreimageReceipt(mediaUuid, sha256, source.contentLength)
     }
 
     private suspend fun postCausalBatch(
@@ -2238,6 +2239,35 @@ private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = Cau
     width = requiredNullableLong("width", context),
     height = requiredNullableLong("height", context),
 )
+
+private fun JsonObject.toCausalMediaPreimageReceipt(
+    expectedMediaUuid: String,
+    expectedSha256: String,
+    expectedByteSize: Long,
+): CausalMediaPreimageReceipt {
+    val context = "causal media preimage"
+    requireExactKeys(
+        setOf("media_uuid", "status", "byte_size", "sha256", "expires_at"),
+        context,
+    )
+    val receipt = CausalMediaPreimageReceipt(
+        mediaUuid = requiredNonBlankString("media_uuid", context),
+        status = requiredNonBlankString("status", context),
+        byteSize = requiredLong("byte_size", context),
+        sha256 = requiredNonBlankString("sha256", context),
+        expiresAtEpochSeconds = requiredLong("expires_at", context),
+    )
+    require(receipt.mediaUuid == expectedMediaUuid) { "$context.media_uuid 与请求不一致" }
+    require(receipt.status == "staged" || receipt.status == "consumed") {
+        "$context.status 无效"
+    }
+    require(receipt.byteSize == expectedByteSize && receipt.byteSize > 0L) {
+        "$context.byte_size 与请求不一致"
+    }
+    require(receipt.sha256 == expectedSha256) { "$context.sha256 与请求不一致" }
+    require(receipt.expiresAtEpochSeconds > 0L) { "$context.expires_at 无效" }
+    return receipt
+}
 
 private fun JsonObject.optionalNonBlankString(key: String, context: String): String? =
     when (val value = get(key)) {

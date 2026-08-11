@@ -290,6 +290,233 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
+    fun lostMediaCommitResponseReplaysCommitWithoutUploadingTheDurableReceiptAgain() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-media-lost-response",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v0",
+                openConflictId = "existing-conflict",
+                localBranchVersionId = "existing-branch",
+            ),
+        )
+        val mediaUuid = "00000000-0000-4000-8000-000000000011"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "/private/lost-response.jpg",
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        var commitAttempts = 0
+        var mutationId: String? = null
+        var firstMutation: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            commitAttempts += 1
+            mutationId = units.single().mutationId
+            if (firstMutation == null) firstMutation = units.single()
+            if (commitAttempts == 1) throw java.io.IOException("commit response lost")
+        }
+
+        assertThat(
+            runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+
+        val edited = requireNotNull(
+            rig.records.getByClientUuid("record-media-lost-response"),
+        )
+        rig.records.update(
+            edited.copy(
+                payloadJson = """{"amount_ml":90}""",
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(commitAttempts).isEqualTo(2)
+        assertThat(rig.backend.causalCommittedUnits.last().single())
+            .isEqualTo(requireNotNull(firstMutation))
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(mediaUuid)
+        val superseding = requireNotNull(
+            rig.records.getByClientUuid("record-media-lost-response"),
+        )
+        assertThat(superseding.payloadJson).isEqualTo("""{"amount_ml":90}""")
+        assertThat(superseding.updatedAt).isEqualTo(200)
+        assertThat(superseding.syncDirty).isTrue()
+        assertThat(superseding.baseVersion).isNotNull()
+        assertThat(superseding.mutationId).isNull()
+        assertThat(superseding.openConflictId).isEqualTo("existing-conflict")
+        assertThat(rig.immutableMediaSpool.discardedMutationIds)
+            .containsExactly(requireNotNull(mutationId))
+        assertThat(
+            rig.conflictDetails.getFrozenMediaSpoolManifest(requireNotNull(mutationId)),
+        ).isNull()
+    }
+
+    @Test
+    fun openConflictProcessDeathRestoresPartialReceiptsBeforeMutationIdRotation() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-media-partial-restart",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v0",
+                openConflictId = "existing-conflict",
+                localBranchVersionId = "existing-branch",
+            ),
+        )
+        val firstMedia = "00000000-0000-4000-8000-000000000013"
+        val secondMedia = "00000000-0000-4000-8000-000000000014"
+        listOf(firstMedia, secondMedia).forEachIndexed { index, mediaUuid ->
+            val localUri = "/private/partial-$index.jpg"
+            rig.mediaFiles.preparedUploadBytes[localUri] = byteArrayOf(index.toByte(), 7, 8)
+            rig.media.seed(
+                MediaAssetEntity(
+                    recordId = recordId,
+                    clientUuid = mediaUuid,
+                    kind = "log",
+                    localUri = localUri,
+                    createdAt = 100,
+                    updatedAt = 100,
+                    syncDirty = true,
+                ),
+            )
+        }
+        var secondFailures = 0
+        rig.backend.onCausalMediaPreimage = { mediaUuid ->
+            if (mediaUuid == secondMedia && secondFailures++ == 0) {
+                throw java.io.IOException("second preimage interrupted")
+            }
+        }
+
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
+                .exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        val firstMutation = rig.backend.causalReconciledUnits.single().single()
+        val pendingRow = requireNotNull(
+            rig.conflictDetails.getFrozenMediaSpoolManifest(firstMutation.mutationId),
+        )
+        val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.snapshotJson))
+        assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.Pending)
+        assertThat(pending.receipts.map { it.mediaUuid }).containsExactly(firstMedia)
+
+        rig.newEngine().synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalReconciledUnits.last().single()).isEqualTo(firstMutation)
+        assertThat(rig.backend.causalCommittedUnits.single().single()).isEqualTo(firstMutation)
+        assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
+            .containsExactly(firstMedia, secondMedia)
+            .inOrder()
+        assertThat(rig.immutableMediaSpool.discardedMutationIds)
+            .containsExactly(firstMutation.mutationId)
+        assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(firstMutation.mutationId))
+            .isNull()
+    }
+
+    @Test
+    fun branchedMediaSettlementRetainsSpoolReceiptAndStopsBlindResend() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-media-branch",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v0",
+            ),
+        )
+        val mediaUuid = "00000000-0000-4000-8000-000000000012"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "/private/branch.jpg",
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        var mutationId: String? = null
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            mutationId = unit.mutationId
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v0",
+                        stableRootJson = unit.rootJson,
+                        stableMedia = unit.media,
+                        conflictId = "conflict-media",
+                        branchVersionId = "branch-media",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        val commits = rig.backend.causalCommittedUnits.size
+        val uploads = rig.backend.causalMediaPreimageBytes.size
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val frozenMutationId = requireNotNull(mutationId)
+        assertThat(rig.backend.causalCommittedUnits).hasSize(commits)
+        assertThat(rig.backend.causalMediaPreimageBytes).hasSize(uploads)
+        assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
+        val row = requireNotNull(rig.conflictDetails.getFrozenMediaSpoolManifest(frozenMutationId))
+        assertThat(decodeCausalMediaSettlementOrNull(row.snapshotJson)?.phase)
+            .isEqualTo(CausalMediaSettlementPhase.Branched)
+        assertThat(rig.records.getByClientUuid("record-media-branch")?.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid("record-media-branch")?.openConflictId)
+            .isEqualTo("conflict-media")
+    }
+
+    @Test
     fun causalProofRejectsNonCanonicalRequestHashesBeforeRoomSettlement() = runTest {
         val corruptions: List<(String) -> String> = listOf(
             { "" },

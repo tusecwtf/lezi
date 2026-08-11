@@ -1026,7 +1026,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun lostMediaCommitResponseRetriesExactSpoolAfterSourceChanges() = runTest {
+    fun lostMediaCommitResponseReusesDurableReceiptAfterSourceChanges() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 4)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -1076,6 +1076,13 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 .exceptionOrNull(),
         ).isInstanceOf(java.io.IOException::class.java)
         val firstMutation = rig.backend.causalCommittedUnits.single().single()
+        val durableJournal = requireNotNull(
+            rig.conflictDetails.getFrozenMediaSpoolManifest(firstMutation.mutationId),
+        )
+        assertThat(decodeCausalMediaSettlementOrNull(durableJournal.snapshotJson)?.phase)
+            .isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
+        assertThat(rig.records.getByClientUuid("record-spool-retry")?.mutationId)
+            .isEqualTo(firstMutation.mutationId)
         rig.mediaFiles.preparedUploadBytes[localUri] = byteArrayOf(9, 9, 9)
         rig.mediaFiles.prepareUploadFailures += localUri
 
@@ -1083,9 +1090,8 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
 
         assertThat(rig.backend.causalCommittedUnits.last().single()).isEqualTo(firstMutation)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-        assertThat(rig.backend.causalMediaPreimageBytes).hasSize(2)
-        assertThat(rig.backend.causalMediaPreimageBytes[0].second).isEqualTo(firstBytes)
-        assertThat(rig.backend.causalMediaPreimageBytes[1].second).isEqualTo(firstBytes)
+        assertThat(rig.backend.causalMediaPreimageBytes).hasSize(1)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(firstBytes)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
     }
 
@@ -1146,7 +1152,8 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
-        assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNotNull()
+        assertThat(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId)).isNull()
+        assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
         assertThat(rig.backend.causalMediaPreimageBytes.single().second)
             .isEqualTo(byteArrayOf(4, 3, 2, 1))
         assertThat(rig.backend.causalCommittedUnits.single().single().clientUuid)

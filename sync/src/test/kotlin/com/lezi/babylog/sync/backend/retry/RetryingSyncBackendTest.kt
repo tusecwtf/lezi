@@ -3,6 +3,7 @@ package com.lezi.babylog.sync.backend.retry
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.MemorySyncPreferences
 import com.lezi.babylog.sync.backend.CausalMutationUnit
+import com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.FakeSyncBackend
 import com.lezi.babylog.sync.backend.FROZEN_PULL_PAGE_BUDGET
@@ -50,9 +51,16 @@ class RetryingSyncBackendTest {
                 mediaUuid: String,
                 source: SyncMediaUploadSource,
                 sha256: String,
-            ) {
+            ): CausalMediaPreimageReceipt {
                 requests += Triple(mediaUuid, source, sha256)
                 if (requests.size == 1) throw SyncHttpException(503)
+                return CausalMediaPreimageReceipt(
+                    mediaUuid = mediaUuid,
+                    status = "staged",
+                    byteSize = source.contentLength,
+                    sha256 = sha256,
+                    expiresAtEpochSeconds = Long.MAX_VALUE,
+                )
             }
         }
         val backend = RetryingSyncBackend(

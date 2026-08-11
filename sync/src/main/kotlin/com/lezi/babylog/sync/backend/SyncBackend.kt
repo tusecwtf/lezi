@@ -142,6 +142,16 @@ data class CausalMediaItem(
     val height: Long? = null,
 )
 
+/** Durable server receipt for one exact causal media preimage (wire §4.6.1). */
+data class CausalMediaPreimageReceipt(
+    val mediaUuid: String,
+    /** staged | consumed */
+    val status: String,
+    val byteSize: Long,
+    val sha256: String,
+    val expiresAtEpochSeconds: Long,
+)
+
 /**
  * Wire §3.1 frozen mutation unit for `/v1/causal/reconcile` and `/v1/causal/commit`.
  * [rootJson] is the closed-key root object (includes `updated_at`).
@@ -781,7 +791,8 @@ interface SyncBackend {
         mediaUuid: String,
         source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
         sha256: String,
-    ): Unit = throw UnsupportedOperationException("Causal media preimage upload is not implemented")
+    ): CausalMediaPreimageReceipt =
+        throw UnsupportedOperationException("Causal media preimage upload is not implemented")
 
     /**
      * On-demand conflict detail (wire §8.1). Not included in ordinary pull pages.

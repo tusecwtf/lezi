@@ -91,6 +91,29 @@ class ImmutableMediaSpoolTest {
     }
 
     @Test
+    fun terminalDiscardIsIdempotentAndCannotRemoveAnotherMutation() = runTest {
+        val root = ownedDirectory()
+        val files = QueueSourceMediaFiles(
+            "content://terminal" to byteArrayOf(1, 2, 3),
+            "content://retained" to byteArrayOf(4, 5, 6),
+        )
+        val spool = spool(root, files)
+        spool.freezeGroup(MUTATION_ONE, listOf(source(MEDIA_ONE, "content://terminal")))
+        val retained = spool.freezeGroup(
+            MUTATION_TWO,
+            listOf(source(MEDIA_TWO, "content://retained")),
+        )
+
+        spool.discardGroup(MUTATION_ONE)
+        spool.discardGroup(MUTATION_ONE)
+
+        assertThat(spool.recoverGroup(MUTATION_ONE)).isNull()
+        assertThat(spool.recoverGroup(MUTATION_TWO)?.group).isEqualTo(retained)
+        assertThat(spool.open(MUTATION_TWO, retained.items.single()).readAll())
+            .isEqualTo(byteArrayOf(4, 5, 6))
+    }
+
+    @Test
     fun capacityPressurePausesNewFreezeAndPreservesExistingEvidence() = runTest {
         val root = ownedDirectory()
         val files = QueueSourceMediaFiles(

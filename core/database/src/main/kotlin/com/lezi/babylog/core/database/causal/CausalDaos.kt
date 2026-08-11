@@ -449,6 +449,10 @@ interface ConflictSnapshotCacheDao {
             ),
         )
     }
+
+    suspend fun deleteFrozenMediaSpoolManifest(mutationId: String) {
+        delete(frozenMediaSpoolCacheKey(mutationId))
+    }
 }
 
 const val CONFLICT_SNAPSHOT_STAGE_KEY_PREFIX = "conflict-page-stage:"

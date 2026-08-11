@@ -322,6 +322,16 @@ created/expiry 与状态；同 UUID/同 bytes replay 幂等，同 UUID/不同 by
 单文件上限服从服务器媒体上限；未消费资源固定为每 membership 64 个、每 family 256 个、
 family aggregate 512 MiB、TTL 24 小时。
 
+成功 PUT 返回 closed durable receipt
+`{media_uuid,status,byte_size,sha256,expires_at}`；`status` 只允许 `staged|consumed`。Android
+必须在 commit 前把全部 receipt 与同一 mutation、pending fact epoch、canonical request hash 和
+immutable spool manifest 持久绑定。commit 请求发出前先 durable 标记 `commit_unknown`；进程死亡或
+响应丢失后先 replay 同一 commit，不重复 PUT 已有 exact receipt。只有 accepted/merged 与本机 fact
+settlement 同事务落库后，spool 才可进入幂等 cleanup；branched/pending/unknown 永久保留到后续明确
+resolution/settlement。当前 Android 没有 media mutation abandon command，因此 pending 不存在隐式删除
+入口；未来若增加显式 abandon，只有 commit 从未发出、用户确认且 pending fact 在同一事务解除绑定后才
+eligible。
+
 `commit` 必须在写 version/rev/publication 前精确匹配 UUID/SHA/size，并在同一数据库事务把
 accepted/merged/branched 引用标记为 consumed。最终 `media/{family}/{uuid}` 只接收数据库已
 消费的 bytes；commit/restart retry 必须从任意 DB/filesystem crash point 收敛。启动在开放业务

@@ -155,6 +155,9 @@ interface ImmutableMediaSpool {
         item: ImmutableMediaSpoolItem,
     ): SyncMediaUploadSource
 
+    /** Idempotently removes exactly one mutation-owned spool after durable cleanup eligibility. */
+    suspend fun discardGroup(mutationId: String)
+
     /** Keeps every retained partial/complete journal and unlinks only unreferenced owned artifacts. */
     suspend fun recoverAndSweep(
         retainedMutationIds: Set<String>,
@@ -248,6 +251,17 @@ internal class FileImmutableMediaSpool(
             val path = mediaPath(mutationDirectory(mutationId), item.slot)
             requireRegularFile(path, mutationDirectory(mutationId))
             SpoolUploadSource(path, item)
+        }
+    }
+
+    override suspend fun discardGroup(mutationId: String): Unit = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            requireCanonicalUuid(mutationId, "media spool mutation id")
+            ensureRoot()
+            val directory = mutationDirectory(mutationId)
+            if (existsNoFollow(directory)) {
+                deleteOwnedTree(directory, rootPath)
+            }
         }
     }
 

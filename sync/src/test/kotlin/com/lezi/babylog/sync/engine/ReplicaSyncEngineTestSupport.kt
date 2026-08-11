@@ -51,7 +51,7 @@ import com.lezi.babylog.sync.TestImmutableMediaSpool
 
 internal class ReplicaEngineRig(
     session: SyncSession,
-    allowHistoricalMutableRootEvidence: Boolean = true,
+    private val allowHistoricalMutableRootEvidence: Boolean = true,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
@@ -87,7 +87,9 @@ internal class ReplicaEngineRig(
     var familyBabyAppliedCalls = 0
     var authorityVisibleAtCallback = false
     val carePlanAppliedBatches = mutableListOf<List<String>>()
-    val engine = ReplicaSyncEngine(
+    val engine = newEngine()
+
+    fun newEngine() = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
         recordDao = records,

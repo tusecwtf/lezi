@@ -269,6 +269,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val causalReconciledUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalMediaPreimageBytes = mutableListOf<Pair<String, ByteArray>>()
+    var onCausalMediaPreimage: (suspend (String) -> Unit)? = null
     var nextCausalReconcile: CausalBatchResult? = null
     var nextCausalCommit: CausalBatchResult? = null
     val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
@@ -808,8 +809,9 @@ internal class RecordingSyncBackend : SyncBackend {
         mediaUuid: String,
         source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
         sha256: String,
-    ) {
+    ): com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt {
         // Recording backend accepts preimages as no-ops; production Http stages bytes.
+        onCausalMediaPreimage?.invoke(mediaUuid)
         syncOrder += "causal_media_preimage:$mediaUuid"
         val uploaded = java.io.ByteArrayOutputStream()
         source.openStream().use { stream ->
@@ -823,6 +825,13 @@ internal class RecordingSyncBackend : SyncBackend {
             }
         }
         causalMediaPreimageBytes += mediaUuid to uploaded.toByteArray()
+        return com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt(
+            mediaUuid = mediaUuid,
+            status = "staged",
+            byteSize = source.contentLength,
+            sha256 = sha256,
+            expiresAtEpochSeconds = Long.MAX_VALUE,
+        )
     }
 
     override suspend fun causalReconcile(
@@ -1612,6 +1621,7 @@ internal class TestImmutableMediaSpool(
     private val groups = linkedMapOf<String, ImmutableMediaSpoolGroup>()
     private val expectedItemCounts = linkedMapOf<String, Int>()
     private val bytes = linkedMapOf<Pair<String, String>, ByteArray>()
+    val discardedMutationIds = mutableListOf<String>()
 
     override suspend fun freezeGroup(
         mutationId: String,
@@ -1661,6 +1671,13 @@ internal class TestImmutableMediaSpool(
         content = requireNotNull(bytes[mutationId to item.mediaUuid]),
         mime = item.mime,
     )
+
+    override suspend fun discardGroup(mutationId: String) {
+        groups.remove(mutationId)
+        expectedItemCounts.remove(mutationId)
+        bytes.keys.filter { it.first == mutationId }.forEach(bytes::remove)
+        discardedMutationIds += mutationId
+    }
 
     override suspend fun recoverAndSweep(
         retainedMutationIds: Set<String>,

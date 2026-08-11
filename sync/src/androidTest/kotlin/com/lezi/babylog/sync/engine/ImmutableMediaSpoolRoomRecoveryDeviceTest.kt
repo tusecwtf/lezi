@@ -20,6 +20,7 @@ import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt
 import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.CausalReconcileStatus
 import com.lezi.babylog.sync.backend.CausalUnitResult
@@ -128,17 +129,51 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             database = database()
             val backend = DeviceCausalBackend()
             val reopenedSpool = fileSpool(mediaFiles)
+            val terminalRollbackRunner = object : DatabaseTransactionRunner {
+                override suspend fun <T> run(block: suspend () -> T): T =
+                    database.runInTransaction<T> {
+                        runBlocking {
+                            val result = block()
+                            val row = database.conflictSnapshotCacheDao()
+                                .getFrozenMediaSpoolManifest(MUTATION_ID)
+                            val phase = row?.let {
+                                decodeCausalMediaSettlementOrNull(it.snapshotJson)?.phase
+                            }
+                            if (phase == CausalMediaSettlementPhase.CleanupAccepted) {
+                                error("injected terminal transaction rollback")
+                            }
+                            result
+                        }
+                    }
+            }
+            val terminalFailure = runCatching {
+                settlement(
+                    database = database,
+                    backend = backend,
+                    spool = reopenedSpool,
+                    transactionRunner = terminalRollbackRunner,
+                ).settle(SESSION, listOf(candidate(database)))
+            }.exceptionOrNull()
+            assertThat(terminalFailure).hasMessageThat().contains("terminal transaction rollback")
+            val unknownRow = requireNotNull(
+                database.conflictSnapshotCacheDao().getFrozenMediaSpoolManifest(MUTATION_ID),
+            )
+            assertThat(decodeCausalMediaSettlementOrNull(unknownRow.snapshotJson)?.phase)
+                .isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
+            assertThat(database.recordDao().getByClientUuid(RECORD_ID)?.syncDirty).isTrue()
+            assertThat(reopenedSpool.recoverGroup(MUTATION_ID))
+                .isInstanceOf(ImmutableMediaSpoolRecovery.Complete::class.java)
+
+            database.close()
+            database = database()
             settlement(database, backend, reopenedSpool)
                 .settle(SESSION, listOf(candidate(database)))
 
             val manifestRow = database.conflictSnapshotCacheDao()
                 .getFrozenMediaSpoolManifest(MUTATION_ID)
-            assertThat(manifestRow).isNotNull()
+            assertThat(manifestRow).isNull()
             assertThat(backend.uploadedBytes).hasSize(1)
-            val complete = reopenedSpool.recoverGroup(MUTATION_ID)
-                as ImmutableMediaSpoolRecovery.Complete
-            assertThat(reopenedSpool.open(MUTATION_ID, complete.group.items.single()).readAll())
-                .isEqualTo(backend.uploadedBytes.single())
+            assertThat(reopenedSpool.recoverGroup(MUTATION_ID)).isNull()
             assertThat(database.recordDao().getByClientUuid(RECORD_ID)?.syncDirty).isFalse()
         } finally {
             database.close()
@@ -252,8 +287,15 @@ private class DeviceCausalBackend : SyncBackend {
         mediaUuid: String,
         source: SyncMediaUploadSource,
         sha256: String,
-    ) {
+    ): CausalMediaPreimageReceipt {
         uploadedBytes += source.readAll()
+        return CausalMediaPreimageReceipt(
+            mediaUuid = mediaUuid,
+            status = "staged",
+            byteSize = source.contentLength,
+            sha256 = sha256,
+            expiresAtEpochSeconds = Long.MAX_VALUE,
+        )
     }
 
     override suspend fun causalCommit(
@@ -335,6 +377,8 @@ internal object NoMediaImmutableSpool : ImmutableMediaSpool {
     ): ImmutableMediaSpoolGroup = error("no media expected")
 
     override suspend fun recoverGroup(mutationId: String): ImmutableMediaSpoolRecovery? = null
+
+    override suspend fun discardGroup(mutationId: String) = Unit
 
     override suspend fun open(
         mutationId: String,
