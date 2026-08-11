@@ -12,13 +12,13 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use std::path::Path;
-
 use crate::model::{validate_causal_root, validate_causal_root_shape, Entity};
 
 use super::bundles::validate_canonical_package_ingress;
 use super::causal_admission::admit_new_branch;
-use super::causal_media_staging::{consume_manifest, verify_manifest};
+use super::causal_media_staging::{
+    claim_manifest, verify_consumed_manifest_bytes, CausalMediaReceiptClaimError,
+};
 use super::causal_merge::{mutation_content_hash, three_way_merge, CausalMediaItem, MergeDecision};
 use super::conflict_snapshots::{
     authorize_snapshot_resolution, build_conflict_snapshot, open_conflict_detail_page,
@@ -82,6 +82,20 @@ pub struct CausalUnitResult {
 pub struct CausalBatchResult {
     pub cursor: i64,
     pub results: Vec<CausalUnitResult>,
+}
+
+pub(crate) struct DurableCausalCommit {
+    family_id: String,
+    result: CausalBatchResult,
+    promotion_manifests: Vec<Vec<CausalMediaItem>>,
+}
+
+impl DurableCausalCommit {
+    pub(crate) fn requires_media_promotion(&self) -> bool {
+        self.promotion_manifests
+            .iter()
+            .any(|manifest| !manifest.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -1659,15 +1673,19 @@ fn validate_mutation_content(
     Ok(canonical_root)
 }
 
-/// Wire §9.3: referenced media bytes must exist before branch/accept ack.
-fn require_media_bytes_present(
+/// Bind commit metadata to the durable preimage receipt before any version,
+/// projection, branch, or terminal mutation receipt is written.
+fn claim_media_receipts(
     tx: &Transaction<'_>,
-    database_path: &Path,
     principal: &Principal,
     media: &[CausalMediaItem],
     now: i64,
-) -> Result<(), &'static str> {
-    verify_manifest(tx, database_path, principal, media, now)
+) -> Result<Option<&'static str>, StoreError> {
+    match claim_manifest(tx, principal, media, now) {
+        Ok(()) => Ok(None),
+        Err(CausalMediaReceiptClaimError::Rejected(code)) => Ok(Some(code)),
+        Err(CausalMediaReceiptClaimError::Store(error)) => Err(error),
+    }
 }
 
 fn root_content_hash(
@@ -1732,7 +1750,6 @@ struct EvalContext<'a> {
     principal: &'a Principal,
     now: i64,
     dry_run: bool,
-    database_path: &'a Path,
     max_open_branches_per_root: usize,
 }
 
@@ -1894,6 +1911,10 @@ fn evaluate_unit(
     let package = canonical_package(mutation, &incoming_root, &incoming_media, ctx.now)?;
     if let Err(error) = validate_canonical_package_ingress(ctx.tx, ctx.principal, &package) {
         let code = match error {
+            StoreError::Sqlite(_)
+            | StoreError::Json(_)
+            | StoreError::Io(_)
+            | StoreError::InvalidStoredPayload => return Err(error),
             StoreError::UnresolvedReference(_) => "invalid_reference",
             StoreError::ImmutableMediaAssociation => "media_referential_integrity",
             StoreError::PullEntityTooLarge => "root_too_large",
@@ -1967,6 +1988,19 @@ fn evaluate_unit(
         && media_equal(&stable.media, &incoming_media)
         && stable_deleted == incoming_deleted
     {
+        if !ctx.dry_run && !incoming_deleted {
+            if let Some(code) =
+                claim_media_receipts(ctx.tx, ctx.principal, &incoming_media, ctx.now)?
+            {
+                return Ok(rejected(
+                    &mutation.mutation_id,
+                    &request_hash,
+                    code,
+                    code,
+                    Some(&stable),
+                ));
+            }
+        }
         let conflict_id = if stable_deleted {
             conflict_id_for_stable_delete(
                 ctx.tx,
@@ -2223,9 +2257,7 @@ fn commit_accepted_new(
     request_hash: &str,
 ) -> Result<CausalUnitResult, StoreError> {
     if !mutation.deleted {
-        if let Err(code) =
-            require_media_bytes_present(ctx.tx, ctx.database_path, ctx.principal, media, ctx.now)
-        {
+        if let Some(code) = claim_media_receipts(ctx.tx, ctx.principal, media, ctx.now)? {
             return Ok(rejected(
                 &mutation.mutation_id,
                 request_hash,
@@ -2342,9 +2374,7 @@ fn commit_accepted_update(
     request_hash: &str,
 ) -> Result<CausalUnitResult, StoreError> {
     if !mutation.deleted {
-        if let Err(code) =
-            require_media_bytes_present(ctx.tx, ctx.database_path, ctx.principal, media, ctx.now)
-        {
+        if let Some(code) = claim_media_receipts(ctx.tx, ctx.principal, media, ctx.now)? {
             return Ok(rejected(
                 &mutation.mutation_id,
                 request_hash,
@@ -2479,13 +2509,7 @@ fn commit_merged(
     request_hash: &str,
 ) -> Result<CausalUnitResult, StoreError> {
     if !merged_deleted {
-        if let Err(code) = require_media_bytes_present(
-            ctx.tx,
-            ctx.database_path,
-            ctx.principal,
-            &merged_media,
-            ctx.now,
-        ) {
+        if let Some(code) = claim_media_receipts(ctx.tx, ctx.principal, &merged_media, ctx.now)? {
             return Ok(rejected(
                 &mutation.mutation_id,
                 request_hash,
@@ -2631,13 +2655,7 @@ fn branch_unit(
         ctx.max_open_branches_per_root,
     )?;
     if !mutation.deleted {
-        if let Err(code) = require_media_bytes_present(
-            ctx.tx,
-            ctx.database_path,
-            ctx.principal,
-            incoming_media,
-            ctx.now,
-        ) {
+        if let Some(code) = claim_media_receipts(ctx.tx, ctx.principal, incoming_media, ctx.now)? {
             return Ok(rejected(
                 &mutation.mutation_id,
                 request_hash,
@@ -2745,7 +2763,6 @@ impl Store {
             principal,
             now,
             dry_run: true,
-            database_path: &self.database_path,
             max_open_branches_per_root: self.max_open_causal_branches_per_root,
         };
         let mut results = Vec::with_capacity(units.len());
@@ -2764,12 +2781,12 @@ impl Store {
     }
 
     /// Atomic causal commit (wire §6). Distinct roots remain distinct facts.
-    pub fn causal_commit(
+    pub(crate) fn causal_commit_durable(
         &self,
         principal: &Principal,
         units: Vec<CausalMutation>,
         now: i64,
-    ) -> Result<CausalBatchResult, StoreError> {
+    ) -> Result<DurableCausalCommit, StoreError> {
         if units.is_empty() {
             return Err(StoreError::InvalidReconcileBatch);
         }
@@ -2818,10 +2835,10 @@ impl Store {
             principal,
             now,
             dry_run: false,
-            database_path: &self.database_path,
             max_open_branches_per_root: self.max_open_causal_branches_per_root,
         };
         let mut results = Vec::with_capacity(units.len());
+        let mut promotion_manifests = Vec::with_capacity(units.len());
         for unit in &units {
             let mut result = evaluate_unit(&ctx, unit)?;
             // Persist no-op accepted receipt when identical current-base.
@@ -2858,9 +2875,15 @@ impl Store {
             }
             // Clear internal reason for successful wire statuses (optional).
             if matches!(result.status.as_str(), "accepted" | "merged" | "branched") {
-                if !unit.deleted {
-                    consume_manifest(&tx, principal, &unit.media, now)?;
-                }
+                let version_id = result
+                    .branch_version_id
+                    .as_ref()
+                    .or(result.stable_version_id.as_ref())
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                let (_, _, version) =
+                    load_validated_version(&tx, &principal.family_id, version_id)?
+                        .ok_or(StoreError::InvalidStoredPayload)?;
+                promotion_manifests.push(version.media);
                 result.reason = None;
             }
             results.push(result);
@@ -2871,9 +2894,51 @@ impl Store {
             |row| row.get(0),
         )?;
         tx.commit()?;
-        self.promote_consumed_causal_media_for_family(&principal.family_id)?;
         let cursor = self.current_revision(&principal.family_id)?.max(cursor);
-        Ok(CausalBatchResult { cursor, results })
+        Ok(DurableCausalCommit {
+            family_id: principal.family_id.clone(),
+            result: CausalBatchResult { cursor, results },
+            promotion_manifests,
+        })
+    }
+
+    pub(crate) fn publish_causal_commit(
+        &self,
+        commit: DurableCausalCommit,
+    ) -> Result<CausalBatchResult, StoreError> {
+        self.publish_causal_commit_with_hook(commit, None)
+    }
+
+    pub(crate) fn publish_causal_commit_with_hook(
+        &self,
+        commit: DurableCausalCommit,
+        blocking_hook: Option<&(dyn Fn(&'static str) + Send + Sync + 'static)>,
+    ) -> Result<CausalBatchResult, StoreError> {
+        for media in commit.promotion_manifests {
+            if media.is_empty() {
+                continue;
+            }
+            self.promote_consumed_causal_media_manifest_with_hook(
+                &commit.family_id,
+                &media,
+                blocking_hook,
+            )?;
+        }
+        Ok(commit.result)
+    }
+
+    /// Synchronous Store facade for callers that do not already hold the
+    /// process family mutex. The HTTP adapter uses the two phases above so
+    /// publication I/O runs after releasing that mutex.
+    #[allow(dead_code)]
+    pub fn causal_commit(
+        &self,
+        principal: &Principal,
+        units: Vec<CausalMutation>,
+        now: i64,
+    ) -> Result<CausalBatchResult, StoreError> {
+        let commit = self.causal_commit_durable(principal, units, now)?;
+        self.publish_causal_commit(commit)
     }
 
     pub fn conflict_detail_page(
@@ -3210,20 +3275,22 @@ impl Store {
         }
 
         if !resolved_deleted {
-            let media_result = require_media_bytes_present(
+            match verify_consumed_manifest_bytes(
                 &tx,
                 &self.database_path,
-                principal,
+                &principal.family_id,
                 &resolved_media,
-                now,
-            );
-            if media_result.is_err() {
-                let code = if resolution.restores_direct_base {
-                    "missing_restore_media"
-                } else {
-                    "invalid_domain"
-                };
-                return Ok(rejected_resolution(&input, code));
+            ) {
+                Ok(()) => {}
+                Err(CausalMediaReceiptClaimError::Rejected(_)) => {
+                    let code = if resolution.restores_direct_base {
+                        "missing_restore_media"
+                    } else {
+                        "invalid_domain"
+                    };
+                    return Ok(rejected_resolution(&input, code));
+                }
+                Err(CausalMediaReceiptClaimError::Store(error)) => return Err(error),
             }
         }
 
@@ -3368,8 +3435,6 @@ impl Store {
                 &version_id,
                 now,
             )?;
-        } else {
-            consume_manifest(&tx, principal, &resolved_media, now)?;
         }
         tx.commit()?;
         self.promote_consumed_causal_media_manifest(&principal.family_id, &resolved_media)?;

@@ -473,6 +473,8 @@ pub struct Store {
     snapshot_receipt_key: Arc<[u8]>,
     causal_commit_limiter: Arc<crate::rate_limit::RateLimiter>,
     max_open_causal_branches_per_root: usize,
+    causal_media_publication_locks:
+        Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

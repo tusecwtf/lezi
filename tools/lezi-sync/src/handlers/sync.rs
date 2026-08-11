@@ -534,14 +534,14 @@ pub(crate) async fn causal_commit(
     }
     let units = parse_causal_units(request)?;
     let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
+    let guard = family_lock.lock().await;
     let blocking_state = state.clone();
     let generation = state.generation.clone();
-    let result = run_blocking(move || {
+    let commit = run_blocking(move || {
         // Causal commit preserves each fact; duplicate grouping is an explicit relation.
         blocking_state
             .store
-            .causal_commit(&principal, units, blocking_state.now())
+            .causal_commit_durable(&principal, units, blocking_state.now())
             .map_err(|error| match error {
                 StoreError::InvalidReconcileBatch => {
                     ApiError::unprocessable("causal commit batch is invalid")
@@ -555,6 +555,25 @@ pub(crate) async fn causal_commit(
                 | StoreError::ForbiddenCustomItem => ApiError::unprocessable(error.to_string()),
                 other => other.into(),
             })
+    })
+    .await?;
+    // The durable receipt/version transaction is complete. Exact-manifest
+    // publication may hash/copy/fsync large objects and must not retain the
+    // same-family commit mutex while the response waits for that repair.
+    drop(guard);
+    let requires_media_promotion = commit.requires_media_promotion();
+    let blocking_state = state.clone();
+    let blocking_hook = state.causal_media_commit_blocking_hook.clone();
+    let result = run_blocking(move || {
+        let result = blocking_state
+            .store
+            .publish_causal_commit_with_hook(commit, blocking_hook.as_deref())?;
+        if requires_media_promotion {
+            if let Some(hook) = &blocking_hook {
+                hook("after_promotion");
+            }
+        }
+        Ok(result)
     })
     .await?;
     Ok(Json(json!({

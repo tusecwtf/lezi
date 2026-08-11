@@ -164,6 +164,10 @@ pub struct ServerConfig {
     #[doc(hidden)]
     pub causal_media_prepare_blocking_hook:
         Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    /// Deterministic publication seam for isolated causal-media commit tests.
+    #[doc(hidden)]
+    pub causal_media_commit_blocking_hook:
+        Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     clock: Clock,
 }
 
@@ -196,6 +200,7 @@ impl ServerConfig {
             require_protocol_cutover_release: false,
             lan_apk_download_origin: None,
             causal_media_prepare_blocking_hook: None,
+            causal_media_commit_blocking_hook: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -350,6 +355,7 @@ struct AppState {
     app_update_cache: Arc<app_update::AppUpdateCache>,
     lan_apk_landing_url: Option<Arc<str>>,
     causal_media_prepare_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    causal_media_commit_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
 }
 
 impl AppState {
@@ -696,6 +702,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         app_update_cache,
         lan_apk_landing_url,
         causal_media_prepare_blocking_hook: config.causal_media_prepare_blocking_hook,
+        causal_media_commit_blocking_hook: config.causal_media_commit_blocking_hook,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     let state = Arc::new(state);

@@ -587,6 +587,9 @@ impl Store {
                 admission.family_commit_limit,
             )),
             max_open_causal_branches_per_root: admission.max_open_branches_per_root,
+            causal_media_publication_locks: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         };
         Self::preflight_existing_schema(&store.database_path)?;
         if let Some(parent) = store.database_path.parent() {

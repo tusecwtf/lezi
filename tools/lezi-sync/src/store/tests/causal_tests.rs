@@ -2,6 +2,7 @@
 
 use super::super::causal::{MAX_CAUSAL_UNITS, VERSION_PROVENANCE_PRINCIPAL};
 use super::super::causal_admission::MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT;
+use super::super::causal_media_staging::{claim_manifest, CausalMediaReceiptClaimError};
 use super::super::conflict_snapshots::ConflictOutcome;
 use super::super::*;
 use super::test_support::*;
@@ -5868,6 +5869,362 @@ fn causal_missing_media_bytes_rejected() {
         result.results[0].code.as_deref(),
         Some("missing_media_bytes")
     );
+}
+
+#[test]
+fn causal_media_manifest_claim_is_all_or_none_on_a_wrong_receipt() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut first = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: String::new(),
+        byte_size: 10,
+        mime: "image/jpeg".into(),
+        width: None,
+        height: None,
+    };
+    let mut second = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        byte_size: 11,
+        ..first.clone()
+    };
+    fx.stage_media_bytes(&mut first);
+    fx.stage_media_bytes(&mut second);
+
+    let mut wrong_second = second.clone();
+    wrong_second.sha256 = "f".repeat(64);
+    let mut unit = mut_unit(
+        "record",
+        record_id,
+        None,
+        record_root(fx.baby_id, "two-receipts", 100, 20),
+        false,
+    );
+    unit.media = vec![first.clone(), wrong_second];
+    let rejected = fx
+        .store
+        .causal_commit(&fx.owner, vec![unit], 1_700_000_000)
+        .unwrap();
+    assert_eq!(rejected.results[0].status, "rejected");
+    assert_eq!(
+        rejected.results[0].code.as_deref(),
+        Some("media_sha256_mismatch")
+    );
+
+    let bytes = vec![0_u8; first.byte_size as usize];
+    let incoming = NamedTempFile::new().unwrap();
+    fs::write(incoming.path(), &bytes).unwrap();
+    let verified = VerifiedCausalMediaPreimage::verify(
+        incoming.path().to_owned(),
+        &first.sha256,
+        DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.max_file_bytes,
+    )
+    .unwrap();
+    let replayed_prepare = fx
+        .store
+        .stage_verified_causal_media_preimage(
+            &fx.owner,
+            &first.media_uuid,
+            &verified,
+            1_700_000_001,
+            DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+        )
+        .unwrap();
+    assert_eq!(replayed_prepare.status, "staged");
+}
+
+#[test]
+fn causal_media_receipt_length_and_expiry_equality_reject_before_any_store_write() {
+    for case in ["wrong_byte_size", "expiry_equality"] {
+        let fx = CausalFx::new();
+        let record_id = Uuid::new_v4();
+        let mut media = CausalMediaItem {
+            media_uuid: Uuid::new_v4().to_string(),
+            role: "log".into(),
+            sha256: String::new(),
+            byte_size: 10,
+            mime: "image/jpeg".into(),
+            width: None,
+            height: None,
+        };
+        fx.stage_media_bytes(&mut media);
+        let connection = fx.store.connect().unwrap();
+        let expires_at: i64 = connection
+            .query_row(
+                "SELECT expires_at FROM causal_media_staging
+                 WHERE family_id = ?1 AND media_uuid = ?2",
+                params![fx.family_id, media.media_uuid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mutation_id = Uuid::new_v4().to_string();
+        let before: (i64, i64, i64, i64, i64, String) = connection
+            .query_row(
+                "SELECT
+                    (SELECT rev FROM family_meta WHERE family_id = ?1),
+                    (SELECT COUNT(*) FROM entity_versions
+                      WHERE family_id = ?1 AND mutation_id = ?2),
+                    (SELECT COUNT(*) FROM mutation_receipts
+                      WHERE family_id = ?1 AND mutation_id = ?2),
+                    (SELECT COUNT(*) FROM entities
+                      WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?3),
+                    (SELECT COUNT(*) FROM media_publications
+                      WHERE family_id = ?1 AND media_uuid = ?4),
+                    (SELECT status FROM causal_media_staging
+                      WHERE family_id = ?1 AND media_uuid = ?4)",
+                params![
+                    fx.family_id,
+                    mutation_id,
+                    record_id.to_string(),
+                    media.media_uuid,
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut declared = media.clone();
+        let (now, expected_code) = match case {
+            "wrong_byte_size" => {
+                declared.byte_size += 1;
+                (1_700_000_001, "media_byte_size_mismatch")
+            }
+            "expiry_equality" => (expires_at, "media_preimage_expired"),
+            _ => unreachable!(),
+        };
+        let mut mutation = fx.record_mutation(record_id, None, case);
+        mutation.mutation_id = mutation_id.clone();
+        mutation.media = vec![declared];
+        let rejected = fx
+            .store
+            .causal_commit(&fx.owner, vec![mutation.clone()], now)
+            .unwrap();
+        assert_eq!(rejected.results[0].status, "rejected", "{case}");
+        assert_eq!(
+            rejected.results[0].code.as_deref(),
+            Some(expected_code),
+            "{case}"
+        );
+
+        let connection = fx.store.connect().unwrap();
+        let after: (i64, i64, i64, i64, i64, String) = connection
+            .query_row(
+                "SELECT
+                    (SELECT rev FROM family_meta WHERE family_id = ?1),
+                    (SELECT COUNT(*) FROM entity_versions
+                      WHERE family_id = ?1 AND mutation_id = ?2),
+                    (SELECT COUNT(*) FROM mutation_receipts
+                      WHERE family_id = ?1 AND mutation_id = ?2),
+                    (SELECT COUNT(*) FROM entities
+                      WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?3),
+                    (SELECT COUNT(*) FROM media_publications
+                      WHERE family_id = ?1 AND media_uuid = ?4),
+                    (SELECT status FROM causal_media_staging
+                      WHERE family_id = ?1 AND media_uuid = ?4)",
+                params![
+                    fx.family_id,
+                    mutation_id,
+                    record_id.to_string(),
+                    media.media_uuid,
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(after, before, "{case}");
+
+        if case == "wrong_byte_size" {
+            mutation.media = vec![media];
+            let accepted = fx
+                .store
+                .causal_commit(&fx.owner, vec![mutation], now + 1)
+                .unwrap();
+            assert_eq!(accepted.results[0].status, "accepted");
+        }
+    }
+}
+
+#[test]
+fn causal_media_corrupt_stored_receipt_is_a_retryable_store_failure_with_zero_writes() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut media = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: String::new(),
+        byte_size: 10,
+        mime: "image/jpeg".into(),
+        width: None,
+        height: None,
+    };
+    fx.stage_media_bytes(&mut media);
+    let connection = fx.store.connect().unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET status = 'corrupt'
+              WHERE family_id = ?1 AND media_uuid = ?2",
+            params![fx.family_id, media.media_uuid],
+        )
+        .unwrap();
+    let before = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            params![fx.family_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut unit = mut_unit(
+        "record",
+        record_id,
+        None,
+        record_root(fx.baby_id, "corrupt-receipt", 100, 20),
+        false,
+    );
+    unit.media = vec![media];
+    let error = fx
+        .store
+        .causal_commit(&fx.owner, vec![unit], 1_700_000_001)
+        .unwrap_err();
+    assert!(matches!(error, StoreError::InvalidCausalMediaStaging));
+
+    let connection = fx.store.connect().unwrap();
+    let after = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            params![fx.family_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn causal_media_corrupt_stored_entity_is_a_store_failure_with_zero_terminal_writes() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let mut media = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".into(),
+        sha256: String::new(),
+        byte_size: 10,
+        mime: "image/jpeg".into(),
+        width: None,
+        height: None,
+    };
+    fx.stage_media_bytes(&mut media);
+    let mut created = fx.record_mutation(record_id, None, "media-base");
+    created.media = vec![media.clone()];
+    let stable_version = fx
+        .commit(&fx.owner, created, 1_700_000_001)
+        .unwrap()
+        .results[0]
+        .stable_version_id
+        .clone()
+        .unwrap();
+    let connection = fx.store.connect().unwrap();
+    connection
+        .execute(
+            "UPDATE entities SET payload_json = '{'
+              WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
+            params![fx.family_id, media.media_uuid],
+        )
+        .unwrap();
+    let before = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            params![fx.family_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut connection = fx.store.connect().unwrap();
+    let transaction = connection.transaction().unwrap();
+    let claim_error = claim_manifest(
+        &transaction,
+        &fx.owner,
+        std::slice::from_ref(&media),
+        1_700_000_002,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        claim_error,
+        CausalMediaReceiptClaimError::Store(StoreError::Json(_))
+    ));
+    transaction.rollback().unwrap();
+
+    let mut update = fx.record_mutation(record_id, Some(&stable_version), "media-update");
+    update.media = vec![media];
+    let error = fx.commit(&fx.owner, update, 1_700_000_002).unwrap_err();
+    assert!(matches!(error, StoreError::Json(_)));
+    let connection = fx.store.connect().unwrap();
+    let after = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            params![fx.family_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(after, before);
 }
 
 #[test]

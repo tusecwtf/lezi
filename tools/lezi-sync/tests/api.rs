@@ -16181,6 +16181,64 @@ fn causal_media_item(media_uuid: Uuid, role: &str, sha256: &str, byte_size: usiz
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct CausalReceiptWriteState {
+    revision: i64,
+    staging_status: String,
+    version_rows: i64,
+    terminal_rows: i64,
+    record_rows: i64,
+    media_rows: i64,
+    publication_rows: i64,
+}
+
+fn causal_receipt_write_state(
+    database_path: &Path,
+    write_family_id: &str,
+    receipt_family_id: &str,
+    mutation_id: Uuid,
+    record_id: Uuid,
+    media_id: Uuid,
+) -> CausalReceiptWriteState {
+    Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT status FROM causal_media_staging
+                  WHERE family_id = ?2 AND media_uuid = ?5),
+                (SELECT COUNT(*) FROM entity_versions
+                  WHERE family_id = ?1 AND mutation_id = ?3),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE family_id = ?1 AND mutation_id = ?3),
+                (SELECT COUNT(*) FROM entities
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?4),
+                (SELECT COUNT(*) FROM entities
+                  WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?5),
+                (SELECT COUNT(*) FROM media_publications
+                  WHERE family_id = ?1 AND media_uuid = ?5)",
+            rusqlite::params![
+                write_family_id,
+                receipt_family_id,
+                mutation_id.to_string(),
+                record_id.to_string(),
+                media_id.to_string(),
+            ],
+            |row| {
+                Ok(CausalReceiptWriteState {
+                    revision: row.get(0)?,
+                    staging_status: row.get(1)?,
+                    version_rows: row.get(2)?,
+                    terminal_rows: row.get(3)?,
+                    record_rows: row.get(4)?,
+                    media_rows: row.get(5)?,
+                    publication_rows: row.get(6)?,
+                })
+            },
+        )
+        .unwrap()
+}
+
 fn conflict_set_choice(detail: &Value, path: &str, expected: Value) -> Value {
     let choice_id = detail["conflicting"]
         .as_array()
@@ -17696,6 +17754,553 @@ async fn causal_media_commit_rejects_same_size_different_digest_before_publicati
 }
 
 #[tokio::test]
+async fn causal_media_commit_claims_only_the_preparing_principals_open_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (owner, member) =
+        two_joined_clients(&rig.app, "receipt-claim-owner", "receipt-claim-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"principal-bound-commit";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, owner_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    assert_eq!(prepared["status"], "staged");
+
+    let foreign = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "foreign-receipt", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, rejected) = causal_commit_units(&rig.app, member_token, vec![foreign]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "media_membership_mismatch");
+
+    let accepted_mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "owned-receipt", 80, 30),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, accepted) =
+        causal_commit_units(&rig.app, owner_token, vec![accepted_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+    let stable_version = accepted["results"][0]["stable_version_id"].clone();
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(member_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice()
+    );
+
+    let (status, replay) =
+        causal_commit_units(&rig.app, owner_token, vec![accepted_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "accepted");
+    assert_eq!(replay["results"][0]["stable_version_id"], stable_version);
+    let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE entity_type = 'record' AND client_uuid = ?1",
+            [record_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+}
+
+#[tokio::test]
+async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "receipt-matrix-owner",
+        "receipt-matrix-family-request-000001",
+    )
+    .await;
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let mut token = owner["access_token"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let database_path = rig.directory.path().join("lezi.db");
+
+    // Exact byte length is receipt authority. A semantic rejection leaves no
+    // terminal/version/projection/publication and the same mutation can retry
+    // with the receipt's canonical metadata.
+    let length_media_id = Uuid::new_v4();
+    let length_bytes = b"receipt-length";
+    let length_sha = hex::encode(Sha256::digest(length_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, &token, length_media_id, length_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let length_mutation_id = Uuid::new_v4();
+    let length_record_id = Uuid::new_v4();
+    let before_length = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &family_id,
+        length_mutation_id,
+        length_record_id,
+        length_media_id,
+    );
+    let wrong_length = causal_unit(
+        length_mutation_id,
+        None,
+        "record",
+        length_record_id,
+        causal_formula_root(baby_id, "wrong-length", 80, 20),
+        vec![causal_media_item(
+            length_media_id,
+            "log",
+            &length_sha,
+            length_bytes.len() + 1,
+        )],
+        false,
+    );
+    let (status, rejected) = causal_commit_units(&rig.app, &token, vec![wrong_length]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "media_byte_size_mismatch");
+    assert_eq!(
+        causal_receipt_write_state(
+            &database_path,
+            &family_id,
+            &family_id,
+            length_mutation_id,
+            length_record_id,
+            length_media_id,
+        ),
+        before_length
+    );
+    assert_eq!(before_length.staging_status, "staged");
+    let correct_length = causal_unit(
+        length_mutation_id,
+        None,
+        "record",
+        length_record_id,
+        causal_formula_root(baby_id, "wrong-length", 80, 20),
+        vec![causal_media_item(
+            length_media_id,
+            "log",
+            &length_sha,
+            length_bytes.len(),
+        )],
+        false,
+    );
+    let (status, accepted) = causal_commit_units(&rig.app, &token, vec![correct_length]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+
+    // The same durable row under another family key is invisible to this
+    // authenticated family. Restoring the fixture binding proves rejection did
+    // not terminalize the mutation or consume the receipt.
+    let family_media_id = Uuid::new_v4();
+    let family_bytes = b"receipt-family";
+    let family_sha = hex::encode(Sha256::digest(family_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, &token, family_media_id, family_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let foreign_family_id = Uuid::new_v4().to_string();
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET family_id = ?1
+             WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![foreign_family_id, family_id, family_media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let family_mutation_id = Uuid::new_v4();
+    let family_record_id = Uuid::new_v4();
+    let before_family = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &foreign_family_id,
+        family_mutation_id,
+        family_record_id,
+        family_media_id,
+    );
+    let family_mutation = causal_unit(
+        family_mutation_id,
+        None,
+        "record",
+        family_record_id,
+        causal_formula_root(baby_id, "wrong-family", 80, 30),
+        vec![causal_media_item(
+            family_media_id,
+            "log",
+            &family_sha,
+            family_bytes.len(),
+        )],
+        false,
+    );
+    let (status, rejected) =
+        causal_commit_units(&rig.app, &token, vec![family_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "missing_media_bytes");
+    assert_eq!(
+        causal_receipt_write_state(
+            &database_path,
+            &family_id,
+            &foreign_family_id,
+            family_mutation_id,
+            family_record_id,
+            family_media_id,
+        ),
+        before_family
+    );
+    assert_eq!(before_family.staging_status, "staged");
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET family_id = ?1
+             WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![family_id, foreign_family_id, family_media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let (status, accepted) = causal_commit_units(&rig.app, &token, vec![family_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+
+    // TTL is half-open: now == expires_at is already expired. Startup then
+    // collects that open receipt, allowing a fresh receipt and the same
+    // non-terminalized mutation to succeed.
+    let expiry_media_id = Uuid::new_v4();
+    let expiry_bytes = b"receipt-expiry-equality";
+    let expiry_sha = hex::encode(Sha256::digest(expiry_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, &token, expiry_media_id, expiry_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let expires_at = prepared["expires_at"].as_i64().unwrap();
+    rig.now.store(expires_at, Ordering::SeqCst);
+    let (refresh_status, refreshed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(refresh_status, StatusCode::OK, "{refreshed}");
+    token = refreshed["access_token"].as_str().unwrap().to_owned();
+    let expiry_mutation_id = Uuid::new_v4();
+    let expiry_record_id = Uuid::new_v4();
+    let expiry_mutation = causal_unit(
+        expiry_mutation_id,
+        None,
+        "record",
+        expiry_record_id,
+        causal_formula_root(baby_id, "expiry-equality", 80, 40),
+        vec![causal_media_item(
+            expiry_media_id,
+            "log",
+            &expiry_sha,
+            expiry_bytes.len(),
+        )],
+        false,
+    );
+    let before_expiry = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &family_id,
+        expiry_mutation_id,
+        expiry_record_id,
+        expiry_media_id,
+    );
+    let (status, rejected) =
+        causal_commit_units(&rig.app, &token, vec![expiry_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "media_preimage_expired");
+    assert_eq!(
+        causal_receipt_write_state(
+            &database_path,
+            &family_id,
+            &family_id,
+            expiry_mutation_id,
+            expiry_record_id,
+            expiry_media_id,
+        ),
+        before_expiry
+    );
+    assert_eq!(before_expiry.staging_status, "staged");
+
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (status, reprepared) =
+        put_causal_media_bytes(&restarted, &token, expiry_media_id, expiry_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{reprepared}");
+    assert_eq!(reprepared["status"], "staged");
+    let (status, accepted) = causal_commit_units(&restarted, &token, vec![expiry_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+}
+
+#[tokio::test]
+async fn causal_media_corrupt_stored_receipt_returns_5xx_without_terminal_writes() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let session = create_family(
+        &rig.app,
+        "corrupt-receipt-owner",
+        "corrupt-receipt-family-request-0001",
+    )
+    .await;
+    let token = session["access_token"].as_str().unwrap();
+    let family_id = session["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"corrupt-stored-receipt";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET status = 'corrupt'
+              WHERE family_id = ?1 AND media_uuid = ?2",
+            [family_id, &media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "corrupt-receipt", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, failed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (version_count, receipt_count): (i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM entity_versions
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2)",
+            [family_id, &record_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((version_count, receipt_count), (0, 0));
+}
+
+#[tokio::test]
+async fn causal_media_corrupt_stored_entity_returns_5xx_without_update_writes() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let session = create_family(
+        &rig.app,
+        "corrupt-media-entity-owner",
+        "corrupt-media-entity-family-request-01",
+    )
+    .await;
+    let token = session["access_token"].as_str().unwrap();
+    let family_id = session["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"corrupt-stored-media-entity";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let created = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "media-base", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, created) = causal_commit_units(&rig.app, token, vec![created]).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let stable_version = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE entities SET payload_json = '{'
+              WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
+            [family_id, &media_id.to_string()],
+        )
+        .unwrap();
+    let before: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            [family_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    drop(connection);
+
+    let update = causal_unit(
+        Uuid::new_v4(),
+        Some(&stable_version),
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "media-update", 80, 30),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, failed) = causal_commit_units(&rig.app, token, vec![update]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let after: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            [family_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn causal_media_commit_ignores_unrelated_corrupt_consumed_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let session = create_family(
+        &rig.app,
+        "bounded-promotion-owner",
+        "bounded-promotion-family-request-001",
+    )
+    .await;
+    let token = session["access_token"].as_str().unwrap();
+    let family_id = session["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let unrelated_media = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+    let target_media = Uuid::parse_str("ffffffff-ffff-4fff-bfff-ffffffffffff").unwrap();
+    let unrelated_bytes = b"unrelated-consumed-bytes";
+    let target_bytes = b"target-receipt-bytes";
+    let unrelated_sha = hex::encode(Sha256::digest(unrelated_bytes));
+    let target_sha = hex::encode(Sha256::digest(target_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, token, unrelated_media, unrelated_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let unrelated_mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        Uuid::new_v4(),
+        causal_formula_root(baby_id, "unrelated", 80, 20),
+        vec![causal_media_item(
+            unrelated_media,
+            "log",
+            &unrelated_sha,
+            unrelated_bytes.len(),
+        )],
+        false,
+    );
+    let (status, committed) = causal_commit_units(&rig.app, token, vec![unrelated_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    let unrelated_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(unrelated_media.to_string());
+    fs::write(&unrelated_path, b"corrupt").unwrap();
+
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, token, target_media, target_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let target_record = Uuid::new_v4();
+    let target_mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        target_record,
+        causal_formula_root(baby_id, "target", 80, 20),
+        vec![causal_media_item(
+            target_media,
+            "log",
+            &target_sha,
+            target_bytes.len(),
+        )],
+        false,
+    );
+    let (status, accepted) =
+        causal_commit_units(&rig.app, token, vec![target_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+    let version_id = accepted["results"][0]["stable_version_id"].clone();
+    let target_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(target_media.to_string());
+    assert_eq!(fs::read(&target_path).unwrap(), target_bytes);
+
+    let (status, replay) = causal_commit_units(&rig.app, token, vec![target_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["stable_version_id"], version_id);
+    let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2",
+            [family_id, &target_record.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+}
+
+#[tokio::test]
 async fn causal_media_prepare_rejects_declared_length_drift_without_a_receipt() {
     let rig = Rig::with_config(|config| {
         config.max_media_bytes = 64 * 1024;
@@ -17946,6 +18551,310 @@ async fn slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_comm
     let staged_path = staging_dir.join(media_id.to_string());
     assert_eq!(fs::read(staged_path).unwrap(), bytes);
     assert!(!incoming.path().exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn causal_media_promotion_runs_outside_the_same_family_commit_lock() {
+    let (hook, events, release) = blocked_prepare_hook("before_promotion");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_commit_blocking_hook = Some(hook);
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-promotion-owner",
+        "causal-media-promotion-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let media_id = Uuid::new_v4();
+    let bytes = b"blocked-promotion-bytes";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, &token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        Uuid::new_v4(),
+        causal_formula_root(baby_id, "media-promotion", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let media_app = rig.app.clone();
+    let media_token = token.clone();
+    let media_commit =
+        tokio::spawn(
+            async move { causal_commit_units(&media_app, &media_token, vec![mutation]).await },
+        );
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "before_promotion"
+        );
+    })
+    .await
+    .unwrap();
+
+    let small_commit = tokio::time::timeout(
+        Duration::from_millis(500),
+        commit_causal_record(
+            &rig.app,
+            &token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            "small-during-media-promotion",
+        ),
+    )
+    .await
+    .expect("media promotion retained the same-family commit lock");
+    assert_eq!(small_commit.0, StatusCode::OK, "{}", small_commit.1);
+
+    release.release();
+    let (status, committed) = media_commit.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{committed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn causal_media_branch_commit_and_resolution_serialize_one_publication() {
+    let (hook, events, release) = blocked_prepare_hook("before_promotion");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_commit_blocking_hook = Some(hook);
+    });
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "publication-race-owner",
+        "publication-race-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap().to_owned();
+    let member_token = member["access_token"].as_str().unwrap().to_owned();
+    let generation = owner["generation"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, &owner_token).await;
+    let record_id = Uuid::new_v4();
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        &member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "publication-base", 80, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base_version = created["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, stable) = causal_commit_units(
+        &rig.app,
+        &owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base_version),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "publication-stable", 80, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stable}");
+
+    let media_id = Uuid::new_v4();
+    let bytes = b"serialized-branch-publication";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, &member_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let branch_mutation_id = Uuid::new_v4();
+    let branch_mutation = causal_unit(
+        branch_mutation_id,
+        Some(&base_version),
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "publication-branch", 80, 40),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let branch_app = rig.app.clone();
+    let branch_token = member_token.clone();
+    let branch_request = branch_mutation.clone();
+    let branch_commit = tokio::spawn(async move {
+        causal_commit_units(&branch_app, &branch_token, vec![branch_request]).await
+    });
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "before_promotion"
+        );
+    })
+    .await
+    .unwrap();
+
+    let pull = pull_entities(&rig.app, &owner_token, generation).await;
+    let conflict_id = find_entity(&pull, record_id)["conflict_summary"]["conflict_id"]
+        .as_str()
+        .expect("durable branch is visible while publication waits")
+        .to_owned();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(&owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let branch_version = detail["branches"][0]["version_id"]
+        .as_str()
+        .expect("branch version")
+        .to_owned();
+    let choices = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let candidate = item["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| {
+                    candidate["sources"].as_array().is_some_and(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| source["version_id"] == branch_version)
+                    })
+                })
+                .unwrap_or_else(|| panic!("branch choice missing: {item}"));
+            json!({
+                "path": item["path"],
+                "choice_id": candidate["choice_id"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let resolve_app = rig.app.clone();
+    let resolve_token = owner_token.clone();
+    let resolve_path = format!("/v1/conflicts/{conflict_id}/resolve");
+    let resolution_mutation_id = Uuid::new_v4();
+    let resolve_mutation_id = resolution_mutation_id;
+    let mut resolve = tokio::spawn(async move {
+        json_request(
+            &resolve_app,
+            Method::POST,
+            &resolve_path,
+            Some(&resolve_token),
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": resolve_mutation_id.to_string(),
+                "choices": choices
+            }),
+        )
+        .await
+    });
+    let database_path = rig.directory.path().join("lezi.db");
+    let resolved_family = family_id.to_owned();
+    let resolved_conflict = conflict_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let connection = Connection::open(&database_path).unwrap();
+            let (status, terminal_rows): (String, i64) = connection
+                .query_row(
+                    "SELECT c.status,
+                            (SELECT COUNT(*) FROM conflict_resolutions r
+                              WHERE r.family_id = c.family_id
+                                AND r.conflict_id = c.conflict_id
+                                AND r.resolution_mutation_id = ?3)
+                       FROM conflicts c
+                      WHERE c.family_id = ?1 AND c.conflict_id = ?2",
+                    rusqlite::params![
+                        resolved_family,
+                        resolved_conflict,
+                        resolution_mutation_id.to_string(),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if status == "resolved" && terminal_rows == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resolution did not durably commit before publication"
+            );
+            std::thread::yield_now();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut resolve)
+            .await
+            .is_err(),
+        "resolution bypassed the Store-owned publication serialization"
+    );
+
+    release.release();
+    let (branch_status, branch) = branch_commit.await.unwrap();
+    assert_eq!(branch_status, StatusCode::OK, "{branch}");
+    assert_eq!(branch["results"][0]["status"], "branched", "{branch}");
+    assert_eq!(
+        branch["results"][0]["branch_version_id"], branch_version,
+        "{branch}"
+    );
+    let (resolve_status, resolved) = resolve.await.unwrap();
+    assert_eq!(resolve_status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["status"], "accepted", "{resolved}");
+    assert_eq!(
+        resolved["stable_media"][0]["media_uuid"],
+        media_id.to_string()
+    );
+
+    let (replay_status, replay) =
+        causal_commit_units(&rig.app, &member_token, vec![branch_mutation]).await;
+    assert_eq!(replay_status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "branched", "{replay}");
+    assert_eq!(replay["results"][0]["branch_version_id"], branch_version);
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(&owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let published = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(published.as_ref(), bytes);
+
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let version_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+             WHERE family_id = ?1 AND mutation_id = ?2",
+            rusqlite::params![family_id, branch_mutation_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let publication_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_publications
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_rows, 1);
+    assert_eq!(publication_rows, 1);
 }
 
 #[tokio::test]
@@ -18475,7 +19384,7 @@ async fn causal_media_preimage_replay_conflict_and_restart_publication_are_stabl
 }
 
 #[tokio::test]
-async fn causal_media_published_path_conflict_rejects_before_projection_and_retry_converges() {
+async fn causal_media_receipt_claim_survives_promotion_fault_and_replays_one_version() {
     let rig = Rig::with_config(|config| {
         config.max_media_bytes = 64 * 1024;
     });
@@ -18520,10 +19429,31 @@ async fn causal_media_published_path_conflict_rejects_before_projection_and_retr
     );
 
     let (status, failed) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
-    assert_eq!(status, StatusCode::OK, "{failed}");
-    assert_eq!(failed["results"][0]["status"], "rejected");
-    assert_eq!(failed["results"][0]["code"], "media_uuid_conflict");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
     assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (durable_version, version_count, consumed_count): (String, i64, i64) = connection
+        .query_row(
+            "SELECT r.stable_version_id,
+                    (SELECT COUNT(*) FROM entity_versions v
+                      WHERE v.family_id = r.family_id
+                        AND v.entity_type = r.entity_type
+                        AND v.client_uuid = r.client_uuid),
+                    (SELECT COUNT(*) FROM causal_media_staging s
+                      WHERE s.family_id = r.family_id AND s.media_uuid = ?1
+                        AND s.status = 'consumed')
+               FROM mutation_receipts r
+              WHERE r.mutation_id = ?2",
+            [
+                media_id.to_string(),
+                mutation["mutation_id"].as_str().unwrap().to_owned(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+    assert_eq!(consumed_count, 1);
+    drop(connection);
     let response = request(
         &rig.app,
         Method::GET,
@@ -18545,11 +19475,28 @@ async fn causal_media_published_path_conflict_rejects_before_projection_and_retr
         }));
 
     fs::remove_dir(&final_path).unwrap();
+    let (status, prepared_replay) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared_replay}");
+    assert_eq!(prepared_replay["status"], "consumed");
     let (status, committed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
     assert_eq!(status, StatusCode::OK, "{committed}");
     assert_eq!(committed["results"][0]["status"], "accepted");
+    assert_eq!(
+        committed["results"][0]["stable_version_id"],
+        durable_version
+    );
     assert_eq!(fs::read(&final_path).unwrap(), bytes);
     assert!(!staged_path.exists());
+    let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE entity_type = 'record' AND client_uuid = ?1",
+            [record_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
     let converged_pull = pull_entities(&rig.app, token, generation).await;
     let converged_ids = converged_pull["entities"]
         .as_array()

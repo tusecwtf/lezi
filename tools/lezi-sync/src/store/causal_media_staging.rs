@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -419,6 +420,7 @@ fn finalize_consumed_publication(
 fn promote_consumed_row(
     store: &Store,
     row: (String, String, String, i64),
+    blocking_hook: Option<&(dyn Fn(&'static str) + Send + Sync + 'static)>,
 ) -> Result<(), StoreError> {
     let (family_id, media_uuid, sha256, byte_size) = row;
     let byte_size =
@@ -435,6 +437,9 @@ fn promote_consumed_row(
     }
     if published.try_exists()? || !checked_digest(&staged, byte_size, &sha256)? {
         return Err(StoreError::CausalMediaPreimageConflict);
+    }
+    if let Some(hook) = blocking_hook {
+        hook("before_promotion");
     }
     let parent = published
         .parent()
@@ -462,104 +467,196 @@ fn promote_consumed_row(
     finalize_consumed_publication(store, &family_id, &media_uuid)
 }
 
-pub(in crate::store) fn verify_manifest(
+fn validate_existing_media_identity(
     tx: &Transaction<'_>,
-    database_path: &Path,
-    principal: &Principal,
-    media: &[CausalMediaItem],
-    now: i64,
-) -> Result<(), &'static str> {
-    for item in media {
-        let existing_payload = tx
-            .query_row(
-                "SELECT payload_json FROM entities
-                 WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
-                params![principal.family_id, item.media_uuid],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|_| "media_staging_invalid")?;
-        if let Some(payload_json) = existing_payload {
-            let payload =
-                super::parse_payload(&payload_json).map_err(|_| "media_staging_invalid")?;
-            let existing_sha = payload.get("sha256").and_then(serde_json::Value::as_str);
-            let existing_size = payload
-                .get("byte_size")
-                .and_then(serde_json::Value::as_i64)
-                .ok_or("media_staging_invalid")?;
-            if existing_sha.is_some_and(|sha| sha != item.sha256) || existing_size != item.byte_size
-            {
-                return Err("media_uuid_conflict");
-            }
-        }
-        let row = load_row(tx, &principal.family_id, &item.media_uuid)
-            .map_err(|_| "media_staging_invalid")?
-            .ok_or("missing_media_bytes")?;
-        if row.sha256 != item.sha256 {
-            return Err("media_sha256_mismatch");
-        }
-        if row.byte_size as i64 != item.byte_size {
-            return Err("media_byte_size_mismatch");
-        }
-        let published = published_path(database_path, &principal.family_id, &item.media_uuid);
-        match fs::symlink_metadata(&published) {
-            Ok(_) => {
-                if !checked_digest(&published, row.byte_size, &row.sha256)
-                    .map_err(|_| "media_staging_invalid")?
-                {
-                    return Err("media_uuid_conflict");
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Err("media_staging_invalid"),
-        }
-        let path = if row.status == StagingStatus::Consumed {
-            published
-        } else {
-            if row.membership_id != principal.membership_id {
-                return Err("media_membership_mismatch");
-            }
-            if row.expires_at <= now || row.status != StagingStatus::Staged {
-                return Err("media_preimage_expired");
-            }
-            staging_path(database_path, &principal.family_id, &item.media_uuid)
-        };
-        if !checked_digest(&path, row.byte_size, &row.sha256)
-            .map_err(|_| "media_staging_invalid")?
-        {
-            return Err("media_bytes_integrity_mismatch");
+    family_id: &str,
+    item: &CausalMediaItem,
+) -> Result<(), CausalMediaReceiptClaimError> {
+    let existing_payload = tx
+        .query_row(
+            "SELECT payload_json FROM entities
+             WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
+            params![family_id, item.media_uuid],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(StoreError::from)
+        .map_err(CausalMediaReceiptClaimError::Store)?;
+    if let Some(payload_json) = existing_payload {
+        let payload =
+            super::parse_payload(&payload_json).map_err(CausalMediaReceiptClaimError::Store)?;
+        let existing_sha = payload.get("sha256").and_then(serde_json::Value::as_str);
+        let existing_size = payload
+            .get("byte_size")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or(StoreError::InvalidStoredPayload)
+            .map_err(CausalMediaReceiptClaimError::Store)?;
+        if existing_sha.is_some_and(|sha| sha != item.sha256) || existing_size != item.byte_size {
+            return Err(CausalMediaReceiptClaimError::Rejected(
+                "media_uuid_conflict",
+            ));
         }
     }
     Ok(())
 }
 
-pub(in crate::store) fn consume_manifest(
+fn validate_receipt_metadata(row: &StagingRow, item: &CausalMediaItem) -> Result<(), &'static str> {
+    if row.sha256 != item.sha256 {
+        return Err("media_sha256_mismatch");
+    }
+    if row.byte_size as i64 != item.byte_size {
+        return Err("media_byte_size_mismatch");
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(in crate::store) enum CausalMediaReceiptClaimError {
+    Rejected(&'static str),
+    Store(StoreError),
+}
+
+/// Atomically bind the complete canonical manifest to its durable preimage
+/// receipts. The receipt row is the authority for bytes already verified by
+/// prepare; commit never re-opens or hashes a large object while holding the
+/// family lock / SQLite write transaction.
+pub(in crate::store) fn claim_manifest(
     tx: &Transaction<'_>,
     principal: &Principal,
     media: &[CausalMediaItem],
     now: i64,
-) -> Result<(), StoreError> {
+) -> Result<(), CausalMediaReceiptClaimError> {
+    let mut staged = Vec::new();
     for item in media {
-        tx.execute(
-            "UPDATE causal_media_staging
-             SET status = 'consumed', consumed_at = COALESCE(consumed_at, ?1)
-             WHERE family_id = ?2 AND media_uuid = ?3
-               AND sha256 = ?4 AND byte_size = ?5
-               AND (status = 'consumed' OR (status = 'staged' AND membership_id = ?6))",
-            params![
-                now,
-                principal.family_id,
-                item.media_uuid,
-                item.sha256,
-                item.byte_size,
-                principal.membership_id,
-            ],
-        )?;
+        validate_existing_media_identity(tx, &principal.family_id, item)?;
+        let row = load_row(tx, &principal.family_id, &item.media_uuid)
+            .map_err(CausalMediaReceiptClaimError::Store)?
+            .ok_or(CausalMediaReceiptClaimError::Rejected(
+                "missing_media_bytes",
+            ))?;
+        validate_receipt_metadata(&row, item).map_err(CausalMediaReceiptClaimError::Rejected)?;
+        match row.status {
+            StagingStatus::Consumed => {}
+            StagingStatus::Staged => {
+                if row.membership_id != principal.membership_id {
+                    return Err(CausalMediaReceiptClaimError::Rejected(
+                        "media_membership_mismatch",
+                    ));
+                }
+                if row.expires_at <= now {
+                    return Err(CausalMediaReceiptClaimError::Rejected(
+                        "media_preimage_expired",
+                    ));
+                }
+                staged.push(item);
+            }
+            StagingStatus::Writing | StagingStatus::GcPending => {
+                if row.membership_id != principal.membership_id {
+                    return Err(CausalMediaReceiptClaimError::Rejected(
+                        "media_membership_mismatch",
+                    ));
+                }
+                return Err(CausalMediaReceiptClaimError::Rejected(
+                    "media_preimage_expired",
+                ));
+            }
+        }
+    }
+    // Validation is deliberately complete before the first state transition:
+    // one wrong/expired/foreign receipt leaves every peer receipt staged.
+    for item in staged {
+        let updated = tx
+            .execute(
+                "UPDATE causal_media_staging
+                 SET status = 'consumed', consumed_at = COALESCE(consumed_at, ?1)
+                 WHERE family_id = ?2 AND media_uuid = ?3
+                   AND membership_id = ?4 AND sha256 = ?5 AND byte_size = ?6
+                   AND status = 'staged' AND expires_at > ?1",
+                params![
+                    now,
+                    principal.family_id,
+                    item.media_uuid,
+                    principal.membership_id,
+                    item.sha256,
+                    item.byte_size,
+                ],
+            )
+            .map_err(StoreError::from)
+            .map_err(CausalMediaReceiptClaimError::Store)?;
+        if updated != 1 {
+            return Err(CausalMediaReceiptClaimError::Store(
+                StoreError::InvalidCausalMediaStaging,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Resolution only reuses media already attached by an accepted/merged/branched
+/// commit. It must not claim another principal's open staged receipt.
+pub(in crate::store) fn require_consumed_manifest(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    media: &[CausalMediaItem],
+) -> Result<(), CausalMediaReceiptClaimError> {
+    for item in media {
+        validate_existing_media_identity(tx, family_id, item)?;
+        let row = load_row(tx, family_id, &item.media_uuid)
+            .map_err(CausalMediaReceiptClaimError::Store)?
+            .ok_or(CausalMediaReceiptClaimError::Rejected(
+                "missing_media_bytes",
+            ))?;
+        validate_receipt_metadata(&row, item).map_err(CausalMediaReceiptClaimError::Rejected)?;
+        if row.status != StagingStatus::Consumed {
+            return Err(CausalMediaReceiptClaimError::Rejected(
+                "missing_media_bytes",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Choice-only resolution has no client receipt to repair. It must prove that
+/// every already-consumed preimage is still readable before publishing a new
+/// stable version. Ordinary commit deliberately does not call this function.
+pub(in crate::store) fn verify_consumed_manifest_bytes(
+    tx: &Transaction<'_>,
+    database_path: &Path,
+    family_id: &str,
+    media: &[CausalMediaItem],
+) -> Result<(), CausalMediaReceiptClaimError> {
+    require_consumed_manifest(tx, family_id, media)?;
+    for item in media {
+        let byte_size = usize::try_from(item.byte_size)
+            .map_err(|_| StoreError::InvalidStoredPayload)
+            .map_err(CausalMediaReceiptClaimError::Store)?;
+        let published = published_path(database_path, family_id, &item.media_uuid);
+        let staged = staging_path(database_path, family_id, &item.media_uuid);
+        let published_matches = checked_digest(&published, byte_size, &item.sha256)
+            .map_err(CausalMediaReceiptClaimError::Store)?;
+        let staged_matches = checked_digest(&staged, byte_size, &item.sha256)
+            .map_err(CausalMediaReceiptClaimError::Store)?;
+        if !published_matches && !staged_matches {
+            return Err(CausalMediaReceiptClaimError::Rejected(
+                "missing_media_bytes",
+            ));
+        }
     }
     Ok(())
 }
 
 impl Store {
+    fn causal_media_publication_lock(&self, family_id: &str) -> Arc<std::sync::Mutex<()>> {
+        let mut locks = self
+            .causal_media_publication_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks
+            .entry(family_id.to_owned())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
     pub fn stage_verified_causal_media_preimage(
         &self,
         principal: &Principal,
@@ -691,14 +788,7 @@ impl Store {
     }
 
     pub fn promote_consumed_causal_media(&self) -> Result<(), StoreError> {
-        self.promote_consumed_causal_media_scoped(None)
-    }
-
-    pub fn promote_consumed_causal_media_for_family(
-        &self,
-        family_id: &str,
-    ) -> Result<(), StoreError> {
-        self.promote_consumed_causal_media_scoped(Some(family_id))
+        self.promote_consumed_causal_media_scoped()
     }
 
     /// Repairs only the receipt-authorized root manifest. Resolution replay is
@@ -709,6 +799,19 @@ impl Store {
         family_id: &str,
         media: &[CausalMediaItem],
     ) -> Result<(), StoreError> {
+        self.promote_consumed_causal_media_manifest_with_hook(family_id, media, None)
+    }
+
+    pub(in crate::store) fn promote_consumed_causal_media_manifest_with_hook(
+        &self,
+        family_id: &str,
+        media: &[CausalMediaItem],
+        blocking_hook: Option<&(dyn Fn(&'static str) + Send + Sync + 'static)>,
+    ) -> Result<(), StoreError> {
+        let publication_lock = self.causal_media_publication_lock(family_id);
+        let _publication_guard = publication_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if media.len() > MAX_CAUSAL_MEDIA_PER_ROOT
             || media
                 .windows(2)
@@ -743,24 +846,21 @@ impl Store {
         drop(statement);
         drop(connection);
         for row in rows {
-            promote_consumed_row(self, row)?;
+            promote_consumed_row(self, row, blocking_hook)?;
         }
         Ok(())
     }
 
-    fn promote_consumed_causal_media_scoped(
-        &self,
-        family_scope: Option<&str>,
-    ) -> Result<(), StoreError> {
+    fn promote_consumed_causal_media_scoped(&self) -> Result<(), StoreError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT family_id, media_uuid, sha256, byte_size
              FROM causal_media_staging
-             WHERE status = 'consumed' AND (?1 IS NULL OR family_id = ?1)
+             WHERE status = 'consumed'
              ORDER BY family_id, media_uuid",
         )?;
         let rows = statement
-            .query_map(params![family_scope], |row| {
+            .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -772,7 +872,11 @@ impl Store {
         drop(statement);
         drop(connection);
         for row in rows {
-            promote_consumed_row(self, row)?;
+            let publication_lock = self.causal_media_publication_lock(&row.0);
+            let _publication_guard = publication_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            promote_consumed_row(self, row, None)?;
         }
         Ok(())
     }
