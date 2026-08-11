@@ -166,6 +166,90 @@ class CausalRoomTransactionTest {
     }
 
     @Test
+    fun carePlanCommitFirstDaoUsesContentEpochCasAndPreservesLocalOnlyColumns() = runBlocking {
+        val plans = database.carePlanDao()
+        plans.upsert(
+            CarePlanEntity(
+                clientUuid = "plan-commit-first",
+                babyId = 1,
+                type = "formula",
+                scheduledAt = 10,
+                scheduledZoneId = "UTC",
+                note = "epoch-1",
+                payloadJson = """{"amount_ml":90}""",
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-plan-base",
+                sourceRecordClientUuid = "local-source",
+                systemCalendarEventId = "local-calendar",
+            ),
+        )
+
+        assertThat(
+            plans.freezeCommitFirstEpoch(
+                "plan-commit-first",
+                100,
+                "plan-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("plan-mutation-1")
+        val frozen = requireNotNull(plans.getByClientUuid("plan-commit-first"))
+        plans.update(
+            frozen.copy(
+                note = "epoch-2",
+                updatedAt = 200,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+
+        assertThat(
+            plans.settleCommitFirstBranched(
+                "plan-commit-first",
+                "plan-mutation-1",
+                100,
+                "plan-conflict",
+                "plan-branch",
+                "v-plan-stable",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        with(requireNotNull(plans.getByClientUuid("plan-commit-first"))) {
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-plan-stable")
+            assertThat(openConflictId).isEqualTo("plan-conflict")
+            assertThat(localBranchVersionId).isEqualTo("plan-branch")
+            assertThat(sourceRecordClientUuid).isEqualTo("local-source")
+            assertThat(systemCalendarEventId).isEqualTo("local-calendar")
+        }
+
+        assertThat(
+            plans.freezeCommitFirstEpoch(
+                "plan-commit-first",
+                200,
+                "plan-mutation-2",
+            )?.mutationId,
+        ).isEqualTo("plan-mutation-2")
+        assertThat(
+            plans.settleCommitFirstAcceptedOrMerged(
+                "plan-commit-first",
+                "plan-mutation-2",
+                200,
+                "v-plan-epoch-2",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.CurrentEpoch)
+        with(requireNotNull(plans.getByClientUuid("plan-commit-first"))) {
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(syncDirty).isFalse()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-plan-epoch-2")
+            assertThat(sourceRecordClientUuid).isEqualTo("local-source")
+            assertThat(systemCalendarEventId).isEqualTo("local-calendar")
+        }
+    }
+
+    @Test
     fun providerCommitFirstDaosPreserveCurrentAndSupersededProductEpochs() = runBlocking {
         val babies = database.babyDao()
         val customItems = database.customItemDao()

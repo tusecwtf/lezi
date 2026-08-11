@@ -225,6 +225,582 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
+    fun completedCarePlanDefersUntilItsFulfilledRecordCanBeFrozen() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 45)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000211",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-missing-record", "membership-a", updatedAt = 140).copy(
+                babyId = babyId,
+                status = "completed",
+                fulfilledRecordClientUuid = "00000000-0000-4000-8000-000000000212",
+                fulfilledAt = 130,
+                syncDirty = true,
+                baseVersion = "v-plan",
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(45)
+        with(requireNotNull(rig.carePlans.getByClientUuid("plan-missing-record"))) {
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+        }
+        assertThat(rig.conflictDetails.getFrozenMutation("care_plan", "plan-missing-record"))
+            .isNull()
+    }
+
+    @Test
+    fun completedCarePlanDefersCrossBabyFulfilledRecordWithoutDurableSnapshot() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 45)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val planBabyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000213",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-plan-baby",
+            ),
+        )
+        val otherBabyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000214",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-other-baby",
+            ),
+        )
+        val recordUuid = "00000000-0000-4000-8000-000000000215"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = otherBabyId,
+                type = "formula",
+                timestamp = 120,
+                payloadJson = """{"amount_ml":90}""",
+                schemaVersion = 2,
+                updatedAt = 120,
+                syncDirty = false,
+                baseVersion = "v-other-record",
+            ),
+        )
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-cross-baby", "membership-a", 140).copy(
+                babyId = planBabyId,
+                status = "completed",
+                fulfilledRecordClientUuid = recordUuid,
+                fulfilledAt = 130,
+                syncDirty = true,
+                baseVersion = "v-plan",
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(45)
+        with(requireNotNull(rig.carePlans.getByClientUuid("plan-cross-baby"))) {
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+        }
+        assertThat(rig.conflictDetails.getFrozenMutation("care_plan", "plan-cross-baby"))
+            .isNull()
+    }
+
+    @Test
+    fun eligibleCarePlanLiveAndTombstoneCommitWithoutReconcilePullOrCursorAdvance() = runTest {
+        for (deleted in listOf(false, true)) {
+            val (session, rig, uuid) = seedDirtyCarePlan(
+                pullCursor = 46,
+                clientUuid = "plan-direct-$deleted",
+                deleted = deleted,
+            )
+
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(46)
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            val committed = rig.backend.causalCommittedUnits.single().single()
+            assertThat(committed.entityType).isEqualTo("care_plan")
+            assertThat(committed.clientUuid).isEqualTo(uuid)
+            assertThat(committed.deleted).isEqualTo(deleted)
+            assertThat(committed.media).isEmpty()
+            with(requireNotNull(rig.carePlans.getByClientUuid(uuid))) {
+                assertThat(syncDirty).isFalse()
+                assertThat(mutationId).isNull()
+                assertThat(baseVersion).isNotNull()
+            }
+        }
+    }
+
+    @Test
+    fun dirtyCarePlanDependenciesFreezeAndCommitInProviderFactPlanOrder() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 47)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000220",
+                syncDirty = true,
+                familyAuthority = true,
+                updatedAt = 100,
+            ),
+        )
+        val customId = rig.customItems.seed(
+            localReplicaCustomItem(
+                "00000000-0000-4000-8000-000000000221",
+                "membership-a",
+                110,
+            ).copy(syncDirty = true),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "00000000-0000-4000-8000-000000000222",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 120,
+                payloadJson = """{"amount_ml":90}""",
+                schemaVersion = 2,
+                updatedAt = 120,
+                syncDirty = true,
+            ),
+        )
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-with-dependencies", "membership-a", 130).copy(
+                babyId = babyId,
+                type = "custom",
+                customItemId = customId,
+                payloadJson =
+                    """{"title":"体操","detail":"十分钟","custom_item_id":$customId,"icon_slot":2}""",
+                status = "completed",
+                fulfilledRecordClientUuid = "00000000-0000-4000-8000-000000000222",
+                fulfilledAt = 125,
+                syncDirty = true,
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits.single().map { it.entityType })
+            .containsExactly("baby", "custom_item", "record", "care_plan")
+            .inOrder()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(47)
+        assertThat(
+            requireNotNull(
+                rig.babies.getByClientUuid("00000000-0000-4000-8000-000000000220"),
+            ).syncDirty,
+        ).isFalse()
+        assertThat(
+            requireNotNull(
+                rig.customItems.get("00000000-0000-4000-8000-000000000221"),
+            ).syncDirty,
+        ).isFalse()
+        assertThat(
+            requireNotNull(
+                rig.records.getByClientUuid("00000000-0000-4000-8000-000000000222"),
+            ).syncDirty,
+        ).isFalse()
+        with(requireNotNull(rig.carePlans.getByClientUuid("plan-with-dependencies"))) {
+            assertThat(syncDirty).isFalse()
+            assertThat(status).isEqualTo("completed")
+            assertThat(fulfilledRecordClientUuid)
+                .isEqualTo("00000000-0000-4000-8000-000000000222")
+        }
+    }
+
+    @Test
+    fun lostCarePlanResponseReplaysFrozenEpochBeforeReplanningLaterEdit() = runTest {
+        val (session, rig, uuid) = seedDirtyCarePlan(
+            pullCursor = 48,
+            clientUuid = "plan-response-lost",
+        )
+        var frozen: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            frozen = units.single()
+            throw java.io.IOException("care plan response lost")
+        }
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }.exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        val firstEnvelope = requireNotNull(frozen)
+        val firstRow = requireNotNull(rig.carePlans.getByClientUuid(uuid))
+        rig.carePlans.update(
+            firstRow.copy(note = "epoch-2", updatedAt = 200, syncDirty = true, mutationId = null),
+        )
+
+        rig.backend.onCausalCommit = { units ->
+            val replay = units.single()
+            assertThat(replay).isEqualTo(firstEnvelope)
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.ACCEPTED,
+                        mutationId = replay.mutationId,
+                        requestHash = causalMutationContentHash(replay),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-plan-epoch-1",
+                        stableRootJson = replay.rootJson,
+                        stableMedia = emptyList(),
+                    ),
+                ),
+            )
+        }
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        with(requireNotNull(rig.carePlans.getByClientUuid(uuid))) {
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-plan-epoch-1")
+        }
+        assertThat(rig.conflictDetails.getFrozenMutation("care_plan", uuid)).isNull()
+
+        rig.backend.onCausalCommit = null
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val replanned = rig.backend.causalCommittedUnits.last().single()
+        assertThat(replanned.mutationId).isNotEqualTo(firstEnvelope.mutationId)
+        assertThat(replanned.baseVersion).isEqualTo("v-plan-epoch-1")
+        assertThat(replanned.rootJson).contains("epoch-2")
+        assertThat(requireNotNull(rig.carePlans.getByClientUuid(uuid)).syncDirty).isFalse()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+    }
+
+    @Test
+    fun branchedFrozenCarePlanPreservesNewerEditAndDeviceLocalRelations() = runTest {
+        val (session, rig, uuid) = seedDirtyCarePlan(
+            pullCursor = 49,
+            clientUuid = "plan-branch-newer",
+        )
+        var firstEnvelope: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            firstEnvelope = units.single()
+            throw java.io.IOException("care plan branch response lost")
+        }
+        runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
+        val frozen = requireNotNull(firstEnvelope)
+        val firstRow = requireNotNull(rig.carePlans.getByClientUuid(uuid))
+        rig.carePlans.update(
+            firstRow.copy(
+                note = "newer-local-plan",
+                sourceRecordClientUuid = "device-local-source",
+                systemCalendarEventId = "device-local-calendar",
+                updatedAt = 210,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+        rig.backend.onCausalCommit = { units ->
+            val replay = units.single()
+            assertThat(replay).isEqualTo(frozen)
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = replay.mutationId,
+                        requestHash = causalMutationContentHash(replay),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-plan-stable",
+                        stableRootJson = replay.rootJson,
+                        stableMedia = emptyList(),
+                        branchVersionId = "v-plan-branch",
+                        conflictId = "conflict-plan",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        with(requireNotNull(rig.carePlans.getByClientUuid(uuid))) {
+            assertThat(note).isEqualTo("newer-local-plan")
+            assertThat(sourceRecordClientUuid).isEqualTo("device-local-source")
+            assertThat(systemCalendarEventId).isEqualTo("device-local-calendar")
+            assertThat(updatedAt).isEqualTo(210)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-plan-stable")
+            assertThat(openConflictId).isEqualTo("conflict-plan")
+            assertThat(localBranchVersionId).isEqualTo("v-plan-branch")
+        }
+        assertThat(rig.conflictDetails.getFrozenMutation("care_plan", uuid)).isNull()
+    }
+
+    @Test
+    fun carePlanContentDriftRetainsFrozenEnvelopeAndAttachmentRetainsSourcePath() = runTest {
+        val (session, rig, uuid) = seedDirtyCarePlan(
+            pullCursor = 50,
+            clientUuid = "plan-content-drift",
+        )
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.REJECTED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        code = "content_drift",
+                    ),
+                ),
+            )
+        }
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().contains("content_drift")
+        assertThat(rig.conflictDetails.getFrozenMutation("care_plan", uuid)).isNotNull()
+        assertThat(requireNotNull(rig.carePlans.getByClientUuid(uuid)).syncDirty).isTrue()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+
+        val mediaSession = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 51)
+        val mediaRig = ReplicaEngineRig(mediaSession).also { it.backend.enableCausal = true }
+        val babyId = mediaRig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000250",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val planId = mediaRig.carePlans.seed(
+            localReplicaCarePlan("plan-with-attachment", "membership-a", 160).copy(
+                babyId = babyId,
+                syncDirty = true,
+            ),
+        )
+        mediaRig.media.seed(
+            MediaAssetEntity(
+                clientUuid = "00000000-0000-4000-8000-000000000251",
+                kind = "log",
+                carePlanId = planId,
+                localUri = "plans/attachment.jpg",
+                mime = "image/jpeg",
+                createdAt = 160,
+                updatedAt = 160,
+                syncDirty = true,
+            ),
+        )
+
+        mediaRig.engine.synchronize(mediaSession, SyncTrigger.LocalWrite)
+
+        assertThat(mediaRig.backend.pullCount).isEqualTo(0)
+        assertThat(mediaRig.preferences.current().pullCursor).isEqualTo(51)
+        val reconciled = mediaRig.backend.causalReconciledUnits.single().single()
+        assertThat(reconciled.entityType).isEqualTo("care_plan")
+        assertThat(reconciled.media.map { it.mediaUuid })
+            .containsExactly("00000000-0000-4000-8000-000000000251")
+        assertThat(reconciled.media.single().role).isEqualTo("plan")
+        val committed = mediaRig.backend.causalCommittedUnits.single().single()
+        assertThat(committed.entityType).isEqualTo("care_plan")
+        assertThat(committed.media).isEqualTo(reconciled.media)
+        assertThat(mediaRig.backend.syncOrder.filter { it.startsWith("causal_") })
+            .containsExactly(
+                "causal_reconcile:1",
+                "causal_media_preimage:00000000-0000-4000-8000-000000000251",
+                "causal_commit:1",
+            )
+            .inOrder()
+        assertThat(
+            requireNotNull(mediaRig.carePlans.getByClientUuid("plan-with-attachment")).syncDirty,
+        ).isFalse()
+        assertThat(
+            requireNotNull(
+                mediaRig.media.getByClientUuid("00000000-0000-4000-8000-000000000251"),
+            ).syncDirty,
+        ).isFalse()
+        assertThat(mediaRig.conflictDetails.getFrozenMutation("care_plan", "plan-with-attachment"))
+            .isNull()
+    }
+
+    @Test
+    fun currentEpochCarePlanTerminalProofInvalidatesStaleCalendarProjection() = runTest {
+        data class Case(
+            val name: String,
+            val status: String,
+            val deleted: Boolean,
+            val branched: Boolean,
+        )
+        val cases = listOf(
+            Case("merged-visible-revision", CausalCommitStatus.MERGED, false, false),
+            Case("branched-visible-revision", CausalCommitStatus.BRANCHED, false, true),
+            Case("accepted-tombstone", CausalCommitStatus.ACCEPTED, true, false),
+        )
+        for ((index, case) in cases.withIndex()) {
+            val (session, rig, uuid) = seedDirtyCarePlan(
+                pullCursor = 60L + index,
+                clientUuid = "plan-calendar-${case.name}",
+                deleted = case.deleted,
+            )
+            val seeded = requireNotNull(rig.carePlans.getByClientUuid(uuid))
+            rig.carePlans.update(
+                seeded.copy(
+                    sourceRecordClientUuid = "device-local-source-${case.name}",
+                    systemCalendarProjectionEnabled = true,
+                    systemCalendarEventId = "calendar-event-${case.name}",
+                    systemCalendarReminderReady = true,
+                    systemCalendarProjectionPending = false,
+                ),
+            )
+            rig.backend.onCausalCommit = { units ->
+                val unit = units.single()
+                val stableRoot = if (case.deleted) {
+                    unit.rootJson
+                } else {
+                    unit.rootJson.replace("\"note\":\"epoch-1\"", "\"note\":\"stable-${case.name}\"")
+                }
+                rig.backend.nextCausalCommit = CausalBatchResult(
+                    generation = session.pullGeneration,
+                    cursor = session.pullCursor,
+                    results = listOf(
+                        CausalUnitResult(
+                            status = case.status,
+                            mutationId = unit.mutationId,
+                            requestHash = causalMutationContentHash(unit),
+                            generation = session.pullGeneration,
+                            stableVersionId = "v-calendar-${case.name}",
+                            stableRootJson = stableRoot,
+                            stableMedia = emptyList(),
+                            branchVersionId = if (case.branched) {
+                                "branch-calendar-${case.name}"
+                            } else {
+                                null
+                            },
+                            conflictId = if (case.branched) {
+                                "conflict-calendar-${case.name}"
+                            } else {
+                                null
+                            },
+                        ),
+                    ),
+                )
+            }
+
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+            with(requireNotNull(rig.carePlans.getByClientUuid(uuid))) {
+                assertThat(note).isEqualTo(
+                    if (case.deleted) "epoch-1" else "stable-${case.name}",
+                )
+                assertThat(sourceRecordClientUuid)
+                    .isEqualTo("device-local-source-${case.name}")
+                assertThat(systemCalendarProjectionEnabled).isTrue()
+                assertThat(systemCalendarEventId).isEqualTo("calendar-event-${case.name}")
+                assertThat(systemCalendarReminderReady).isFalse()
+                assertThat(systemCalendarProjectionPending).isTrue()
+                assertThat(syncDirty).isFalse()
+                if (case.branched) {
+                    assertThat(mutationId).isNotNull()
+                    assertThat(localBranchVersionId).isEqualTo("branch-calendar-${case.name}")
+                } else {
+                    assertThat(mutationId).isNull()
+                    assertThat(localBranchVersionId).isNull()
+                }
+                assertThat(baseVersion).isEqualTo("v-calendar-${case.name}")
+                assertThat(openConflictId).isEqualTo(
+                    if (case.branched) "conflict-calendar-${case.name}" else null,
+                )
+                assertThat(deletedAt != null).isEqualTo(case.deleted)
+            }
+            assertThat(rig.conflictDetails.getFrozenMutation("care_plan", uuid)).isNull()
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(60L + index)
+        }
+    }
+
+    @Test
+    fun invalidCarePlanTerminalReferencesFailBeforeSettlementAndRetainFrozenProof() = runTest {
+        data class Case(
+            val name: String,
+            val corrupt: (String) -> String,
+        )
+        val cases = listOf(
+            Case("noncanonical-baby") { root ->
+                root.replace(
+                    "00000000-0000-4000-8000-000000000241",
+                    "baby-not-canonical",
+                )
+            },
+            Case("wrong-type-reference") { root ->
+                root.replace("\"type\":\"formula\"", "\"type\":\"custom\"")
+            },
+            Case("partial-fulfillment") { root ->
+                root.replace("\"status\":\"pending\"", "\"status\":\"completed\"")
+                    .replace(
+                        "\"fulfilled_record_client_uuid\":null",
+                        "\"fulfilled_record_client_uuid\":\"00000000-0000-4000-8000-000000000252\"",
+                    )
+            },
+        )
+        for ((index, case) in cases.withIndex()) {
+            val (session, rig, uuid) = seedDirtyCarePlan(
+                pullCursor = 52L + index,
+                clientUuid = "plan-invalid-${case.name}",
+            )
+            rig.backend.onCausalCommit = { units ->
+                val unit = units.single()
+                rig.backend.nextCausalCommit = CausalBatchResult(
+                    generation = session.pullGeneration,
+                    cursor = session.pullCursor,
+                    results = listOf(
+                        CausalUnitResult(
+                            status = CausalCommitStatus.ACCEPTED,
+                            mutationId = unit.mutationId,
+                            requestHash = causalMutationContentHash(unit),
+                            generation = session.pullGeneration,
+                            stableVersionId = "v-invalid-${case.name}",
+                            stableRootJson = case.corrupt(unit.rootJson),
+                            stableMedia = emptyList(),
+                        ),
+                    ),
+                )
+            }
+
+            val failure = runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull()
+
+            assertThat(failure).isNotNull()
+            with(requireNotNull(rig.carePlans.getByClientUuid(uuid))) {
+                assertThat(note).isEqualTo("epoch-1")
+                assertThat(syncDirty).isTrue()
+                assertThat(mutationId).isNotNull()
+                assertThat(baseVersion).isEqualTo("v-plan-base")
+                assertThat(openConflictId).isNull()
+            }
+            assertThat(rig.conflictDetails.getFrozenMutation("care_plan", uuid)).isNotNull()
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(52L + index)
+        }
+    }
+
+    @Test
     fun babyWithActiveAvatarRetainsSourceReconcileUntilMediaMigration() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 45)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
@@ -840,6 +1416,33 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             uuid
         }
         else -> error(entityType)
+    }
+
+    private fun seedDirtyCarePlan(
+        pullCursor: Long,
+        clientUuid: String,
+        deleted: Boolean = false,
+    ): Triple<com.lezi.babylog.sync.session.SyncSession, ReplicaEngineRig, String> {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = pullCursor)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000241",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        rig.carePlans.seed(
+            localReplicaCarePlan(clientUuid, "membership-a", updatedAt = 150).copy(
+                babyId = babyId,
+                note = "epoch-1",
+                syncDirty = true,
+                deletedAt = if (deleted) 149 else null,
+                baseVersion = "v-plan-base",
+            ),
+        )
+        return Triple(session, rig, clientUuid)
     }
 
     private suspend fun applyLaterProviderEdit(

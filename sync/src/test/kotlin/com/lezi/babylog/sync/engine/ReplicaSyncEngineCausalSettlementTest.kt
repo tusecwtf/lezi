@@ -1586,7 +1586,11 @@ class ReplicaSyncEngineCausalRootTypesTest(
             }
             "care_plan" -> {
                 val babyId = rig.babies.seed(
-                    localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+                    localReplicaBaby().copy(
+                        clientUuid = "00000000-0000-4000-8000-000000000312",
+                        syncDirty = false,
+                        familyAuthority = true,
+                    ),
                 )
                 rig.carePlans.seed(
                     localReplicaCarePlan("root-plan", "membership-a", 50).copy(
@@ -1704,7 +1708,11 @@ class ReplicaSyncEngineCausalRootTypesTest(
             }
             "care_plan" -> {
                 val babyId = rig.babies.seed(
-                    localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+                    localReplicaBaby().copy(
+                        clientUuid = "00000000-0000-4000-8000-000000000313",
+                        syncDirty = false,
+                        familyAuthority = true,
+                    ),
                 )
                 rig.carePlans.seed(
                     localReplicaCarePlan("root-plan", "membership-a", 50).copy(
@@ -1752,7 +1760,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        if (entityType in setOf("baby", "record", "custom_item")) {
+        if (entityType in setOf("baby", "record", "care_plan", "custom_item")) {
             assertThat(rig.backend.causalReconciledUnits).isEmpty()
         } else {
             assertThat(rig.backend.causalReconciledUnits).isNotEmpty()

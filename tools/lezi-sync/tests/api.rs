@@ -16017,6 +16017,133 @@ async fn provider_roots_commit_before_referenced_record_and_replay_exactly() {
 }
 
 #[tokio::test]
+async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstones() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "care-plan-commit-first-owner",
+        "care-plan-commit-first-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let baby = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        baby_id,
+        json!({
+            "nickname": "年年",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "birth_weight_grams": null,
+            "avatar_media_uuid": null,
+            "updated_at": 10,
+        }),
+        vec![],
+        false,
+    );
+    let record = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "按计划完成", 100, 20),
+        vec![],
+        false,
+    );
+    let plan_mutation_id = Uuid::new_v4();
+    let mut plan_root = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_root["status"] = json!("completed");
+    plan_root["fulfilled_record_client_uuid"] = json!(record_id);
+    plan_root["fulfilled_at"] = json!(1_700_000_100_i64);
+    plan_root["updated_at"] = json!(30);
+    let plan = causal_unit(
+        plan_mutation_id,
+        None,
+        "care_plan",
+        plan_id,
+        plan_root,
+        vec![],
+        false,
+    );
+
+    let frozen = vec![baby, record, plan.clone()];
+    let (status, committed) = causal_commit_units(&rig.app, token, frozen.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(
+        committed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["accepted", "accepted", "accepted"],
+        "{committed}",
+    );
+    assert_eq!(
+        committed["results"][2]["stable_root"]["fulfilled_record_client_uuid"],
+        record_id.to_string(),
+    );
+    let stable_plan = committed["results"][2]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, replayed) = causal_commit_units(&rig.app, token, frozen).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["results"][2]["stable_version_id"],
+        committed["results"][2]["stable_version_id"],
+    );
+    assert_eq!(
+        replayed["results"][2]["request_hash"],
+        committed["results"][2]["request_hash"],
+    );
+
+    let mut drift = plan.clone();
+    drift["root"]["note"] = json!("漂移计划");
+    let (status, rejected) = causal_commit_units(&rig.app, token, vec![drift]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "content_drift");
+
+    let mut tombstone_root = plan["root"].clone();
+    tombstone_root["updated_at"] = json!(40);
+    let tombstone = causal_unit(
+        Uuid::new_v4(),
+        Some(&stable_plan),
+        "care_plan",
+        plan_id,
+        tombstone_root,
+        vec![],
+        true,
+    );
+    let (status, deleted) = causal_commit_units(&rig.app, token, vec![tombstone]).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+    let generation = owner["generation"].as_str().unwrap();
+    let (status, pull) = get_json(
+        &rig.app,
+        &format!("/v1/pull?cursor=0&generation={generation}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pull}");
+    let deleted_plan = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| {
+            entity["type"] == "care_plan" && entity["client_uuid"] == plan_id.to_string()
+        })
+        .expect("care_plan tombstone in pull");
+    assert!(deleted_plan["deleted_at"].is_number());
+}
+
+#[tokio::test]
 async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
     let rig = Rig::new();
     let owner = create_family(

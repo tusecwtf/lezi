@@ -17,6 +17,7 @@ import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
 import com.lezi.babylog.core.database.causal.CommitFirstSettlementEpoch
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
+import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.sync.backend.AuthorityProofException
 import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
@@ -335,6 +336,12 @@ internal class CausalSettlement(
             unit.contentEpoch,
             stableBaseVersion,
         )
+        "care_plan" -> carePlanDao.settleCommitFirstAcceptedOrMerged(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            stableBaseVersion,
+        )
         "custom_item" -> customItemDao.settleCommitFirstAcceptedOrMerged(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
@@ -359,6 +366,14 @@ internal class CausalSettlement(
             stableBaseVersion,
         )
         "record" -> recordDao.settleCommitFirstBranched(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            conflictId,
+            branchVersionId,
+            stableBaseVersion,
+        )
+        "care_plan" -> carePlanDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
@@ -564,7 +579,17 @@ internal class CausalSettlement(
         contentEpoch: Long,
         candidates: List<PublishCandidate>,
     ): FrozenCausalUnit? {
-        if (entityType in COMMIT_FIRST_ROOT_TYPES) {
+        if (entityType == "care_plan") {
+            freezeEmptyMediaCommitEnvelope(
+                entityType = entityType,
+                clientUuid = clientUuid,
+                contentEpoch = contentEpoch,
+                candidates = candidates,
+            )?.let { return it }
+            // A complete empty manifest that cannot yet satisfy its dependency
+            // order must wait; falling through would resurrect reconcile-first.
+            if (!hasCarePlanMediaPublishOrRepairEvidence(clientUuid, candidates)) return null
+        } else if (entityType in COMMIT_FIRST_ROOT_TYPES) {
             freezeEmptyMediaCommitEnvelope(
                 entityType = entityType,
                 clientUuid = clientUuid,
@@ -683,6 +708,9 @@ internal class CausalSettlement(
             }
             if (loadActiveCausalMedia(entityType, clientUuid).isNotEmpty()) return@run null
             if (entityType == "record" && !recordProvidersReady(clientUuid, cache)) return@run null
+            if (entityType == "care_plan" && !carePlanDependenciesReady(clientUuid, cache)) {
+                return@run null
+            }
             val mutationId = UUID.randomUUID().toString()
             val frozen = freezeCommitFirstIdentity(
                 entityType = entityType,
@@ -755,6 +783,16 @@ internal class CausalSettlement(
                 it.deletedAt != null,
             )
         }
+        "care_plan" -> carePlanDao.getByClientUuid(clientUuid)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
         "custom_item" -> customItemDao.getByClientUuid(clientUuid)?.let {
             CausalLocal(
                 it.baseVersion,
@@ -794,6 +832,16 @@ internal class CausalSettlement(
                 it.deletedAt != null,
             )
         }
+        "care_plan" -> carePlanDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
         "custom_item" ->
             customItemDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
                 CausalLocal(
@@ -824,6 +872,43 @@ internal class CausalSettlement(
             "custom_item",
             customItem.clientUuid,
             customItem.mutationId,
+        )
+    }
+
+    private suspend fun carePlanDependenciesReady(
+        carePlanClientUuid: String,
+        cache: ConflictSnapshotCacheDao,
+    ): Boolean {
+        val root = buildCausalRootJson("care_plan", carePlanClientUuid) ?: return false
+        val wire = runCatching {
+            decodeCarePlanWire(
+                Json.parseToJsonElement(root).jsonObject,
+                RootUpdatedAtLocation.InlineStableRoot,
+                requireCanonicalIds = true,
+            )
+        }.getOrElse { return false }
+        val references = resolveCarePlanReferences(
+            wire = wire,
+            babyDao = babyDao,
+            customItemDao = customItemDao,
+            recordDao = recordDao,
+        ) ?: return false
+        val baby = references.baby
+        if (!baby.familyAuthority) return false
+        if (baby.syncDirty && !cache.hasCurrentFrozenProvider("baby", baby.clientUuid, baby.mutationId)) {
+            return false
+        }
+        val customItem = references.customItem
+        if (customItem?.syncDirty == true &&
+            !cache.hasCurrentFrozenProvider("custom_item", customItem.clientUuid, customItem.mutationId)
+        ) {
+            return false
+        }
+        val record = references.fulfilledRecord ?: return true
+        return !record.syncDirty || cache.hasCurrentFrozenProvider(
+            "record",
+            record.clientUuid,
+            record.mutationId,
         )
     }
 
@@ -965,6 +1050,18 @@ internal class CausalSettlement(
         val baby = babyDao.getByClientUuid(clientUuid) ?: return false
         return mediaDao.listAllIncludingDeleted().any { media ->
             media.babyId == baby.id && (media.syncDirty || media.deletedAt == null)
+        }
+    }
+
+    /** H12 owns only a complete empty CarePlan manifest; all media stays on H23's source path. */
+    private suspend fun hasCarePlanMediaPublishOrRepairEvidence(
+        clientUuid: String,
+        candidates: List<PublishCandidate>,
+    ): Boolean {
+        if (candidates.any { it.entityType == "media" }) return true
+        val plan = carePlanDao.getByClientUuid(clientUuid) ?: return false
+        return mediaDao.listForCarePlan(plan.id).any { media ->
+            media.syncDirty || media.deletedAt == null
         }
     }
 
@@ -1225,7 +1322,12 @@ internal class CausalSettlement(
         when (unit.mutation.entityType) {
             "record" -> applyStableRecord(unit.mutation.clientUuid, root, stableVersion)
             "baby" -> applyStableBaby(unit.mutation.clientUuid, root, stableVersion)
-            "care_plan" -> applyStableCarePlan(unit.mutation.clientUuid, root, stableVersion)
+            "care_plan" -> applyStableCarePlan(
+                unit.mutation.clientUuid,
+                root,
+                stableVersion,
+                deleted = unit.mutation.deleted,
+            )
             "custom_item" -> applyStableCustomItem(unit.mutation.clientUuid, root, stableVersion)
             "wake_observation" -> applyStableWake(unit.mutation.clientUuid, root, stableVersion)
         }
@@ -1300,19 +1402,61 @@ internal class CausalSettlement(
         clientUuid: String,
         root: JsonObject,
         stableVersion: String,
+        deleted: Boolean,
     ) {
         val existing = carePlanDao.getByClientUuid(clientUuid) ?: return
-        val note = root.stringOrNull("note")
-        val status = root.stringOrNull("status") ?: existing.status
-        val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
-        val payload = root["payload_json"] as? JsonObject
+        val wire = decodeCarePlanWire(
+            root,
+            RootUpdatedAtLocation.InlineStableRoot,
+            requireCanonicalIds = true,
+        )
+        val references = requireNotNull(
+            resolveCarePlanReferences(
+                wire = wire,
+                babyDao = babyDao,
+                customItemDao = customItemDao,
+                recordDao = recordDao,
+            ),
+        ) { "care_plan stable_root 引用无效或跨 Baby" }
+        val customItemId = references.customItem?.id
+        val localPayload = SyncWireMapper.localPayloadFromWire(
+            type = wire.type,
+            payload = wire.payload,
+            customItemId = customItemId,
+            allowIntentOnlyFeed = isNextFeedPlanNote(wire.note),
+        )
+        val calendarDisposition = carePlanCalendarDisposition(
+            existing = existing,
+            babyId = references.baby.id,
+            type = wire.type.key,
+            customItemId = customItemId,
+            scheduledAt = wire.scheduledAt,
+            scheduledZoneId = wire.scheduledZoneId,
+            note = wire.note,
+            payloadJson = localPayload,
+            schemaVersion = wire.schemaVersion,
+            status = wire.status,
+            deleted = deleted,
+        )
         carePlanDao.update(
             existing.copy(
-                note = note,
-                status = status,
-                payloadJson = payload?.toString() ?: existing.payloadJson,
-                updatedAt = updatedAt,
+                babyId = references.baby.id,
+                type = wire.type.key,
+                customItemId = customItemId,
+                scheduledAt = wire.scheduledAt,
+                scheduledZoneId = wire.scheduledZoneId,
+                note = wire.note,
+                payloadJson = localPayload,
+                schemaVersion = wire.schemaVersion,
+                status = wire.status,
+                createdByMembershipId = wire.createdByMembershipId,
+                fulfilledRecordClientUuid = wire.fulfilledRecordClientUuid,
+                fulfilledAt = wire.fulfilledAt,
+                updatedAt = requireNotNull(wire.inlineUpdatedAt),
                 baseVersion = stableVersion,
+                // Source provenance and calendar projection columns are device-local.
+                systemCalendarReminderReady = calendarDisposition.reminderReady,
+                systemCalendarProjectionPending = calendarDisposition.projectionPending,
                 mutationId = existing.mutationId,
                 syncDirty = existing.syncDirty,
                 openConflictId = existing.openConflictId,
@@ -1512,6 +1656,18 @@ internal class CausalSettlement(
                 }
                 null
             }
+            "care_plan" -> {
+                runCatching {
+                    decodeCarePlanWire(
+                        stableRoot,
+                        RootUpdatedAtLocation.InlineStableRoot,
+                        requireCanonicalIds = true,
+                    )
+                }.getOrElse {
+                    fail("因果 ${result.status} care_plan stable_root 类型或 domain 无效")
+                }
+                null
+            }
             else -> null
         }
         val serverStampKeys = when (unit.mutation.entityType) {
@@ -1634,7 +1790,7 @@ internal class CausalSettlement(
     private companion object {
         const val MAX_CAUSAL_SETTLEMENT_UNITS = 64
 
-        val COMMIT_FIRST_ROOT_TYPES = setOf("baby", "custom_item", "record")
+        val COMMIT_FIRST_ROOT_TYPES = setOf("baby", "custom_item", "record", "care_plan")
 
         val ROOT_DEPENDENCY_PRIORITY = mapOf(
             "baby" to 0,

@@ -20,7 +20,7 @@ import org.junit.Test
 class RealSyncPortLocalWriteNoPullTest {
 
     @Test
-    fun localWriteCommitsProviderRootsBeforeReferencedRecordAtFacadeSeam() = runTest {
+    fun localWriteCommitsProvidersAndFulfilledRecordBeforeCarePlanAtFacadeSeam() = runTest {
         val session = joinedSession("family-a").copy(pullCursor = 14)
         val rig = SyncRig(
             session = session,
@@ -29,7 +29,7 @@ class RealSyncPortLocalWriteNoPullTest {
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
             localBaby().copy(
-                clientUuid = "baby-facade-provider",
+                clientUuid = "00000000-0000-4000-8000-000000000410",
                 syncDirty = true,
                 familyAuthority = true,
                 baseVersion = "v-baby-provider",
@@ -38,7 +38,7 @@ class RealSyncPortLocalWriteNoPullTest {
         )
         val customItemId = rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "custom-facade-provider",
+                clientUuid = "00000000-0000-4000-8000-000000000411",
                 familyId = 1,
                 name = "抚触",
                 iconSlot = 2,
@@ -50,7 +50,7 @@ class RealSyncPortLocalWriteNoPullTest {
         )
         rig.records.seed(
             localRecord(babyId).copy(
-                clientUuid = "record-facade-consumer",
+                clientUuid = "00000000-0000-4000-8000-000000000412",
                 type = "custom",
                 payloadJson =
                     """{"title":"抚触","detail":"十分钟","custom_item_id":$customItemId,"icon_slot":2}""",
@@ -58,6 +58,21 @@ class RealSyncPortLocalWriteNoPullTest {
                 updatedAt = 102,
                 syncDirty = true,
                 baseVersion = "v-record-provider",
+            ),
+        )
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-facade-consumer",
+                type = "custom",
+                customItemId = customItemId,
+                payloadJson =
+                    """{"title":"抚触","detail":"十分钟","custom_item_id":$customItemId,"icon_slot":2}""",
+                status = "completed",
+                fulfilledRecordClientUuid = "00000000-0000-4000-8000-000000000412",
+                fulfilledAt = 103,
+                updatedAt = 103,
+                syncDirty = true,
+                baseVersion = "v-plan-provider",
             ),
         )
 
@@ -68,12 +83,72 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(14)
         assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
-            .containsExactly("baby", "custom_item", "record")
+            .containsExactly("baby", "custom_item", "record", "care_plan")
             .inOrder()
-        assertThat(rig.customItems.get("custom-facade-provider")?.sortOrder).isEqualTo(7)
-        assertThat(rig.records.getByClientUuid("record-facade-consumer")?.babyId)
+        assertThat(rig.customItems.get("00000000-0000-4000-8000-000000000411")?.sortOrder)
+            .isEqualTo(7)
+        assertThat(
+            rig.records.getByClientUuid("00000000-0000-4000-8000-000000000412")?.babyId,
+        )
             .isEqualTo(babyId)
+        assertThat(rig.carePlans.getByClientUuid("plan-facade-consumer")?.syncDirty).isFalse()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun localWriteDefersCrossBabyCarePlanReferenceAtFacadeWithoutPullOrSnapshot() = runTest {
+        val session = joinedSession("family-a").copy(pullCursor = 15)
+        val rig = SyncRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        )
+        rig.backend.enableCausal = true
+        val planBabyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000420",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-plan-baby",
+            ),
+        )
+        val otherBabyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000421",
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-other-baby",
+            ),
+        )
+        val recordUuid = "00000000-0000-4000-8000-000000000422"
+        rig.records.seed(
+            localRecord(otherBabyId).copy(
+                clientUuid = recordUuid,
+                syncDirty = false,
+                baseVersion = "v-other-record",
+            ),
+        )
+        rig.carePlans.seed(
+            localCarePlan(planBabyId).copy(
+                clientUuid = "plan-facade-cross-baby",
+                status = "completed",
+                fulfilledRecordClientUuid = recordUuid,
+                fulfilledAt = 130,
+                syncDirty = true,
+                baseVersion = "v-plan",
+            ),
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(15)
+        assertThat(rig.carePlans.getByClientUuid("plan-facade-cross-baby")?.syncDirty).isTrue()
+        assertThat(
+            rig.conflictDetails.getFrozenMutation("care_plan", "plan-facade-cross-baby"),
+        ).isNull()
     }
 
     @Test

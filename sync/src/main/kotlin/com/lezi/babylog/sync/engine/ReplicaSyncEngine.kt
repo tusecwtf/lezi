@@ -21,7 +21,6 @@ import com.lezi.babylog.core.database.causal.SourceRelationReason
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.model.RecordType
-import java.time.ZoneId
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -539,11 +538,18 @@ internal class ReplicaSyncEngine(
     ): Boolean {
         val existing = carePlanDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val wire = parseCarePlanWire(payload)
-        val baby = babyDao.getByClientUuid(wire.babyClientUuid) ?: return false
-        val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
-            customItemDao.getByClientUuid(customItemUuid)?.id ?: return false
-        }
+        val wire = decodeCarePlanWire(
+            payload,
+            requireCanonicalIds = backend.supportsCausalWire(),
+        )
+        val references = resolveCarePlanReferences(
+            wire = wire,
+            babyDao = babyDao,
+            customItemDao = customItemDao,
+            recordDao = recordDao,
+        ) ?: return false
+        val baby = references.baby
+        val customItemId = references.customItem?.id
         if (!forceAuthority &&
             existing != null &&
             !causalSettlement.shouldApplyStablePull(
@@ -613,47 +619,25 @@ internal class ReplicaSyncEngine(
                 return true
             }
         }
-        // Full-set co-gate: completed + linked record must not appear without the fact.
-        if (
-            entity.deletedAt == null &&
-            wire.status == CarePlanStatus.COMPLETED.storageKey &&
-            !wire.fulfilledRecordClientUuid.isNullOrBlank()
-        ) {
-            if (recordDao.getByClientUuid(wire.fulfilledRecordClientUuid) == null) return false
-        }
         val remotePayloadJson = SyncWireMapper.localPayloadFromWire(
             wire.type,
             wire.payload,
             customItemId,
             allowIntentOnlyFeed = isNextFeedPlanNote(wire.note),
         )
-        val terminal = entity.deletedAt != null ||
-            wire.status == CarePlanStatus.COMPLETED.storageKey ||
-            wire.status == CarePlanStatus.SKIPPED.storageKey
-        val existingTerminal = existing?.let {
-            it.deletedAt != null || it.status == "completed" || it.status == "skipped"
-        }
-        val projectionVisibleRevision = existing != null && (
-            existing.babyId != baby.id ||
-                existing.type != wire.type.key ||
-                existing.customItemId != customItemId ||
-                existing.scheduledAt != wire.scheduledAt ||
-                existing.scheduledZoneId != wire.scheduledZoneId ||
-                existing.note != wire.note ||
-                existing.payloadJson != remotePayloadJson ||
-                existing.schemaVersion != wire.schemaVersion ||
-                existingTerminal != terminal
-            )
-        // Provider I/O runs only after this transaction. Persist the hand-off here so
-        // a crash between replica apply and the listener cannot leave a stale event
-        // claiming that its reminder is ready. Terminal rows use the same marker for
-        // durable cleanup only when this device has evidence of a prior side effect.
-        val calendarProjectionNeedsReconciliation = terminal || projectionVisibleRevision
-        val hasLocalReminderSideEffectEvidence = existing?.let {
-            it.systemCalendarEventId != null ||
-                it.systemCalendarReminderReady ||
-                it.systemCalendarProjectionPending
-        } == true
+        val calendarDisposition = carePlanCalendarDisposition(
+            existing = existing,
+            babyId = baby.id,
+            type = wire.type.key,
+            customItemId = customItemId,
+            scheduledAt = wire.scheduledAt,
+            scheduledZoneId = wire.scheduledZoneId,
+            note = wire.note,
+            payloadJson = remotePayloadJson,
+            schemaVersion = wire.schemaVersion,
+            status = wire.status,
+            deleted = entity.deletedAt != null,
+        )
         if (concurrentNextFeedCreate) {
             val losingMedia = mediaDao.listForCarePlan(existing!!.id)
             val losingMediaUuids = losingMedia.map(MediaAssetEntity::clientUuid)
@@ -702,16 +686,8 @@ internal class ReplicaSyncEngine(
                 systemCalendarProjectionEnabled =
                     existing?.systemCalendarProjectionEnabled ?: true,
                 systemCalendarEventId = existing?.systemCalendarEventId,
-                systemCalendarReminderReady = if (calendarProjectionNeedsReconciliation) {
-                    false
-                } else {
-                    existing?.systemCalendarReminderReady ?: false
-                },
-                systemCalendarProjectionPending = if (calendarProjectionNeedsReconciliation) {
-                    hasLocalReminderSideEffectEvidence
-                } else {
-                    existing?.systemCalendarProjectionPending ?: false
-                },
+                systemCalendarReminderReady = calendarDisposition.reminderReady,
+                systemCalendarProjectionPending = calendarDisposition.projectionPending,
             ),
         )
         return true
@@ -2729,21 +2705,6 @@ private data class RecordWire(
     val effectiveWakeObservationPresent: Boolean = false,
 )
 
-private data class CarePlanWire(
-    val babyClientUuid: String,
-    val type: RecordType,
-    val customItemClientUuid: String?,
-    val scheduledAt: Long,
-    val scheduledZoneId: String,
-    val note: String?,
-    val payload: JsonObject,
-    val schemaVersion: Int,
-    val status: String,
-    val createdByMembershipId: String,
-    val fulfilledRecordClientUuid: String?,
-    val fulfilledAt: Long?,
-)
-
 private data class FulfillmentCandidateWire(
     val carePlanClientUuid: String,
     val recordClientUuid: String,
@@ -2833,70 +2794,6 @@ private fun parseRecordWire(payload: JsonObject): RecordWire {
         effectiveWakeObservationClientUuid = effectiveWake,
         effectiveWakeObservationPresent =
             "effective_wake_observation_client_uuid" in payload,
-    )
-}
-
-private fun parseCarePlanWire(payload: JsonObject): CarePlanWire {
-    payload.requireExactKeys(
-        "care_plan",
-        "baby_client_uuid",
-        "type",
-        "custom_item_client_uuid",
-        "scheduled_at",
-        "scheduled_zone_id",
-        "note",
-        "payload_json",
-        "schema_version",
-        "status",
-        "created_by_membership_id",
-        "fulfilled_record_client_uuid",
-        "fulfilled_at",
-    )
-    val type = SyncWireMapper.requireCurrentRecordType(
-        payload.requireNonBlankString("type", "care_plan"),
-        "care plan type",
-    )
-    val customItemUuid = payload.requireNullableString("custom_item_client_uuid", "care_plan")
-    require((type == RecordType.CUSTOM) == (customItemUuid != null)) {
-        if (type == RecordType.CUSTOM) {
-            "care plan type custom requires custom_item_client_uuid"
-        } else {
-            "care plan custom_item_client_uuid is only valid for type custom"
-        }
-    }
-    val zone = payload.requireNonBlankString("scheduled_zone_id", "care_plan")
-    require(runCatching { ZoneId.of(zone) }.isSuccess) { "care plan scheduled_zone_id 无效" }
-    val status = payload.requireNonBlankString("status", "care_plan")
-    require(status in CarePlanStatus.entries.map(CarePlanStatus::storageKey)) {
-        "care plan status 无效"
-    }
-    val nested = payload.requireObject("payload_json", "care_plan")
-    require("photos" !in nested && "custom_item_id" !in nested) {
-        "care plan payload_json 包含设备本地字段"
-    }
-    val scheduledAt = payload.requireLong("scheduled_at", "care_plan")
-    require(scheduledAt >= 0) { "care plan scheduled_at 无效" }
-    val fulfilledAt = payload.requireNullableLong("fulfilled_at", "care_plan")
-    require(fulfilledAt == null || fulfilledAt >= 0) { "care plan fulfilled_at 无效" }
-    return CarePlanWire(
-        babyClientUuid = payload.requireNonBlankString("baby_client_uuid", "care_plan"),
-        type = type,
-        customItemClientUuid = customItemUuid,
-        scheduledAt = scheduledAt,
-        scheduledZoneId = zone,
-        note = payload.requireNullableString("note", "care_plan"),
-        payload = nested,
-        schemaVersion = SyncWireMapper.carePlanSchemaVersion(payload),
-        status = status,
-        createdByMembershipId = payload.requireNullableString(
-            "created_by_membership_id",
-            "care_plan",
-        ).orEmpty().trim(),
-        fulfilledRecordClientUuid = payload.requireNullableString(
-            "fulfilled_record_client_uuid",
-            "care_plan",
-        ),
-        fulfilledAt = fulfilledAt,
     )
 }
 
