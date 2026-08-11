@@ -10,6 +10,7 @@ import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalCommitRejectedException
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.PullConflictSummary
 import com.lezi.babylog.sync.backend.PullResult
@@ -17,6 +18,10 @@ import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
@@ -849,6 +854,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
         assertThat(rig.carePlans.getByClientUuid(planUuid)?.openConflictId)
             .isEqualTo("conflict-delete-plan-media")
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.deletedAt).isNull()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isEqualTo(200)
         assertThat(rig.conflictSummaries.get("conflict-delete-plan-media")?.branchVersionIdsJson)
@@ -930,6 +936,94 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
+    fun mixedLiveDeleteAndMediaRecordsShareOneCommitAndOneSettlementPath() = runTest {
+        val fixture = seedMixedRecordSettlement(81, "success", 1)
+        val (session, rig, plainUuid, mediaRecordUuid, mediaUuid) = fixture
+        var mediaMutationId: String? = null
+        rig.backend.onCausalCommit = { units ->
+            assertThat(units.map { it.clientUuid }).containsExactly(plainUuid, mediaRecordUuid)
+            assertThat(units.single { it.clientUuid == plainUuid }.deleted).isTrue()
+            assertThat(units.single { it.clientUuid == mediaRecordUuid }.deleted).isFalse()
+            assertThat(units.count { it.media.isEmpty() }).isEqualTo(1)
+            assertThat(units.count { it.media.isNotEmpty() }).isEqualTo(1)
+            mediaMutationId = units.single { it.media.isNotEmpty() }.mutationId
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = units.map { unit ->
+                    CausalUnitResult(
+                        status = CausalCommitStatus.ACCEPTED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "stable-${unit.clientUuid}",
+                        stableRootJson = unit.rootJson,
+                        stableMedia = unit.media,
+                        stableDeleted = unit.deleted,
+                        stableDeletedAt = if (unit.deleted) 909 else null,
+                    )
+                },
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
+        assertThat(rig.backend.causalCommittedUnits.single()).hasSize(2)
+        assertThat(rig.records.getByClientUuid(plainUuid)?.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid(plainUuid)?.deletedAt).isEqualTo(909)
+        assertThat(rig.records.getByClientUuid(mediaRecordUuid)?.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid(mediaRecordUuid)?.deletedAt).isNull()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.immutableMediaSpool.discardedMutationIds)
+            .containsExactly(requireNotNull(mediaMutationId))
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(81)
+    }
+
+    @Test
+    fun mixedLiveDeleteAndMediaProofErrorRejectsBeforeSettlementAndLeavesEveryUnitPending() =
+        runTest {
+            val fixture = seedMixedRecordSettlement(82, "error", 2)
+            val (session, rig, deletedUuid, liveUuid, mediaUuid) = fixture
+            rig.backend.onCausalCommit = { units ->
+                assertThat(units.map { it.clientUuid }).containsExactly(deletedUuid, liveUuid)
+                rig.backend.nextCausalCommit = CausalBatchResult(
+                    generation = session.pullGeneration,
+                    cursor = session.pullCursor,
+                    results = units.map { unit ->
+                        CausalUnitResult(
+                            status = CausalCommitStatus.ACCEPTED,
+                            mutationId = unit.mutationId,
+                            requestHash = causalMutationContentHash(unit),
+                            generation = session.pullGeneration,
+                            stableVersionId = "stable-${unit.clientUuid}",
+                            stableRootJson = unit.rootJson,
+                            stableMedia = unit.media,
+                            stableRootPresent = unit.clientUuid != liveUuid,
+                            stableDeleted = unit.deleted,
+                            stableDeletedAt = if (unit.deleted) 909 else null,
+                        )
+                    },
+                )
+            }
+
+            val failure = runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+            assertThat(failure).hasMessageThat().contains("frozen commit proof invalid")
+            assertThat(rig.backend.causalCommittedUnits.single()).hasSize(2)
+            assertThat(rig.records.getByClientUuid(deletedUuid)?.syncDirty).isTrue()
+            assertThat(rig.records.getByClientUuid(deletedUuid)?.deletedAt).isEqualTo(100)
+            assertThat(rig.records.getByClientUuid(liveUuid)?.syncDirty).isTrue()
+            assertThat(rig.records.getByClientUuid(liveUuid)?.deletedAt).isNull()
+            assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isTrue()
+            assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(82)
+        }
+
+    @Test
     fun recordTombstoneAndRemovedMediaCommitTogetherAndRemainConflictDiscoverable() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 73)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
@@ -995,6 +1089,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(73)
         assertThat(rig.records.getByClientUuid("record-media-tombstone")?.openConflictId)
             .isEqualTo("conflict-delete-edit-media")
+        assertThat(rig.records.getByClientUuid("record-media-tombstone")?.deletedAt).isNull()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isEqualTo(200)
         assertThat(
@@ -1278,6 +1373,7 @@ class ReplicaSyncEngineCausalSettlementTest {
                         payloadJson = """{"amount_ml":60}""",
                         schemaVersion = 2,
                         updatedAt = 100,
+                        deletedAt = 50,
                         syncDirty = true,
                         baseVersion = "v0",
                     )
@@ -1296,6 +1392,7 @@ class ReplicaSyncEngineCausalSettlementTest {
                         payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
                         schemaVersion = 2,
                         updatedAt = 100,
+                        deletedAt = 50,
                         syncDirty = true,
                         baseVersion = "v0",
                         effectiveWakeObservationClientUuid = "wake-old",
@@ -1332,6 +1429,8 @@ class ReplicaSyncEngineCausalSettlementTest {
                                 stableVersionId = "v1",
                                 stableRootJson = case.clearStableField(unit.rootJson),
                                 stableMedia = unit.media,
+                                stableDeleted = true,
+                                stableDeletedAt = 777,
                             ),
                         ),
                     )
@@ -1339,7 +1438,9 @@ class ReplicaSyncEngineCausalSettlementTest {
 
                 rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-                case.assertCleared(requireNotNull(rig.records.getByClientUuid(case.uuid)))
+                val settled = requireNotNull(rig.records.getByClientUuid(case.uuid))
+                case.assertCleared(settled)
+                assertThat(settled.deletedAt).isEqualTo(777)
             }
         }
     }
@@ -1774,23 +1875,16 @@ class ReplicaSyncEngineCausalSettlementTest {
         // Reject settlement so pending stays; pull must still not clobber content.
         rig.backend.onCausalCommit = { units ->
             val unit = units.single()
-            rig.backend.nextCausalCommit = CausalBatchResult(
-                generation = session.pullGeneration,
-                cursor = session.pullCursor,
-                results = listOf(
-                    CausalUnitResult(
-                        status = CausalCommitStatus.REJECTED,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
-                        generation = session.pullGeneration,
-                        code = "temporary",
-                        reason = "retry_later",
-                    ),
-                ),
+            rig.backend.nextCausalCommitFailure = CausalCommitRejectedException(
+                mutationId = unit.mutationId,
+                code = "invalid_domain",
             )
         }
 
-        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+        }.exceptionOrNull()
+        assertThat(failure).isInstanceOf(CausalCommitRejectedException::class.java)
 
         val row = requireNotNull(rig.records.getByClientUuid("record-dirty-pull"))
         assertThat(row.note).isEqualTo("local-pending")
@@ -2332,6 +2426,83 @@ class ReplicaSyncEngineCausalSettlementTest {
         val uri: String,
         val bytes: ByteArray,
     )
+
+    private data class MixedRecordSettlementFixture(
+        val session: SyncSession,
+        val rig: ReplicaEngineRig,
+        val deletedUuid: String,
+        val liveUuid: String,
+        val mediaUuid: String,
+    )
+
+    private suspend fun seedMixedRecordSettlement(
+        pullCursor: Long,
+        suffix: String,
+        mediaByte: Byte,
+    ): MixedRecordSettlementFixture {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Owner,
+            pullCursor = pullCursor,
+        )
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val deletedUuid = "record-mixed-$suffix-delete"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = deletedUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                deletedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-delete-base",
+            ),
+        )
+        val liveUuid = "record-mixed-$suffix-media"
+        val liveId = rig.records.seed(
+            RecordEntity(
+                clientUuid = liveUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 101,
+                payloadJson = """{"amount_ml":61}""",
+                schemaVersion = 2,
+                updatedAt = 101,
+                syncDirty = true,
+                baseVersion = "v-live-base",
+            ),
+        )
+        val mediaUuid = "00000000-0000-4000-8000-${pullCursor.toString().padStart(12, '0')}"
+        val mediaUri = "/private/mixed-$suffix-record.jpg"
+        rig.mediaFiles.preparedUploadBytes[mediaUri] = byteArrayOf(8, mediaByte)
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = liveId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = mediaUri,
+                createdAt = 101,
+                updatedAt = 101,
+                syncDirty = true,
+            ),
+        )
+        return MixedRecordSettlementFixture(
+            session = session,
+            rig = rig,
+            deletedUuid = deletedUuid,
+            liveUuid = liveUuid,
+            mediaUuid = mediaUuid,
+        )
+    }
 }
 
 @RunWith(Parameterized::class)
@@ -2490,7 +2661,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
     }
 
     @Test
-    fun acceptedSettlesEachRootType() = runTest {
+    fun acceptedSettlesEachRootTypeWithServerStampedDeletedAt() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         when (entityType) {
@@ -2500,6 +2671,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
                     familyAuthority = true,
                     baseVersion = null,
                     updatedAt = 50,
+                    deletedAt = 50,
                 ),
             )
             "record" -> {
@@ -2515,6 +2687,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
                         payloadJson = """{"amount_ml":1}""",
                         schemaVersion = 2,
                         updatedAt = 50,
+                        deletedAt = 50,
                         syncDirty = true,
                     ),
                 )
@@ -2533,11 +2706,15 @@ class ReplicaSyncEngineCausalRootTypesTest(
                         syncDirty = true,
                         status = "pending",
                         schemaVersion = 2,
+                        deletedAt = 50,
                     ),
                 )
             }
             "custom_item" -> rig.customItems.seed(
-                localReplicaCustomItem("root-custom", "membership-a", 50).copy(syncDirty = true),
+                localReplicaCustomItem("root-custom", "membership-a", 50).copy(
+                    deletedAt = 50,
+                    syncDirty = true,
+                ),
             )
             "wake_observation" -> {
                 val babyId = rig.babies.seed(
@@ -2564,11 +2741,39 @@ class ReplicaSyncEngineCausalRootTypesTest(
                         note = "woke",
                         withdrawn = false,
                         updatedAt = 50,
+                        deletedAt = 50,
                         syncDirty = true,
                     ),
                 )
             }
             else -> error(entityType)
+        }
+
+        rig.backend.onCausalCommit = { units ->
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = units.map { unit ->
+                    CausalUnitResult(
+                        status = CausalCommitStatus.ACCEPTED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "stable-$entityType",
+                        stableRootJson = if (unit.entityType == "wake_observation") {
+                            JsonObject(
+                                Json.parseToJsonElement(unit.rootJson).jsonObject +
+                                    ("observer_membership_id" to JsonPrimitive(session.membershipId)),
+                            ).toString()
+                        } else {
+                            unit.rootJson
+                        },
+                        stableMedia = unit.media,
+                        stableDeleted = true,
+                        stableDeletedAt = 777,
+                    )
+                },
+            )
         }
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
@@ -2580,26 +2785,31 @@ class ReplicaSyncEngineCausalRootTypesTest(
                 val baby = requireNotNull(rig.babies.getByClientUuid("baby-local"))
                 assertThat(baby.syncDirty).isFalse()
                 assertThat(baby.baseVersion).isNotNull()
+                assertThat(baby.deletedAt).isEqualTo(777)
             }
             "record" -> {
                 val row = requireNotNull(rig.records.getByClientUuid("root-record"))
                 assertThat(row.syncDirty).isFalse()
                 assertThat(row.baseVersion).isNotNull()
+                assertThat(row.deletedAt).isEqualTo(777)
             }
             "care_plan" -> {
                 val plan = requireNotNull(rig.carePlans.getByClientUuid("root-plan"))
                 assertThat(plan.syncDirty).isFalse()
                 assertThat(plan.baseVersion).isNotNull()
+                assertThat(plan.deletedAt).isEqualTo(777)
             }
             "custom_item" -> {
                 val item = requireNotNull(rig.customItems.getByClientUuid("root-custom"))
                 assertThat(item.syncDirty).isFalse()
                 assertThat(item.baseVersion).isNotNull()
+                assertThat(item.deletedAt).isEqualTo(777)
             }
             "wake_observation" -> {
                 val wake = requireNotNull(rig.wakeObservations.getByClientUuid("root-wake"))
                 assertThat(wake.syncDirty).isFalse()
                 assertThat(wake.baseVersion).isNotNull()
+                assertThat(wake.deletedAt).isEqualTo(777)
             }
         }
     }

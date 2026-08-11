@@ -15650,7 +15650,7 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     .await;
     assert_eq!(status, StatusCode::OK, "{rec_body}");
     assert_eq!(rec_body["results"][0]["status"], "accepted");
-    let v1 = rec_body["results"][0]["stable_version_id"]
+    let v1 = rec_body["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -15667,7 +15667,7 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     .await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(replay["results"][0]["status"], "accepted");
-    assert_eq!(replay["results"][0]["stable_version_id"], v1);
+    assert_eq!(replay["results"][0]["stable"]["version_id"], v1);
     assert_eq!(
         replay["results"][0]["request_hash"],
         rec_body["results"][0]["request_hash"]
@@ -15684,8 +15684,8 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "content_drift");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
 
     let generation = created["generation"].as_str().unwrap_or("generation-a");
     let (status, pull) = get_json(
@@ -15734,7 +15734,7 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     .await;
     assert_eq!(status, StatusCode::OK, "{left}");
     assert_eq!(left["results"][0]["status"], "accepted");
-    let v2 = left["results"][0]["stable_version_id"]
+    let v2 = left["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -16117,6 +16117,283 @@ async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
     );
 }
 
+#[tokio::test]
+async fn causal_commit_success_response_is_closed_contracted_and_marks_exact_replay() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-shape-owner",
+        "causal-commit-shape-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("contracted", None, 100),
+        vec![],
+        false,
+    );
+
+    let (status, first) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(
+        first
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["generation".to_owned(), "results".to_owned()]),
+    );
+    let first_unit = first["results"][0].as_object().unwrap();
+    assert_eq!(
+        first_unit.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "mutation_id".to_owned(),
+            "replay".to_owned(),
+            "request_hash".to_owned(),
+            "stable".to_owned(),
+            "status".to_owned(),
+        ]),
+    );
+    assert_eq!(first_unit["status"], "accepted");
+    assert_eq!(first_unit["replay"], false);
+    assert_eq!(
+        first_unit["stable"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "deleted".to_owned(),
+            "deleted_at".to_owned(),
+            "media".to_owned(),
+            "root".to_owned(),
+            "version_id".to_owned(),
+        ]),
+    );
+
+    let (status, replay) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(
+        replay["results"][0]["status"],
+        first["results"][0]["status"]
+    );
+    assert_eq!(
+        replay["results"][0]["stable"],
+        first["results"][0]["stable"]
+    );
+    assert_eq!(replay["results"][0]["replay"], true);
+}
+
+#[tokio::test]
+async fn causal_commit_rejection_rolls_back_the_whole_batch_and_uses_terminal_envelope() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-atomic-owner",
+        "causal-commit-atomic-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let accepted = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("must-roll-back", None, 100),
+        vec![],
+        false,
+    );
+    let invalid_base = Uuid::new_v4().to_string();
+    let invalid = causal_unit(
+        Uuid::new_v4(),
+        Some(&invalid_base),
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("invalid-base", None, 101),
+        vec![],
+        false,
+    );
+
+    let (status, rejected) =
+        causal_commit_units(&rig.app, token, vec![accepted.clone(), invalid.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(
+        rejected
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "error".to_owned(),
+            "mutation_id".to_owned(),
+            "status".to_owned(),
+        ]),
+    );
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["mutation_id"], invalid["mutation_id"]);
+    assert_eq!(
+        rejected["error"],
+        json!({"code": "invalid_domain", "retryable": false})
+    );
+
+    let (status, retried) = causal_commit_units(&rig.app, token, vec![accepted]).await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["results"][0]["status"], "accepted");
+    assert_eq!(retried["results"][0]["replay"], false);
+}
+
+#[tokio::test]
+async fn causal_commit_maps_auth_generation_and_closed_request_failures_to_terminal_envelopes() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-terminal-owner",
+        "causal-commit-terminal-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("terminal", None, 100),
+        vec![],
+        false,
+    );
+    let valid = json!({"generation": generation, "units": [mutation.clone()]});
+
+    let cases = [
+        (
+            None,
+            valid.clone(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation, "units": [mutation.clone()], "future": true}),
+            StatusCode::OK,
+            "unknown_field",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation}),
+            StatusCode::OK,
+            "missing_field",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation, "units": "bad"}),
+            StatusCode::OK,
+            "wrong_type",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation, "units": []}),
+            StatusCode::OK,
+            "invalid_domain",
+        ),
+        (
+            Some(token),
+            json!({"generation": "other-generation", "units": [mutation.clone()]}),
+            StatusCode::CONFLICT,
+            "capability_mismatch",
+        ),
+    ];
+    for (token, body, expected_status, expected_code) in cases {
+        let (status, response) =
+            json_request(&rig.app, Method::POST, "/v1/causal/commit", token, body).await;
+        assert_eq!(status, expected_status, "{response}");
+        assert_eq!(response["status"], "rejected");
+        assert_eq!(
+            response["error"],
+            json!({"code": expected_code, "retryable": false})
+        );
+    }
+
+    let mutation_client_uuid = mutation["client_uuid"].as_str().unwrap();
+    let root = mutation["root"].to_string();
+    let duplicate_root = root.replacen('{', r#"{"nickname":"duplicate","#, 1);
+    let nested_duplicate = mutation.to_string().replace(&root, &duplicate_root);
+    let duplicate_requests = [
+        format!(r#"{{"generation":"{generation}","units":[],"units":[]}}"#),
+        format!(r#"{{"generation":"{generation}","units":[{nested_duplicate}]}}"#),
+    ];
+    for duplicate_request in duplicate_requests {
+        let response = request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/causal/commit",
+            Some(token),
+            Body::from(duplicate_request),
+            Some("application/json"),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["status"], "rejected");
+        assert_eq!(body["error"]["code"], "non_canonical_value");
+    }
+    let duplicate_writes: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE client_uuid = ?1",
+            [mutation_client_uuid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(duplicate_writes, 0);
+
+    let mut unknown_root = mutation;
+    unknown_root["root"]["future"] = json!(true);
+    let (status, response) = causal_commit_units(&rig.app, token, vec![unknown_root]).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["error"]["code"], "unknown_field");
+}
+
+#[tokio::test]
+async fn causal_commit_keeps_authentication_store_failures_retryable() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-auth-store-owner",
+        "causal-commit-auth-store-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "ALTER TABLE device_sessions RENAME TO broken_device_sessions",
+            [],
+        )
+        .unwrap();
+
+    let (status, body) = raw_json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({"generation": owner["generation"], "units": []}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body, json!({"detail": "Internal server error"}));
+}
+
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Ticket 09 — two joined clients on isolated real lezi-sync (causal cutover)
@@ -16194,7 +16471,7 @@ fn causal_media_item(media_uuid: Uuid, role: &str, sha256: &str, byte_size: usiz
 #[derive(Debug, PartialEq, Eq)]
 struct CausalReceiptWriteState {
     revision: i64,
-    staging_status: String,
+    staging_status: Option<String>,
     version_rows: i64,
     terminal_rows: i64,
     record_rows: i64,
@@ -16484,11 +16761,11 @@ async fn provider_roots_commit_before_referenced_record_and_replay_exactly() {
         .iter()
         .all(|result| result["status"] == "accepted"));
     assert_eq!(
-        committed["results"][2]["stable_root"]["baby_client_uuid"],
+        committed["results"][2]["stable"]["root"]["baby_client_uuid"],
         baby_id.to_string(),
     );
     assert_eq!(
-        committed["results"][2]["stable_root"]["custom_item_client_uuid"],
+        committed["results"][2]["stable"]["root"]["custom_item_client_uuid"],
         custom_item_id.to_string(),
     );
 
@@ -16496,8 +16773,8 @@ async fn provider_roots_commit_before_referenced_record_and_replay_exactly() {
     assert_eq!(status, StatusCode::OK, "{replayed}");
     for index in 0..3 {
         assert_eq!(
-            replayed["results"][index]["stable_version_id"],
-            committed["results"][index]["stable_version_id"],
+            replayed["results"][index]["stable"]["version_id"],
+            committed["results"][index]["stable"]["version_id"],
         );
         assert_eq!(
             replayed["results"][index]["request_hash"],
@@ -16512,11 +16789,8 @@ async fn provider_roots_commit_before_referenced_record_and_replay_exactly() {
     let (status, rejected) =
         causal_commit_units(&rig.app, token, vec![baby_drift, custom_drift]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert!(rejected["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|result| { result["status"] == "rejected" && result["code"] == "content_drift" }));
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
 }
 
 #[tokio::test]
@@ -16587,10 +16861,10 @@ async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstone
         "{committed}",
     );
     assert_eq!(
-        committed["results"][2]["stable_root"]["fulfilled_record_client_uuid"],
+        committed["results"][2]["stable"]["root"]["fulfilled_record_client_uuid"],
         record_id.to_string(),
     );
-    let stable_plan = committed["results"][2]["stable_version_id"]
+    let stable_plan = committed["results"][2]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -16598,8 +16872,8 @@ async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstone
     let (status, replayed) = causal_commit_units(&rig.app, token, frozen).await;
     assert_eq!(status, StatusCode::OK, "{replayed}");
     assert_eq!(
-        replayed["results"][2]["stable_version_id"],
-        committed["results"][2]["stable_version_id"],
+        replayed["results"][2]["stable"]["version_id"],
+        committed["results"][2]["stable"]["version_id"],
     );
     assert_eq!(
         replayed["results"][2]["request_hash"],
@@ -16610,8 +16884,8 @@ async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstone
     drift["root"]["note"] = json!("漂移计划");
     let (status, rejected) = causal_commit_units(&rig.app, token, vec![drift]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "content_drift");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
 
     let mut tombstone_root = plan["root"].clone();
     tombstone_root["updated_at"] = json!(40);
@@ -16693,8 +16967,8 @@ async fn care_plan_three_attachments_publish_only_after_all_receipts_and_replay_
 
     let (status, incomplete) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{incomplete}");
-    assert_eq!(incomplete["results"][0]["status"], "rejected");
-    assert_eq!(incomplete["results"][0]["code"], "missing_media_bytes");
+    assert_eq!(incomplete["status"], "rejected");
+    assert_eq!(incomplete["error"]["code"], "invalid_domain");
     let pull = pull_entities(&rig.app, token, generation).await;
     assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
         row["client_uuid"] != plan_id.to_string()
@@ -16709,7 +16983,7 @@ async fn care_plan_three_attachments_publish_only_after_all_receipts_and_replay_
     assert_eq!(status, StatusCode::OK, "{committed}");
     assert_eq!(committed["results"][0]["status"], "accepted");
     assert_eq!(
-        committed["results"][0]["stable_media"]
+        committed["results"][0]["stable"]["media"]
             .as_array()
             .unwrap()
             .len(),
@@ -16719,8 +16993,8 @@ async fn care_plan_three_attachments_publish_only_after_all_receipts_and_replay_
     let (status, replayed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
     assert_eq!(status, StatusCode::OK, "{replayed}");
     assert_eq!(
-        replayed["results"][0]["stable_version_id"],
-        committed["results"][0]["stable_version_id"],
+        replayed["results"][0]["stable"]["version_id"],
+        committed["results"][0]["stable"]["version_id"],
     );
     assert_eq!(
         replayed["results"][0]["request_hash"],
@@ -16777,8 +17051,8 @@ async fn care_plan_attachment_waits_for_fact_respects_acl_and_retains_tombstoned
 
     let (status, blocked) = causal_commit_units(&rig.app, owner_token, vec![plan.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{blocked}");
-    assert_eq!(blocked["results"][0]["status"], "rejected");
-    assert_eq!(blocked["results"][0]["code"], "invalid_reference");
+    assert_eq!(blocked["status"], "rejected");
+    assert_eq!(blocked["error"]["code"], "invalid_domain");
     let pull = pull_entities(&rig.app, owner_token, generation).await;
     assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
         row["client_uuid"] != plan_id.to_string() && row["client_uuid"] != media_id.to_string()
@@ -16799,14 +17073,14 @@ async fn care_plan_attachment_waits_for_fact_respects_acl_and_retains_tombstoned
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{record}");
-    let record_version = record["results"][0]["stable_version_id"]
+    let record_version = record["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
     let (status, accepted) = causal_commit_units(&rig.app, owner_token, vec![plan]).await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["results"][0]["status"], "accepted");
-    let stable_version = accepted["results"][0]["stable_version_id"]
+    let stable_version = accepted["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -16829,8 +17103,8 @@ async fn care_plan_attachment_waits_for_fact_respects_acl_and_retains_tombstoned
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{forbidden}");
-    assert_eq!(forbidden["results"][0]["status"], "rejected");
-    assert_eq!(forbidden["results"][0]["code"], "forbidden_care_plan");
+    assert_eq!(forbidden["status"], "rejected");
+    assert_eq!(forbidden["error"]["code"], "forbidden");
     let response = request(
         &rig.app,
         Method::GET,
@@ -16921,7 +17195,9 @@ async fn deleted_care_plan_keeps_attachment_branch_bytes_auditable_but_unreachab
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let v1 = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
     let mut tombstone_root = live_root.clone();
     tombstone_root["updated_at"] = json!(30);
     let (status, deleted) = causal_commit_units(
@@ -17045,14 +17321,14 @@ async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["results"][0]["status"], "accepted", "{accepted}");
     assert_eq!(
-        accepted["results"][0]["stable_root"]["sleep_record_client_uuid"],
+        accepted["results"][0]["stable"]["root"]["sleep_record_client_uuid"],
         sleep_id.to_string(),
     );
     assert_eq!(
-        accepted["results"][0]["stable_root"]["observer_membership_id"],
+        accepted["results"][0]["stable"]["root"]["observer_membership_id"],
         owner["membership_id"],
     );
-    let first_version = accepted["results"][0]["stable_version_id"]
+    let first_version = accepted["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -17060,8 +17336,8 @@ async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     let (status, replayed) = causal_commit_units(&rig.app, owner_token, vec![wake.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{replayed}");
     assert_eq!(
-        replayed["results"][0]["stable_version_id"],
-        accepted["results"][0]["stable_version_id"],
+        replayed["results"][0]["stable"]["version_id"],
+        accepted["results"][0]["stable"]["version_id"],
     );
     assert_eq!(
         replayed["results"][0]["request_hash"],
@@ -17072,8 +17348,8 @@ async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     drift["root"]["note"] = json!("same mutation drift");
     let (status, rejected) = causal_commit_units(&rig.app, owner_token, vec![drift]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "content_drift");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
 
     let mut stable_edit_root = wake_root.clone();
     stable_edit_root["note"] = json!("stable edit");
@@ -17094,7 +17370,7 @@ async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     .await;
     assert_eq!(status, StatusCode::OK, "{stable_edit}");
     assert_eq!(stable_edit["results"][0]["status"], "accepted");
-    let stable_version = stable_edit["results"][0]["stable_version_id"]
+    let stable_version = stable_edit["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -17118,9 +17394,12 @@ async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     .await;
     assert_eq!(status, StatusCode::OK, "{branched}");
     assert_eq!(branched["results"][0]["status"], "branched", "{branched}");
-    assert_eq!(branched["results"][0]["stable_root"]["note"], "stable edit",);
     assert_eq!(
-        branched["results"][0]["stable_root"]["sleep_record_client_uuid"],
+        branched["results"][0]["stable"]["root"]["note"],
+        "stable edit",
+    );
+    assert_eq!(
+        branched["results"][0]["stable"]["root"]["sleep_record_client_uuid"],
         sleep_id.to_string(),
     );
 
@@ -17197,7 +17476,9 @@ async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let base = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let base = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
     assert_eq!(
         put_causal_media_bytes(&rig.app, token, added_id, &added_bytes)
             .await
@@ -17225,7 +17506,7 @@ async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{live}");
-    let live_version = live["results"][0]["stable_version_id"]
+    let live_version = live["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -17406,11 +17687,11 @@ async fn two_clients_restore_only_the_tombstones_complete_direct_base_across_res
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let base_version = created["results"][0]["stable_version_id"]
+    let base_version = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
-    let base_root = created["results"][0]["stable_root"].clone();
+    let base_root = created["results"][0]["stable"]["root"].clone();
     let (status, deleted) = causal_commit_units(
         &rig.app,
         owner_token,
@@ -17427,7 +17708,7 @@ async fn two_clients_restore_only_the_tombstones_complete_direct_base_across_res
     .await;
     assert_eq!(status, StatusCode::OK, "{deleted}");
     assert_eq!(deleted["results"][0]["status"], "accepted");
-    let tombstone_version = deleted["results"][0]["stable_version_id"]
+    let tombstone_version = deleted["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -17668,11 +17949,9 @@ async fn causal_commit_http_returns_typed_saturation_and_allows_exact_replay() {
         })
         .collect();
     let (oversized_status, oversized_body) = causal_commit_units(&rig.app, token, oversized).await;
-    assert_eq!(
-        oversized_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{oversized_body}"
-    );
+    assert_eq!(oversized_status, StatusCode::OK, "{oversized_body}");
+    assert_eq!(oversized_body["status"], "rejected");
+    assert_eq!(oversized_body["error"]["code"], "invalid_domain");
 
     let saturated_unit = causal_unit(
         Uuid::new_v4(),
@@ -17704,7 +17983,15 @@ async fn causal_commit_http_returns_typed_saturation_and_allows_exact_replay() {
 
     let (status, replay) = causal_commit_units(&rig.app, token, vec![mutation]).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
-    assert_eq!(replay["results"], first["results"]);
+    assert_eq!(
+        replay["results"][0]["status"],
+        first["results"][0]["status"]
+    );
+    assert_eq!(
+        replay["results"][0]["stable"],
+        first["results"][0]["stable"]
+    );
+    assert_eq!(replay["results"][0]["replay"], true);
 }
 
 #[tokio::test]
@@ -17722,7 +18009,9 @@ async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
     let (status, created, _) =
         commit_causal_record(&rig.app, token, baby_id, record_id, None, "base").await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let base = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let base = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
     let (status, accepted, _) =
         commit_causal_record(&rig.app, token, baby_id, record_id, Some(base), "stable").await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
@@ -17843,7 +18132,7 @@ async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
         first_body.unwrap(),
     );
 
-    let current_stable = accepted["results"][0]["stable_version_id"]
+    let current_stable = accepted["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap();
     let (stable_status, stable_changed, _) = commit_causal_record(
@@ -17962,7 +18251,23 @@ async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
     let (replay_status, replay) =
         causal_commit_units(&rig.app, token, vec![first_branch.unwrap()]).await;
     assert_eq!(replay_status, StatusCode::OK, "{replay}");
-    assert_eq!(replay["results"], branched["results"]);
+    assert_eq!(
+        replay["results"][0]["status"],
+        branched["results"][0]["status"]
+    );
+    assert_eq!(
+        replay["results"][0]["stable"],
+        branched["results"][0]["stable"]
+    );
+    assert_eq!(
+        replay["results"][0]["branch_version_id"],
+        branched["results"][0]["branch_version_id"]
+    );
+    assert_eq!(
+        replay["results"][0]["conflict_id"],
+        branched["results"][0]["conflict_id"]
+    );
+    assert_eq!(replay["results"][0]["replay"], true);
 }
 
 #[tokio::test]
@@ -18032,10 +18337,8 @@ async fn causal_ingress_api_uses_the_canonical_store_validation_codes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "invalid_entity_value");
-    assert_eq!(rejected["results"][1]["status"], "rejected");
-    assert_eq!(rejected["results"][1]["code"], "invalid_reference");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
 
     let pull = pull_entities(&rig.app, token, owner["generation"].as_str().unwrap()).await;
     assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
@@ -18088,8 +18391,8 @@ async fn causal_media_commit_rejects_same_size_different_digest_before_publicati
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "media_sha256_mismatch");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
 
     let pull = pull_entities(&rig.app, token, generation).await;
     assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
@@ -18136,8 +18439,8 @@ async fn causal_media_commit_claims_only_the_preparing_principals_open_receipt()
     );
     let (status, rejected) = causal_commit_units(&rig.app, member_token, vec![foreign]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "media_membership_mismatch");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
 
     let accepted_mutation = causal_unit(
         Uuid::new_v4(),
@@ -18152,7 +18455,7 @@ async fn causal_media_commit_claims_only_the_preparing_principals_open_receipt()
         causal_commit_units(&rig.app, owner_token, vec![accepted_mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["results"][0]["status"], "accepted");
-    let stable_version = accepted["results"][0]["stable_version_id"].clone();
+    let stable_version = accepted["results"][0]["stable"]["version_id"].clone();
     let response = request(
         &rig.app,
         Method::GET,
@@ -18172,7 +18475,7 @@ async fn causal_media_commit_claims_only_the_preparing_principals_open_receipt()
         causal_commit_units(&rig.app, owner_token, vec![accepted_mutation]).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(replay["results"][0]["status"], "accepted");
-    assert_eq!(replay["results"][0]["stable_version_id"], stable_version);
+    assert_eq!(replay["results"][0]["stable"]["version_id"], stable_version);
     let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
         .unwrap()
         .query_row(
@@ -18236,8 +18539,8 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
     );
     let (status, rejected) = causal_commit_units(&rig.app, &token, vec![wrong_length]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "media_byte_size_mismatch");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
     assert_eq!(
         causal_receipt_write_state(
             &database_path,
@@ -18249,7 +18552,7 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
         ),
         before_length
     );
-    assert_eq!(before_length.staging_status, "staged");
+    assert_eq!(before_length.staging_status.as_deref(), Some("staged"));
     let correct_length = causal_unit(
         length_mutation_id,
         None,
@@ -18317,8 +18620,8 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
     let (status, rejected) =
         causal_commit_units(&rig.app, &token, vec![family_mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "missing_media_bytes");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
     assert_eq!(
         causal_receipt_write_state(
             &database_path,
@@ -18330,7 +18633,7 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
         ),
         before_family
     );
-    assert_eq!(before_family.staging_status, "staged");
+    assert_eq!(before_family.staging_status.as_deref(), Some("staged"));
     let connection = Connection::open(&database_path).unwrap();
     connection
         .execute_batch("PRAGMA foreign_keys = OFF")
@@ -18395,20 +18698,28 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
     let (status, rejected) =
         causal_commit_units(&rig.app, &token, vec![expiry_mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "media_preimage_expired");
-    assert_eq!(
-        causal_receipt_write_state(
-            &database_path,
-            &family_id,
-            &family_id,
-            expiry_mutation_id,
-            expiry_record_id,
-            expiry_media_id,
-        ),
-        before_expiry
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    let after_expiry = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &family_id,
+        expiry_mutation_id,
+        expiry_record_id,
+        expiry_media_id,
     );
-    assert_eq!(before_expiry.staging_status, "staged");
+    // At now == expires_at, detached H24 maintenance may independently mark or
+    // remove the expired staging row. The rejected commit must still be a zero
+    // write for family revision, immutable/terminal facts, and publication.
+    assert_eq!(after_expiry.revision, before_expiry.revision);
+    assert_eq!(after_expiry.version_rows, before_expiry.version_rows);
+    assert_eq!(after_expiry.terminal_rows, before_expiry.terminal_rows);
+    assert_eq!(after_expiry.record_rows, before_expiry.record_rows);
+    assert_eq!(after_expiry.media_rows, before_expiry.media_rows);
+    assert_eq!(
+        after_expiry.publication_rows,
+        before_expiry.publication_rows
+    );
 
     let restarted = rig.restart_with_config("generation-a", |config| {
         config.max_media_bytes = 64 * 1024;
@@ -18512,7 +18823,7 @@ async fn causal_media_corrupt_stored_entity_returns_5xx_without_update_writes() 
     );
     let (status, created) = causal_commit_units(&rig.app, token, vec![created]).await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let stable_version = created["results"][0]["stable_version_id"]
+    let stable_version = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -18630,7 +18941,7 @@ async fn causal_media_commit_ignores_unrelated_corrupt_consumed_receipt() {
         causal_commit_units(&rig.app, token, vec![target_mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["results"][0]["status"], "accepted");
-    let version_id = accepted["results"][0]["stable_version_id"].clone();
+    let version_id = accepted["results"][0]["stable"]["version_id"].clone();
     let target_path = rig
         .directory
         .path()
@@ -18641,7 +18952,7 @@ async fn causal_media_commit_ignores_unrelated_corrupt_consumed_receipt() {
 
     let (status, replay) = causal_commit_units(&rig.app, token, vec![target_mutation]).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
-    assert_eq!(replay["results"][0]["stable_version_id"], version_id);
+    assert_eq!(replay["results"][0]["stable"]["version_id"], version_id);
     let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
         .unwrap()
         .query_row(
@@ -19084,7 +19395,7 @@ async fn causal_media_branch_commit_and_resolution_serialize_one_publication() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let base_version = created["results"][0]["stable_version_id"]
+    let base_version = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20069,7 +20380,7 @@ async fn causal_media_receipt_claim_survives_promotion_fault_and_replays_one_ver
     assert_eq!(status, StatusCode::OK, "{committed}");
     assert_eq!(committed["results"][0]["status"], "accepted");
     assert_eq!(
-        committed["results"][0]["stable_version_id"],
+        committed["results"][0]["stable"]["version_id"],
         durable_version
     );
     assert_eq!(fs::read(&final_path).unwrap(), bytes);
@@ -20162,8 +20473,8 @@ async fn expired_causal_media_preimage_is_rejected_and_collected_on_restart() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
-    assert_eq!(rejected["results"][0]["status"], "rejected");
-    assert_eq!(rejected["results"][0]["code"], "media_preimage_expired");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
 
     let _restarted = rig.restart_with_config("generation-a", |config| {
         config.max_media_bytes = 64 * 1024;
@@ -20263,7 +20574,7 @@ async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() 
         .iter()
         .map(|result| {
             assert_eq!(result["status"], "accepted", "{result}");
-            result["stable_version_id"].as_str().unwrap().to_owned()
+            result["stable"]["version_id"].as_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
 
@@ -20299,7 +20610,7 @@ async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() 
         .iter()
         .map(|result| {
             assert_eq!(result["status"], "accepted", "{result}");
-            result["stable_version_id"].as_str().unwrap().to_owned()
+            result["stable"]["version_id"].as_str().unwrap().to_owned()
         })
         .collect::<Vec<_>>();
     let owner_display = Uuid::new_v4();
@@ -20318,7 +20629,7 @@ async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() 
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{owner_display_created}");
-    let owner_display_version = owner_display_created["results"][0]["stable_version_id"]
+    let owner_display_version = owner_display_created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20486,7 +20797,7 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     assert_eq!(created["results"][0]["status"], "accepted");
-    let v1 = created["results"][0]["stable_version_id"]
+    let v1 = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20524,12 +20835,12 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
     .await;
     assert_eq!(status, StatusCode::OK, "{right}");
     assert_eq!(right["results"][0]["status"], "merged", "{right}");
-    assert_eq!(right["results"][0]["stable_root"]["note"], "owner-note");
+    assert_eq!(right["results"][0]["stable"]["root"]["note"], "owner-note");
     assert_eq!(
-        right["results"][0]["stable_root"]["payload_json"]["amount_ml"],
+        right["results"][0]["stable"]["root"]["payload_json"]["amount_ml"],
         180
     );
-    let v_merged = right["results"][0]["stable_version_id"]
+    let v_merged = right["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20550,7 +20861,7 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
     .await;
     assert_eq!(status, StatusCode::OK, "{owner_note}");
     assert_eq!(owner_note["results"][0]["status"], "accepted");
-    let v_owner = owner_note["results"][0]["stable_version_id"]
+    let v_owner = owner_note["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20576,7 +20887,7 @@ async fn causal_two_client_disjoint_merge_and_same_field_branch() {
         .unwrap()
         .to_owned();
     assert_eq!(
-        member_branch["results"][0]["stable_version_id"].as_str(),
+        member_branch["results"][0]["stable"]["version_id"].as_str(),
         Some(v_owner.as_str())
     );
 
@@ -20732,7 +21043,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let v1 = created["results"][0]["stable_version_id"]
+    let v1 = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20751,7 +21062,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{replay}");
-    assert_eq!(replay["results"][0]["stable_version_id"], v1);
+    assert_eq!(replay["results"][0]["stable"]["version_id"], v1);
 
     let (status, deleted) = causal_commit_units(
         &rig.app,
@@ -20769,7 +21080,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     .await;
     assert_eq!(status, StatusCode::OK, "{deleted}");
     assert_eq!(deleted["results"][0]["status"], "accepted");
-    let tombstone_v = deleted["results"][0]["stable_version_id"]
+    let tombstone_v = deleted["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20791,7 +21102,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     assert_eq!(status, StatusCode::OK, "{concurrent_edit}");
     assert_eq!(concurrent_edit["results"][0]["status"], "branched");
     assert_eq!(
-        concurrent_edit["results"][0]["stable_version_id"].as_str(),
+        concurrent_edit["results"][0]["stable"]["version_id"].as_str(),
         Some(tombstone_v.as_str())
     );
     let pull = pull_entities(&rig.app, owner_token, generation).await;
@@ -20817,11 +21128,8 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{stale}");
-    assert_eq!(stale["results"][0]["status"], "rejected");
-    assert_eq!(
-        stale["results"][0]["code"].as_str(),
-        Some("stale_live_over_tombstone")
-    );
+    assert_eq!(stale["status"], "rejected");
+    assert_eq!(stale["error"]["code"].as_str(), Some("invalid_domain"));
 
     // --- Order B: edit first, then delete from common base → branched; stable is live edit.
     let record_b = Uuid::new_v4();
@@ -20840,7 +21148,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created_b}");
-    let vb1 = created_b["results"][0]["stable_version_id"]
+    let vb1 = created_b["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20860,7 +21168,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
     .await;
     assert_eq!(status, StatusCode::OK, "{edited}");
     assert_eq!(edited["results"][0]["status"], "accepted");
-    let vb2 = edited["results"][0]["stable_version_id"]
+    let vb2 = edited["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20885,7 +21193,7 @@ async fn causal_two_client_delete_edit_both_arrival_orders() {
         "{delete_late}"
     );
     assert_eq!(
-        delete_late["results"][0]["stable_version_id"].as_str(),
+        delete_late["results"][0]["stable"]["version_id"].as_str(),
         Some(vb2.as_str())
     );
     let pull_b = pull_entities(&rig.app, member_token, generation).await;
@@ -20937,8 +21245,8 @@ async fn causal_member_cannot_commit_baby_avatar_root() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{denied}");
-    assert_eq!(denied["results"][0]["status"], "rejected", "{denied}");
-    assert_eq!(denied["results"][0]["code"], "forbidden_baby", "{denied}");
+    assert_eq!(denied["status"], "rejected", "{denied}");
+    assert_eq!(denied["error"]["code"], "forbidden", "{denied}");
 }
 
 #[tokio::test]
@@ -20979,7 +21287,7 @@ async fn causal_baby_avatar_exact_commit_replay_keeps_stable_version_and_bytes()
         causal_commit_units(&rig.app, owner_token, vec![mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{created}");
     assert_eq!(created["results"][0]["status"], "accepted", "{created}");
-    let v1 = created["results"][0]["stable_version_id"]
+    let v1 = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -20987,7 +21295,7 @@ async fn causal_baby_avatar_exact_commit_replay_keeps_stable_version_and_bytes()
     let (status, replay) = causal_commit_units(&rig.app, owner_token, vec![mutation]).await;
     assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(replay["results"][0]["status"], "accepted", "{replay}");
-    assert_eq!(replay["results"][0]["stable_version_id"], v1);
+    assert_eq!(replay["results"][0]["stable"]["version_id"], v1);
 
     let response = request(
         &rig.app,
@@ -21045,7 +21353,7 @@ async fn causal_deleted_baby_stable_keeps_avatar_branch_evidence_auditable() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let v1 = created["results"][0]["stable_version_id"]
+    let v1 = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -21171,7 +21479,9 @@ async fn causal_deleted_baby_clears_avatar_reachability() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
-    let delete_base = created["results"][0]["stable_version_id"].as_str().unwrap();
+    let delete_base = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
     let (status, deleted) = causal_commit_units(
         &rig.app,
         owner_token,
@@ -21249,7 +21559,7 @@ async fn causal_two_client_media_merge_and_delete_edit_branch() {
     .await;
     assert_eq!(status, StatusCode::OK, "{created}");
     assert_eq!(created["results"][0]["status"], "accepted");
-    let v1 = created["results"][0]["stable_version_id"]
+    let v1 = created["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -21296,7 +21606,7 @@ async fn causal_two_client_media_merge_and_delete_edit_branch() {
     .await;
     assert_eq!(status, StatusCode::OK, "{right}");
     assert_eq!(right["results"][0]["status"], "merged", "{right}");
-    let media = right["results"][0]["stable_media"]
+    let media = right["results"][0]["stable"]["media"]
         .as_array()
         .cloned()
         .unwrap_or_default();
@@ -21339,7 +21649,7 @@ async fn causal_two_client_media_merge_and_delete_edit_branch() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{c2}");
-    let base = c2["results"][0]["stable_version_id"]
+    let base = c2["results"][0]["stable"]["version_id"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -21660,8 +21970,13 @@ async fn causal_forced_min_supported_from_catalog_blocks_legacy_client() {
         &legacy,
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["code"], json!("client_update_required"), "{body}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["status"], json!("rejected"), "{body}");
+    assert_eq!(
+        body["error"]["code"],
+        json!("capability_mismatch"),
+        "{body}"
+    );
 
     let (pull_status, pull_body) = raw_json_request_with_headers(
         &app,

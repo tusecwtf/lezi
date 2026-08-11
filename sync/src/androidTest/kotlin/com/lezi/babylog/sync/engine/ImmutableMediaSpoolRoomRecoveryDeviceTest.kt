@@ -20,10 +20,11 @@ import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CausalBatchResult
+import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.FamilyMemberDirectorySnapshot
 import com.lezi.babylog.sync.backend.PullPageRequest
@@ -497,18 +498,19 @@ private class DeviceCausalBackend : SyncBackend {
         session: SyncSession,
         units: List<CausalMutationUnit>,
         status: String,
-    ) = CausalBatchResult(
+    ): CausalCommitBatchResult = CausalCommitBatchResult(
         generation = session.pullGeneration,
-        cursor = session.pullCursor,
         results = units.map { unit ->
-            CausalUnitResult(
+            CausalCommitUnitResult(
                 status = status,
                 mutationId = unit.mutationId,
                 requestHash = causalMutationContentHash(unit),
-                generation = session.pullGeneration,
-                stableVersionId = if (status == CausalCommitStatus.ACCEPTED) "v-record-1" else null,
+                replay = false,
+                stableVersionId = "v-record-1",
                 stableRootJson = unit.rootJson,
                 stableMedia = unit.media,
+                stableDeleted = false,
+                stableDeletedAt = null,
             )
         },
     )

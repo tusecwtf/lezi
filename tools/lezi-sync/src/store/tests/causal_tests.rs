@@ -19,6 +19,13 @@ fn map(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
+fn assert_commit_rejected(result: Result<CausalCommitResult, StoreError>, expected_code: &str) {
+    match result {
+        Err(StoreError::CausalCommitRejected { code, .. }) => assert_eq!(code, expected_code),
+        other => panic!("expected terminal causal commit rejection, got {other:?}"),
+    }
+}
+
 fn first_conflict_detail(
     store: &Store,
     principal: &Principal,
@@ -410,7 +417,7 @@ impl CausalFx {
         principal: &Principal,
         mutation: CausalMutation,
         now: i64,
-    ) -> Result<CausalBatchResult, StoreError> {
+    ) -> Result<CausalCommitResult, StoreError> {
         self.store.causal_commit(principal, vec![mutation], now)
     }
 
@@ -617,7 +624,12 @@ fn causal_commit_principal_budget_exempts_exact_replay_and_resets_at_boundary() 
     ));
 
     let replay = fx.commit(&fx.owner, mutation, 1_700_000_000).unwrap();
-    assert_eq!(replay.results, first.results);
+    assert_eq!(replay.results[0].status, first.results[0].status);
+    assert_eq!(
+        replay.results[0].stable_version_id,
+        first.results[0].stable_version_id
+    );
+    assert!(replay.results[0].replay);
 
     let restarted = Store::open_with_causal_admission(
         fx._dir.path().join("lezi.db"),
@@ -678,7 +690,12 @@ fn causal_commit_family_budget_is_shared_by_principals_and_root_types() {
     let replay = fx
         .commit(&fx.member, member_mutation, 1_700_000_000)
         .unwrap();
-    assert_eq!(replay.results, member_result.results);
+    assert_eq!(replay.results[0].status, member_result.results[0].status);
+    assert_eq!(
+        replay.results[0].stable_version_id,
+        member_result.results[0].stable_version_id,
+    );
+    assert!(replay.results[0].replay);
 
     let after_window = fx
         .store
@@ -730,9 +747,8 @@ fn causal_commit_charges_oversize_and_content_rejections_and_mixed_batches() {
     assert_principal_saturated(&oversize, 1_700_000_001);
 
     let invalid = CausalFx::with_admission(admission(2, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
-    let rejected = invalid
-        .store
-        .causal_commit(
+    assert_commit_rejected(
+        invalid.store.causal_commit(
             &invalid.owner,
             vec![mut_unit(
                 "unknown",
@@ -742,9 +758,9 @@ fn causal_commit_charges_oversize_and_content_rejections_and_mixed_batches() {
                 false,
             )],
             1_700_000_001,
-        )
-        .unwrap();
-    assert_eq!(rejected.results[0].status, "rejected");
+        ),
+        "invalid_domain",
+    );
     assert_principal_saturated(&invalid, 1_700_000_001);
 
     let drift = CausalFx::with_admission(admission(3, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
@@ -754,8 +770,10 @@ fn causal_commit_charges_oversize_and_content_rejections_and_mixed_batches() {
         .unwrap();
     let mut changed = original;
     changed.root.insert("note".to_owned(), json!("changed"));
-    let rejected = drift.commit(&drift.owner, changed, 1_700_000_001).unwrap();
-    assert_eq!(rejected.results[0].code.as_deref(), Some("content_drift"));
+    assert_commit_rejected(
+        drift.commit(&drift.owner, changed, 1_700_000_001),
+        "content_drift",
+    );
     assert_principal_saturated(&drift, 1_700_000_001);
 
     let mixed = CausalFx::with_admission(admission(3, 100, MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT));
@@ -803,6 +821,7 @@ fn causal_commit_create_and_idempotent_replay() {
         .causal_commit(&fx.owner, vec![unit.clone()], 1_700_000_001)
         .unwrap();
     assert_eq!(replay.results[0].status, "accepted");
+    assert!(replay.results[0].replay);
     assert_eq!(
         replay.results[0].stable_version_id.as_deref(),
         Some(v1.as_str())
@@ -813,9 +832,51 @@ fn causal_commit_create_and_idempotent_replay() {
     let drift = fx
         .store
         .causal_commit(&fx.owner, vec![unit], 1_700_000_002)
+        .unwrap_err();
+    assert!(matches!(
+        drift,
+        StoreError::CausalCommitRejected { ref code, .. } if code == "content_drift"
+    ));
+}
+
+#[test]
+fn causal_commit_mixed_live_delete_and_media_units_share_one_terminal_batch() {
+    let fx = CausalFx::new();
+    let mut media = CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: "log".to_owned(),
+        sha256: String::new(),
+        byte_size: 7,
+        mime: "image/jpeg".to_owned(),
+        width: None,
+        height: None,
+    };
+    fx.stage_media_bytes(&mut media);
+    let live = fx.record_mutation(Uuid::new_v4(), None, "live");
+    let tombstone = mut_unit(
+        "record",
+        Uuid::new_v4(),
+        None,
+        record_root(fx.baby_id, "delete", 100, 41),
+        true,
+    );
+    let mut with_media = fx.record_mutation(Uuid::new_v4(), None, "media");
+    with_media.media = vec![media.clone()];
+
+    let committed = fx
+        .store
+        .causal_commit(&fx.owner, vec![live, tombstone, with_media], 1_700_000_000)
         .unwrap();
-    assert_eq!(drift.results[0].status, "rejected");
-    assert_eq!(drift.results[0].code.as_deref(), Some("content_drift"));
+
+    assert_eq!(committed.results.len(), 3);
+    assert!(committed
+        .results
+        .iter()
+        .all(|result| result.status == "accepted"));
+    assert!(committed.results.iter().all(|result| !result.replay));
+    assert!(committed.results[0].stable_deleted_at.is_none());
+    assert!(committed.results[1].stable_deleted_at.is_some());
+    assert_eq!(committed.results[2].stable_media, vec![media]);
 }
 
 #[test]
@@ -885,6 +946,8 @@ fn causal_current_base_delete_accepted_with_tombstone_conflict_handle() {
     let v2 = deleted.results[0].stable_version_id.clone().unwrap();
     assert_ne!(v1, v2);
     let conflict_id = deleted.results[0].conflict_id.clone().unwrap();
+    let deleted_at = deleted.results[0].stable_deleted_at;
+    assert!(deleted_at.is_some());
 
     // Projection is tombstone.
     let page = fx.store.pull(&fx.family_id, 0).unwrap();
@@ -895,12 +958,44 @@ fn causal_current_base_delete_accepted_with_tombstone_conflict_handle() {
         .unwrap();
     assert!(row.deleted_at.is_some());
 
-    // Idempotent delete replay.
+    // Simulate a receipt written before H25 persisted tombstone evidence. The
+    // exact immutable version, not the mutable head, repairs the replay.
+    let deletion_mutation_id = del.mutation_id.clone();
+    let connection = fx.store.connect().unwrap();
+    let receipt_json: String = connection
+        .query_row(
+            "SELECT receipt_json FROM mutation_receipts
+             WHERE family_id = ?1 AND membership_id = ?2 AND mutation_id = ?3",
+            params![fx.family_id, fx.owner.membership_id, deletion_mutation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy_receipt: Value = serde_json::from_str(&receipt_json).unwrap();
+    legacy_receipt
+        .as_object_mut()
+        .unwrap()
+        .remove("stable_deleted_at");
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = ?1
+             WHERE family_id = ?2 AND membership_id = ?3 AND mutation_id = ?4",
+            params![
+                serde_json::to_string(&legacy_receipt).unwrap(),
+                fx.family_id,
+                fx.owner.membership_id,
+                deletion_mutation_id,
+            ],
+        )
+        .unwrap();
+
+    // Idempotent delete replay preserves the original tombstone projection.
     let replay = fx
         .store
         .causal_commit(&fx.owner, vec![del], 1_700_000_002)
         .unwrap();
     assert_eq!(replay.results[0].status, "accepted");
+    assert!(replay.results[0].replay);
+    assert_eq!(replay.results[0].stable_deleted_at, deleted_at);
     assert_eq!(
         replay.results[0].stable_version_id.as_deref(),
         Some(v2.as_str())
@@ -917,14 +1012,10 @@ fn causal_current_base_delete_accepted_with_tombstone_conflict_handle() {
     // v1 IS parent of v2, so concurrent edit would branch. Use unknown base.
     let mut stale = stale;
     stale.base_version = Some(Uuid::new_v4().to_string());
-    let rejected = fx
-        .store
-        .causal_commit(&fx.owner, vec![stale], 1_700_000_003)
-        .unwrap();
-    assert_eq!(rejected.results[0].status, "rejected");
-    assert_eq!(
-        rejected.results[0].code.as_deref(),
-        Some("stale_live_over_tombstone")
+    assert_commit_rejected(
+        fx.store
+            .causal_commit(&fx.owner, vec![stale], 1_700_000_003),
+        "invalid_domain",
     );
 
     // Detail exposes tombstone restore handle.
@@ -2345,10 +2436,9 @@ fn ordinary_commit_and_choice_resolution_share_media_domain_validation() {
         false,
     );
     invalid_commit.media = media;
-    let commit_result = fx.commit(&fx.owner, invalid_commit, 1_700_000_004).unwrap();
-    assert_eq!(
-        commit_result.results[0].code.as_deref(),
-        Some("media_limit_exceeded")
+    assert_commit_rejected(
+        fx.commit(&fx.owner, invalid_commit, 1_700_000_004),
+        "invalid_domain",
     );
 }
 
@@ -3487,12 +3577,11 @@ fn causal_member_acl_rejects_baby_and_foreign_record_edit() {
         baby_root("hack", 99),
         false,
     );
-    let denied = fx
-        .store
-        .causal_commit(&member, vec![baby_edit], 1_700_000_000)
-        .unwrap();
-    assert_eq!(denied.results[0].status, "rejected");
-    assert_eq!(denied.results[0].code.as_deref(), Some("forbidden_baby"));
+    assert_commit_rejected(
+        fx.store
+            .causal_commit(&member, vec![baby_edit], 1_700_000_000),
+        "forbidden",
+    );
 }
 
 #[test]
@@ -3609,7 +3698,7 @@ fn causal_pull_exposes_version_id_and_branch_conflict_summary() {
         .causal_commit(&fx.owner, vec![right], 1_700_000_002)
         .unwrap();
     assert_eq!(branched.results[0].status, "branched");
-    let cursor_before = branched.cursor;
+    let cursor_before = fx.store.pull(&fx.family_id, 0).unwrap().cursor;
 
     let page = fx.store.pull(&fx.family_id, 0).unwrap();
     let row = page
@@ -3715,7 +3804,16 @@ fn causal_commit_caps_open_branches_without_hiding_durable_branches() {
     }
 
     let replay = fx.commit(&fx.owner, first_branch, 1_700_000_002).unwrap();
-    assert_eq!(replay.results, first.results, "exact replay must be stable");
+    assert_eq!(replay.results[0].status, first.results[0].status);
+    assert_eq!(
+        replay.results[0].stable_version_id,
+        first.results[0].stable_version_id
+    );
+    assert_eq!(
+        replay.results[0].branch_version_id,
+        first.results[0].branch_version_id
+    );
+    assert!(replay.results[0].replay, "exact replay must be marked");
 
     let overflow = fx
         .commit(
@@ -5381,12 +5479,10 @@ fn causal_unknown_root_field_rejected() {
         false,
     );
     unit.root.insert("not_a_wire_field".to_owned(), json!("x"));
-    let result = fx
-        .store
-        .causal_commit(&fx.owner, vec![unit], 1_700_000_000)
-        .unwrap();
-    assert_eq!(result.results[0].status, "rejected");
-    assert_eq!(result.results[0].code.as_deref(), Some("unknown_field"));
+    assert_commit_rejected(
+        fx.store.causal_commit(&fx.owner, vec![unit], 1_700_000_000),
+        "unknown_field",
+    );
 }
 
 #[test]
@@ -5507,18 +5603,11 @@ fn causal_ingress_rejects_invalid_canonical_values_with_stable_codes() {
     .collect();
 
     let before = fx.store.pull(&fx.family_id, 0).unwrap().cursor;
-    let result = fx
-        .store
-        .causal_commit(&fx.owner, units, 1_700_000_000)
-        .unwrap();
-
-    assert!(
-        result.results.iter().all(|unit| {
-            unit.status == "rejected" && unit.code.as_deref() == Some("invalid_entity_value")
-        }),
-        "{result:?}"
+    assert_commit_rejected(
+        fx.store.causal_commit(&fx.owner, units, 1_700_000_000),
+        "invalid_domain",
     );
-    assert_eq!(result.cursor, before);
+    assert_eq!(fx.store.pull(&fx.family_id, 0).unwrap().cursor, before);
 }
 
 #[test]
@@ -5534,13 +5623,10 @@ fn causal_ingress_rejects_a_dangling_baby_reference_without_publication() {
         false,
     );
 
-    let result = fx
-        .store
-        .causal_commit(&fx.owner, vec![unit], 1_700_000_000)
-        .unwrap();
-
-    assert_eq!(result.results[0].status, "rejected", "{result:?}");
-    assert_eq!(result.results[0].code.as_deref(), Some("invalid_reference"));
+    assert_commit_rejected(
+        fx.store.causal_commit(&fx.owner, vec![unit], 1_700_000_000),
+        "invalid_domain",
+    );
     let after = fx.store.pull(&fx.family_id, 0).unwrap();
     assert_eq!(after.cursor, before.cursor);
     assert!(after
@@ -5557,9 +5643,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
     dangling_custom.insert("type".to_owned(), json!("custom"));
     dangling_custom.insert("custom_item_client_uuid".to_owned(), json!(Uuid::new_v4()));
     dangling_custom.insert("payload_json".to_owned(), json!({"title": "不存在"}));
-    let custom_rejected = fx
-        .store
-        .causal_commit(
+    assert_commit_rejected(
+        fx.store.causal_commit(
             &fx.owner,
             vec![mut_unit(
                 "record",
@@ -5569,11 +5654,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
                 false,
             )],
             1_700_000_000,
-        )
-        .unwrap();
-    assert_eq!(
-        custom_rejected.results[0].code.as_deref(),
-        Some("invalid_reference")
+        ),
+        "invalid_domain",
     );
 
     let sleep_id = Uuid::new_v4();
@@ -5597,9 +5679,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
         "effective_wake_observation_client_uuid".to_owned(),
         json!(Uuid::new_v4()),
     );
-    let effective_rejected = fx
-        .store
-        .causal_commit(
+    assert_commit_rejected(
+        fx.store.causal_commit(
             &fx.owner,
             vec![mut_unit(
                 "record",
@@ -5609,11 +5690,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
                 false,
             )],
             1_700_000_002,
-        )
-        .unwrap();
-    assert_eq!(
-        effective_rejected.results[0].code.as_deref(),
-        Some("invalid_reference")
+        ),
+        "invalid_domain",
     );
 
     let deleted_sleep = fx
@@ -5631,9 +5709,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
         )
         .unwrap();
     assert_eq!(deleted_sleep.results[0].status, "accepted");
-    let wake_rejected = fx
-        .store
-        .causal_commit(
+    assert_commit_rejected(
+        fx.store.causal_commit(
             &fx.owner,
             vec![mut_unit(
                 "wake_observation",
@@ -5649,11 +5726,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
                 false,
             )],
             1_700_000_004,
-        )
-        .unwrap();
-    assert_eq!(
-        wake_rejected.results[0].code.as_deref(),
-        Some("invalid_reference")
+        ),
+        "invalid_domain",
     );
 
     let other_baby_id = Uuid::new_v4();
@@ -5708,9 +5782,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
         "fulfilled_at": 100,
         "updated_at": 52,
     }));
-    let fulfillment_rejected = fx
-        .store
-        .causal_commit(
+    assert_commit_rejected(
+        fx.store.causal_commit(
             &fx.owner,
             vec![mut_unit(
                 "care_plan",
@@ -5720,11 +5793,8 @@ fn causal_ingress_closes_custom_wake_and_fulfillment_references() {
                 false,
             )],
             1_700_000_007,
-        )
-        .unwrap();
-    assert_eq!(
-        fulfillment_rejected.results[0].code.as_deref(),
-        Some("invalid_reference")
+        ),
+        "invalid_domain",
     );
 }
 
@@ -5787,7 +5857,7 @@ fn causal_wake_receipt_replays_before_changed_sleep_validation() {
         )
         .unwrap();
     assert_eq!(moved_sleep.results[0].status, "accepted");
-    let cursor_before_replay = moved_sleep.cursor;
+    let cursor_before_replay = fx.store.pull(&fx.family_id, 0).unwrap().cursor;
 
     let replay = fx
         .store
@@ -5795,16 +5865,18 @@ fn causal_wake_receipt_replays_before_changed_sleep_validation() {
         .unwrap();
     assert_eq!(replay.results[0].status, "accepted", "{replay:?}");
     assert_eq!(replay.results[0].stable_version_id, wake_version);
-    assert_eq!(replay.cursor, cursor_before_replay);
+    assert_eq!(
+        fx.store.pull(&fx.family_id, 0).unwrap().cursor,
+        cursor_before_replay,
+    );
 
     let mut drift = wake;
     drift.root.insert("note".to_owned(), json!("不同内容"));
-    let rejected = fx
-        .store
-        .causal_commit(&fx.owner, vec![drift], 1_700_000_004)
-        .unwrap();
-    assert_eq!(rejected.results[0].status, "rejected");
-    assert_eq!(rejected.results[0].code.as_deref(), Some("content_drift"));
+    assert_commit_rejected(
+        fx.store
+            .causal_commit(&fx.owner, vec![drift], 1_700_000_004),
+        "content_drift",
+    );
 }
 
 #[test]
@@ -5818,17 +5890,14 @@ fn causal_ingress_rejects_a_root_that_cannot_fit_the_pull_budget() {
         json!({"body": "x".repeat(crate::PULL_ENTITY_TARGET_BYTES + 1_024)}),
     );
 
-    let result = fx
-        .store
-        .causal_commit(
+    assert_commit_rejected(
+        fx.store.causal_commit(
             &fx.owner,
             vec![mut_unit("record", record_id, None, root, false)],
             1_700_000_000,
-        )
-        .unwrap();
-
-    assert_eq!(result.results[0].status, "rejected", "{result:?}");
-    assert_eq!(result.results[0].code.as_deref(), Some("root_too_large"));
+        ),
+        "invalid_domain",
+    );
     assert!(fx
         .store
         .pull(&fx.family_id, 0)
@@ -5860,14 +5929,9 @@ fn causal_missing_media_bytes_rejected() {
     );
     unit.media = vec![m1];
     // No stage_media_bytes — fail closed.
-    let result = fx
-        .store
-        .causal_commit(&fx.owner, vec![unit], 1_700_000_000)
-        .unwrap();
-    assert_eq!(result.results[0].status, "rejected");
-    assert_eq!(
-        result.results[0].code.as_deref(),
-        Some("missing_media_bytes")
+    assert_commit_rejected(
+        fx.store.causal_commit(&fx.owner, vec![unit], 1_700_000_000),
+        "invalid_domain",
     );
 }
 
@@ -5902,14 +5966,9 @@ fn causal_media_manifest_claim_is_all_or_none_on_a_wrong_receipt() {
         false,
     );
     unit.media = vec![first.clone(), wrong_second];
-    let rejected = fx
-        .store
-        .causal_commit(&fx.owner, vec![unit], 1_700_000_000)
-        .unwrap();
-    assert_eq!(rejected.results[0].status, "rejected");
-    assert_eq!(
-        rejected.results[0].code.as_deref(),
-        Some("media_sha256_mismatch")
+    assert_commit_rejected(
+        fx.store.causal_commit(&fx.owner, vec![unit], 1_700_000_000),
+        "invalid_domain",
     );
 
     let bytes = vec![0_u8; first.byte_size as usize];
@@ -5994,26 +6053,21 @@ fn causal_media_receipt_length_and_expiry_equality_reject_before_any_store_write
         drop(connection);
 
         let mut declared = media.clone();
-        let (now, expected_code) = match case {
+        let now = match case {
             "wrong_byte_size" => {
                 declared.byte_size += 1;
-                (1_700_000_001, "media_byte_size_mismatch")
+                1_700_000_001
             }
-            "expiry_equality" => (expires_at, "media_preimage_expired"),
+            "expiry_equality" => expires_at,
             _ => unreachable!(),
         };
         let mut mutation = fx.record_mutation(record_id, None, case);
         mutation.mutation_id = mutation_id.clone();
         mutation.media = vec![declared];
-        let rejected = fx
-            .store
-            .causal_commit(&fx.owner, vec![mutation.clone()], now)
-            .unwrap();
-        assert_eq!(rejected.results[0].status, "rejected", "{case}");
-        assert_eq!(
-            rejected.results[0].code.as_deref(),
-            Some(expected_code),
-            "{case}"
+        assert_commit_rejected(
+            fx.store
+                .causal_commit(&fx.owner, vec![mutation.clone()], now),
+            "invalid_domain",
         );
 
         let connection = fx.store.connect().unwrap();

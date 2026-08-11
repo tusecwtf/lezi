@@ -88,6 +88,9 @@ import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CanonicalRecordAuthor
 import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalCommitRejectedException
+import com.lezi.babylog.sync.backend.CausalCommitBatchResult
+import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.CausalReconcileStatus
 import com.lezi.babylog.sync.backend.CausalUnitResult
@@ -272,6 +275,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var onCausalMediaPreimage: (suspend (String) -> Unit)? = null
     var nextCausalReconcile: CausalBatchResult? = null
     var nextCausalCommit: CausalBatchResult? = null
+    var nextCausalCommitFailure: CausalCommitRejectedException? = null
     val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
     val conflictSnapshotPageFailures = ArrayDeque<Throwable>()
     val conflictSnapshotPageRequests = mutableListOf<ConflictSnapshotPageRequest>()
@@ -861,24 +865,52 @@ internal class RecordingSyncBackend : SyncBackend {
     override suspend fun causalCommit(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ): CausalBatchResult {
+    ): CausalCommitBatchResult {
         if (!supportsCausalWire()) {
             throw UnsupportedOperationException("Causal commit is not implemented")
         }
         causalCommittedUnits += units
         syncOrder += "causal_commit:${units.size}"
         onCausalCommit?.invoke(units)
+        nextCausalCommitFailure?.let { failure ->
+            nextCausalCommitFailure = null
+            throw failure
+        }
         val prepared = nextCausalCommit
         nextCausalCommit = null
-        if (prepared != null) return prepared
+        if (prepared != null) return CausalCommitBatchResult(
+            prepared.generation,
+            prepared.results.map { it.toCommitResult() },
+        )
         return defaultCausalBatch(
             session = session,
             units = units,
             status = CausalCommitStatus.ACCEPTED,
             mintStableVersion = true,
             useContentHash = true,
-        )
+        ).let { batch ->
+            CausalCommitBatchResult(
+                batch.generation,
+                batch.results.map { it.toCommitResult() },
+            )
+        }
     }
+
+    private fun CausalUnitResult.toCommitResult() = CausalCommitUnitResult(
+        status = status,
+        mutationId = mutationId,
+        requestHash = requestHash,
+        replay = replay,
+        stableVersionId = stableVersionId.orEmpty(),
+        stableRootJson = stableRootJson,
+        stableMedia = stableMedia,
+        stableDeleted = stableDeleted,
+        stableDeletedAt = stableDeletedAt,
+        stableRootPresent = stableRootPresent,
+        stableMediaPresent = stableMediaPresent,
+        branchVersionId = branchVersionId,
+        conflictId = conflictId,
+    )
 
     override suspend fun fetchConflictSnapshotPage(
         session: SyncSession,
@@ -925,6 +957,14 @@ internal class RecordingSyncBackend : SyncBackend {
                     unit.rootJson.ifBlank { "{}" }
                 },
                 stableMedia = unit.media,
+                stableDeleted = unit.deleted,
+                stableDeletedAt = if (unit.deleted) {
+                    Json.parseToJsonElement(unit.rootJson).jsonObject["updated_at"]
+                        ?.jsonPrimitive
+                        ?.longOrNull
+                } else {
+                    null
+                },
                 branchVersionId = null,
                 conflictId = null,
             )

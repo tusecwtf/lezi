@@ -1,6 +1,6 @@
 package com.lezi.babylog.sync.backend.retry
 
-import com.lezi.babylog.sync.backend.CausalBatchResult
+import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.ConflictResolveRequest
 import com.lezi.babylog.sync.backend.ConflictResolveResult
@@ -33,7 +33,7 @@ internal class RetryingSyncBackend(
     override suspend fun causalCommit(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ): CausalBatchResult {
+    ): CausalCommitBatchResult {
         require(units.size in 1..MAX_CAUSAL_UNITS) {
             "因果同步批次必须包含 1..$MAX_CAUSAL_UNITS 个原子单元"
         }

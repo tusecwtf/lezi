@@ -865,17 +865,36 @@ class HttpSyncBackend internal constructor(
     override suspend fun causalReconcile(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ): CausalBatchResult = postCausalBatch(session, "/v1/causal/reconcile", units)
+    ): CausalBatchResult {
+        val posted = postCausalBatch(session, "/v1/causal/reconcile", units)
+        return decodeCausalProof(session, posted.response) {
+            parseCausalReconcileBatchResult(posted, session, "/v1/causal/reconcile")
+        }
+    }
 
     override suspend fun causalCommit(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ): CausalBatchResult = postCausalBatch(
-        session,
-        "/v1/causal/commit",
-        units,
-        SyncRetryOperation.Commit,
-    )
+    ): CausalCommitBatchResult {
+        val posted = try {
+            postCausalBatch(
+                session,
+                "/v1/causal/commit",
+                units,
+                SyncRetryOperation.Commit,
+            )
+        } catch (failure: SyncHttpException) {
+            val terminal = runCatching {
+                Json.parseToJsonElement(failure.responseBody).jsonObject
+            }.getOrNull() ?: throw failure
+            terminal.throwIfCausalCommitRejected("/v1/causal/commit")
+            throw failure
+        }
+        posted.response.throwIfCausalCommitRejected("/v1/causal/commit")
+        return decodeCausalProof(session, posted.response) {
+            parseCausalCommitBatchResult(posted, session, "/v1/causal/commit")
+        }
+    }
 
     override suspend fun declareSourceRelation(
         session: SyncSession,
@@ -1053,7 +1072,7 @@ class HttpSyncBackend internal constructor(
         path: String,
         units: List<CausalMutationUnit>,
         retryOperation: SyncRetryOperation? = null,
-    ): CausalBatchResult {
+    ): PostedCausalBatch {
         session.requireCurrentReplicaTransport()
         require(units.isNotEmpty() && units.size <= MAX_CAUSAL_UNITS) {
             "因果同步批次必须包含 1..$MAX_CAUSAL_UNITS 个原子单元"
@@ -1077,21 +1096,7 @@ class HttpSyncBackend internal constructor(
             },
             retryOperation = retryOperation,
         )
-        return try {
-            parseCausalBatchResult(
-                response = response,
-                session = session,
-                expectedKeys = expectedKeys,
-                expectedByMutation = expectedByMutation,
-                context = path,
-            )
-        } catch (error: IllegalArgumentException) {
-            val serverGeneration = response["generation"]?.jsonPrimitive?.contentOrNull
-                ?.trim()
-                ?.takeIf(String::isNotEmpty)
-                ?: session.pullGeneration
-            throw AuthorityProofException(serverGeneration, error)
-        }
+        return PostedCausalBatch(response, expectedKeys, expectedByMutation)
     }
 
     override suspend fun updateMyDisplayName(
@@ -2106,82 +2111,189 @@ private fun CausalMediaItem.toJson(): JsonObject = buildJsonObject {
     if (height == null) put("height", JsonNull) else put("height", height)
 }
 
-private fun parseCausalBatchResult(
-    response: JsonObject,
+private data class PostedCausalBatch(
+    val response: JsonObject,
+    val expectedKeys: Set<Pair<String, String>>,
+    val expectedByMutation: Map<String, CausalMutationUnit>,
+)
+
+private inline fun <T> decodeCausalProof(
     session: SyncSession,
-    expectedKeys: Set<Pair<String, String>>,
-    expectedByMutation: Map<String, CausalMutationUnit>,
+    response: JsonObject,
+    decode: () -> T,
+): T = try {
+    decode()
+} catch (error: IllegalArgumentException) {
+    val serverGeneration = response["generation"]?.jsonPrimitive?.contentOrNull
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: session.pullGeneration
+    throw AuthorityProofException(serverGeneration, error)
+}
+
+private fun parseCausalReconcileBatchResult(
+    posted: PostedCausalBatch,
+    session: SyncSession,
     context: String,
 ): CausalBatchResult {
-    // Per-unit generation is echoed; batch may omit top-level generation.
+    val response = posted.response
+    val generation = response.requiredNonBlankString("generation", context)
+    require(generation == session.pullGeneration) {
+        "家庭服务器在因果同步期间变更了同步代际"
+    }
+    response.requireExactKeys(setOf("generation", "cursor", "results"), context)
     val results = response.requiredArray("results", context).mapIndexed { index, item ->
         val value = item as? JsonObject
             ?: throw IllegalArgumentException("$context.results[$index] 不是对象")
-        val unitContext = "$context.results[$index]"
-        value.toCausalUnitResult(unitContext, session.pullGeneration)
+        value.toCausalUnitResult("$context.results[$index]", generation)
     }
-    val byMutation = results.groupBy(CausalUnitResult::mutationId)
-    require(byMutation.keys == expectedByMutation.keys && byMutation.values.all { it.size == 1 }) {
-        "家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key"
-    }
-    require(results.map(CausalUnitResult::mutationId) == expectedByMutation.keys.toList()) {
-        "家庭服务器因果响应顺序与请求不一致"
-    }
-    val byKey = results.groupBy { result ->
-        val unit = expectedByMutation.getValue(result.mutationId)
-        unit.entityType to unit.clientUuid
-    }
-    require(byKey.keys == expectedKeys && byKey.values.all { it.size == 1 }) {
-        "家庭服务器因果响应 key 不完整、重复或包含多余 key"
-    }
+    validateCausalResultBinding(results, posted, context)
     results.forEach { result ->
-        require(result.generation == session.pullGeneration) {
-            "家庭服务器在因果同步期间变更了同步代际"
-        }
         when (result.status) {
-            CausalReconcileStatus.CONFIRMED,
-            CausalReconcileStatus.PUBLISH,
-            CausalReconcileStatus.CONFLICT_PREVIEW,
-            CausalCommitStatus.ACCEPTED,
-            CausalCommitStatus.MERGED,
-            -> {
-                // stable projection required for successful non-branch outcomes that settle.
-            }
-            CausalReconcileStatus.CONFIRMED,
-            CausalCommitStatus.ACCEPTED,
-            CausalCommitStatus.MERGED,
-            CausalCommitStatus.BRANCHED,
-            -> {
-                require(!result.stableVersionId.isNullOrBlank()) {
-                    "$context ${result.status} 缺少 stable_version_id"
-                }
-                if (result.status == CausalCommitStatus.BRANCHED) {
-                    require(!result.branchVersionId.isNullOrBlank()) {
-                        "branched 响应缺少 branch_version_id"
-                    }
-                    require(!result.conflictId.isNullOrBlank()) {
-                        "branched 响应缺少 conflict_id"
-                    }
-                }
+            CausalReconcileStatus.CONFIRMED -> require(!result.stableVersionId.isNullOrBlank()) {
+                "$context confirmed 缺少 stable_version_id"
             }
             CausalReconcileStatus.PUBLISH,
             CausalReconcileStatus.CONFLICT_PREVIEW,
+            CausalReconcileStatus.REJECTED,
             -> Unit
-            CausalReconcileStatus.REJECTED, CausalCommitStatus.REJECTED -> Unit
-            else -> throw IllegalArgumentException("$context 未知因果 status: ${result.status}")
+            else -> throw IllegalArgumentException("$context 未知因果 reconcile status: ${result.status}")
         }
     }
-    val generation = results.firstOrNull()?.generation ?: session.pullGeneration
     val cursor = response.requiredLong("cursor", context)
     require(cursor >= session.pullCursor) {
         "家庭服务器因果游标早于本机已拉取检查点"
     }
-    return CausalBatchResult(
-        generation = generation,
-        cursor = cursor,
-        results = results,
+    return CausalBatchResult(generation, cursor, results)
+}
+
+private fun parseCausalCommitBatchResult(
+    posted: PostedCausalBatch,
+    session: SyncSession,
+    context: String,
+): CausalCommitBatchResult {
+    val response = posted.response
+    val generation = response.requiredNonBlankString("generation", context)
+    require(generation == session.pullGeneration) {
+        "家庭服务器在因果同步期间变更了同步代际"
+    }
+    response.requireExactKeys(setOf("generation", "results"), context)
+    val results = response.requiredArray("results", context).mapIndexed { index, item ->
+        val value = item as? JsonObject
+            ?: throw IllegalArgumentException("$context.results[$index] 不是对象")
+        value.toCausalCommitUnitResult("$context.results[$index]")
+    }
+    validateCausalResultBinding(results, posted, context)
+    return CausalCommitBatchResult(generation, results)
+}
+
+private fun validateCausalResultBinding(
+    results: List<CausalProofUnit>,
+    posted: PostedCausalBatch,
+    context: String,
+) {
+    val byMutation = results.groupBy(CausalProofUnit::mutationId)
+    require(byMutation.keys == posted.expectedByMutation.keys && byMutation.values.all { it.size == 1 }) {
+        "家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key"
+    }
+    require(results.map(CausalProofUnit::mutationId) == posted.expectedByMutation.keys.toList()) {
+        "家庭服务器因果响应顺序与请求不一致"
+    }
+    val byKey = results.groupBy { result ->
+        val unit = posted.expectedByMutation.getValue(result.mutationId)
+        unit.entityType to unit.clientUuid
+    }
+    require(byKey.keys == posted.expectedKeys && byKey.values.all { it.size == 1 }) {
+        "家庭服务器因果响应 key 不完整、重复或包含多余 key"
+    }
+}
+
+private fun JsonObject.toCausalCommitUnitResult(
+    context: String,
+): CausalCommitUnitResult {
+    val status = requiredNonBlankString("status", context)
+    require(status in setOf(CausalCommitStatus.ACCEPTED, CausalCommitStatus.MERGED, CausalCommitStatus.BRANCHED)) {
+        "$context 未知因果 commit status: $status"
+    }
+    val expected = mutableSetOf("status", "mutation_id", "request_hash", "replay", "stable")
+    if (status == CausalCommitStatus.BRANCHED) {
+        expected += "branch_version_id"
+        expected += "conflict_id"
+    } else if ("conflict_id" in keys) {
+        expected += "conflict_id"
+    }
+    requireExactKeys(expected, context)
+    val stable = get("stable") as? JsonObject
+        ?: throw IllegalArgumentException("$context.stable 不是对象")
+    stable.requireExactKeys(setOf("version_id", "root", "media", "deleted", "deleted_at"), "$context.stable")
+    val root = stable["root"] as? JsonObject
+        ?: throw IllegalArgumentException("$context.stable.root 不是对象")
+    val media = (stable["media"] as? JsonArray)?.mapIndexed { index, element ->
+        (element as? JsonObject)?.toCausalMediaItem("$context.stable.media[$index]")
+            ?: throw IllegalArgumentException("$context.stable.media[$index] 不是对象")
+    } ?: throw IllegalArgumentException("$context.stable.media 不是数组")
+    val deleted = stable.requiredBoolean("deleted", "$context.stable")
+    val deletedAt = stable.requiredNullableLong("deleted_at", "$context.stable")
+    require(deleted == (deletedAt != null)) { "$context.stable delete evidence 不一致" }
+    return CausalCommitUnitResult(
+        status = status,
+        mutationId = requiredNonBlankString("mutation_id", context),
+        requestHash = requiredNonBlankString("request_hash", context),
+        stableVersionId = stable.requiredNonBlankString("version_id", "$context.stable"),
+        stableRootJson = root.toString(),
+        stableMedia = media,
+        stableDeleted = deleted,
+        stableDeletedAt = deletedAt,
+        replay = requiredBoolean("replay", context),
+        branchVersionId = optionalNonBlankString("branch_version_id", context),
+        conflictId = optionalNonBlankString("conflict_id", context),
     )
 }
+
+private fun JsonObject.throwIfCausalCommitRejected(context: String) {
+    if (get("status")?.jsonPrimitive?.contentOrNull != "rejected") return
+    requireExactKeys(
+        if ("mutation_id" in this) setOf("status", "mutation_id", "error") else setOf("status", "error"),
+        context,
+    )
+    val error = get("error") as? JsonObject
+        ?: throw IllegalArgumentException("$context.error 不是对象")
+    error.requireExactKeys(setOf("code", "retryable"), "$context.error")
+    require(!error.requiredBoolean("retryable", "$context.error")) {
+        "$context terminal rejection 不得标记 retryable"
+    }
+    val code = error.requiredNonBlankString("code", "$context.error")
+    require(code in CAUSAL_COMMIT_TERMINAL_CODES) {
+        "$context terminal rejection code 未冻结: $code"
+    }
+    throw CausalCommitRejectedException(
+        mutationId = optionalNonBlankString("mutation_id", context),
+        code = code,
+    )
+}
+
+private val CAUSAL_COMMIT_TERMINAL_CODES = setOf(
+    "unknown_field",
+    "missing_field",
+    "wrong_type",
+    "non_canonical_value",
+    "invalid_domain",
+    "content_drift",
+    "unauthenticated",
+    "forbidden",
+    "capability_mismatch",
+    "not_ready",
+    "invalid_snapshot_token",
+    "snapshot_expired",
+    "snapshot_stale",
+    "invalid_choice",
+    "duplicate_choice",
+    "incomplete_choices",
+    "missing_restore_base",
+    "incomplete_restore_base",
+    "missing_restore_media",
+    "cas_mismatch",
+)
 
 private fun JsonObject.toCausalUnitResult(
     context: String,

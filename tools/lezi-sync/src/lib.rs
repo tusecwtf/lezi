@@ -1489,6 +1489,14 @@ impl ApiError {
     pub(crate) fn internal(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, detail)
     }
+
+    pub(crate) fn is_authentication_terminal(&self) -> bool {
+        self.status == StatusCode::UNAUTHORIZED
+    }
+
+    pub(crate) fn is_client_update_terminal(&self) -> bool {
+        self.status == StatusCode::FORBIDDEN && self.code == Some(CLIENT_UPDATE_REQUIRED_CODE)
+    }
 }
 
 impl IntoResponse for ApiError {

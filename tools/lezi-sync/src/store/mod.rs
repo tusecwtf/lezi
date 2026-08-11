@@ -49,11 +49,11 @@ use crate::model::Entity;
 #[allow(unused_imports)]
 use self::SourceRelationReceipt as _;
 pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
-pub(crate) use causal::MAX_CAUSAL_UNITS;
 pub use causal::{
-    CausalBatchResult, CausalMutation, CausalUnitResult, ConflictResolutionChoice, ConflictSummary,
-    ResolveConflictInput, ResolveConflictResult,
+    CausalBatchResult, CausalCommitResult, CausalMutation, CausalUnitResult,
+    ConflictResolutionChoice, ConflictSummary, ResolveConflictInput, ResolveConflictResult,
 };
+pub(crate) use causal::{DurableCausalCommit, MAX_CAUSAL_UNITS};
 pub(crate) use causal_admission::CausalAdmissionConfig;
 pub use causal_admission::CausalCommitSaturation;
 pub use causal_media_staging::{
@@ -71,7 +71,10 @@ pub use source_relations::{
 
 // Re-exported types are the public Store/HTTP causal seams (ticket 03).
 #[allow(unused_imports)]
-use self::{CausalBatchResult as _, ConflictDetailPage as _, ResolveConflictResult as _};
+use self::{
+    CausalBatchResult as _, CausalCommitResult as _, ConflictDetailPage as _,
+    ResolveConflictResult as _,
+};
 pub(crate) use identity::anonymize_membership_authorship_fields;
 pub(crate) use schema::VERSIONED_ENTITY_TYPES;
 #[cfg(test)]
@@ -400,6 +403,8 @@ pub enum StoreError {
     LegacyBundleCausalRootUnsupported(String),
     #[error("authoritative reconcile batch is invalid")]
     InvalidReconcileBatch,
+    #[error("causal commit rejected for mutation {mutation_id}: {code}")]
+    CausalCommitRejected { mutation_id: String, code: String },
     #[error("causal commit admission saturated: {0:?}")]
     CausalCommitSaturated(CausalCommitSaturation),
     #[error("causal commit admission is unavailable")]

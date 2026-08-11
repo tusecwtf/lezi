@@ -11,7 +11,8 @@ use axum::response::Response;
 use axum::Json;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::media::media_entity_is_pullable;
@@ -34,6 +35,7 @@ use crate::{
 
 const MAX_RECONCILE_UNITS: usize = 64;
 const MAX_RECONCILE_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_CAUSAL_COMMIT_REQUEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -448,15 +450,167 @@ fn parse_causal_units(request: CausalBatchRequest) -> Result<Vec<CausalMutation>
     Ok(units)
 }
 
+fn terminal_commit_rejection(mutation_id: Option<&str>, code: &str) -> Json<Value> {
+    let mut value = json!({
+        "status": "rejected",
+        "error": { "code": code, "retryable": false },
+    });
+    if let Some(mutation_id) = mutation_id {
+        value
+            .as_object_mut()
+            .expect("terminal envelope is an object")
+            .insert(
+                "mutation_id".to_owned(),
+                Value::String(mutation_id.to_owned()),
+            );
+    }
+    Json(value)
+}
+
+struct UniqueJsonMembers;
+
+impl<'de> Deserialize<'de> for UniqueJsonMembers {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(UniqueJsonMembersVisitor)
+    }
+}
+
+struct UniqueJsonMembersVisitor;
+
+impl<'de> Visitor<'de> for UniqueJsonMembersVisitor {
+    type Value = UniqueJsonMembers;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON with unique object members")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(de::Error::custom("duplicate JSON member"));
+            }
+            map.next_value::<UniqueJsonMembers>()?;
+        }
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<UniqueJsonMembers>()?.is_some() {}
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(UniqueJsonMembers)
+    }
+}
+
+fn causal_commit_decode_error_code(error: &serde_json::Error) -> &'static str {
+    let message = error.to_string();
+    if message.starts_with("unknown field") {
+        "unknown_field"
+    } else if message.starts_with("missing field") {
+        "missing_field"
+    } else if message.starts_with("duplicate field") || message.starts_with("duplicate JSON member")
+    {
+        "non_canonical_value"
+    } else {
+        "wrong_type"
+    }
+}
+
+fn classify_causal_commit_request(raw: &[u8]) -> Result<CausalBatchRequest, Json<Value>> {
+    if raw.len() > MAX_CAUSAL_COMMIT_REQUEST_BYTES {
+        return Err(terminal_commit_rejection(None, "wrong_type"));
+    }
+    serde_json::from_slice::<UniqueJsonMembers>(raw).map_err(|error| {
+        terminal_commit_rejection(None, causal_commit_decode_error_code(&error))
+    })?;
+    let request = serde_json::from_slice::<CausalBatchRequest>(raw).map_err(|error| {
+        terminal_commit_rejection(None, causal_commit_decode_error_code(&error))
+    })?;
+    if request.units.is_empty() {
+        return Err(terminal_commit_rejection(None, "invalid_domain"));
+    }
+    Ok(request)
+}
+
 fn causal_unit_json(result: crate::store::CausalUnitResult, generation: &str) -> Value {
     let mut value = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
     if let Some(obj) = value.as_object_mut() {
+        obj.remove("replay");
+        obj.remove("stable_deleted_at");
         obj.insert(
             "generation".to_owned(),
             Value::String(generation.to_owned()),
         );
     }
     value
+}
+
+fn causal_commit_unit_json(result: crate::store::CausalUnitResult) -> Value {
+    let mut unit = serde_json::Map::from_iter([
+        ("status".to_owned(), Value::String(result.status)),
+        ("mutation_id".to_owned(), Value::String(result.mutation_id)),
+        (
+            "request_hash".to_owned(),
+            Value::String(result.request_hash),
+        ),
+        ("replay".to_owned(), Value::Bool(result.replay)),
+        (
+            "stable".to_owned(),
+            json!({
+                "version_id": result.stable_version_id,
+                "root": result.stable_root,
+                "media": result.stable_media,
+                "deleted": result.stable_deleted_at.is_some(),
+                "deleted_at": result.stable_deleted_at,
+            }),
+        ),
+    ]);
+    if let Some(branch_version_id) = result.branch_version_id {
+        unit.insert(
+            "branch_version_id".to_owned(),
+            Value::String(branch_version_id),
+        );
+    }
+    if let Some(conflict_id) = result.conflict_id {
+        unit.insert("conflict_id".to_owned(), Value::String(conflict_id));
+    }
+    Value::Object(unit)
 }
 
 pub(crate) async fn causal_reconcile(
@@ -518,46 +672,97 @@ pub(crate) async fn causal_reconcile(
 pub(crate) async fn causal_commit(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<Json<CausalBatchRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, &headers).await?;
-    require_supported_client(&state, &headers).await?;
-    let request = json_body(body)?;
+    body: Bytes,
+) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
+    enum Dispatch {
+        Commit(crate::store::DurableCausalCommit),
+        Rejected {
+            mutation_id: Option<String>,
+            code: String,
+        },
+    }
+    let principal = match authenticate(&state, &headers).await {
+        Ok(principal) => principal,
+        Err(error) if error.is_authentication_terminal() => {
+            return Ok((
+                axum::http::StatusCode::UNAUTHORIZED,
+                terminal_commit_rejection(None, "unauthenticated"),
+            ))
+        }
+        Err(error) => return Err(error),
+    };
+    match require_supported_client(&state, &headers).await {
+        Ok(()) => {}
+        Err(error) if error.is_client_update_terminal() => {
+            return Ok((
+                axum::http::StatusCode::CONFLICT,
+                terminal_commit_rejection(None, "capability_mismatch"),
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    if !is_ready(&state).await {
+        return Ok((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            terminal_commit_rejection(None, "not_ready"),
+        ));
+    }
+    let request = match classify_causal_commit_request(&body) {
+        Ok(request) => request,
+        Err(rejection) => return Ok((axum::http::StatusCode::OK, rejection)),
+    };
     if let Some(gen) = request.generation.as_deref() {
         if gen != state.generation {
-            return Err(ApiError::conflict_value(
-                state
-                    .recovery_detail(&principal.family_id, "generation_changed")
-                    .await?,
+            return Ok((
+                axum::http::StatusCode::CONFLICT,
+                terminal_commit_rejection(None, "capability_mismatch"),
             ));
         }
     }
     let units = parse_causal_units(request)?;
+    let first_mutation_id = units.first().map(|unit| unit.mutation_id.clone());
     let family_lock = state.family_lock(&principal.family_id).await;
     let guard = family_lock.lock().await;
     let blocking_state = state.clone();
     let generation = state.generation.clone();
     let family_id = principal.family_id.clone();
-    let commit = run_blocking(move || {
+    let dispatch = run_blocking(move || {
         // Causal commit preserves each fact; duplicate grouping is an explicit relation.
         blocking_state
             .store
             .causal_commit_durable(&principal, units, blocking_state.now())
-            .map_err(|error| match error {
-                StoreError::InvalidReconcileBatch => {
-                    ApiError::unprocessable("causal commit batch is invalid")
-                }
+            .map(Dispatch::Commit)
+            .or_else(|error| match error {
+                StoreError::CausalCommitRejected { mutation_id, code } => Ok(Dispatch::Rejected {
+                    mutation_id: Some(mutation_id),
+                    code,
+                }),
+                StoreError::InvalidReconcileBatch => Ok(Dispatch::Rejected {
+                    mutation_id: first_mutation_id,
+                    code: "invalid_domain".to_owned(),
+                }),
                 StoreError::CausalCommitSaturated(saturation) => {
-                    ApiError::causal_commit_saturated(saturation)
+                    Err(ApiError::causal_commit_saturated(saturation))
                 }
                 StoreError::ForbiddenBaby
                 | StoreError::ForbiddenRecord
                 | StoreError::ForbiddenCarePlan
-                | StoreError::ForbiddenCustomItem => ApiError::unprocessable(error.to_string()),
-                other => other.into(),
+                | StoreError::ForbiddenCustomItem => {
+                    Err(ApiError::unprocessable(error.to_string()))
+                }
+                other => Err(other.into()),
             })
     })
     .await?;
+    let commit = match dispatch {
+        Dispatch::Commit(commit) => commit,
+        Dispatch::Rejected { mutation_id, code } => {
+            return Ok((
+                axum::http::StatusCode::OK,
+                terminal_commit_rejection(mutation_id.as_deref(), &code),
+            ));
+        }
+    };
     // The durable receipt/version transaction is complete. Exact-manifest
     // publication may hash/copy/fsync large objects and must not retain the
     // same-family commit mutex while the response waits for that repair.
@@ -584,14 +789,16 @@ pub(crate) async fn causal_commit(
     if committed_any {
         state.schedule_causal_media_gc_for_family(family_id);
     }
-    Ok(Json(json!({
-        "generation": generation,
-        "cursor": result.cursor,
-        "results": result.results
-            .into_iter()
-            .map(|unit| causal_unit_json(unit, &generation))
-            .collect::<Vec<_>>(),
-    })))
+    Ok((
+        axum::http::StatusCode::OK,
+        Json(json!({
+            "generation": generation,
+            "results": result.results
+                .into_iter()
+                .map(causal_commit_unit_json)
+                .collect::<Vec<_>>(),
+        })),
+    ))
 }
 
 pub(crate) async fn conflict_detail(

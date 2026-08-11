@@ -193,7 +193,9 @@ class RealSyncPortIdentityClearTest {
             removedDeviceLocalClearGate = resumedGate,
         )
         resumedGate.firstCall.await()
-        withTimeout(2_000) { preferences.familyDeletionClearCompleted.await() }
+        withContext(Dispatchers.Default.limitedParallelism(1)) {
+            withTimeout(2_000) { preferences.familyDeletionClearCompleted.await() }
+        }
         assertThat(preferences.current()).isEqualTo(SyncSession())
         assertThat(preferences.pendingFamilyDeletionClear).isFalse()
     }

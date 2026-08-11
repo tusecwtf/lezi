@@ -218,7 +218,15 @@
     {
       "id": "commit-exact-replay-marker", "kind": "accept",
       "input": { "mutation_id": "00000000-0000-0000-0000-000000000030", "request_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "attempts": 2 },
-      "expect": { "first": { "status": "branched", "replay": false }, "second": { "status": "branched", "replay": true }, "new_status": false }
+      "expect": {
+        "batch_keys": ["generation", "results"],
+        "unit_required_keys": ["status", "mutation_id", "request_hash", "replay", "stable"],
+        "unit_optional_keys": ["branch_version_id", "conflict_id"],
+        "stable_keys": ["version_id", "root", "media", "deleted", "deleted_at"],
+        "first": { "status": "branched", "replay": false },
+        "second": { "status": "branched", "replay": true },
+        "new_status": false
+      }
     }
   ]
 }

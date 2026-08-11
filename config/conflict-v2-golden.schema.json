@@ -833,8 +833,20 @@
             "expect": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["first", "second", "new_status"],
+              "required": ["batch_keys", "unit_required_keys", "unit_optional_keys", "stable_keys", "first", "second", "new_status"],
               "properties": {
+                "batch_keys": {
+                  "const": ["generation", "results"]
+                },
+                "unit_required_keys": {
+                  "const": ["status", "mutation_id", "request_hash", "replay", "stable"]
+                },
+                "unit_optional_keys": {
+                  "const": ["branch_version_id", "conflict_id"]
+                },
+                "stable_keys": {
+                  "const": ["version_id", "root", "media", "deleted", "deleted_at"]
+                },
                 "first": {
                   "allOf": [
                     { "$ref": "#/$defs/successMarker" },

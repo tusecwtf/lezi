@@ -7,6 +7,7 @@ import com.lezi.babylog.sync.SyncPlan
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalCommitRejectedException
 import com.lezi.babylog.sync.backend.CausalReconcileStatus
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.PullResult
@@ -199,18 +200,9 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             rig.backend.onCausalCommit = { units ->
                 val unit = units.single()
                 rejected = unit
-                rig.backend.nextCausalCommit = CausalBatchResult(
-                    generation = session.pullGeneration,
-                    cursor = session.pullCursor,
-                    results = listOf(
-                        CausalUnitResult(
-                            status = CausalCommitStatus.REJECTED,
-                            mutationId = unit.mutationId,
-                            requestHash = causalMutationContentHash(unit),
-                            generation = session.pullGeneration,
-                            code = "content_drift",
-                        ),
-                    ),
+                rig.backend.nextCausalCommitFailure = CausalCommitRejectedException(
+                    mutationId = unit.mutationId,
+                    code = "content_drift",
                 )
             }
 
@@ -626,18 +618,9 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         )
         rig.backend.onCausalCommit = { units ->
             val unit = units.single()
-            rig.backend.nextCausalCommit = CausalBatchResult(
-                generation = session.pullGeneration,
-                cursor = session.pullCursor,
-                results = listOf(
-                    CausalUnitResult(
-                        status = CausalCommitStatus.REJECTED,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
-                        generation = session.pullGeneration,
-                        code = "content_drift",
-                    ),
-                ),
+            rig.backend.nextCausalCommitFailure = CausalCommitRejectedException(
+                mutationId = unit.mutationId,
+                code = "content_drift",
             )
         }
         val failure = runCatching {
@@ -756,6 +739,8 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                             stableVersionId = "v-calendar-${case.name}",
                             stableRootJson = stableRoot,
                             stableMedia = emptyList(),
+                            stableDeleted = case.deleted,
+                            stableDeletedAt = if (case.deleted) seeded.deletedAt else null,
                             branchVersionId = if (case.branched) {
                                 "branch-calendar-${case.name}"
                             } else {
@@ -1597,19 +1582,9 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         rig.backend.onCausalCommit = { units ->
             val unit = units.single()
             rejected = unit
-            rig.backend.nextCausalCommit = CausalBatchResult(
-                generation = session.pullGeneration,
-                cursor = session.pullCursor,
-                results = listOf(
-                    CausalUnitResult(
-                        status = CausalCommitStatus.REJECTED,
-                        mutationId = unit.mutationId,
-                        requestHash = causalMutationContentHash(unit),
-                        generation = session.pullGeneration,
-                        code = "content_drift",
-                        reason = "mutation id reused with different canonical content",
-                    ),
-                ),
+            rig.backend.nextCausalCommitFailure = CausalCommitRejectedException(
+                mutationId = unit.mutationId,
+                code = "content_drift",
             )
         }
         val failure = runCatching {

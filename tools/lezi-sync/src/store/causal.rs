@@ -65,7 +65,11 @@ pub struct CausalUnitResult {
     pub stable_root: Map<String, Value>,
     #[serde(default)]
     pub stable_media: Vec<CausalMediaItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_deleted_at: Option<i64>,
     pub request_hash: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_version_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,9 +88,14 @@ pub struct CausalBatchResult {
     pub results: Vec<CausalUnitResult>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CausalCommitResult {
+    pub results: Vec<CausalUnitResult>,
+}
+
 pub(crate) struct DurableCausalCommit {
     family_id: String,
-    result: CausalBatchResult,
+    result: CausalCommitResult,
     promotion_manifests: Vec<Vec<CausalMediaItem>>,
 }
 
@@ -297,7 +306,9 @@ fn rejected(
             .unwrap_or_default()
             .into_iter()
             .collect::<Vec<_>>(),
+        stable_deleted_at: stable.and_then(|s| s.deleted_at),
         request_hash: request_hash.to_owned(),
+        replay: false,
         branch_version_id: None,
         conflict_id: None,
         code: Some(code.to_owned()),
@@ -1862,10 +1873,21 @@ fn evaluate_unit(
             ));
         }
         let mut receipt: CausalUnitResult = serde_json::from_str(&receipt_json)?;
+        // Receipts written before the contracted commit envelope did not
+        // persist tombstone evidence. The referenced immutable version is the
+        // authority for upgrading that replay without consulting mutable head.
+        if receipt.stable_deleted_at.is_none() {
+            if let Some(version_id) = receipt.stable_version_id.as_deref() {
+                receipt.stable_deleted_at =
+                    load_version(ctx.tx, &ctx.principal.family_id, version_id)?
+                        .and_then(|version| version.deleted_at);
+            }
+        }
         if ctx.dry_run && matches!(receipt.status.as_str(), "accepted" | "merged" | "branched") {
             receipt.status = "confirmed".to_owned();
         }
         receipt.request_hash = request_hash;
+        receipt.replay = true;
         return Ok(receipt);
     }
 
@@ -1983,7 +2005,9 @@ fn evaluate_unit(
                 stable_version_id: None,
                 stable_root: Map::new(),
                 stable_media: vec![],
+                stable_deleted_at: None,
                 request_hash,
+                replay: false,
                 branch_version_id: None,
                 conflict_id: None,
                 code: None,
@@ -2061,7 +2085,9 @@ fn evaluate_unit(
             stable_version_id: Some(stable.version_id.clone()),
             stable_root: stable.root.clone(),
             stable_media: stable.media.clone(),
+            stable_deleted_at: stable.deleted_at,
             request_hash,
+            replay: false,
             branch_version_id: None,
             conflict_id,
             code: None,
@@ -2091,7 +2117,9 @@ fn evaluate_unit(
                 stable_version_id: Some(stable.version_id.clone()),
                 stable_root: stable.root.clone(),
                 stable_media: stable.media.clone(),
+                stable_deleted_at: stable.deleted_at,
                 request_hash,
+                replay: false,
                 branch_version_id: None,
                 conflict_id: None,
                 code: None,
@@ -2119,7 +2147,9 @@ fn evaluate_unit(
                 stable_version_id: Some(stable.version_id.clone()),
                 stable_root: stable.root.clone(),
                 stable_media: stable.media.clone(),
+                stable_deleted_at: stable.deleted_at,
                 request_hash,
+                replay: false,
                 branch_version_id: None,
                 conflict_id: None,
                 code: None,
@@ -2175,7 +2205,9 @@ fn evaluate_unit(
             stable_version_id: Some(stable.version_id.clone()),
             stable_root: stable.root.clone(),
             stable_media: stable.media.clone(),
+            stable_deleted_at: stable.deleted_at,
             request_hash,
+            replay: false,
             branch_version_id: None,
             conflict_id: load_open_conflict_id(
                 ctx.tx,
@@ -2200,7 +2232,9 @@ fn evaluate_unit(
                     stable_version_id: Some(stable.version_id.clone()),
                     stable_root: stable.root.clone(),
                     stable_media: stable.media.clone(),
+                    stable_deleted_at: stable.deleted_at,
                     request_hash,
+                    replay: false,
                     branch_version_id: None,
                     conflict_id: None,
                     code: None,
@@ -2230,7 +2264,9 @@ fn evaluate_unit(
                     stable_version_id: Some(stable.version_id.clone()),
                     stable_root: stable.root.clone(),
                     stable_media: stable.media.clone(),
+                    stable_deleted_at: stable.deleted_at,
                     request_hash,
+                    replay: false,
                     branch_version_id: None,
                     conflict_id: None,
                     code: None,
@@ -2373,7 +2409,9 @@ fn commit_accepted_new(
         stable_version_id: Some(version_id.clone()),
         stable_root: root.clone(),
         stable_media: media.to_vec(),
+        stable_deleted_at: deleted_at,
         request_hash: request_hash.to_owned(),
+        replay: false,
         branch_version_id: None,
         conflict_id: conflict_id.clone(),
         code: None,
@@ -2506,7 +2544,9 @@ fn commit_accepted_update(
         stable_version_id: Some(version_id.clone()),
         stable_root: root.clone(),
         stable_media: media.to_vec(),
+        stable_deleted_at: deleted_at,
         request_hash: request_hash.to_owned(),
+        replay: false,
         branch_version_id: None,
         conflict_id: conflict_id.clone(),
         code: None,
@@ -2646,7 +2686,9 @@ fn commit_merged(
         stable_version_id: Some(version_id.clone()),
         stable_root: merged_root,
         stable_media: projected_media,
+        stable_deleted_at: deleted_at,
         request_hash: request_hash.to_owned(),
+        replay: false,
         branch_version_id: None,
         conflict_id: conflict_id.clone(),
         code: None,
@@ -2748,7 +2790,9 @@ fn branch_unit(
         stable_version_id: Some(stable.version_id.clone()),
         stable_root: stable.root.clone(),
         stable_media: stable.media.clone(),
+        stable_deleted_at: stable.deleted_at,
         request_hash: request_hash.to_owned(),
+        replay: false,
         branch_version_id: Some(branch_version_id.clone()),
         conflict_id: Some(conflict_id.clone()),
         code: None,
@@ -2874,6 +2918,24 @@ impl Store {
         let mut promotion_manifests = Vec::with_capacity(units.len());
         for unit in &units {
             let mut result = evaluate_unit(&ctx, unit)?;
+            if result.status == "rejected" {
+                let code = match result.code.as_deref() {
+                    Some(
+                        code @ ("unknown_field"
+                        | "missing_field"
+                        | "wrong_type"
+                        | "non_canonical_value"
+                        | "invalid_domain"
+                        | "content_drift"),
+                    ) => code,
+                    Some(code) if code.starts_with("forbidden") => "forbidden",
+                    _ => "invalid_domain",
+                };
+                return Err(StoreError::CausalCommitRejected {
+                    mutation_id: result.mutation_id,
+                    code: code.to_owned(),
+                });
+            }
             // Persist no-op accepted receipt when identical current-base.
             if result.status == "accepted"
                 && result.reason.as_deref() == Some("canonical_equivalent")
@@ -2921,16 +2983,10 @@ impl Store {
             }
             results.push(result);
         }
-        let cursor: i64 = tx.query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
-            params![principal.family_id],
-            |row| row.get(0),
-        )?;
         tx.commit()?;
-        let cursor = self.current_revision(&principal.family_id)?.max(cursor);
         Ok(DurableCausalCommit {
             family_id: principal.family_id.clone(),
-            result: CausalBatchResult { cursor, results },
+            result: CausalCommitResult { results },
             promotion_manifests,
         })
     }
@@ -2938,7 +2994,7 @@ impl Store {
     pub(crate) fn publish_causal_commit(
         &self,
         commit: DurableCausalCommit,
-    ) -> Result<CausalBatchResult, StoreError> {
+    ) -> Result<CausalCommitResult, StoreError> {
         self.publish_causal_commit_with_hook(commit, None)
     }
 
@@ -2946,7 +3002,7 @@ impl Store {
         &self,
         commit: DurableCausalCommit,
         blocking_hook: Option<&(dyn Fn(&'static str) + Send + Sync + 'static)>,
-    ) -> Result<CausalBatchResult, StoreError> {
+    ) -> Result<CausalCommitResult, StoreError> {
         for media in commit.promotion_manifests {
             if media.is_empty() {
                 continue;
@@ -2969,7 +3025,7 @@ impl Store {
         principal: &Principal,
         units: Vec<CausalMutation>,
         now: i64,
-    ) -> Result<CausalBatchResult, StoreError> {
+    ) -> Result<CausalCommitResult, StoreError> {
         let commit = self.causal_commit_durable(principal, units, now)?;
         self.publish_causal_commit(commit)
     }
@@ -3490,7 +3546,11 @@ impl<'de> serde::Deserialize<'de> for CausalUnitResult {
             stable_root: Map<String, Value>,
             #[serde(default)]
             stable_media: Vec<CausalMediaItem>,
+            #[serde(default)]
+            stable_deleted_at: Option<i64>,
             request_hash: String,
+            #[serde(default)]
+            replay: bool,
             branch_version_id: Option<String>,
             conflict_id: Option<String>,
             code: Option<String>,
@@ -3504,7 +3564,9 @@ impl<'de> serde::Deserialize<'de> for CausalUnitResult {
             stable_version_id: raw.stable_version_id,
             stable_root: raw.stable_root,
             stable_media: raw.stable_media,
+            stable_deleted_at: raw.stable_deleted_at,
             request_hash: raw.request_hash,
+            replay: raw.replay,
             branch_version_id: raw.branch_version_id,
             conflict_id: raw.conflict_id,
             code: raw.code,

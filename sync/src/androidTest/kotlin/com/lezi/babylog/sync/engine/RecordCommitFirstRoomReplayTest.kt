@@ -13,10 +13,10 @@ import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
-import com.lezi.babylog.sync.backend.CausalBatchResult
+import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
+import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.FamilyMemberDirectorySnapshot
 import com.lezi.babylog.sync.backend.PullPageRequest
@@ -163,31 +163,35 @@ class RecordCommitFirstRoomReplayTest {
         requireRemoteAllowed = {},
     )
 
-    private fun accepted(unit: CausalMutationUnit, stableVersion: String) = CausalBatchResult(
+    private fun accepted(
+        unit: CausalMutationUnit,
+        stableVersion: String,
+    ) = CausalCommitBatchResult(
         generation = SESSION.pullGeneration,
-        cursor = SESSION.pullCursor,
         results = listOf(
-            CausalUnitResult(
+            CausalCommitUnitResult(
                 status = CausalCommitStatus.ACCEPTED,
                 mutationId = unit.mutationId,
                 requestHash = causalMutationContentHash(unit),
-                generation = SESSION.pullGeneration,
+                replay = false,
                 stableVersionId = stableVersion,
                 stableRootJson = unit.rootJson,
                 stableMedia = unit.media,
+                stableDeleted = false,
+                stableDeletedAt = null,
             ),
         ),
     )
 
     private class CommitOnlyBackend(
-        private val commit: suspend (List<CausalMutationUnit>) -> CausalBatchResult,
+        private val commit: suspend (List<CausalMutationUnit>) -> CausalCommitBatchResult,
     ) : SyncBackend {
         override fun supportsCausalWire() = true
 
         override suspend fun causalCommit(
             session: SyncSession,
             units: List<CausalMutationUnit>,
-        ): CausalBatchResult = commit(units)
+        ): CausalCommitBatchResult = commit(units)
 
         override suspend fun create(
             baseUrl: String,

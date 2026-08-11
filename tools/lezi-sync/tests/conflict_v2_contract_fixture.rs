@@ -288,6 +288,22 @@ fn assert_disjoint_case(case: &Value) {
 
 fn assert_replay_invariants(case: &Value) {
     assert_eq!(
+        strings(&case["expect"]["batch_keys"]),
+        ["generation", "results"]
+    );
+    assert_eq!(
+        strings(&case["expect"]["unit_required_keys"]),
+        ["status", "mutation_id", "request_hash", "replay", "stable"]
+    );
+    assert_eq!(
+        strings(&case["expect"]["unit_optional_keys"]),
+        ["branch_version_id", "conflict_id"]
+    );
+    assert_eq!(
+        strings(&case["expect"]["stable_keys"]),
+        ["version_id", "root", "media", "deleted", "deleted_at"]
+    );
+    assert_eq!(
         case["expect"]["first"]["status"],
         case["expect"]["second"]["status"]
     );
