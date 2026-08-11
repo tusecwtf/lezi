@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.availability.FamilyServerAvailability
 import com.lezi.babylog.sync.backend.PullResult
@@ -17,6 +18,63 @@ import org.junit.Test
  * Does not assert Channel/Job/mutex private coordinator structure.
  */
 class RealSyncPortLocalWriteNoPullTest {
+
+    @Test
+    fun localWriteCommitsProviderRootsBeforeReferencedRecordAtFacadeSeam() = runTest {
+        val session = joinedSession("family-a").copy(pullCursor = 14)
+        val rig = SyncRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        )
+        rig.backend.enableCausal = true
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-facade-provider",
+                syncDirty = true,
+                familyAuthority = true,
+                baseVersion = "v-baby-provider",
+                updatedAt = 100,
+            ),
+        )
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-facade-provider",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                sortOrder = 7,
+                updatedAt = 101,
+                syncDirty = true,
+                baseVersion = "v-custom-provider",
+            ),
+        )
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-facade-consumer",
+                type = "custom",
+                payloadJson =
+                    """{"title":"抚触","detail":"十分钟","custom_item_id":$customItemId,"icon_slot":2}""",
+                schemaVersion = 2,
+                updatedAt = 102,
+                syncDirty = true,
+                baseVersion = "v-record-provider",
+            ),
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(14)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
+            .containsExactly("baby", "custom_item", "record")
+            .inOrder()
+        assertThat(rig.customItems.get("custom-facade-provider")?.sortOrder).isEqualTo(7)
+        assertThat(rig.records.getByClientUuid("record-facade-consumer")?.babyId)
+            .isEqualTo(babyId)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
 
     @Test
     fun localWriteNoMediaRecordCommitsWithoutReconcilePullOrCursorAdvance() = runTest {

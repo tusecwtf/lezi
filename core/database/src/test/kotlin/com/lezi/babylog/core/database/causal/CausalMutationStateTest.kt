@@ -73,6 +73,81 @@ class CausalMutationStateTest {
     }
 
     @Test
+    fun commitFirstFreezePinsTheCapturedEpochIdentity() {
+        val pending = CausalRootMutationState(
+            baseVersion = "v-base-1",
+            mutationId = null,
+            contentEpoch = 100,
+            syncDirty = true,
+            openConflictId = null,
+            localBranchVersionId = null,
+        )
+
+        val frozen = requireNotNull(
+            freezeCommitFirstEpoch(
+                current = pending,
+                contentEpoch = 100,
+                newMutationId = "mut-frozen",
+            ),
+        )
+
+        assertThat(frozen.mutationId).isEqualTo("mut-frozen")
+        assertThat(frozen.baseVersion).isEqualTo("v-base-1")
+        assertThat(frozen.syncDirty).isTrue()
+        assertThat(
+            freezeCommitFirstEpoch(
+                current = pending.copy(contentEpoch = 101),
+                contentEpoch = 100,
+                newMutationId = "mut-stale",
+            ),
+        ).isNull()
+    }
+
+    @Test
+    fun commitFirstTerminalAdvancesBaseWithoutOverwritingSupersedingFact() {
+        val laterEdit = CausalRootMutationState(
+            baseVersion = "v-base-1",
+            mutationId = "mut-epoch-1",
+            contentEpoch = 200,
+            syncDirty = true,
+            openConflictId = null,
+            localBranchVersionId = null,
+        )
+
+        val accepted = requireNotNull(
+            settleCommitFirstAcceptedOrMerged(
+                current = laterEdit,
+                expectedMutationId = "mut-epoch-1",
+                expectedContentEpoch = 100,
+                newBaseVersion = "v-epoch-1",
+            ),
+        )
+        assertThat(accepted.epoch).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        assertThat(accepted.state.contentEpoch).isEqualTo(200)
+        assertThat(accepted.state.syncDirty).isTrue()
+        assertThat(accepted.state.mutationId).isNull()
+        assertThat(accepted.state.baseVersion).isEqualTo("v-epoch-1")
+
+        val branched = requireNotNull(
+            settleCommitFirstBranched(
+                current = laterEdit,
+                expectedMutationId = "mut-epoch-1",
+                expectedContentEpoch = 100,
+                conflictId = "conflict-1",
+                branchVersionId = "branch-1",
+                stableBaseVersion = "v-stable",
+            ),
+        )
+        assertThat(branched.epoch).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        assertThat(branched.state.contentEpoch).isEqualTo(200)
+        assertThat(branched.state.syncDirty).isTrue()
+        assertThat(branched.state.mutationId).isNull()
+        assertThat(branched.state.openConflictId).isEqualTo("conflict-1")
+        assertThat(branched.state.localBranchVersionId).isEqualTo("branch-1")
+        assertThat(branched.state.baseVersion).isEqualTo("v-stable")
+    }
+
+    @Test
     fun exactCasAckAdvancesBaseClearsPendingForMatchingMutation() {
         val pending = CausalRootMutationState(
             baseVersion = "v-base-1",

@@ -152,7 +152,7 @@ class CausalRoomTransactionTest {
                     expectedContentEpoch = 100,
                     newBaseVersion = "v-epoch-1",
                 ),
-            ).isEqualTo(RecordCommitFirstSettlement.SupersededEpoch)
+            ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
             envelopes.deleteFrozenMutation("record", "record-commit-first")
         }
 
@@ -163,6 +163,135 @@ class CausalRoomTransactionTest {
         assertThat(pending.mutationId).isNull()
         assertThat(pending.baseVersion).isEqualTo("v-epoch-1")
         assertThat(envelopes.getFrozenMutation("record", "record-commit-first")).isNull()
+    }
+
+    @Test
+    fun providerCommitFirstDaosPreserveCurrentAndSupersededProductEpochs() = runBlocking {
+        val babies = database.babyDao()
+        val customItems = database.customItemDao()
+        babies.upsert(
+            BabyEntity(
+                familyId = 1,
+                nickname = "baby-epoch-1",
+                birthdayEpochDay = 1,
+                themeColorArgb = 0,
+                clientUuid = "baby-provider-commit-first",
+                sortOrder = 8,
+                updatedAt = 100,
+                syncDirty = true,
+                familyAuthority = true,
+                baseVersion = "v-baby-base",
+            ),
+        )
+        customItems.upsert(
+            CustomItemEntity(
+                clientUuid = "custom-provider-commit-first",
+                familyId = 1,
+                name = "custom-epoch-1",
+                iconSlot = 2,
+                sortOrder = 9,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-custom-base",
+            ),
+        )
+
+        assertThat(
+            babies.freezeCommitFirstEpoch(
+                "baby-provider-commit-first",
+                100,
+                "baby-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("baby-mutation-1")
+        assertThat(
+            customItems.freezeCommitFirstEpoch(
+                "custom-provider-commit-first",
+                100,
+                "custom-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("custom-mutation-1")
+
+        val frozenBaby = requireNotNull(babies.getByClientUuid("baby-provider-commit-first"))
+        babies.update(
+            frozenBaby.copy(
+                nickname = "baby-epoch-2",
+                sortOrder = 18,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        val frozenCustom = requireNotNull(
+            customItems.getByClientUuid("custom-provider-commit-first"),
+        )
+        customItems.update(
+            frozenCustom.copy(
+                name = "custom-epoch-2",
+                sortOrder = 19,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(
+            babies.settleCommitFirstAcceptedOrMerged(
+                "baby-provider-commit-first",
+                "baby-mutation-1",
+                100,
+                "v-baby-epoch-1",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        assertThat(
+            customItems.settleCommitFirstBranched(
+                "custom-provider-commit-first",
+                "custom-mutation-1",
+                100,
+                "custom-conflict",
+                "custom-branch",
+                "v-custom-stable",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+
+        with(requireNotNull(babies.getByClientUuid("baby-provider-commit-first"))) {
+            assertThat(nickname).isEqualTo("baby-epoch-2")
+            assertThat(sortOrder).isEqualTo(18)
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-baby-epoch-1")
+        }
+        with(requireNotNull(customItems.getByClientUuid("custom-provider-commit-first"))) {
+            assertThat(name).isEqualTo("custom-epoch-2")
+            assertThat(sortOrder).isEqualTo(19)
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(openConflictId).isEqualTo("custom-conflict")
+            assertThat(localBranchVersionId).isEqualTo("custom-branch")
+            assertThat(baseVersion).isEqualTo("v-custom-stable")
+        }
+
+        assertThat(
+            babies.freezeCommitFirstEpoch(
+                "baby-provider-commit-first",
+                200,
+                "baby-mutation-2",
+            )?.mutationId,
+        ).isEqualTo("baby-mutation-2")
+        assertThat(
+            babies.settleCommitFirstAcceptedOrMerged(
+                "baby-provider-commit-first",
+                "baby-mutation-2",
+                200,
+                "v-baby-epoch-2",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.CurrentEpoch)
+        with(requireNotNull(babies.getByClientUuid("baby-provider-commit-first"))) {
+            assertThat(nickname).isEqualTo("baby-epoch-2")
+            assertThat(sortOrder).isEqualTo(18)
+            assertThat(syncDirty).isFalse()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-baby-epoch-2")
+        }
     }
 
     @Test

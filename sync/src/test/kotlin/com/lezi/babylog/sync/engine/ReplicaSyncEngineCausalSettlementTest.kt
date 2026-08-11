@@ -2,6 +2,7 @@ package com.lezi.babylog.sync.engine
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
@@ -25,6 +26,62 @@ import org.junit.runners.Parameterized
  * dirty pull protection, generation recovery.
  */
 class ReplicaSyncEngineCausalSettlementTest {
+
+    @Test
+    fun providerRootsCommitBeforeReferencedRecordWithoutReconcileOrPull() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(
+            session = session,
+            allowHistoricalMutableRootEvidence = false,
+        ).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-provider",
+                syncDirty = true,
+                familyAuthority = true,
+                baseVersion = "v-baby-base",
+                updatedAt = 101,
+            ),
+        )
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-provider",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                sortOrder = 7,
+                updatedAt = 102,
+                syncDirty = true,
+                baseVersion = "v-custom-base",
+            ),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-provider-consumer",
+                babyId = babyId,
+                type = "custom",
+                timestamp = 100,
+                payloadJson =
+                    """{"title":"抚触","detail":"十分钟","custom_item_id":$customItemId,"icon_slot":2}""",
+                schemaVersion = 2,
+                updatedAt = 103,
+                syncDirty = true,
+                baseVersion = "v-record-base",
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
+            .containsExactly("baby", "custom_item", "record")
+            .inOrder()
+        assertThat(rig.babies.getByClientUuid("baby-provider")?.sortOrder).isEqualTo(0)
+        assertThat(rig.customItems.get("custom-provider")?.sortOrder).isEqualTo(7)
+        assertThat(rig.records.getByClientUuid("record-provider-consumer")?.babyId)
+            .isEqualTo(babyId)
+    }
 
     @Test
     fun recordCommitFirstDrainsWireBoundedBatchesWithoutReconcile() = runTest {
@@ -720,6 +777,104 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
+    fun providerWrongTypeAndDomainInvalidProofsFailBeforeAnySettlementWrite() = runTest {
+        data class Case(
+            val entityType: String,
+            val name: String,
+            val corrupt: (String) -> String,
+        )
+        val cases = listOf(
+            Case("baby", "wrong-type") { root ->
+                root.replace(Regex("\"birthday\":\"[^\"]+\""), "\"birthday\":123")
+            },
+            Case("baby", "domain-invalid") { root ->
+                root.replace("\"birth_weight_grams\":null", "\"birth_weight_grams\":100001")
+            },
+            Case("custom_item", "wrong-type") { root ->
+                root.replace("\"icon_slot\":0", "\"icon_slot\":\"bad\"")
+            },
+            Case("custom_item", "domain-invalid") { root ->
+                root.replace("\"icon_slot\":0", "\"icon_slot\":8")
+            },
+        )
+        for (case in cases) {
+            val session = joinedReplicaSession().copy(
+                role = FamilyRole.Owner,
+                pullCursor = 46,
+            )
+            val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+            val clientUuid = when (case.entityType) {
+                "baby" -> {
+                    val uuid = "baby-proof-${case.name}"
+                    rig.babies.seed(
+                        localReplicaBaby().copy(
+                            clientUuid = uuid,
+                            syncDirty = true,
+                            familyAuthority = true,
+                            baseVersion = "v-provider-base",
+                            updatedAt = 150,
+                        ),
+                    )
+                    uuid
+                }
+                "custom_item" -> {
+                    val uuid = "custom-proof-${case.name}"
+                    rig.customItems.seed(
+                        localReplicaCustomItem(uuid, "membership-a", 150).copy(
+                            syncDirty = true,
+                            baseVersion = "v-provider-base",
+                            updatedAt = 150,
+                        ),
+                    )
+                    uuid
+                }
+                else -> error(case.entityType)
+            }
+            val peerUuid = "peer-must-not-apply-${case.entityType}-${case.name}"
+            rig.backend.nextPull = PullResult(
+                entities = listOf(remoteReplicaRecord(peerUuid)),
+                cursor = 999,
+                generation = session.pullGeneration,
+                hasMore = false,
+            )
+            var frozenState: ProviderProofDurableState? = null
+            rig.backend.onCausalCommit = { units ->
+                val unit = units.single()
+                val corrupted = case.corrupt(unit.rootJson)
+                assertThat(corrupted).isNotEqualTo(unit.rootJson)
+                frozenState = providerProofDurableState(rig, case.entityType, clientUuid, peerUuid)
+                rig.backend.nextCausalCommit = CausalBatchResult(
+                    generation = session.pullGeneration,
+                    cursor = session.pullCursor,
+                    results = listOf(
+                        CausalUnitResult(
+                            status = CausalCommitStatus.ACCEPTED,
+                            mutationId = unit.mutationId,
+                            requestHash = causalMutationContentHash(unit),
+                            generation = session.pullGeneration,
+                            stableVersionId = "v-malformed",
+                            stableRootJson = corrupted,
+                            stableMedia = emptyList(),
+                        ),
+                    ),
+                )
+            }
+
+            val failure = runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+            assertThat(failure).hasMessageThat().contains("类型或 domain 无效")
+            assertThat(providerProofDurableState(rig, case.entityType, clientUuid, peerUuid))
+                .isEqualTo(requireNotNull(frozenState))
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(46)
+        }
+    }
+
+    @Test
     fun concurrentLocalEditKeepsNewFactAndUsesOldTerminalAsNextBase() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
@@ -1044,12 +1199,14 @@ class ReplicaSyncEngineCausalSettlementTest {
         val row = requireNotNull(rig.records.getByClientUuid("record-gen"))
         assertThat(row.clientUuid).isEqualTo("record-gen")
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("other-generation")
-        // Full recovery dirties the provider Baby, which intentionally remains on
-        // the source reconcile path until H11. The no-media Record still retries
-        // directly from its durable envelope and settles its terminal.
+        // Full recovery dirties the provider Baby. H11 freezes that no-avatar
+        // provider directly before the Record retries its durable envelope.
         assertThat(rig.backend.pullCount).isAtLeast(1)
-        assertThat(rig.backend.causalReconciledUnits.flatten().map { it.entityType })
-            .containsExactly("baby")
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        val babyCommits = rig.backend.causalCommittedUnits.flatten()
+            .filter { it.entityType == "baby" }
+        assertThat(babyCommits).hasSize(1)
+        assertThat(babyCommits.single().media).isEmpty()
         val recordCommits = rig.backend.causalCommittedUnits.flatten()
             .filter { it.entityType == "record" }
         assertThat(recordCommits).hasSize(2)
@@ -1303,6 +1460,27 @@ class ReplicaSyncEngineCausalSettlementTest {
         val records: List<RecordEntity>,
         val collateralMedia: MediaAssetEntity?,
         val envelopes: List<ConflictSnapshotCacheEntity?>,
+    )
+
+    private data class ProviderProofDurableState(
+        val session: SyncSession,
+        val baby: BabyEntity?,
+        val customItem: CustomItemEntity?,
+        val envelope: ConflictSnapshotCacheEntity?,
+        val peer: RecordEntity?,
+    )
+
+    private suspend fun providerProofDurableState(
+        rig: ReplicaEngineRig,
+        entityType: String,
+        clientUuid: String,
+        peerUuid: String,
+    ) = ProviderProofDurableState(
+        session = rig.preferences.current(),
+        baby = rig.babies.getByClientUuid(clientUuid),
+        customItem = rig.customItems.get(clientUuid),
+        envelope = rig.conflictDetails.getFrozenMutation(entityType, clientUuid),
+        peer = rig.records.getByClientUuid(peerUuid),
     )
 
     private suspend fun seedProofCollateralMedia(
@@ -1574,7 +1752,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        if (entityType == "record") {
+        if (entityType in setOf("baby", "record", "custom_item")) {
             assertThat(rig.backend.causalReconciledUnits).isEmpty()
         } else {
             assertThat(rig.backend.causalReconciledUnits).isNotEmpty()

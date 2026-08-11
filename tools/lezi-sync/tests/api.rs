@@ -15895,6 +15895,128 @@ async fn commit_causal_record(
 }
 
 #[tokio::test]
+async fn provider_roots_commit_before_referenced_record_and_replay_exactly() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "provider-commit-first-owner",
+        "provider-commit-first-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let custom_item_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let baby_mutation_id = Uuid::new_v4();
+    let custom_mutation_id = Uuid::new_v4();
+    let record_mutation_id = Uuid::new_v4();
+    let baby = causal_unit(
+        baby_mutation_id,
+        None,
+        "baby",
+        baby_id,
+        json!({
+            "nickname": "年年",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "birth_weight_grams": null,
+            "avatar_media_uuid": null,
+            "updated_at": 10,
+        }),
+        vec![],
+        false,
+    );
+    let custom_item = causal_unit(
+        custom_mutation_id,
+        None,
+        "custom_item",
+        custom_item_id,
+        json!({
+            "name": "抚触",
+            "icon_slot": 2,
+            "updated_at": 11,
+        }),
+        vec![],
+        false,
+    );
+    let record = causal_unit(
+        record_mutation_id,
+        None,
+        "record",
+        record_id,
+        json!({
+            "baby_client_uuid": baby_id,
+            "type": "custom",
+            "custom_item_client_uuid": custom_item_id,
+            "timestamp": 1_700_000_100,
+            "end_timestamp": null,
+            "note": null,
+            "payload_json": {"title": "抚触", "detail": "十分钟", "icon_slot": 2},
+            "schema_version": 2,
+            "updated_at": 12,
+        }),
+        vec![],
+        false,
+    );
+    let frozen = vec![baby.clone(), custom_item.clone(), record.clone()];
+
+    let (status, committed) = causal_commit_units(&rig.app, token, frozen.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(
+        committed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["mutation_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec![
+            baby_mutation_id.to_string(),
+            custom_mutation_id.to_string(),
+            record_mutation_id.to_string(),
+        ],
+    );
+    assert!(committed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result["status"] == "accepted"));
+    assert_eq!(
+        committed["results"][2]["stable_root"]["baby_client_uuid"],
+        baby_id.to_string(),
+    );
+    assert_eq!(
+        committed["results"][2]["stable_root"]["custom_item_client_uuid"],
+        custom_item_id.to_string(),
+    );
+
+    let (status, replayed) = causal_commit_units(&rig.app, token, frozen).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    for index in 0..3 {
+        assert_eq!(
+            replayed["results"][index]["stable_version_id"],
+            committed["results"][index]["stable_version_id"],
+        );
+        assert_eq!(
+            replayed["results"][index]["request_hash"],
+            committed["results"][index]["request_hash"],
+        );
+    }
+
+    let mut baby_drift = baby;
+    baby_drift["root"]["nickname"] = json!("漂移宝宝");
+    let mut custom_drift = custom_item;
+    custom_drift["root"]["name"] = json!("漂移项目");
+    let (status, rejected) =
+        causal_commit_units(&rig.app, token, vec![baby_drift, custom_drift]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert!(rejected["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| { result["status"] == "rejected" && result["code"] == "content_drift" }));
+}
+
+#[tokio::test]
 async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
     let rig = Rig::new();
     let owner = create_family(

@@ -32,11 +32,16 @@ data class AppliedCausalMutationColumns(
     val localBranchVersionId: String?,
 )
 
-/** Whether a durable Record terminal settled the frozen fact or a later local edit. */
-enum class RecordCommitFirstSettlement {
+/** Whether a durable commit-first terminal settled the frozen fact or a later local edit. */
+enum class CommitFirstSettlementEpoch {
     CurrentEpoch,
     SupersededEpoch,
 }
+
+data class CommitFirstSettlement(
+    val state: CausalRootMutationState,
+    val epoch: CommitFirstSettlementEpoch,
+)
 
 fun CausalRootMutationState.toAppliedColumns(): AppliedCausalMutationColumns =
     AppliedCausalMutationColumns(
@@ -85,6 +90,79 @@ fun freezeDirtyEpoch(
         syncDirty = true,
         openConflictId = if (preserveConflict) current.openConflictId else null,
         localBranchVersionId = if (preserveConflict) current.localBranchVersionId else null,
+    )
+}
+
+/** Assign the one immutable-envelope identity at the captured fact epoch. */
+fun freezeCommitFirstEpoch(
+    current: CausalRootMutationState,
+    contentEpoch: Long,
+    newMutationId: String,
+): CausalRootMutationState? {
+    if (!current.syncDirty || current.contentEpoch != contentEpoch) return null
+    if (newMutationId.isBlank()) return null
+    return current.copy(mutationId = newMutationId)
+}
+
+/**
+ * Settle accepted/merged without letting an old response overwrite a later local edit.
+ * A superseding fact keeps its product content and pending state while advancing its
+ * causal base to the durable server terminal.
+ */
+fun settleCommitFirstAcceptedOrMerged(
+    current: CausalRootMutationState,
+    expectedMutationId: String,
+    expectedContentEpoch: Long,
+    newBaseVersion: String,
+): CommitFirstSettlement? {
+    if (current.contentEpoch == expectedContentEpoch) {
+        val settled = acknowledgeAcceptedOrMerged(
+            current = current,
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            newBaseVersion = newBaseVersion,
+        ) ?: return null
+        return CommitFirstSettlement(settled, CommitFirstSettlementEpoch.CurrentEpoch)
+    }
+    if (!current.syncDirty || current.contentEpoch < expectedContentEpoch) return null
+    if (current.mutationId != null && current.mutationId != expectedMutationId) return null
+    return CommitFirstSettlement(
+        state = current.copy(baseVersion = newBaseVersion, mutationId = null),
+        epoch = CommitFirstSettlementEpoch.SupersededEpoch,
+    )
+}
+
+/** Same epoch policy as [settleCommitFirstAcceptedOrMerged] for a durable branch. */
+fun settleCommitFirstBranched(
+    current: CausalRootMutationState,
+    expectedMutationId: String,
+    expectedContentEpoch: Long,
+    conflictId: String,
+    branchVersionId: String,
+    stableBaseVersion: String,
+): CommitFirstSettlement? {
+    if (current.contentEpoch == expectedContentEpoch) {
+        val settled = acknowledgeBranched(
+            current = current,
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            conflictId = conflictId,
+            branchVersionId = branchVersionId,
+            stableBaseVersion = stableBaseVersion,
+        ) ?: return null
+        return CommitFirstSettlement(settled, CommitFirstSettlementEpoch.CurrentEpoch)
+    }
+    if (!current.syncDirty || current.contentEpoch < expectedContentEpoch) return null
+    if (current.mutationId != null && current.mutationId != expectedMutationId) return null
+    return CommitFirstSettlement(
+        state = current.copy(
+            baseVersion = stableBaseVersion,
+            mutationId = null,
+            syncDirty = true,
+            openConflictId = conflictId,
+            localBranchVersionId = branchVersionId,
+        ),
+        epoch = CommitFirstSettlementEpoch.SupersededEpoch,
     )
 }
 

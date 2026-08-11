@@ -14,7 +14,7 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
-import com.lezi.babylog.core.database.causal.RecordCommitFirstSettlement
+import com.lezi.babylog.core.database.causal.CommitFirstSettlementEpoch
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.sync.backend.AuthorityProofException
@@ -51,7 +51,7 @@ internal val CAUSAL_ROOT_TYPES = setOf(
 )
 
 /**
- * One frozen causal atomic unit. H10 no-media Records restore an immutable
+ * One frozen causal atomic unit. Migrated empty-media roots restore one immutable
  * Room-backed envelope; roots not yet migrated retain the source reconcile path.
  */
 private data class FrozenCausalUnit(
@@ -63,7 +63,7 @@ private data class FrozenCausalUnit(
     val candidates: List<PublishCandidate>,
     /** Active attachment revisions materialized into [mutation]. */
     val mediaSnapshot: List<CausalMediaRevision>,
-    /** True only when [mutation] was restored from the durable commit-first envelope. */
+    /** True only when [mutation] is owned by the durable commit-first envelope. */
     val durableCommitFirst: Boolean = false,
 )
 
@@ -144,7 +144,7 @@ internal class CausalSettlement(
         val commitByMutation = commit.results.associateBy(CausalUnitResult::mutationId)
         transactionRunner.run {
             for (unit in frozen) {
-                applyRecordCommitFirstResult(
+                applyCommitFirstResult(
                     unit,
                     commitByMutation.getValue(unit.mutation.mutationId),
                 )
@@ -237,12 +237,12 @@ internal class CausalSettlement(
         }
     }
 
-    private suspend fun applyRecordCommitFirstResult(
+    private suspend fun applyCommitFirstResult(
         unit: FrozenCausalUnit,
         result: CausalUnitResult,
     ) {
-        require(unit.durableCommitFirst && unit.mutation.entityType == "record") {
-            "commit-first settlement only owns frozen Record envelopes"
+        require(unit.durableCommitFirst && unit.mutation.entityType in COMMIT_FIRST_ROOT_TYPES) {
+            "commit-first settlement only owns migrated empty-media roots"
         }
         val cache = requireNotNull(conflictSnapshotCacheDao) {
             "commit-first settlement requires durable envelope storage"
@@ -256,13 +256,8 @@ internal class CausalSettlement(
                     result.generation,
                     IllegalArgumentException("accepted/merged 缺少 stable_version_id"),
                 )
-                val settled = recordDao.settleCommitFirstAcceptedOrMerged(
-                    clientUuid = unit.mutation.clientUuid,
-                    expectedMutationId = unit.mutation.mutationId,
-                    expectedContentEpoch = unit.contentEpoch,
-                    newBaseVersion = version,
-                ) ?: return
-                if (settled == RecordCommitFirstSettlement.CurrentEpoch) {
+                val settled = settleCommitFirstAcceptedOrMerged(unit, version) ?: return
+                if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
                 }
                 cache.deleteFrozenMutation(
@@ -285,15 +280,13 @@ internal class CausalSettlement(
                     result.generation,
                     IllegalArgumentException("branched 缺少 stable_version_id"),
                 )
-                val settled = recordDao.settleCommitFirstBranched(
-                    clientUuid = unit.mutation.clientUuid,
-                    expectedMutationId = unit.mutation.mutationId,
-                    expectedContentEpoch = unit.contentEpoch,
+                val settled = settleCommitFirstBranched(
+                    unit = unit,
                     conflictId = conflictId,
                     branchVersionId = branchVersionId,
                     stableBaseVersion = version,
                 ) ?: return
-                if (settled == RecordCommitFirstSettlement.CurrentEpoch) {
+                if (settled == CommitFirstSettlementEpoch.CurrentEpoch) {
                     applyStableProjectionAfterAck(unit, result)
                 }
                 conflictSummaryDao.upsert(
@@ -317,13 +310,71 @@ internal class CausalSettlement(
             CausalCommitStatus.REJECTED -> {
                 if (result.code == "content_drift") {
                     throw FrozenCommitProofException(
-                        "frozen Record commit rejected content_drift; exact envelope retained",
+                        "frozen commit rejected content_drift; exact envelope retained",
                     )
                 }
                 applyCommitResult(unit, result)
             }
             else -> applyCommitResult(unit, result)
         }
+    }
+
+    private suspend fun settleCommitFirstAcceptedOrMerged(
+        unit: FrozenCausalUnit,
+        stableBaseVersion: String,
+    ): CommitFirstSettlementEpoch? = when (unit.mutation.entityType) {
+        "baby" -> babyDao.settleCommitFirstAcceptedOrMerged(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            stableBaseVersion,
+        )
+        "record" -> recordDao.settleCommitFirstAcceptedOrMerged(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            stableBaseVersion,
+        )
+        "custom_item" -> customItemDao.settleCommitFirstAcceptedOrMerged(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            stableBaseVersion,
+        )
+        else -> null
+    }
+
+    private suspend fun settleCommitFirstBranched(
+        unit: FrozenCausalUnit,
+        conflictId: String,
+        branchVersionId: String,
+        stableBaseVersion: String,
+    ): CommitFirstSettlementEpoch? = when (unit.mutation.entityType) {
+        "baby" -> babyDao.settleCommitFirstBranched(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            conflictId,
+            branchVersionId,
+            stableBaseVersion,
+        )
+        "record" -> recordDao.settleCommitFirstBranched(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            conflictId,
+            branchVersionId,
+            stableBaseVersion,
+        )
+        "custom_item" -> customItemDao.settleCommitFirstBranched(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            conflictId,
+            branchVersionId,
+            stableBaseVersion,
+        )
+        else -> null
     }
 
     /**
@@ -502,7 +553,9 @@ internal class CausalSettlement(
             freezeRoot(entityType, resolvedUuid, rootEpoch, mediaRows)?.let { units += it }
             mediaRows.forEach { remaining.remove(it.planId) }
         }
-        return units
+        return units.sortedBy { unit ->
+            ROOT_DEPENDENCY_PRIORITY.getValue(unit.mutation.entityType)
+        }
     }
 
     private suspend fun freezeRoot(
@@ -511,8 +564,9 @@ internal class CausalSettlement(
         contentEpoch: Long,
         candidates: List<PublishCandidate>,
     ): FrozenCausalUnit? {
-        if (entityType == "record") {
-            freezeNoMediaRecordEnvelope(
+        if (entityType in COMMIT_FIRST_ROOT_TYPES) {
+            freezeEmptyMediaCommitEnvelope(
+                entityType = entityType,
                 clientUuid = clientUuid,
                 contentEpoch = contentEpoch,
                 candidates = candidates,
@@ -574,39 +628,40 @@ internal class CausalSettlement(
     }
 
     /**
-     * Freezes or restores the H10 no-media Record tracer in one Room transaction.
+     * Freezes or restores one migrated empty-media root in one Room transaction.
      * An existing envelope always wins over the mutable fact so process death and
      * response loss replay byte-identical intent before a later edit is frozen.
      */
-    private suspend fun freezeNoMediaRecordEnvelope(
+    private suspend fun freezeEmptyMediaCommitEnvelope(
+        entityType: String,
         clientUuid: String,
         contentEpoch: Long,
         candidates: List<PublishCandidate>,
     ): FrozenCausalUnit? {
         val cache = conflictSnapshotCacheDao ?: return null
         return transactionRunner.run {
-            cache.getFrozenMutation("record", clientUuid)?.let { stored ->
-                val restored = decodeFrozenRecordEnvelope(stored.snapshotJson)
+            cache.getFrozenMutation(entityType, clientUuid)?.let { stored ->
+                val restored = decodeFrozenCommitEnvelope(stored.snapshotJson)
                 require(restored.contentEpoch == stored.cachedAt) {
-                    "frozen Record envelope epoch metadata drift"
+                    "frozen commit envelope epoch metadata drift"
                 }
                 require(
-                    restored.mutation.entityType == "record" &&
+                    restored.mutation.entityType == entityType &&
                         restored.mutation.clientUuid == clientUuid &&
                         restored.mutation.media.isEmpty(),
                 ) {
-                    "frozen Record envelope storage identity drift"
+                    "frozen commit envelope storage identity drift"
                 }
-                val current = recordDao.getByClientUuid(clientUuid)
-                    ?: error("frozen Record envelope lost its product fact")
+                val current = loadCommitFirstLocal(entityType, clientUuid)
+                    ?: error("frozen commit envelope lost its product fact")
                 val identityStillOwned = current.mutationId == restored.mutation.mutationId ||
-                    (current.updatedAt > restored.contentEpoch && current.mutationId == null)
+                    (current.contentEpoch > restored.contentEpoch && current.mutationId == null)
                 require(
                     current.syncDirty &&
-                        current.updatedAt >= restored.contentEpoch &&
+                        current.contentEpoch >= restored.contentEpoch &&
                         identityStillOwned,
                 ) {
-                    "frozen Record envelope no longer owns the pending fact"
+                    "frozen commit envelope no longer owns the pending fact"
                 }
                 return@run FrozenCausalUnit(
                     mutation = restored.mutation,
@@ -618,41 +673,38 @@ internal class CausalSettlement(
                 )
             }
 
-            val current = recordDao.getByClientUuid(clientUuid) ?: return@run null
-            if (!current.syncDirty || current.updatedAt != contentEpoch) return@run null
-            if (loadActiveCausalMedia("record", clientUuid).isNotEmpty()) return@run null
-            val baby = babyDao.getIncludingDeleted(current.babyId) ?: return@run null
-            if (!baby.familyAuthority || baby.syncDirty || baby.openConflictId != null) {
-                // H11 owns provider commit ordering. Until then, a Record whose
-                // provider is pending stays on the source reconcile path.
+            val current = loadCommitFirstLocal(entityType, clientUuid) ?: return@run null
+            if (!current.syncDirty || current.contentEpoch != contentEpoch) return@run null
+            if (entityType == "baby" && babyDao.getByClientUuid(clientUuid)?.familyAuthority != true) {
                 return@run null
             }
-            val customItemUuid = resolveRecordCustomItemClientUuid(current, customItemDao)
-            if (customItemUuid != null) {
-                val customItem = customItemDao.getByClientUuid(customItemUuid) ?: return@run null
-                if (customItem.syncDirty || customItem.openConflictId != null) return@run null
+            if (entityType == "baby" && hasBabyMediaPublishOrRepairEvidence(clientUuid, candidates)) {
+                return@run null
             }
+            if (loadActiveCausalMedia(entityType, clientUuid).isNotEmpty()) return@run null
+            if (entityType == "record" && !recordProvidersReady(clientUuid, cache)) return@run null
             val mutationId = UUID.randomUUID().toString()
-            val frozen = recordDao.freezeCommitFirstEpoch(
+            val frozen = freezeCommitFirstIdentity(
+                entityType = entityType,
                 clientUuid = clientUuid,
                 contentEpoch = contentEpoch,
-                newMutationId = mutationId,
+                mutationId = mutationId,
             ) ?: return@run null
-            val rootJson = buildCausalRootJson("record", clientUuid) ?: return@run null
+            val rootJson = buildCausalRootJson(entityType, clientUuid) ?: return@run null
             val mutation = CausalMutationUnit(
                 mutationId = requireNotNull(frozen.mutationId),
                 baseVersion = frozen.baseVersion,
-                entityType = "record",
+                entityType = entityType,
                 clientUuid = clientUuid,
                 rootJson = rootJson,
                 media = emptyList(),
-                deleted = frozen.deletedAt != null,
+                deleted = frozen.deleted,
             )
             val requestHash = causalMutationContentHash(mutation)
             cache.putFrozenMutation(
-                entityType = "record",
+                entityType = entityType,
                 clientUuid = clientUuid,
-                canonicalEnvelopeJson = encodeFrozenRecordEnvelope(
+                canonicalEnvelopeJson = encodeFrozenCommitEnvelope(
                     mutation = mutation,
                     contentEpoch = contentEpoch,
                     requestHash = requestHash,
@@ -678,6 +730,116 @@ internal class CausalSettlement(
         val openConflictId: String?,
         val deleted: Boolean,
     )
+
+    private suspend fun loadCommitFirstLocal(
+        entityType: String,
+        clientUuid: String,
+    ): CausalLocal? = when (entityType) {
+        "baby" -> babyDao.getByClientUuid(clientUuid)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
+        "record" -> recordDao.getByClientUuid(clientUuid)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
+        "custom_item" -> customItemDao.getByClientUuid(clientUuid)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
+        else -> null
+    }
+
+    private suspend fun freezeCommitFirstIdentity(
+        entityType: String,
+        clientUuid: String,
+        contentEpoch: Long,
+        mutationId: String,
+    ): CausalLocal? = when (entityType) {
+        "baby" -> babyDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
+        "record" -> recordDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
+        "custom_item" ->
+            customItemDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
+                CausalLocal(
+                    it.baseVersion,
+                    it.mutationId,
+                    it.updatedAt,
+                    it.syncDirty,
+                    it.openConflictId,
+                    it.deletedAt != null,
+                )
+            }
+        else -> null
+    }
+
+    private suspend fun recordProvidersReady(
+        recordClientUuid: String,
+        cache: ConflictSnapshotCacheDao,
+    ): Boolean {
+        val record = recordDao.getByClientUuid(recordClientUuid) ?: return false
+        val baby = babyDao.getIncludingDeleted(record.babyId) ?: return false
+        if (!baby.familyAuthority) return false
+        if (baby.syncDirty && !cache.hasCurrentFrozenProvider("baby", baby.clientUuid, baby.mutationId)) {
+            return false
+        }
+        val customItemUuid = resolveRecordCustomItemClientUuid(record, customItemDao) ?: return true
+        val customItem = customItemDao.getByClientUuid(customItemUuid) ?: return false
+        return !customItem.syncDirty || cache.hasCurrentFrozenProvider(
+            "custom_item",
+            customItem.clientUuid,
+            customItem.mutationId,
+        )
+    }
+
+    private suspend fun ConflictSnapshotCacheDao.hasCurrentFrozenProvider(
+        entityType: String,
+        clientUuid: String,
+        currentMutationId: String?,
+    ): Boolean {
+        val stored = getFrozenMutation(entityType, clientUuid) ?: return false
+        val frozen = runCatching { decodeFrozenCommitEnvelope(stored.snapshotJson) }.getOrNull()
+            ?: return false
+        return frozen.mutation.entityType == entityType &&
+            frozen.mutation.clientUuid == clientUuid &&
+            frozen.mutation.mutationId == currentMutationId &&
+            frozen.mutation.media.isEmpty()
+    }
 
     private suspend fun buildCausalRootJson(entityType: String, clientUuid: String): String? {
         return when (entityType) {
@@ -788,6 +950,22 @@ internal class CausalSettlement(
         }
         "custom_item" -> emptyList()
         else -> emptyList()
+    }
+
+    /**
+     * H11 owns only a complete empty Baby manifest. A deleted root can still have
+     * a dirty tombstoned avatar or a pre-fix live orphan that capture must repair;
+     * both remain on the media-aware source path until H22.
+     */
+    private suspend fun hasBabyMediaPublishOrRepairEvidence(
+        clientUuid: String,
+        candidates: List<PublishCandidate>,
+    ): Boolean {
+        if (candidates.any { it.entityType == "media" }) return true
+        val baby = babyDao.getByClientUuid(clientUuid) ?: return false
+        return mediaDao.listAllIncludingDeleted().any { media ->
+            media.babyId == baby.id && (media.syncDirty || media.deletedAt == null)
+        }
     }
 
     private fun List<MediaAssetEntity>.toCausalMediaRevisions(): List<CausalMediaRevision> =
@@ -1100,16 +1278,15 @@ internal class CausalSettlement(
         stableVersion: String,
     ) {
         val existing = babyDao.getByClientUuid(clientUuid) ?: return
-        val nickname = root.stringOrNull("nickname") ?: existing.nickname
-        val sex = root.stringOrNull("sex")
-        val avatar = root.stringOrNull("avatar_media_uuid")
-        val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
+        val wire = decodeBabyWire(root, RootUpdatedAtLocation.InlineStableRoot)
         babyDao.update(
             existing.copy(
-                nickname = nickname,
-                sex = sex,
-                avatarMediaUuid = avatar,
-                updatedAt = updatedAt,
+                nickname = wire.nickname,
+                sex = wire.sex,
+                birthdayEpochDay = wire.birthdayEpochDay,
+                birthWeightGrams = wire.birthWeightGrams,
+                avatarMediaUuid = wire.avatarMediaUuid,
+                updatedAt = requireNotNull(wire.inlineUpdatedAt),
                 baseVersion = stableVersion,
                 mutationId = existing.mutationId,
                 syncDirty = existing.syncDirty,
@@ -1150,14 +1327,13 @@ internal class CausalSettlement(
         stableVersion: String,
     ) {
         val existing = customItemDao.getByClientUuid(clientUuid) ?: return
-        val name = root.stringOrNull("name") ?: existing.name
-        val iconSlot = root["icon_slot"]?.jsonPrimitive?.longOrNull?.toInt() ?: existing.iconSlot
-        val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
+        val wire = decodeCustomItemWire(root, RootUpdatedAtLocation.InlineStableRoot)
         customItemDao.update(
             existing.copy(
-                name = name,
-                iconSlot = iconSlot,
-                updatedAt = updatedAt,
+                name = wire.name,
+                iconSlot = wire.iconSlot,
+                createdByMembershipId = wire.createdByMembershipId,
+                updatedAt = requireNotNull(wire.inlineUpdatedAt),
                 baseVersion = stableVersion,
                 mutationId = existing.mutationId,
                 syncDirty = existing.syncDirty,
@@ -1237,7 +1413,7 @@ internal class CausalSettlement(
         fun fail(message: String, generationDrift: Boolean = false): Nothing {
             if (localFrozenProof && !generationDrift) {
                 throw FrozenCommitProofException(
-                    "frozen Record commit proof invalid; exact envelope retained: $message",
+                    "frozen commit proof invalid; exact envelope retained: $message",
                 )
             }
             throw AuthorityProofException(
@@ -1323,6 +1499,21 @@ internal class CausalSettlement(
         val stableRoot = runCatching {
             Json.parseToJsonElement(result.stableRootJson).jsonObject
         }.getOrElse { fail("因果 ${result.status} stable_root 无效") }
+        val providerAvatarUuid = when (unit.mutation.entityType) {
+            "baby" -> runCatching {
+                decodeBabyWire(stableRoot, RootUpdatedAtLocation.InlineStableRoot)
+            }.getOrElse { fail("因果 ${result.status} baby stable_root 类型或 domain 无效") }
+                .avatarMediaUuid
+            "custom_item" -> {
+                runCatching {
+                    decodeCustomItemWire(stableRoot, RootUpdatedAtLocation.InlineStableRoot)
+                }.getOrElse {
+                    fail("因果 ${result.status} custom_item stable_root 类型或 domain 无效")
+                }
+                null
+            }
+            else -> null
+        }
         val serverStampKeys = when (unit.mutation.entityType) {
             "wake_observation" -> setOf("observer_membership_id")
             else -> setOf("created_by_membership_id")
@@ -1358,12 +1549,7 @@ internal class CausalSettlement(
             fail("因果 ${result.status} stable_media 不符合 closed manifest")
         }
         if (unit.mutation.entityType == "baby") {
-            val avatar = stableRoot["avatar_media_uuid"]
-            val avatarUuid = if (avatar == null || avatar is JsonNull) null else {
-                (avatar as? JsonPrimitive)?.contentOrNull
-                    ?: fail("baby avatar_media_uuid 无效")
-            }
-            if (avatarUuid != null && media.none { it.mediaUuid == avatarUuid }) {
+            if (providerAvatarUuid != null && media.none { it.mediaUuid == providerAvatarUuid }) {
                 fail("baby stable_root 引用了 stable_media 之外的头像")
             }
         }
@@ -1447,6 +1633,16 @@ internal class CausalSettlement(
 
     private companion object {
         const val MAX_CAUSAL_SETTLEMENT_UNITS = 64
+
+        val COMMIT_FIRST_ROOT_TYPES = setOf("baby", "custom_item", "record")
+
+        val ROOT_DEPENDENCY_PRIORITY = mapOf(
+            "baby" to 0,
+            "custom_item" to 1,
+            "record" to 2,
+            "wake_observation" to 3,
+            "care_plan" to 4,
+        )
 
         val LOWERCASE_SHA256 = Regex("^[0-9a-f]{64}$")
 

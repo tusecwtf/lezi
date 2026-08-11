@@ -21,7 +21,6 @@ import com.lezi.babylog.core.database.causal.SourceRelationReason
 import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.model.limitBabyNicknameInput
 import java.time.ZoneId
 import java.security.MessageDigest
 import java.util.UUID
@@ -943,7 +942,7 @@ internal class ReplicaSyncEngine(
     ): Boolean {
         val existing = customItemDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val wire = parseCustomItemWire(payload)
+        val wire = decodeCustomItemWire(payload)
         if (!forceAuthority &&
             existing != null &&
             !causalSettlement.shouldApplyStablePull(
@@ -1051,7 +1050,7 @@ internal class ReplicaSyncEngine(
     ): Boolean {
         val existing = babyDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val wire = parseBabyWire(payload)
+        val wire = decodeBabyWire(payload)
         // Members still accept family authority babies (force path / member role).
         if (existing != null && session.role != FamilyRole.Member && !forceAuthority) {
             if (!causalSettlement.shouldApplyStablePull(
@@ -2716,20 +2715,6 @@ internal fun requireCustomItemCapacityAfterApply(
     }
 }
 
-private data class BabyWire(
-    val nickname: String,
-    val sex: String?,
-    val birthdayEpochDay: Long,
-    val birthWeightGrams: Int?,
-    val avatarMediaUuid: String?,
-)
-
-private data class CustomItemWire(
-    val name: String,
-    val iconSlot: Int,
-    val createdByMembershipId: String,
-)
-
 private data class RecordWire(
     val babyClientUuid: String,
     val createdByMembershipId: String,
@@ -2778,53 +2763,6 @@ private data class MediaWire(
     val height: Int?,
     val byteSize: Long,
 )
-
-private fun parseBabyWire(payload: JsonObject): BabyWire {
-    payload.requireExactKeys(
-        "baby",
-        "nickname",
-        "sex",
-        "birthday",
-        "birth_weight_grams",
-        "avatar_media_uuid",
-    )
-    val nickname = payload.requireNonBlankString("nickname", "baby").trim()
-    require(limitBabyNicknameInput(nickname) == nickname) { "baby nickname 超出 current 限制" }
-    val sex = payload.requireNullableString("sex", "baby")
-    require(sex == null || sex == "female" || sex == "male") { "baby sex 无效" }
-    val birthWeight = payload.requireNullableLong("birth_weight_grams", "baby")
-    require(birthWeight == null || birthWeight in 0..100_000) {
-        "baby birth_weight_grams 无效"
-    }
-    val avatar = payload.requireNullableString("avatar_media_uuid", "baby")
-    avatar?.let { requireCanonicalUuid(it, "baby avatar_media_uuid") }
-    return BabyWire(
-        nickname = nickname,
-        sex = sex,
-        birthdayEpochDay = SyncWireMapper.birthdayEpochDay(payload),
-        birthWeightGrams = birthWeight?.toInt(),
-        avatarMediaUuid = avatar,
-    )
-}
-
-private fun parseCustomItemWire(payload: JsonObject): CustomItemWire {
-    payload.requireExactKeys(
-        "custom_item",
-        "name",
-        "icon_slot",
-        "created_by_membership_id",
-    )
-    val iconSlot = payload.requireLong("icon_slot", "custom_item")
-    require(iconSlot in 0..7) { "custom_item icon_slot 无效" }
-    return CustomItemWire(
-        name = payload.requireNonBlankString("name", "custom_item").trim(),
-        iconSlot = iconSlot.toInt(),
-        createdByMembershipId = payload.requireNullableString(
-            "created_by_membership_id",
-            "custom_item",
-        ).orEmpty().trim(),
-    )
-}
 
 private fun parseRecordWire(payload: JsonObject): RecordWire {
     val baseKeys = setOf(
