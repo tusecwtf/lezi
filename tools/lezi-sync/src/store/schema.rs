@@ -18,10 +18,10 @@ use crate::rate_limit::{RateLimitConfig, RateLimiter};
 /// Current SQLite `PRAGMA user_version` / schema contract version.
 /// Offline migration inventory couples to this constant (must not drift).
 ///
-/// v12 adds immutable causal versions, mutation receipts, conflicts/branches,
-/// resolutions, and source-relation storage. Runtime still opens only exact
-/// current shape (no in-place upgrade). v11→v12 is offline copy-out only.
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 12;
+/// v13 adds the reverse media-reachability index and durable per-family media
+/// GC progress. Runtime still opens only the exact current shape (no in-place
+/// upgrade); historical v3/v11 migration remains frozen at schema 12.
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 13;
 
 /// Mutable atomic roots that participate in the causal version graph.
 /// Single source of truth for versioned types; must match CHECK fragments in
@@ -254,8 +254,9 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
     );
 
     -- Causal media bytes are durable preimages until a successful causal
-    -- transaction consumes their exact manifest. They never use the published
-    -- media path while status is writing/staged/gc_pending.
+    -- transaction consumes their exact manifest. Open rows use the staging
+    -- path; consumed rows use the published path. gc_pending preserves
+    -- consumed_at so crash recovery can finish deleting the correct object.
     CREATE TABLE causal_media_staging (
         family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
         membership_id TEXT NOT NULL,
@@ -268,10 +269,42 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
             'writing', 'staged', 'consumed', 'gc_pending'
         )),
         consumed_at INTEGER,
+        publication_confirmed INTEGER NOT NULL DEFAULT 0
+            CHECK(publication_confirmed IN (0, 1)),
         PRIMARY KEY (family_id, media_uuid)
     );
     CREATE INDEX causal_media_staging_quota
         ON causal_media_staging(family_id, membership_id, status, expires_at);
+    CREATE INDEX causal_media_staging_recovery
+        ON causal_media_staging(status, publication_confirmed, family_id, media_uuid);
+
+    -- Durable keyset progress for bounded staging and upload-orphan sweeps.
+    -- This state is maintenance metadata and never advances the family rev.
+    CREATE TABLE causal_media_gc_state (
+        family_id TEXT PRIMARY KEY,
+        staging_after_family_id TEXT NOT NULL DEFAULT '',
+        staging_after_media_uuid TEXT NOT NULL DEFAULT '',
+        orphan_after_family_id TEXT NOT NULL DEFAULT '',
+        orphan_after_sequence INTEGER NOT NULL DEFAULT 0
+            CHECK(orphan_after_sequence >= 0),
+        next_upload_sequence INTEGER NOT NULL DEFAULT 1
+            CHECK(next_upload_sequence > 0)
+    );
+
+    -- Every streamed upload receives a durable sequence before its temporary
+    -- object is created. GC can therefore inspect/retry exact orphan paths by
+    -- keyset instead of depending on filesystem directory iteration order.
+    CREATE TABLE causal_media_uploads (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK(sequence > 0),
+        membership_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, sequence)
+    );
+    CREATE INDEX causal_media_uploads_active
+        ON causal_media_uploads(family_id, expires_at, sequence);
 
     -- Causal: immutable root versions (stable projection remains `entities`).
     CREATE TABLE entity_versions (
@@ -316,6 +349,8 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
         FOREIGN KEY (family_id, version_id)
             REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE
     );
+    CREATE INDEX entity_version_media_by_media
+        ON entity_version_media(family_id, media_uuid, version_id);
 
     -- O(1) stable head; ordinary pull does not join full version history.
     CREATE TABLE entity_stable_heads (
@@ -589,6 +624,9 @@ impl Store {
             max_open_causal_branches_per_root: admission.max_open_branches_per_root,
             causal_media_publication_locks: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
+            )),
+            causal_media_gc_in_flight: Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeSet::new(),
             )),
         };
         Self::preflight_existing_schema(&store.database_path)?;

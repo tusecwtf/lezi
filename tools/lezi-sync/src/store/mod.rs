@@ -477,6 +477,7 @@ pub struct Store {
     max_open_causal_branches_per_root: usize,
     causal_media_publication_locks:
         Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
+    causal_media_gc_in_flight: Arc<std::sync::Mutex<BTreeSet<String>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

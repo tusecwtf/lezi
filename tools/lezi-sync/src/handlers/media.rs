@@ -155,10 +155,41 @@ pub(crate) async fn put_causal_media_preimage(
     let upload_reservation = state
         .causal_media_upload_admission
         .reserve(&principal.family_id, &principal.membership_id)?;
-
-    let incoming_path = state.causal_media_incoming_path(&principal.family_id, &client_uuid)?;
-    let incoming = stream_causal_media_preimage(body, incoming_path, state.max_media_bytes).await?;
+    let store = state.store.clone();
+    let reservation_principal = principal.clone();
+    let reservation_media_uuid = client_uuid.to_string();
+    let reservation_now = state.now();
+    let durable_reservation = run_blocking(move || {
+        store
+            .reserve_causal_media_upload(
+                &reservation_principal,
+                &reservation_media_uuid,
+                reservation_now,
+            )
+            .map_err(map_causal_media_staging_error)
+    })
+    .await?;
+    let incoming_path = durable_reservation.path().to_owned();
+    let incoming =
+        match stream_causal_media_preimage(body, incoming_path, state.max_media_bytes).await {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                abort_causal_media_upload(
+                    state.store.clone(),
+                    principal.family_id.clone(),
+                    durable_reservation.sequence(),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
     if declared_length.is_some_and(|declared| declared != incoming.byte_size) {
+        abort_causal_media_upload(
+            state.store.clone(),
+            principal.family_id.clone(),
+            durable_reservation.sequence(),
+        )
+        .await?;
         return Err(ApiError::unprocessable(
             "media body length does not match Content-Length",
         ));
@@ -171,42 +202,73 @@ pub(crate) async fn put_causal_media_preimage(
         ..DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS
     };
     let blocking_hook = state.causal_media_prepare_blocking_hook.clone();
+    let upload_sequence = durable_reservation.sequence();
+    let gc_family_id = principal.family_id.clone();
     let status = run_blocking(move || {
         let _upload_reservation = upload_reservation;
-        if let Some(hook) = &blocking_hook {
-            hook("before_verify");
-        }
-        let verified = VerifiedCausalMediaPreimage::verify(
-            incoming.path().to_owned(),
-            &expected_sha,
-            limits.max_file_bytes,
-        )
-        .map_err(|error| match error {
-            StoreError::CausalMediaPreimageConflict => {
-                ApiError::unprocessable("media body sha256 does not match X-Lezi-Media-Sha256")
+        let outcome = (|| {
+            if let Some(hook) = &blocking_hook {
+                hook("before_verify");
             }
-            other => map_causal_media_staging_error(other),
-        })?;
-        let _family_guard = family_lock.blocking_lock_owned();
-        if let Some(hook) = &blocking_hook {
-            hook("before_store");
-        }
-        let status = store
-            .stage_verified_causal_media_preimage(
-                &principal,
-                &client_uuid.to_string(),
-                &verified,
-                now,
-                limits,
+            let verified = VerifiedCausalMediaPreimage::verify(
+                incoming.path().to_owned(),
+                &expected_sha,
+                limits.max_file_bytes,
             )
-            .map_err(map_causal_media_staging_error)?;
-        if let Some(hook) = &blocking_hook {
-            hook("after_store");
+            .map_err(|error| match error {
+                StoreError::CausalMediaPreimageConflict => {
+                    ApiError::unprocessable("media body sha256 does not match X-Lezi-Media-Sha256")
+                }
+                other => map_causal_media_staging_error(other),
+            })?;
+            let _family_guard = family_lock.blocking_lock_owned();
+            if let Some(hook) = &blocking_hook {
+                hook("before_store");
+            }
+            store
+                .stage_verified_causal_media_preimage(
+                    &principal,
+                    &client_uuid.to_string(),
+                    &verified,
+                    now,
+                    limits,
+                )
+                .map_err(map_causal_media_staging_error)
+        })();
+        match outcome {
+            Ok(status) => {
+                store
+                    .complete_causal_media_upload(&principal.family_id, upload_sequence)
+                    .map_err(map_causal_media_staging_error)?;
+                if let Some(hook) = &blocking_hook {
+                    hook("after_store");
+                }
+                Ok(status)
+            }
+            Err(error) => {
+                store
+                    .abort_causal_media_upload(&principal.family_id, upload_sequence)
+                    .map_err(map_causal_media_staging_error)?;
+                Err(error)
+            }
         }
-        Ok(status)
     })
     .await?;
+    state.schedule_causal_media_gc_for_family(gc_family_id);
     Ok(Json(status))
+}
+
+async fn abort_causal_media_upload(
+    store: Store,
+    family_id: String,
+    sequence: i64,
+) -> Result<(), ApiError> {
+    run_blocking(move || {
+        store
+            .abort_causal_media_upload(&family_id, sequence)
+            .map_err(map_causal_media_staging_error)
+    })
+    .await
 }
 
 struct IncomingCausalMedia {

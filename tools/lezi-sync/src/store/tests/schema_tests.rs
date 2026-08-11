@@ -90,7 +90,7 @@ fn empty_database_initializes_current_schema_and_restarts_with_persistence() {
 }
 #[test]
 fn nonempty_unsupported_schema_versions_fail_without_mutation() {
-    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13] {
+    for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14] {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("lezi.db");
         let connection = Connection::open(&database_path).unwrap();
@@ -144,7 +144,7 @@ fn current_version_with_wrong_shape_fails_without_mutation() {
     connection
         .execute_batch(
             "
-        PRAGMA user_version = 12;
+        PRAGMA user_version = 13;
         CREATE TABLE families(id TEXT PRIMARY KEY);
         INSERT INTO families(id) VALUES ('preserve-me');
         ",
@@ -173,7 +173,7 @@ fn current_version_with_wrong_shape_fails_without_mutation() {
 }
 
 #[test]
-fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
+fn fresh_schema_v13_has_bounded_media_gc_shape_and_causal_entity_types() {
     let directory = TempDir::new().unwrap();
     let database_path = directory.path().join("lezi.db");
     fs::File::create(&database_path).unwrap();
@@ -195,6 +195,8 @@ fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
         "conflict_branches",
         "conflict_resolutions",
         "causal_media_staging",
+        "causal_media_gc_state",
+        "causal_media_uploads",
         "source_relations",
         "source_relation_mutation_receipts",
         "source_relation_record_eligibility",
@@ -210,6 +212,102 @@ fn fresh_schema_v12_has_causal_tables_and_wake_observation_entity_type() {
             .unwrap();
         assert_eq!(n, 1, "missing table {table}");
     }
+    let reverse_index_columns = connection
+        .prepare("PRAGMA index_info('entity_version_media_by_media')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(2))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        reverse_index_columns,
+        ["family_id", "media_uuid", "version_id"],
+        "media reachability must use the reverse key order"
+    );
+    for (index, expected) in [
+        (
+            "causal_media_staging_recovery",
+            vec!["status", "publication_confirmed", "family_id", "media_uuid"],
+        ),
+        (
+            "causal_media_uploads_active",
+            vec!["family_id", "expires_at", "sequence"],
+        ),
+    ] {
+        let columns = connection
+            .prepare(&format!("PRAGMA index_info('{index}')"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(columns, expected, "wrong key order for {index}");
+    }
+    let reachability_plan = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT EXISTS(
+                 SELECT 1 FROM entity_version_media
+                  WHERE family_id = ?1 AND media_uuid = ?2
+             )",
+        )
+        .unwrap()
+        .query_map(rusqlite::params!["fam", "media"], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join("\n");
+    assert!(
+        reachability_plan.contains("entity_version_media_by_media")
+            && reachability_plan.contains("family_id=? AND media_uuid=?"),
+        "version absence proof is not reverse-indexed: {reachability_plan}"
+    );
+    for (sql, expected) in [
+        (
+            "EXPLAIN QUERY PLAN SELECT family_id, media_uuid
+               FROM causal_media_staging
+              WHERE family_id = ?1 AND media_uuid > ?2
+              ORDER BY family_id, media_uuid LIMIT 512",
+            "media_uuid>?",
+        ),
+        (
+            "EXPLAIN QUERY PLAN SELECT family_id, sequence
+               FROM causal_media_uploads
+              WHERE family_id = ?1 AND sequence > ?2
+              ORDER BY family_id, sequence LIMIT 512",
+            "sequence>?",
+        ),
+    ] {
+        let plan = connection
+            .prepare(sql)
+            .unwrap()
+            .query_map(rusqlite::params!["fam", ""], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(
+            plan.contains("SEARCH") && plan.contains(expected),
+            "GC keyset degraded to a scan: {plan}"
+        );
+    }
+    let gc_state_columns = table_columns(&connection, "causal_media_gc_state").unwrap();
+    assert_eq!(
+        gc_state_columns,
+        [
+            "family_id",
+            "staging_after_family_id",
+            "staging_after_media_uuid",
+            "orphan_after_family_id",
+            "orphan_after_sequence",
+            "next_upload_sequence",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    );
     // entities CHECK includes wake_observation (insert of allowed type must succeed shape-wise).
     connection
         .execute(

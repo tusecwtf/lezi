@@ -4,8 +4,11 @@
 //! consumed their exact UUID/SHA/size manifest. `consumed` is the crash journal:
 //! startup can finish publication before serving requests, while expired open
 //! preimages use `gc_pending` until both bytes and metadata are durably removed.
+//! Consumed bytes retain the same receipt row while any live projection or
+//! immutable version still references them; every upload temporary has a
+//! durable sequence marker and the same TTL, so GC never guesses `read_dir`
+//! order or collects an in-flight prepare.
 
-use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -19,6 +22,8 @@ use uuid::Uuid;
 use super::{CausalMediaItem, Principal, Store, StoreError};
 
 pub(crate) const CAUSAL_MEDIA_STAGING_TTL_SECONDS: i64 = 24 * 60 * 60;
+pub(crate) const CAUSAL_MEDIA_GC_BATCH: usize = 8;
+pub(crate) const CAUSAL_MEDIA_GC_SCAN_LIMIT: usize = 512;
 pub(crate) const MAX_CAUSAL_MEDIA_STAGED_PER_MEMBERSHIP: usize = 64;
 pub(crate) const MAX_CAUSAL_MEDIA_STAGED_PER_FAMILY: usize = 256;
 pub(crate) const MAX_CAUSAL_MEDIA_STAGED_BYTES_PER_FAMILY: usize = 512 * 1024 * 1024;
@@ -49,6 +54,37 @@ pub struct CausalMediaStageStatus {
     pub byte_size: usize,
     pub sha256: String,
     pub expires_at: i64,
+}
+
+/// Durable identity for one streamed request body. Its sequence makes orphan
+/// discovery keyset-addressable across process restart.
+pub(crate) struct CausalMediaUploadReservation {
+    path: PathBuf,
+    sequence: i64,
+}
+
+pub(crate) struct CausalMediaGcLease {
+    family_id: String,
+    in_flight: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
+}
+
+impl Drop for CausalMediaGcLease {
+    fn drop(&mut self) {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.family_id);
+    }
+}
+
+impl CausalMediaUploadReservation {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn sequence(&self) -> i64 {
+        self.sequence
+    }
 }
 
 /// File-backed preimage whose exact length and digest were verified before the
@@ -96,6 +132,44 @@ struct StagingRow {
     byte_size: usize,
     expires_at: i64,
     status: StagingStatus,
+}
+
+#[derive(Debug)]
+struct GcScanRow {
+    family_id: String,
+    media_uuid: String,
+    consumed_at: Option<i64>,
+    expires_at: i64,
+    status: StagingStatus,
+    live: bool,
+    published: bool,
+    version_referenced: bool,
+    upload_active: bool,
+}
+
+#[derive(Debug)]
+struct GcUploadRow {
+    family_id: String,
+    sequence: i64,
+    expires_at: i64,
+}
+
+impl GcScanRow {
+    fn eligible(&self, now: i64) -> bool {
+        match self.status {
+            StagingStatus::GcPending => true,
+            StagingStatus::Writing | StagingStatus::Staged => {
+                self.expires_at <= now && !self.upload_active
+            }
+            StagingStatus::Consumed => {
+                self.consumed_at.is_some_and(|consumed_at| {
+                    consumed_at <= now.saturating_sub(CAUSAL_MEDIA_STAGING_TTL_SECONDS)
+                }) && !self.live
+                    && !self.published
+                    && !self.version_referenced
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,50 +250,26 @@ fn sync_parent(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn remove_untracked_staging_files(
-    database_path: &Path,
-    tracked: &BTreeSet<(String, String)>,
-    family_scope: Option<&str>,
-) -> Result<(), StoreError> {
-    let root = staging_root(database_path);
-    if !root.try_exists()? {
-        return Ok(());
-    }
-    let mut root_changed = false;
-    for family_entry in fs::read_dir(&root)? {
-        let family_entry = family_entry?;
-        let family_name = family_entry.file_name().to_string_lossy().into_owned();
-        if family_scope.is_some_and(|scope| scope != family_name) {
-            continue;
-        }
-        if !family_entry.file_type()?.is_dir() {
-            fs::remove_file(family_entry.path())?;
-            root_changed = true;
-            continue;
-        }
-        let mut family_changed = false;
-        for entry in fs::read_dir(family_entry.path())? {
-            let entry = entry?;
-            let media_name = entry.file_name().to_string_lossy().into_owned();
-            if tracked.contains(&(family_name.clone(), media_name)) {
-                continue;
+fn incoming_upload_path(database_path: &Path, family_id: &str, sequence: i64) -> PathBuf {
+    staging_root(database_path)
+        .join(family_id)
+        .join(format!(".upload-{sequence}.tmp"))
+}
+
+fn remove_file_if_present(path: &Path, _family_id: &str) -> Result<(), StoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            #[cfg(test)]
+            if test_hook::take_fail_before_parent_sync(_family_id) {
+                return Err(StoreError::InvalidCausalMediaStaging);
             }
-            if entry.file_type()?.is_dir() {
-                fs::remove_dir_all(entry.path())?;
-            } else {
-                fs::remove_file(entry.path())?;
-            }
-            family_changed = true;
+            sync_parent(path)
         }
-        if family_changed {
-            crate::sync_directory(&family_entry.path())?;
-            root_changed = true;
-        }
+        // A previous unlink may have reached the filesystem while its parent
+        // fsync failed. Re-sync before terminal receipt deletion on retry.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => sync_parent(path),
+        Err(error) => Err(error.into()),
     }
-    if root_changed {
-        crate::sync_directory(&root)?;
-    }
-    Ok(())
 }
 
 fn install_staged_file(
@@ -340,6 +390,78 @@ fn load_row(
         .transpose()
 }
 
+fn load_gc_row(
+    connection: &rusqlite::Connection,
+    family_id: &str,
+    media_uuid: &str,
+) -> Result<Option<GcScanRow>, StoreError> {
+    connection
+        .query_row(
+            "SELECT s.consumed_at, s.expires_at, s.status,
+                    EXISTS(
+                        SELECT 1 FROM entities e
+                         WHERE e.family_id = s.family_id
+                           AND e.entity_type = 'media'
+                           AND e.client_uuid = s.media_uuid
+                           AND e.deleted_at IS NULL
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM media_publications p
+                         WHERE p.family_id = s.family_id
+                           AND p.media_uuid = s.media_uuid
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM entity_version_media vm
+                         WHERE vm.family_id = s.family_id
+                           AND vm.media_uuid = s.media_uuid
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM causal_media_uploads u
+                         WHERE u.family_id = s.family_id
+                           AND u.media_uuid = s.media_uuid
+                    )
+               FROM causal_media_staging s
+              WHERE s.family_id = ?1 AND s.media_uuid = ?2",
+            params![family_id, media_uuid],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, bool>(6)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(
+            |(
+                consumed_at,
+                expires_at,
+                status,
+                live,
+                published,
+                version_referenced,
+                upload_active,
+            )| {
+                Ok(GcScanRow {
+                    family_id: family_id.to_owned(),
+                    media_uuid: media_uuid.to_owned(),
+                    consumed_at,
+                    expires_at,
+                    status: StagingStatus::parse(&status)?,
+                    live,
+                    published,
+                    version_referenced,
+                    upload_active,
+                })
+            },
+        )
+        .transpose()
+}
+
 fn advance_family_rev(tx: &Transaction<'_>, family_id: &str) -> Result<i64, StoreError> {
     tx.execute(
         "UPDATE family_meta SET rev = rev + 1 WHERE family_id = ?1",
@@ -351,6 +473,22 @@ fn advance_family_rev(tx: &Transaction<'_>, family_id: &str) -> Result<i64, Stor
         |row| row.get(0),
     )
     .map_err(StoreError::from)
+}
+
+fn confirm_consumed_publication(
+    tx: &Transaction<'_>,
+    family_id: &str,
+    media_uuid: &str,
+) -> Result<(), StoreError> {
+    let updated = tx.execute(
+        "UPDATE causal_media_staging SET publication_confirmed = 1
+          WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'consumed'",
+        params![family_id, media_uuid],
+    )?;
+    if updated != 1 {
+        return Err(StoreError::InvalidCausalMediaStaging);
+    }
+    Ok(())
 }
 
 fn finalize_consumed_publication(
@@ -369,10 +507,12 @@ fn finalize_consumed_publication(
         )
         .optional()?;
     let Some((deleted_at, payload_json)) = row else {
+        confirm_consumed_publication(&tx, family_id, media_uuid)?;
         tx.commit()?;
         return Ok(()); // Branch-only preimage: retained but not publicly addressable.
     };
     if deleted_at.is_some() {
+        confirm_consumed_publication(&tx, family_id, media_uuid)?;
         tx.commit()?;
         return Ok(());
     }
@@ -386,6 +526,7 @@ fn finalize_consumed_publication(
         .optional()?
         .is_some();
     if already_published {
+        confirm_consumed_publication(&tx, family_id, media_uuid)?;
         tx.commit()?;
         return Ok(());
     }
@@ -413,6 +554,7 @@ fn finalize_consumed_publication(
          VALUES (?1, ?2, 'ordinary', NULL)",
         params![family_id, media_uuid],
     )?;
+    confirm_consumed_publication(&tx, family_id, media_uuid)?;
     tx.commit()?;
     Ok(())
 }
@@ -657,6 +799,122 @@ impl Store {
             .clone()
     }
 
+    pub(crate) fn try_begin_causal_media_gc(&self, family_id: &str) -> Option<CausalMediaGcLease> {
+        let mut in_flight = self
+            .causal_media_gc_in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let global_in_flight = in_flight.contains("");
+        let conflicts = if family_id.is_empty() {
+            !in_flight.is_empty()
+        } else {
+            global_in_flight || in_flight.contains(family_id)
+        };
+        if conflicts {
+            return None;
+        }
+        in_flight.insert(family_id.to_owned());
+        Some(CausalMediaGcLease {
+            family_id: family_id.to_owned(),
+            in_flight: self.causal_media_gc_in_flight.clone(),
+        })
+    }
+
+    pub(crate) fn reserve_causal_media_upload(
+        &self,
+        principal: &Principal,
+        media_uuid: &str,
+        now: i64,
+    ) -> Result<CausalMediaUploadReservation, StoreError> {
+        Uuid::parse_str(media_uuid).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO causal_media_gc_state(family_id) VALUES (?1)",
+            params![principal.family_id],
+        )?;
+        let (total, active): (i64, i64) = tx.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM causal_media_uploads
+                  WHERE family_id = ?1 AND expires_at > ?2)",
+            params![principal.family_id, now],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if total >= CAUSAL_MEDIA_GC_SCAN_LIMIT as i64 {
+            tx.execute(
+                "UPDATE causal_media_gc_state
+                    SET orphan_after_family_id = '', orphan_after_sequence = 0
+                  WHERE family_id = ?1",
+                params![principal.family_id],
+            )?;
+            tx.commit()?;
+            drop(connection);
+            let removed = self.gc_expired_causal_media_uploads_scoped(
+                Some(&principal.family_id),
+                now,
+                CAUSAL_MEDIA_GC_BATCH,
+            )?;
+            if removed == 0 {
+                return Err(StoreError::CausalMediaStagingQuota("family_upload_history"));
+            }
+            return self.reserve_causal_media_upload(principal, media_uuid, now);
+        }
+        if active >= MAX_CAUSAL_MEDIA_STAGED_PER_FAMILY as i64 {
+            return Err(StoreError::CausalMediaStagingQuota("family_upload_count"));
+        }
+        let sequence: i64 = tx.query_row(
+            "UPDATE causal_media_gc_state
+                SET next_upload_sequence = next_upload_sequence + 1
+              WHERE family_id = ?1
+              RETURNING next_upload_sequence - 1",
+            params![principal.family_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO causal_media_uploads(
+                family_id, sequence, membership_id, media_uuid, created_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                principal.family_id,
+                sequence,
+                principal.membership_id,
+                media_uuid,
+                now,
+                now.saturating_add(CAUSAL_MEDIA_STAGING_TTL_SECONDS),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(CausalMediaUploadReservation {
+            path: incoming_upload_path(&self.database_path, &principal.family_id, sequence),
+            sequence,
+        })
+    }
+
+    pub(crate) fn complete_causal_media_upload(
+        &self,
+        family_id: &str,
+        sequence: i64,
+    ) -> Result<(), StoreError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "DELETE FROM causal_media_uploads
+              WHERE family_id = ?1 AND sequence = ?2",
+            params![family_id, sequence],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn abort_causal_media_upload(
+        &self,
+        family_id: &str,
+        sequence: i64,
+    ) -> Result<(), StoreError> {
+        let path = incoming_upload_path(&self.database_path, family_id, sequence);
+        remove_file_if_present(&path, family_id)?;
+        self.complete_causal_media_upload(family_id, sequence)
+    }
+
     pub fn stage_verified_causal_media_preimage(
         &self,
         principal: &Principal,
@@ -685,6 +943,15 @@ impl Store {
                 return Err(StoreError::CausalMediaMembershipMismatch);
             }
             tx.commit()?;
+            let current = load_row(&self.connect()?, &principal.family_id, media_uuid)?
+                .ok_or(StoreError::InvalidCausalMediaStaging)?;
+            if current.status != row.status
+                || current.membership_id != row.membership_id
+                || current.sha256 != row.sha256
+                || current.byte_size != row.byte_size
+            {
+                return Err(StoreError::InvalidCausalMediaStaging);
+            }
             let path = if row.status == StagingStatus::Consumed {
                 published_path(&self.database_path, &principal.family_id, media_uuid)
             } else {
@@ -759,6 +1026,16 @@ impl Store {
             ],
         )?;
         tx.commit()?;
+
+        let current = load_row(&self.connect()?, &principal.family_id, media_uuid)?
+            .ok_or(StoreError::InvalidCausalMediaStaging)?;
+        if current.status != StagingStatus::Writing
+            || current.membership_id != principal.membership_id
+            || current.sha256 != incoming.sha256
+            || current.byte_size != incoming.byte_size
+        {
+            return Err(StoreError::InvalidCausalMediaStaging);
+        }
 
         let path = staging_path(&self.database_path, &principal.family_id, media_uuid);
         install_staged_file(&path, incoming)?;
@@ -856,11 +1133,12 @@ impl Store {
         let mut statement = connection.prepare(
             "SELECT family_id, media_uuid, sha256, byte_size
              FROM causal_media_staging
-             WHERE status = 'consumed'
-             ORDER BY family_id, media_uuid",
+             WHERE status = 'consumed' AND publication_confirmed = 0
+             ORDER BY family_id, media_uuid
+             LIMIT ?1",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(params![CAUSAL_MEDIA_GC_BATCH as i64], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -869,6 +1147,7 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let full_batch = rows.len() == CAUSAL_MEDIA_GC_BATCH;
         drop(statement);
         drop(connection);
         for row in rows {
@@ -878,76 +1157,399 @@ impl Store {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             promote_consumed_row(self, row, None)?;
         }
+        if full_batch {
+            // Routes remain closed until every crash-incomplete publication is
+            // terminal, but each restart performs one durable hard-bounded
+            // batch. Confirmed rows leave the recovery index, so the next
+            // restart advances without a separate mutable cursor.
+            return Err(StoreError::InvalidCausalMediaStaging);
+        }
         Ok(())
     }
 
-    pub fn gc_expired_causal_media_preimages(&self, now: i64) -> Result<usize, StoreError> {
-        self.gc_expired_causal_media_preimages_scoped(None, now)
+    /// Collect at most one hard-bounded batch across every family.
+    ///
+    /// Eligibility and `gc_pending` are committed before filesystem work;
+    /// retrying after any deletion/confirmation failure is idempotent. Receipt,
+    /// version, and mutation audit rows are never compacted by this owner.
+    pub fn gc_causal_media(&self, now: i64) -> Result<usize, StoreError> {
+        self.gc_causal_media_scoped(None, now)
     }
 
-    #[cfg(test)]
-    pub(super) fn gc_expired_causal_media_preimages_for_family(
+    /// Run the same bounded policy after releasing one family's commit mutex.
+    pub(crate) fn gc_causal_media_for_family(
         &self,
         family_id: &str,
         now: i64,
     ) -> Result<usize, StoreError> {
-        self.gc_expired_causal_media_preimages_scoped(Some(family_id), now)
+        self.gc_causal_media_scoped(Some(family_id), now)
     }
 
-    fn gc_expired_causal_media_preimages_scoped(
+    fn scan_causal_media_gc_window(
+        &self,
+        family_scope: Option<&str>,
+    ) -> Result<Vec<GcScanRow>, StoreError> {
+        let cursor_key = family_scope.unwrap_or("").to_owned();
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO causal_media_gc_state(family_id) VALUES (?1)",
+            params![cursor_key],
+        )?;
+        let cursor = connection.query_row(
+            "SELECT staging_after_family_id, staging_after_media_uuid
+               FROM causal_media_gc_state WHERE family_id = ?1",
+            params![cursor_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let (scan_key, scan_after, predicate) = match family_scope {
+            Some(family_id) => (
+                family_id.to_owned(),
+                cursor.1,
+                "family_id = ?1 AND (?2 = '' OR media_uuid > ?2)",
+            ),
+            None => (cursor.0, cursor.1, "(family_id, media_uuid) > (?1, ?2)"),
+        };
+        let sql = format!(
+            "WITH scan AS MATERIALIZED (
+                SELECT family_id, media_uuid, consumed_at, expires_at, status
+                  FROM causal_media_staging
+                 WHERE {predicate}
+                 ORDER BY family_id, media_uuid
+                 LIMIT ?3
+             )
+             SELECT scan.family_id, scan.media_uuid, scan.consumed_at,
+                    scan.expires_at, scan.status,
+                    EXISTS(
+                        SELECT 1 FROM entities e
+                         WHERE e.family_id = scan.family_id
+                           AND e.entity_type = 'media'
+                           AND e.client_uuid = scan.media_uuid
+                           AND e.deleted_at IS NULL
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM media_publications p
+                         WHERE p.family_id = scan.family_id
+                           AND p.media_uuid = scan.media_uuid
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM entity_version_media vm
+                         WHERE vm.family_id = scan.family_id
+                           AND vm.media_uuid = scan.media_uuid
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM causal_media_uploads u
+                         WHERE u.family_id = scan.family_id
+                           AND u.media_uuid = scan.media_uuid
+                    )
+               FROM scan
+              ORDER BY scan.family_id, scan.media_uuid"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let raw = statement
+            .query_map(
+                params![scan_key, scan_after, CAUSAL_MEDIA_GC_SCAN_LIMIT as i64,],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(6)?,
+                        row.get::<_, bool>(7)?,
+                        row.get::<_, bool>(8)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut scanned = Vec::with_capacity(raw.len());
+        for (
+            family_id,
+            media_uuid,
+            consumed_at,
+            expires_at,
+            status,
+            live,
+            published,
+            version_referenced,
+            upload_active,
+        ) in raw
+        {
+            scanned.push(GcScanRow {
+                family_id,
+                media_uuid,
+                consumed_at,
+                expires_at,
+                status: StagingStatus::parse(&status)?,
+                live,
+                published,
+                version_referenced,
+                upload_active,
+            });
+        }
+        #[cfg(test)]
+        test_hook::record_candidate_inspections(&cursor_key, scanned.len());
+        let next = if scanned.len() == CAUSAL_MEDIA_GC_SCAN_LIMIT {
+            let last = scanned.last().expect("non-empty full GC scan window");
+            (last.family_id.as_str(), last.media_uuid.as_str())
+        } else {
+            ("", "")
+        };
+        connection.execute(
+            "UPDATE causal_media_gc_state
+                SET staging_after_family_id = ?1, staging_after_media_uuid = ?2
+              WHERE family_id = ?3",
+            params![next.0, next.1, cursor_key],
+        )?;
+        Ok(scanned)
+    }
+
+    fn scan_causal_media_upload_window(
+        &self,
+        family_scope: Option<&str>,
+    ) -> Result<Vec<GcUploadRow>, StoreError> {
+        let cursor_key = family_scope.unwrap_or("").to_owned();
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO causal_media_gc_state(family_id) VALUES (?1)",
+            params![cursor_key],
+        )?;
+        let cursor = connection.query_row(
+            "SELECT orphan_after_family_id, orphan_after_sequence
+               FROM causal_media_gc_state WHERE family_id = ?1",
+            params![cursor_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        let (scan_family, scan_sequence, predicate) = match family_scope {
+            Some(family_id) => (
+                family_id.to_owned(),
+                cursor.1,
+                "family_id = ?1 AND sequence > ?2",
+            ),
+            None => (cursor.0, cursor.1, "(family_id, sequence) > (?1, ?2)"),
+        };
+        let sql = format!(
+            "SELECT family_id, sequence, expires_at
+               FROM causal_media_uploads
+              WHERE {predicate}
+              ORDER BY family_id, sequence
+              LIMIT ?3"
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let scanned = statement
+            .query_map(
+                params![
+                    scan_family,
+                    scan_sequence,
+                    CAUSAL_MEDIA_GC_SCAN_LIMIT as i64,
+                ],
+                |row| {
+                    Ok(GcUploadRow {
+                        family_id: row.get(0)?,
+                        sequence: row.get(1)?,
+                        expires_at: row.get(2)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        #[cfg(test)]
+        test_hook::record_orphan_inspections(&cursor_key, scanned.len());
+        let next = if scanned.len() == CAUSAL_MEDIA_GC_SCAN_LIMIT {
+            let last = scanned.last().expect("non-empty full upload GC window");
+            (last.family_id.as_str(), last.sequence)
+        } else {
+            ("", 0)
+        };
+        connection.execute(
+            "UPDATE causal_media_gc_state
+                SET orphan_after_family_id = ?1, orphan_after_sequence = ?2
+              WHERE family_id = ?3",
+            params![next.0, next.1, cursor_key],
+        )?;
+        Ok(scanned)
+    }
+
+    fn gc_expired_causal_media_uploads_scoped(
+        &self,
+        family_scope: Option<&str>,
+        now: i64,
+        limit: usize,
+    ) -> Result<usize, StoreError> {
+        let candidates = self
+            .scan_causal_media_upload_window(family_scope)?
+            .into_iter()
+            .filter(|row| row.expires_at <= now)
+            .take(limit)
+            .collect::<Vec<_>>();
+        for row in &candidates {
+            let path = incoming_upload_path(&self.database_path, &row.family_id, row.sequence);
+            remove_file_if_present(&path, &row.family_id)?;
+            let connection = self.connect()?;
+            connection.execute(
+                "DELETE FROM causal_media_uploads
+                  WHERE family_id = ?1 AND sequence = ?2 AND expires_at <= ?3",
+                params![row.family_id, row.sequence, now],
+            )?;
+        }
+        Ok(candidates.len())
+    }
+
+    fn gc_causal_media_scoped(
         &self,
         family_scope: Option<&str>,
         now: i64,
     ) -> Result<usize, StoreError> {
+        let candidates = self
+            .scan_causal_media_gc_window(family_scope)?
+            .into_iter()
+            .filter(|row| row.eligible(now))
+            .take(CAUSAL_MEDIA_GC_BATCH)
+            .collect::<Vec<_>>();
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "UPDATE causal_media_staging SET status = 'gc_pending'
-             WHERE status IN ('writing', 'staged') AND expires_at <= ?1
-               AND (?2 IS NULL OR family_id = ?2)",
-            params![now, family_scope],
-        )?;
-        let mut statement = tx.prepare(
-            "SELECT family_id, media_uuid FROM causal_media_staging
-             WHERE status = 'gc_pending' AND (?1 IS NULL OR family_id = ?1)
-             ORDER BY family_id, media_uuid",
-        )?;
-        let pending = statement
-            .query_map(params![family_scope], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
+        let mut pending = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let Some(current) = load_gc_row(&tx, &candidate.family_id, &candidate.media_uuid)?
+            else {
+                continue;
+            };
+            if !current.eligible(now) {
+                continue;
+            }
+            if current.status == StagingStatus::GcPending {
+                pending.push(current);
+                continue;
+            }
+            let updated = tx.execute(
+                "UPDATE causal_media_staging SET status = 'gc_pending'
+                 WHERE family_id = ?1 AND media_uuid = ?2 AND status = ?3",
+                params![
+                    current.family_id,
+                    current.media_uuid,
+                    current.status.as_str(),
+                ],
+            )?;
+            if updated != 1 {
+                return Err(StoreError::InvalidCausalMediaStaging);
+            }
+            pending.push(current);
+        }
         tx.commit()?;
 
-        for (family_id, media_uuid) in &pending {
-            let path = staging_path(&self.database_path, family_id, media_uuid);
-            match fs::remove_file(&path) {
-                Ok(()) => sync_parent(&path)?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => sync_parent(&path)?,
-                Err(error) => return Err(error.into()),
+        #[cfg(test)]
+        if !pending.is_empty() && test_hook::take_fail_after_mark(&pending[0].family_id) {
+            return Err(StoreError::InvalidCausalMediaStaging);
+        }
+
+        for row in &pending {
+            let staged = staging_path(&self.database_path, &row.family_id, &row.media_uuid);
+            remove_file_if_present(&staged, &row.family_id)?;
+            if row.consumed_at.is_some() {
+                let published =
+                    published_path(&self.database_path, &row.family_id, &row.media_uuid);
+                remove_file_if_present(&published, &row.family_id)?;
             }
             let connection = self.connect()?;
             connection.execute(
                 "DELETE FROM causal_media_staging
                  WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'gc_pending'",
-                params![family_id, media_uuid],
+                params![row.family_id, row.media_uuid],
             )?;
         }
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT family_id, media_uuid FROM causal_media_staging
-             WHERE (?1 IS NULL OR family_id = ?1)
-             ORDER BY family_id, media_uuid",
-        )?;
-        let tracked = statement
-            .query_map(params![family_scope], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<BTreeSet<_>, _>>()?;
-        drop(statement);
-        drop(connection);
-        remove_untracked_staging_files(&self.database_path, &tracked, family_scope)?;
-        Ok(pending.len())
+        let remaining = CAUSAL_MEDIA_GC_BATCH.saturating_sub(pending.len());
+        let orphaned = if remaining == 0 {
+            0
+        } else {
+            self.gc_expired_causal_media_uploads_scoped(family_scope, now, remaining)?
+        };
+        Ok(pending.len() + orphaned)
+    }
+}
+
+#[cfg(test)]
+pub(in crate::store) mod test_hook {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn fail_family() -> &'static Mutex<Option<String>> {
+        static FAIL_FAMILY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+        FAIL_FAMILY.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn fail_after_mark_once(family_id: &str) {
+        *fail_family().lock().unwrap() = Some(family_id.to_owned());
+    }
+
+    pub(super) fn take_fail_after_mark(family_id: &str) -> bool {
+        let mut armed = fail_family().lock().unwrap();
+        if armed.as_deref() == Some(family_id) {
+            armed.take();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn fail_parent_sync_family() -> &'static Mutex<Option<String>> {
+        static FAIL_FAMILY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+        FAIL_FAMILY.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn fail_before_parent_sync_once(family_id: &str) {
+        *fail_parent_sync_family().lock().unwrap() = Some(family_id.to_owned());
+    }
+
+    pub(super) fn take_fail_before_parent_sync(family_id: &str) -> bool {
+        let mut armed = fail_parent_sync_family().lock().unwrap();
+        if armed.as_deref() == Some(family_id) {
+            armed.take();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn orphan_inspection_counts() -> &'static Mutex<HashMap<String, usize>> {
+        static COUNTS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+        COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn record_orphan_inspections(scope: &str, inspected: usize) {
+        orphan_inspection_counts()
+            .lock()
+            .unwrap()
+            .insert(scope.to_owned(), inspected);
+    }
+
+    pub fn orphan_inspections(scope: &str) -> usize {
+        orphan_inspection_counts()
+            .lock()
+            .unwrap()
+            .get(scope)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn candidate_inspection_counts() -> &'static Mutex<HashMap<String, usize>> {
+        static COUNTS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+        COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(super) fn record_candidate_inspections(scope: &str, inspected: usize) {
+        candidate_inspection_counts()
+            .lock()
+            .unwrap()
+            .insert(scope.to_owned(), inspected);
+    }
+
+    pub fn candidate_inspections(scope: &str) -> usize {
+        candidate_inspection_counts()
+            .lock()
+            .unwrap()
+            .get(scope)
+            .copied()
+            .unwrap_or(0)
     }
 }

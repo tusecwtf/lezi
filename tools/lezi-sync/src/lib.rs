@@ -67,6 +67,7 @@ pub const DEFAULT_MAX_PENDING_MEMBER_REQUESTS: usize = 32;
 pub const MEMBER_LOGIN_GRANT_TTL_SECONDS: i64 = 10 * 60;
 pub(crate) const OPEN_STAGING_BUNDLE_TTL_SECONDS: i64 = 24 * 60 * 60;
 const HTTP_REQUEST_TIMEOUT_SECONDS: u64 = 5 * 60;
+const CAUSAL_MEDIA_GC_MAINTENANCE_INTERVAL_SECONDS: u64 = 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 /// Advertised on `/health` so clients can refuse metadata-first fallbacks.
 pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
@@ -371,6 +372,64 @@ impl AppState {
         (self.clock)()
     }
 
+    fn schedule_causal_media_gc_for_family(self: &Arc<Self>, family_id: String) {
+        let Some(gc_lease) = self.store.try_begin_causal_media_gc(&family_id) else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            let media_gc = run_blocking(move || {
+                let _gc_lease = gc_lease;
+                state
+                    .store
+                    .gc_causal_media_for_family(&family_id, state.now())
+                    .map(|_| ())
+                    .map_err(ApiError::from)
+            })
+            .await;
+            if let Err(error) = media_gc {
+                tracing::warn!(?error, "bounded causal media GC sweep failed");
+            }
+        });
+    }
+
+    fn start_causal_media_gc_maintenance(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::downgrade(self);
+        runtime.spawn(async move {
+            let start = tokio::time::Instant::now()
+                + Duration::from_secs(CAUSAL_MEDIA_GC_MAINTENANCE_INTERVAL_SECONDS);
+            let mut interval = tokio::time::interval_at(
+                start,
+                Duration::from_secs(CAUSAL_MEDIA_GC_MAINTENANCE_INTERVAL_SECONDS),
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                let Some(gc_lease) = state.store.try_begin_causal_media_gc("") else {
+                    continue;
+                };
+                let media_gc = run_blocking(move || {
+                    let _gc_lease = gc_lease;
+                    state
+                        .store
+                        .gc_causal_media(state.now())
+                        .map(|_| ())
+                        .map_err(ApiError::from)
+                })
+                .await;
+                if let Err(error) = media_gc {
+                    tracing::warn!(?error, "periodic bounded causal media GC sweep failed");
+                }
+            }
+        });
+    }
+
     fn owner_tokens(
         &self,
         create_request_hash: &str,
@@ -506,19 +565,6 @@ impl AppState {
             .join(bundle_id.to_string()))
     }
 
-    fn causal_media_incoming_path(
-        &self,
-        family_id: &str,
-        media_uuid: &Uuid,
-    ) -> Result<PathBuf, ApiError> {
-        let family_id = self.safe_family_id(family_id)?;
-        Ok(self
-            .media_root
-            .join(".causal-stage")
-            .join(family_id)
-            .join(format!(".{}.{}.upload.tmp", media_uuid, Uuid::new_v4(),)))
-    }
-
     fn bundle_media_path(
         &self,
         family_id: &str,
@@ -580,10 +626,10 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
     media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
     // Complete any causal DB-accepted publication before the authority graph is
-    // validated or public routes can observe it, then durably collect expired
-    // unconsumed preimages.
+    // validated or public routes can observe it, then durably collect one
+    // bounded media batch without discarding live/version-referenced bytes.
     store.promote_consumed_causal_media()?;
-    store.gc_expired_causal_media_preimages((config.clock)())?;
+    store.gc_causal_media((config.clock)())?;
     store.gc_conflict_metadata((config.clock)())?;
     let validation_media_root = media_root.clone();
     let validation = store
@@ -706,6 +752,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     let state = Arc::new(state);
+    state.start_causal_media_gc_maintenance();
     let public = Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(readiness))

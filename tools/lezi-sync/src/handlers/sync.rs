@@ -537,6 +537,7 @@ pub(crate) async fn causal_commit(
     let guard = family_lock.lock().await;
     let blocking_state = state.clone();
     let generation = state.generation.clone();
+    let family_id = principal.family_id.clone();
     let commit = run_blocking(move || {
         // Causal commit preserves each fact; duplicate grouping is an explicit relation.
         blocking_state
@@ -576,6 +577,13 @@ pub(crate) async fn causal_commit(
         Ok(result)
     })
     .await?;
+    let committed_any = result
+        .results
+        .iter()
+        .any(|unit| matches!(unit.status.as_str(), "accepted" | "merged" | "branched"));
+    if committed_any {
+        state.schedule_causal_media_gc_for_family(family_id);
+    }
     Ok(Json(json!({
         "generation": generation,
         "cursor": result.cursor,

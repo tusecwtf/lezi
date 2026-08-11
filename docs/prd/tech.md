@@ -35,7 +35,7 @@
 | versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.3.13 / versionCode **20**）；家庭 NAS 是否已切到该代以 live health 为准 |
 | versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
 | 本地数据契约 | 当前 tree `v4` / Room **v27**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
-| **0.3.13 发版目标（tree 就绪；生产切割待维护窗）** | versionName `0.3.13`、versionCode **20**、Room **27**、server schema **12**；source wire 以该版本 runtime 与测试为准，0.4.0 target 另见 [`causal-sync-wire.md`](./causal-sync-wire.md)；`app-update.json` minSupported=**20** 且已与签名 release APK 对齐；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
+| **0.3.13 已发布 source 基线（生产切割待维护窗）** | versionName `0.3.13`、versionCode **20**、Room **27**、历史 server schema **12**；当前 tree 已为 H24 GC 正确性建立 fresh server schema **13**，但 Android/server 0.4.0 版本、Room 28、floor 21 与 `causal_sync_v2` 仍只能由 H27 原子激活；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
 | **0.4.0 合同目标（未激活）** | versionName `0.4.0`、versionCode **21**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；H27 才能切换版本/capability，H28–H30 证明迁移与 guarded CD，本票不修改 runtime 版本 |
 | 应用名 | 乐记 |
 
@@ -406,11 +406,12 @@ APK。该端口不完成家庭登录，也不放宽同步门禁。首次安装�
 
 **NAS schema / offline-migrate 边界：** 日常启动只接受精确 current schema（fail closed；
 见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。**当前 tree**
-server `DATABASE_SCHEMA_VERSION` 以 `tools/lezi-sync` 源码为准（撰写时 **12**，含
-不可变版本/冲突/来源关系表）。**v11 仅为 offline-migrate 源**：审计 copy-out 升级到
-v12；旧二进制不得打开 v12。历史 v3 数据根**不得**在 server startup 自动迁移；唯一出路
+server `DATABASE_SCHEMA_VERSION` 以 `tools/lezi-sync` 源码为准（当前 **13**；H24 增加
+media reachability reverse index、durable GC cursor 与 upload marker）。**v11 仅为 offline-migrate 源**；
+R20 历史工具仅能冻结产生/validate schema **12**，不会跟随 live current。历史 v3 数据根
+**不得**在 server startup 自动迁移；维护窗内的 schema 11/12→13 copy-out mapping 专属 H28，唯一出路
 是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md) 的两阶段路径：
-维护窗前在备份上用显式 `lezi-sync offline-migrate`（源 user_version **3 或 11**→current、
+维护窗前在备份上用显式 `lezi-sync offline-migrate`（源 user_version **3 或 11**→legacy 12；H28 再处理 **11 或 12**→13）、
 独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。0.3.13 的 wire
 minSupported / 客户端能力门与 schema 12 落地分开叙述。发布二进制含该子命令 ≠ 滚动兼容；
 普通 CD 不执行。权威 runbook：

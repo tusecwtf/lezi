@@ -26,10 +26,12 @@ HTTPS `/v1/*` 合同只对成员登录 grant 增加可选 `landing_url`；新的
 
 ## 数据目录合同
 
-服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=12`
+服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=13`
 （`DATABASE_SCHEMA_VERSION`）。空数据目录、不存在的 `lezi.db` 或零字节空库会初始化为
-**当前 v12 schema**；已有数据目录只有在 `user_version=12` 且表、索引、约束完全匹配
+**当前 v13 schema**；已有数据目录只有在 `user_version=13` 且表、索引、约束完全匹配
 当前 schema 时才允许重启并保留数据。
+历史 `offline-migrate` 仍冻结输出 schema 12；11/12→13 的 copy-out mapping 专属 H28，
+在它落地前不得把 legacy 输出交给当前进程。
 
 任何非空旧版本、未来版本、或声称 current 但形状不匹配的数据库都在只读预检阶段
 fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQLite sidecar，也不会

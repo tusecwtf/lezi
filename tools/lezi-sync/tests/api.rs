@@ -3334,7 +3334,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     drop(connection);
 
@@ -3359,7 +3359,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
 }
 
@@ -3371,7 +3371,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
     connection
         .execute_batch(
             "
-            PRAGMA user_version = 13;
+            PRAGMA user_version = 14;
             CREATE TABLE future_sentinel(value TEXT NOT NULL);
             INSERT INTO future_sentinel(value) VALUES ('preserve-me');
             ",
@@ -3431,7 +3431,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         connection
@@ -18697,6 +18697,14 @@ async fn causal_media_prepare_rejects_declared_length_drift_without_a_receipt() 
         )
         .unwrap();
     assert_eq!(rows, 0, "length drift minted a durable receipt");
+    let upload_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(upload_rows, 0, "handled length error leaked upload quota");
     assert!(!rig
         .directory
         .path()
@@ -18745,6 +18753,14 @@ async fn causal_media_prepare_rejects_digest_drift_without_a_receipt() {
         )
         .unwrap();
     assert_eq!(rows, 0, "digest drift minted a durable receipt");
+    let upload_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(upload_rows, 0, "handled digest error leaked upload quota");
     let staging_dir = rig
         .directory
         .path()
@@ -18806,6 +18822,65 @@ async fn causal_media_prepare_binds_receipt_to_membership_and_family() {
         put_causal_media_bytes(&other_rig.app, other_token, media_id, bytes).await;
     assert_eq!(status, StatusCode::OK, "{independent}");
     assert_ne!(other["family_id"], owner["family_id"]);
+}
+
+#[tokio::test]
+async fn successful_causal_media_prepare_detaches_bounded_expired_family_gc() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-prepare-gc-owner",
+        "causal-media-prepare-gc-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let expired_media = Uuid::new_v4();
+    let (status, first) = put_causal_media_bytes(&rig.app, token, expired_media, b"expired").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "UPDATE causal_media_staging SET expires_at = ?1
+              WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![
+                rig.now.load(Ordering::SeqCst) - 1,
+                family_id,
+                expired_media.to_string(),
+            ],
+        )
+        .unwrap();
+    let (status, second) =
+        put_causal_media_bytes(&rig.app, token, Uuid::new_v4(), b"trigger").await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+
+    let database_path = rig.directory.path().join("lezi.db");
+    let expired_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(expired_media.to_string());
+    for _ in 0..100 {
+        let rows: i64 = Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM causal_media_staging
+                  WHERE family_id = ?1 AND media_uuid = ?2",
+                rusqlite::params![family_id, expired_media.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if rows == 0 {
+            assert!(!expired_path.exists());
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("successful prepare did not trigger detached expired staging GC");
 }
 
 #[tokio::test]
@@ -18871,7 +18946,11 @@ async fn slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_comm
     let incoming = fs::read_dir(&staging_dir)
         .unwrap()
         .filter_map(Result::ok)
-        .find(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+        .find(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".upload-") && name.ends_with(".tmp")
+        })
         .expect("first chunk was streamed to a server-owned incoming file");
     assert_eq!(incoming.metadata().unwrap().len(), 5);
     let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
@@ -19297,10 +19376,26 @@ async fn causal_media_prepare_inflight_admission_bounds_and_releases_cancelled_s
         fs::read_dir(&staging_dir)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".upload-") && name.ends_with(".tmp")
+            })
             .count(),
         1,
         "cancelled upload kept its temp reservation"
+    );
+    let durable_inflight_uploads: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        durable_inflight_uploads, 2,
+        "cancelled and still-active bodies must both remain GC-addressable"
     );
 
     let replacement_id = Uuid::new_v4();
@@ -19318,6 +19413,15 @@ async fn causal_media_prepare_inflight_admission_bounds_and_releases_cancelled_s
 
     releases.remove(0).send(()).unwrap();
     assert_eq!(uploads.remove(0).await.unwrap().status(), StatusCode::OK);
+    let durable_cancelled_uploads: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(durable_cancelled_uploads, 1);
 }
 
 #[tokio::test]
@@ -19367,7 +19471,11 @@ async fn cancelled_prepare_keeps_admission_and_temp_owned_until_verification_fin
         fs::read_dir(&staging_dir)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".upload-") && name.ends_with(".tmp")
+            })
             .count(),
         2,
         "cancel detached the verifier from its temp owner"
@@ -19412,7 +19520,11 @@ async fn cancelled_prepare_keeps_admission_and_temp_owned_until_verification_fin
         fs::read_dir(&staging_dir)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".upload-") && name.ends_with(".tmp")
+            })
             .count(),
         0
     );
@@ -19642,6 +19754,111 @@ async fn causal_media_prepare_restart_replay_preserves_the_exact_durable_receipt
 }
 
 #[tokio::test]
+async fn causal_media_startup_and_commit_gc_expired_staging_without_failing_family_commit() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-gc-owner",
+        "causal-media-gc-request-000000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let media_id = Uuid::new_v4();
+    assert_eq!(
+        put_causal_media_raw(&rig.app, token, media_id, b"expired")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    fs::remove_file(&staged_path).unwrap();
+    fs::create_dir(&staged_path).unwrap();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET expires_at = ?1
+             WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![
+                rig.now.load(Ordering::SeqCst),
+                family_id,
+                media_id.to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (status, body, _) = commit_causal_record(
+        &rig.app,
+        token,
+        baby_id,
+        Uuid::new_v4(),
+        None,
+        "gc-failure-does-not-fail-commit",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pending = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+            let status: String = connection
+                .query_row(
+                    "SELECT status FROM causal_media_staging
+                     WHERE family_id = ?1 AND media_uuid = ?2",
+                    rusqlite::params![family_id, media_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if status == "gc_pending" {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached bounded GC did not mark its expired candidate");
+    assert_eq!(pending, "gc_pending");
+
+    fs::remove_dir(&staged_path).unwrap();
+    fs::write(&staged_path, b"expired").unwrap();
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    assert!(!staged_path.exists());
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+    assert_eq!(
+        request(
+            &restarted,
+            Method::GET,
+            "/health",
+            None,
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn causal_media_preimage_replay_conflict_and_restart_publication_are_stable() {
     let rig = Rig::with_config(|config| {
         config.max_media_bytes = 64 * 1024;
@@ -19713,6 +19930,22 @@ async fn causal_media_preimage_replay_conflict_and_restart_publication_are_stabl
 
     // Crash fixture: the DB consume is durable, while filesystem promotion did
     // not finish. Startup must converge before exposing public routes.
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "DELETE FROM media_publications
+              WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![owner["family_id"].as_str().unwrap(), media_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET publication_confirmed = 0
+              WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'consumed'",
+            rusqlite::params![owner["family_id"].as_str().unwrap(), media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
     fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
     fs::rename(&final_path, &staged_path).unwrap();
     assert!(!final_path.exists());
