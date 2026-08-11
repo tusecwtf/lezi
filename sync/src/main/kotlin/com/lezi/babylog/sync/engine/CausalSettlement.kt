@@ -348,6 +348,12 @@ internal class CausalSettlement(
             unit.contentEpoch,
             stableBaseVersion,
         )
+        "wake_observation" -> wakeObservationDao.settleCommitFirstAcceptedOrMerged(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            stableBaseVersion,
+        )
         else -> null
     }
 
@@ -382,6 +388,14 @@ internal class CausalSettlement(
             stableBaseVersion,
         )
         "custom_item" -> customItemDao.settleCommitFirstBranched(
+            unit.mutation.clientUuid,
+            unit.mutation.mutationId,
+            unit.contentEpoch,
+            conflictId,
+            branchVersionId,
+            stableBaseVersion,
+        )
+        "wake_observation" -> wakeObservationDao.settleCommitFirstBranched(
             unit.mutation.clientUuid,
             unit.mutation.mutationId,
             unit.contentEpoch,
@@ -579,7 +593,17 @@ internal class CausalSettlement(
         contentEpoch: Long,
         candidates: List<PublishCandidate>,
     ): FrozenCausalUnit? {
-        if (entityType == "care_plan") {
+        if (entityType == "wake_observation") {
+            freezeEmptyMediaCommitEnvelope(
+                entityType = entityType,
+                clientUuid = clientUuid,
+                contentEpoch = contentEpoch,
+                candidates = candidates,
+            )?.let { return it }
+            // Wake has no reconcile-first fallback. Media-bearing observations
+            // wait for the immutable spool/receipt owner (H18/H20).
+            return null
+        } else if (entityType == "care_plan") {
             freezeEmptyMediaCommitEnvelope(
                 entityType = entityType,
                 clientUuid = clientUuid,
@@ -679,6 +703,17 @@ internal class CausalSettlement(
                 }
                 val current = loadCommitFirstLocal(entityType, clientUuid)
                     ?: error("frozen commit envelope lost its product fact")
+                if (entityType == "wake_observation") {
+                    require(
+                        wakeMutationReferencesReady(
+                            clientUuid = clientUuid,
+                            rootJson = restored.mutation.rootJson,
+                            cache = cache,
+                        ),
+                    ) {
+                        "frozen Wake envelope lost its exact Sleep source dependency"
+                    }
+                }
                 val identityStillOwned = current.mutationId == restored.mutation.mutationId ||
                     (current.contentEpoch > restored.contentEpoch && current.mutationId == null)
                 require(
@@ -709,6 +744,11 @@ internal class CausalSettlement(
             if (loadActiveCausalMedia(entityType, clientUuid).isNotEmpty()) return@run null
             if (entityType == "record" && !recordProvidersReady(clientUuid, cache)) return@run null
             if (entityType == "care_plan" && !carePlanDependenciesReady(clientUuid, cache)) {
+                return@run null
+            }
+            if (entityType == "wake_observation" &&
+                !wakeObservationDependenciesReady(clientUuid, cache)
+            ) {
                 return@run null
             }
             val mutationId = UUID.randomUUID().toString()
@@ -803,6 +843,16 @@ internal class CausalSettlement(
                 it.deletedAt != null,
             )
         }
+        "wake_observation" -> wakeObservationDao.getByClientUuid(clientUuid)?.let {
+            CausalLocal(
+                it.baseVersion,
+                it.mutationId,
+                it.updatedAt,
+                it.syncDirty,
+                it.openConflictId,
+                it.deletedAt != null,
+            )
+        }
         else -> null
     }
 
@@ -844,6 +894,17 @@ internal class CausalSettlement(
         }
         "custom_item" ->
             customItemDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
+                CausalLocal(
+                    it.baseVersion,
+                    it.mutationId,
+                    it.updatedAt,
+                    it.syncDirty,
+                    it.openConflictId,
+                    it.deletedAt != null,
+                )
+            }
+        "wake_observation" ->
+            wakeObservationDao.freezeCommitFirstEpoch(clientUuid, contentEpoch, mutationId)?.let {
                 CausalLocal(
                     it.baseVersion,
                     it.mutationId,
@@ -912,6 +973,43 @@ internal class CausalSettlement(
         )
     }
 
+    /** Wake keeps the exact Sleep Record source UUID and never commits a dangling reference. */
+    private suspend fun wakeObservationDependenciesReady(
+        wakeClientUuid: String,
+        cache: ConflictSnapshotCacheDao,
+    ): Boolean {
+        val rootJson = buildCausalRootJson("wake_observation", wakeClientUuid) ?: return false
+        return wakeMutationReferencesReady(
+            clientUuid = wakeClientUuid,
+            rootJson = rootJson,
+            cache = cache,
+        )
+    }
+
+    private suspend fun wakeMutationReferencesReady(
+        clientUuid: String,
+        rootJson: String,
+        cache: ConflictSnapshotCacheDao,
+    ): Boolean {
+        val wake = wakeObservationDao.getByClientUuid(clientUuid) ?: return false
+        val wire = runCatching {
+            decodeWakeRootWire(
+                Json.parseToJsonElement(rootJson).jsonObject,
+                WakeRootWireShape.LocalMutation,
+            )
+        }.getOrElse { return false }
+        val sleep = resolveWakeReference(
+            wire = wire,
+            recordDao = recordDao,
+            expectedSleepClientUuid = wake.sleepRecordClientUuid,
+        ) ?: return false
+        return !sleep.syncDirty || cache.hasCurrentFrozenProvider(
+            "record",
+            sleep.clientUuid,
+            sleep.mutationId,
+        )
+    }
+
     private suspend fun ConflictSnapshotCacheDao.hasCurrentFrozenProvider(
         entityType: String,
         clientUuid: String,
@@ -969,16 +1067,7 @@ internal class CausalSettlement(
             }
             "wake_observation" -> {
                 val wake = wakeObservationDao.getByClientUuid(clientUuid) ?: return null
-                buildJsonObject {
-                    put("sleep_record_client_uuid", wake.sleepRecordClientUuid)
-                    put("wake_timestamp", wake.wakeTimestamp)
-                    if (wake.note == null) put("note", JsonNull) else put("note", wake.note)
-                    put("withdrawn", wake.withdrawn)
-                    put("updated_at", wake.updatedAt)
-                    if (wake.observerMembershipId.isNotBlank()) {
-                        put("observer_membership_id", wake.observerMembershipId)
-                    }
-                }.toString()
+                encodeWakeMutationRoot(wake)
             }
             else -> null
         }
@@ -1493,17 +1582,15 @@ internal class CausalSettlement(
         stableVersion: String,
     ) {
         val existing = wakeObservationDao.getByClientUuid(clientUuid) ?: return
-        val wakeTs = root["wake_timestamp"]?.jsonPrimitive?.longOrNull ?: existing.wakeTimestamp
-        val note = root.stringOrNull("note")
-        val withdrawn = root["withdrawn"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull()
-            ?: existing.withdrawn
-        val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
+        val wire = decodeWakeRootWire(root, WakeRootWireShape.StableRoot)
         wakeObservationDao.update(
             existing.copy(
-                wakeTimestamp = wakeTs,
-                note = note,
-                withdrawn = withdrawn,
-                updatedAt = updatedAt,
+                sleepRecordClientUuid = wire.sleepRecordClientUuid,
+                wakeTimestamp = wire.wakeTimestamp,
+                observerMembershipId = requireNotNull(wire.observerMembershipId),
+                note = wire.note,
+                withdrawn = wire.withdrawn,
+                updatedAt = requireNotNull(wire.inlineUpdatedAt),
                 baseVersion = stableVersion,
                 mutationId = existing.mutationId,
                 syncDirty = existing.syncDirty,
@@ -1541,13 +1628,10 @@ internal class CausalSettlement(
             else -> null
         }
 
-    private suspend fun resolveWakeById(id: Long): WakeObservationEntity? {
-        val pending = wakeObservationDao.listPendingSync() + wakeObservationDao.listOpenConflicts()
-        return pending.firstOrNull { it.id == id }
-            ?: wakeObservationDao.listPendingSync().firstOrNull { it.id == id }
-    }
+    private suspend fun resolveWakeById(id: Long): WakeObservationEntity? =
+        wakeObservationDao.get(id)
 
-    private fun validateCausalProof(
+    private suspend fun validateCausalProof(
         session: SyncSession,
         frozen: List<FrozenCausalUnit>,
         batch: CausalBatchResult,
@@ -1629,7 +1713,7 @@ internal class CausalSettlement(
         }
     }
 
-    private fun validateStableProjection(
+    private suspend fun validateStableProjection(
         unit: FrozenCausalUnit,
         result: CausalUnitResult,
         fail: (String) -> Nothing,
@@ -1643,6 +1727,11 @@ internal class CausalSettlement(
         val stableRoot = runCatching {
             Json.parseToJsonElement(result.stableRootJson).jsonObject
         }.getOrElse { fail("因果 ${result.status} stable_root 无效") }
+        if (unit.mutation.entityType == "wake_observation") {
+            runCatching {
+                decodeWakeRootWire(expectedRoot, WakeRootWireShape.LocalMutation)
+            }.getOrElse { fail("本机冻结 Wake causal root 类型或 domain 无效") }
+        }
         val providerAvatarUuid = when (unit.mutation.entityType) {
             "baby" -> runCatching {
                 decodeBabyWire(stableRoot, RootUpdatedAtLocation.InlineStableRoot)
@@ -1665,6 +1754,24 @@ internal class CausalSettlement(
                     )
                 }.getOrElse {
                     fail("因果 ${result.status} care_plan stable_root 类型或 domain 无效")
+                }
+                null
+            }
+            "wake_observation" -> {
+                val wire = runCatching {
+                    decodeWakeRootWire(stableRoot, WakeRootWireShape.StableRoot)
+                }.getOrElse {
+                    fail("因果 ${result.status} wake stable_root 类型或 domain 无效")
+                }
+                val existing = wakeObservationDao.getByClientUuid(unit.mutation.clientUuid)
+                    ?: fail("因果 ${result.status} wake 本机事实缺失")
+                if (resolveWakeReference(
+                        wire = wire,
+                        recordDao = recordDao,
+                        expectedSleepClientUuid = existing.sleepRecordClientUuid,
+                    ) == null
+                ) {
+                    fail("因果 ${result.status} wake stable_root Sleep source 无效或漂移")
                 }
                 null
             }
@@ -1790,7 +1897,13 @@ internal class CausalSettlement(
     private companion object {
         const val MAX_CAUSAL_SETTLEMENT_UNITS = 64
 
-        val COMMIT_FIRST_ROOT_TYPES = setOf("baby", "custom_item", "record", "care_plan")
+        val COMMIT_FIRST_ROOT_TYPES = setOf(
+            "baby",
+            "custom_item",
+            "record",
+            "wake_observation",
+            "care_plan",
+        )
 
         val ROOT_DEPENDENCY_PRIORITY = mapOf(
             "baby" to 0,

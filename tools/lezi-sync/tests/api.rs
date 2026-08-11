@@ -16144,6 +16144,170 @@ async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstone
 }
 
 #[tokio::test]
+async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
+    let rig = Rig::new();
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "wake-commit-first-owner",
+        "wake-commit-first-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let sleep_id = Uuid::new_v4();
+    let wake_id = Uuid::new_v4();
+    let wake_time = 1_700_303_600_000_i64;
+
+    let (status, sleep) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            sleep_id,
+            causal_sleep_root(baby_id, 1_700_300_000_000, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sleep}");
+    assert_eq!(sleep["results"][0]["status"], "accepted", "{sleep}");
+
+    let wake_mutation_id = Uuid::new_v4();
+    let wake_root = json!({
+        "sleep_record_client_uuid": sleep_id,
+        "wake_timestamp": wake_time,
+        "note": "first observation",
+        "withdrawn": false,
+        "updated_at": 30,
+    });
+    let wake = causal_unit(
+        wake_mutation_id,
+        None,
+        "wake_observation",
+        wake_id,
+        wake_root.clone(),
+        vec![],
+        false,
+    );
+    let (status, accepted) = causal_commit_units(&rig.app, owner_token, vec![wake.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted", "{accepted}");
+    assert_eq!(
+        accepted["results"][0]["stable_root"]["sleep_record_client_uuid"],
+        sleep_id.to_string(),
+    );
+    assert_eq!(
+        accepted["results"][0]["stable_root"]["observer_membership_id"],
+        owner["membership_id"],
+    );
+    let first_version = accepted["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, replayed) = causal_commit_units(&rig.app, owner_token, vec![wake.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["results"][0]["stable_version_id"],
+        accepted["results"][0]["stable_version_id"],
+    );
+    assert_eq!(
+        replayed["results"][0]["request_hash"],
+        accepted["results"][0]["request_hash"],
+    );
+
+    let mut drift = wake;
+    drift["root"]["note"] = json!("same mutation drift");
+    let (status, rejected) = causal_commit_units(&rig.app, owner_token, vec![drift]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["results"][0]["status"], "rejected");
+    assert_eq!(rejected["results"][0]["code"], "content_drift");
+
+    let mut stable_edit_root = wake_root.clone();
+    stable_edit_root["note"] = json!("stable edit");
+    stable_edit_root["updated_at"] = json!(40);
+    let (status, stable_edit) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&first_version),
+            "wake_observation",
+            wake_id,
+            stable_edit_root,
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stable_edit}");
+    assert_eq!(stable_edit["results"][0]["status"], "accepted");
+    let stable_version = stable_edit["results"][0]["stable_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut branch_root = wake_root.clone();
+    branch_root["note"] = json!("concurrent owner observation");
+    branch_root["updated_at"] = json!(41);
+    let (status, branched) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&first_version),
+            "wake_observation",
+            wake_id,
+            branch_root,
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{branched}");
+    assert_eq!(branched["results"][0]["status"], "branched", "{branched}");
+    assert_eq!(branched["results"][0]["stable_root"]["note"], "stable edit",);
+    assert_eq!(
+        branched["results"][0]["stable_root"]["sleep_record_client_uuid"],
+        sleep_id.to_string(),
+    );
+
+    let mut tombstone_root = wake_root;
+    tombstone_root["note"] = Value::Null;
+    tombstone_root["updated_at"] = json!(50);
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&stable_version),
+            "wake_observation",
+            wake_id,
+            tombstone_root,
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+
+    let pull = pull_entities(&rig.app, member_token, generation).await;
+    let deleted_wake = find_entity(&pull, wake_id);
+    assert_eq!(deleted_wake["type"], "wake_observation");
+    assert_eq!(
+        deleted_wake["payload"]["sleep_record_client_uuid"],
+        sleep_id.to_string(),
+    );
+    assert!(deleted_wake["deleted_at"].is_number());
+}
+
+#[tokio::test]
 async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
     let rig = Rig::new();
     let owner = create_family(

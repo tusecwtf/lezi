@@ -1760,11 +1760,7 @@ class ReplicaSyncEngineCausalRootTypesTest(
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
-        if (entityType in setOf("baby", "record", "care_plan", "custom_item")) {
-            assertThat(rig.backend.causalReconciledUnits).isEmpty()
-        } else {
-            assertThat(rig.backend.causalReconciledUnits).isNotEmpty()
-        }
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).isNotEmpty()
         when (entityType) {
             "baby" -> {

@@ -29,9 +29,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -860,41 +858,29 @@ internal class ReplicaSyncEngine(
         ) {
             return true
         }
-        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val sleepUuid = payload.requireNonBlankString(
-            "sleep_record_client_uuid",
-            "wake_observation",
+        val wire = decodeWakeRootWire(
+            Json.parseToJsonElement(entity.payloadJson).jsonObject,
+            WakeRootWireShape.Pull,
         )
-        // Sleep root must already be local (same-page records applied first).
-        if (recordDao.getByClientUuid(sleepUuid) == null) return false
-        val wakeTs = payload.requireLong("wake_timestamp", "wake_observation")
-        val note = if ("note" in payload) {
-            payload.requireNullableString("note", "wake_observation")
-        } else {
-            null
-        }
-        val withdrawn = when (val w = payload["withdrawn"]) {
-            is JsonPrimitive -> w.booleanOrNull
-                ?: w.contentOrNull?.toBooleanStrictOrNull()
-                ?: false
-            else -> false
-        }
-        val observer = if ("observer_membership_id" in payload) {
-            payload.requireNullableString("observer_membership_id", "wake_observation").orEmpty()
-        } else {
-            ""
+        // Records from the same pull page apply first; an existing Wake cannot
+        // be retargeted to a different source Sleep by a later stable version.
+        if (resolveWakeReference(
+                wire = wire,
+                recordDao = recordDao,
+                expectedSleepClientUuid = existing?.sleepRecordClientUuid,
+            ) == null
+        ) {
+            return false
         }
         wakeObservationDao.upsert(
             com.lezi.babylog.core.database.causal.WakeObservationEntity(
                 id = existing?.id ?: 0,
                 clientUuid = entity.clientUuid,
-                sleepRecordClientUuid = sleepUuid,
-                wakeTimestamp = wakeTs,
-                observerMembershipId = observer.ifBlank {
-                    existing?.observerMembershipId.orEmpty()
-                },
-                note = note,
-                withdrawn = withdrawn,
+                sleepRecordClientUuid = wire.sleepRecordClientUuid,
+                wakeTimestamp = wire.wakeTimestamp,
+                observerMembershipId = requireNotNull(wire.observerMembershipId),
+                note = wire.note,
+                withdrawn = wire.withdrawn,
                 updatedAt = entity.updatedAt,
                 deletedAt = entity.deletedAt,
                 syncDirty = false,
@@ -2327,6 +2313,10 @@ internal class ReplicaSyncEngine(
             enqueue(SyncWireMapper.fulfillmentCandidate(candidate))
         }
         media.forEach { asset ->
+            // Wake media is part of the WakeObservation causal root. Until the
+            // generic media spool lands, keep it pending instead of routing it
+            // through the legacy standalone media publisher.
+            if (asset.kind == "wake") return@forEach
             val recordUuid = asset.recordId
                 ?.let { recordDao.getIncludingDeleted(it)?.clientUuid }
             val carePlanUuid = asset.carePlanId
@@ -2378,6 +2368,10 @@ internal class ReplicaSyncEngine(
         // Inspect the complete local media set so historical zero/null probe fields cannot reach
         // reconcile merely because the row already has a publication receipt.
         for (snapshot in mediaDao.listAllIncludingDeleted()) {
+            // Wake media belongs exclusively to the causal root owner. The legacy
+            // repair path must not inspect, normalize, tombstone, or delete it;
+            // H18/H20 will own its immutable spool and receipt settlement.
+            if (snapshot.kind == "wake") continue
             val inspected = snapshot.localUri
                 .takeIf(String::isNotBlank)
                 ?.let { mediaFiles.inspect(it) }
@@ -2392,9 +2386,10 @@ internal class ReplicaSyncEngine(
                 val carePlan = current.carePlanId?.let { carePlanDao.get(it) }
                 val baby = current.babyId?.let { babyDao.getIncludingDeleted(it) }
                 val validOwner = when (current.kind) {
-                    "log" -> (record != null) xor (carePlan != null)
+                    "log" -> ((record != null) xor (carePlan != null)) &&
+                        current.babyId == null && current.wakeObservationId == null
                     "avatar" -> baby != null && current.recordId == null &&
-                        current.carePlanId == null
+                        current.carePlanId == null && current.wakeObservationId == null
                     else -> false
                 }
                 if (!validOwner) {

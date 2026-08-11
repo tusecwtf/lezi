@@ -250,6 +250,173 @@ class CausalRoomTransactionTest {
     }
 
     @Test
+    fun wakeCommitFirstDaoPreservesSourceAndObserverAcrossSupersededBranch() = runBlocking {
+        val wakes = database.wakeObservationDao()
+        wakes.upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-commit-first",
+                sleepRecordClientUuid = "sleep-source",
+                wakeTimestamp = 200,
+                observerMembershipId = "server-observer",
+                note = "epoch-1",
+                withdrawn = false,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-wake-base",
+            ),
+        )
+        assertThat(
+            wakes.freezeCommitFirstEpoch(
+                "wake-commit-first",
+                100,
+                "wake-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("wake-mutation-1")
+        val frozen = requireNotNull(wakes.getByClientUuid("wake-commit-first"))
+        wakes.update(
+            frozen.copy(
+                wakeTimestamp = 240,
+                note = "epoch-2",
+                withdrawn = true,
+                updatedAt = 200,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+
+        assertThat(
+            wakes.settleCommitFirstBranched(
+                "wake-commit-first",
+                "wake-mutation-1",
+                100,
+                "wake-conflict",
+                "wake-branch",
+                "v-wake-stable",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        with(requireNotNull(wakes.getByClientUuid("wake-commit-first"))) {
+            assertThat(sleepRecordClientUuid).isEqualTo("sleep-source")
+            assertThat(observerMembershipId).isEqualTo("server-observer")
+            assertThat(wakeTimestamp).isEqualTo(240)
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(withdrawn).isTrue()
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-wake-stable")
+            assertThat(openConflictId).isEqualTo("wake-conflict")
+            assertThat(localBranchVersionId).isEqualTo("wake-branch")
+        }
+    }
+
+    @Test
+    fun wakeAcceptedAndMergedCurrentOrSupersededCasPreservesFactsAndRollsBack() = runBlocking {
+        data class Case(val disposition: String, val superseded: Boolean)
+        val wakes = database.wakeObservationDao()
+        for (case in listOf(
+            Case("accepted", superseded = false),
+            Case("accepted", superseded = true),
+            Case("merged", superseded = false),
+            Case("merged", superseded = true),
+        )) {
+            val suffix = "${case.disposition}-${case.superseded}"
+            val clientUuid = "wake-$suffix"
+            wakes.upsert(
+                WakeObservationEntity(
+                    clientUuid = clientUuid,
+                    sleepRecordClientUuid = "sleep-$suffix",
+                    wakeTimestamp = 200,
+                    observerMembershipId = "server-observer-$suffix",
+                    note = "epoch-1-$suffix",
+                    withdrawn = false,
+                    updatedAt = 100,
+                    syncDirty = true,
+                    baseVersion = "v-base-$suffix",
+                ),
+            )
+            assertThat(
+                wakes.freezeCommitFirstEpoch(clientUuid, 100, "mutation-$suffix")?.mutationId,
+            ).isEqualTo("mutation-$suffix")
+            if (case.superseded) {
+                val frozen = requireNotNull(wakes.getByClientUuid(clientUuid))
+                wakes.update(
+                    frozen.copy(
+                        wakeTimestamp = 240,
+                        note = "epoch-2-$suffix",
+                        withdrawn = true,
+                        updatedAt = 200,
+                        syncDirty = true,
+                        mutationId = null,
+                    ),
+                )
+            }
+
+            assertThat(
+                wakes.settleCommitFirstAcceptedOrMerged(
+                    clientUuid,
+                    "mutation-$suffix",
+                    100,
+                    "v-stable-$suffix",
+                ),
+            ).isEqualTo(
+                if (case.superseded) {
+                    CommitFirstSettlementEpoch.SupersededEpoch
+                } else {
+                    CommitFirstSettlementEpoch.CurrentEpoch
+                },
+            )
+            with(requireNotNull(wakes.getByClientUuid(clientUuid))) {
+                assertThat(sleepRecordClientUuid).isEqualTo("sleep-$suffix")
+                assertThat(observerMembershipId).isEqualTo("server-observer-$suffix")
+                assertThat(wakeTimestamp).isEqualTo(if (case.superseded) 240 else 200)
+                assertThat(note).isEqualTo(
+                    if (case.superseded) "epoch-2-$suffix" else "epoch-1-$suffix",
+                )
+                assertThat(withdrawn).isEqualTo(case.superseded)
+                assertThat(updatedAt).isEqualTo(if (case.superseded) 200 else 100)
+                assertThat(baseVersion).isEqualTo("v-stable-$suffix")
+                assertThat(familyPublishedUpdatedAt).isEqualTo(100)
+                assertThat(syncDirty).isEqualTo(case.superseded)
+                assertThat(mutationId).isNull()
+                assertThat(openConflictId).isNull()
+                assertThat(localBranchVersionId).isNull()
+            }
+        }
+
+        val rollbackUuid = "wake-accepted-rollback"
+        wakes.upsert(
+            WakeObservationEntity(
+                clientUuid = rollbackUuid,
+                sleepRecordClientUuid = "sleep-rollback",
+                wakeTimestamp = 300,
+                observerMembershipId = "server-observer-rollback",
+                note = "rollback-fact",
+                withdrawn = false,
+                updatedAt = 300,
+                syncDirty = true,
+                baseVersion = "v-rollback-base",
+            ),
+        )
+        wakes.freezeCommitFirstEpoch(rollbackUuid, 300, "mutation-rollback")
+        val beforeRollback = requireNotNull(wakes.getByClientUuid(rollbackUuid))
+        val failure = runCatching {
+            RoomDatabaseTransactionRunner(database).run {
+                checkNotNull(
+                    wakes.settleCommitFirstAcceptedOrMerged(
+                        rollbackUuid,
+                        "mutation-rollback",
+                        300,
+                        "v-never-visible",
+                    ),
+                )
+                error("projection after Wake settlement failed")
+            }
+        }.exceptionOrNull()
+        assertThat(failure).isNotNull()
+        assertThat(wakes.getByClientUuid(rollbackUuid)).isEqualTo(beforeRollback)
+    }
+
+    @Test
     fun providerCommitFirstDaosPreserveCurrentAndSupersededProductEpochs() = runBlocking {
         val babies = database.babyDao()
         val customItems = database.customItemDao()

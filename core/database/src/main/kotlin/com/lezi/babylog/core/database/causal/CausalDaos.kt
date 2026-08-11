@@ -23,6 +23,9 @@ private fun sourceRelationMemberSetFingerprint(memberIds: Set<String>): String {
 
 @Dao
 interface WakeObservationDao {
+    @Query("SELECT * FROM wake_observations WHERE id = :id LIMIT 1")
+    suspend fun get(id: Long): WakeObservationEntity?
+
     @Query("SELECT * FROM wake_observations WHERE clientUuid = :uuid LIMIT 1")
     suspend fun getByClientUuid(uuid: String): WakeObservationEntity?
 
@@ -99,6 +102,92 @@ interface WakeObservationDao {
         )
         update(written)
         return written
+    }
+
+    /** Freeze one no-media WakeObservation envelope at its captured fact epoch. */
+    @Transaction
+    suspend fun freezeCommitFirstEpoch(
+        clientUuid: String,
+        contentEpoch: Long,
+        newMutationId: String,
+    ): WakeObservationEntity? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        val next = com.lezi.babylog.core.database.causal.freezeCommitFirstEpoch(
+            current = current.toCausalMutationState(),
+            contentEpoch = contentEpoch,
+            newMutationId = newMutationId,
+        ) ?: return null
+        val cols = next.toAppliedColumns()
+        val written = current.copy(
+            baseVersion = cols.baseVersion,
+            mutationId = cols.mutationId,
+            syncDirty = cols.syncDirty,
+            openConflictId = cols.openConflictId,
+            localBranchVersionId = cols.localBranchVersionId,
+        )
+        update(written)
+        return written
+    }
+
+    /** Settle a WakeObservation terminal while preserving a newer observed fact. */
+    @Transaction
+    suspend fun settleCommitFirstAcceptedOrMerged(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        newBaseVersion: String,
+    ): CommitFirstSettlementEpoch? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        val settled = com.lezi.babylog.core.database.causal.settleCommitFirstAcceptedOrMerged(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            newBaseVersion = newBaseVersion,
+        ) ?: return null
+        val cols = settled.state.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+                familyPublishedUpdatedAt = expectedContentEpoch,
+            ),
+        )
+        return settled.epoch
+    }
+
+    /** Same epoch policy as accepted/merged for a durable WakeObservation branch. */
+    @Transaction
+    suspend fun settleCommitFirstBranched(
+        clientUuid: String,
+        expectedMutationId: String,
+        expectedContentEpoch: Long,
+        conflictId: String,
+        branchVersionId: String,
+        stableBaseVersion: String,
+    ): CommitFirstSettlementEpoch? {
+        val current = getByClientUuid(clientUuid) ?: return null
+        val settled = com.lezi.babylog.core.database.causal.settleCommitFirstBranched(
+            current = current.toCausalMutationState(),
+            expectedMutationId = expectedMutationId,
+            expectedContentEpoch = expectedContentEpoch,
+            conflictId = conflictId,
+            branchVersionId = branchVersionId,
+            stableBaseVersion = stableBaseVersion,
+        ) ?: return null
+        val cols = settled.state.toAppliedColumns()
+        update(
+            current.copy(
+                baseVersion = cols.baseVersion,
+                mutationId = cols.mutationId,
+                syncDirty = cols.syncDirty,
+                openConflictId = cols.openConflictId,
+                localBranchVersionId = cols.localBranchVersionId,
+            ),
+        )
+        return settled.epoch
     }
 
     /** Exact CAS accepted/merged ack for the frozen mutation epoch. */

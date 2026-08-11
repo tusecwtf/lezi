@@ -28,6 +28,9 @@ internal class FakeWakeObservationDao : WakeObservationDao {
 
     fun itemsSnapshot(): List<WakeObservationEntity> = items.toList()
 
+    override suspend fun get(id: Long): WakeObservationEntity? =
+        items.find { it.id == id }
+
     override suspend fun getByClientUuid(uuid: String): WakeObservationEntity? =
         items.find { it.clientUuid == uuid }
 

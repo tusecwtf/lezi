@@ -15,6 +15,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Test
 
 /**
@@ -605,7 +609,6 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 syncDirty = true,
             ),
         )
-
         mediaRig.engine.synchronize(mediaSession, SyncTrigger.LocalWrite)
 
         assertThat(mediaRig.backend.pullCount).isEqualTo(0)
@@ -1237,9 +1240,10 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun localWriteCoBatchedSleepCommitsBeforeWakeSourceReconcile() = runTest {
-        // H10 owns only the no-media Record. The dependent Wake stays on the
-        // source reconcile path, but sees the accepted sleep in the same cycle.
+    fun localWriteCoBatchesSleepAndWakeInOneDirectCommit() = runTest {
+        // H13 preserves the Sleep source UUID while moving the dependent Wake
+        // onto the same commit-first batch. LocalWrite must not resurrect the
+        // source reconcile owner or advance the pull cursor.
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 6)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -1278,32 +1282,22 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
             ),
         )
 
-        rig.backend.onCausalReconcile = { units ->
-            assertThat(units.map { it.entityType }).containsExactly("wake_observation")
-            val results = units.map { unit ->
-                CausalUnitResult(
-                    status = CausalReconcileStatus.PUBLISH,
-                    mutationId = unit.mutationId,
-                    requestHash = causalMutationContentHash(unit),
-                    generation = session.pullGeneration,
-                )
-            }
-            rig.backend.nextCausalReconcile = CausalBatchResult(
-                generation = session.pullGeneration,
-                cursor = session.pullCursor,
-                results = results,
-            )
-        }
-
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(6)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
-            .containsExactly("causal_commit:1", "causal_reconcile:1", "causal_commit:1")
+            .containsExactly("causal_commit:2")
             .inOrder()
-        assertThat(rig.backend.causalReconciledUnits).hasSize(1)
-        assertThat(rig.backend.causalCommittedUnits).hasSize(2)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
+        assertThat(rig.backend.causalCommittedUnits.single().map { it.entityType })
+            .containsExactly("record", "wake_observation")
+            .inOrder()
+        val wakeEnvelope = rig.backend.causalCommittedUnits.single().last()
+        assertThat(wakeEnvelope.rootJson)
+            .contains("\"sleep_record_client_uuid\":\"$sleepUuid\"")
+        assertThat(wakeEnvelope.rootJson).doesNotContain("observer_membership_id")
         val sleep = requireNotNull(rig.records.getByClientUuid(sleepUuid))
         val wake = requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))
         assertThat(sleep.syncDirty).isFalse()
@@ -1311,6 +1305,310 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(wake.syncDirty).isFalse()
         assertThat(wake.baseVersion).isNotNull()
         assertThat(wake.openConflictId).isNull()
+    }
+
+    @Test
+    fun acceptedWakeProjectsOnlyTheServerObserverStamp() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 7)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val sleepUuid = "sleep-stamped-wake"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = sleepUuid,
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 100,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = false,
+                baseVersion = "v-sleep",
+            ),
+        )
+        val wakeUuid = "wake-server-stamp"
+        rig.wakeObservations.seed(
+            com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                clientUuid = wakeUuid,
+                sleepRecordClientUuid = sleepUuid,
+                wakeTimestamp = 200,
+                observerMembershipId = "",
+                note = "observed",
+                withdrawn = false,
+                updatedAt = 200,
+                syncDirty = true,
+                baseVersion = null,
+            ),
+        )
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            assertThat(unit.rootJson).doesNotContain("observer_membership_id")
+            val stampedRoot = unit.rootJson.dropLast(1) +
+                ",\"observer_membership_id\":\"server-observer\"}"
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = 999,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.ACCEPTED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-wake-stamped",
+                        stableRootJson = stampedRoot,
+                        stableMedia = emptyList(),
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        with(requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))) {
+            assertThat(observerMembershipId).isEqualTo("server-observer")
+            assertThat(baseVersion).isEqualTo("v-wake-stamped")
+            assertThat(syncDirty).isFalse()
+        }
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(7)
+    }
+
+    @Test
+    fun invalidWakeTerminalProofsWriteNoProductOrConflictState() = runTest {
+        data class Case(
+            val name: String,
+            val corrupt: (MutableMap<String, JsonElement>) -> Unit,
+        )
+        val cases = listOf(
+            Case("missing-observer") { it.remove("observer_membership_id") },
+            Case("wrong-wake-timestamp-type") {
+                it["wake_timestamp"] = JsonPrimitive("200")
+            },
+            Case("wrong-withdrawn-type") { it["withdrawn"] = JsonPrimitive("false") },
+            Case("wrong-observer-type") { it["observer_membership_id"] = JsonPrimitive(42) },
+            Case("source-uuid-drift") {
+                it["sleep_record_client_uuid"] = JsonPrimitive("other-sleep")
+            },
+            Case("wake-before-sleep") { it["wake_timestamp"] = JsonPrimitive(99) },
+        )
+        for (case in cases) {
+            val (session, rig, wakeUuid) = seedDirtyWake(
+                pullCursor = 71,
+                clientUuid = "wake-invalid-${case.name}",
+            )
+            val source = requireNotNull(
+                rig.records.getByClientUuid("sleep-$wakeUuid"),
+            )
+            rig.records.seed(
+                source.copy(
+                    id = 0,
+                    clientUuid = "other-sleep",
+                    baseVersion = "v-other-sleep",
+                ),
+            )
+            var beforeTerminal: com.lezi.babylog.core.database.causal.WakeObservationEntity? = null
+            rig.backend.onCausalCommit = { units ->
+                val unit = units.single()
+                beforeTerminal = rig.wakeObservations.getByClientUuid(wakeUuid)
+                val stable = Json.parseToJsonElement(unit.rootJson).jsonObject.toMutableMap()
+                stable["observer_membership_id"] = JsonPrimitive("server-observer")
+                case.corrupt(stable)
+                rig.backend.nextCausalCommit = CausalBatchResult(
+                    generation = session.pullGeneration,
+                    cursor = 999,
+                    results = listOf(
+                        CausalUnitResult(
+                            status = CausalCommitStatus.ACCEPTED,
+                            mutationId = unit.mutationId,
+                            requestHash = causalMutationContentHash(unit),
+                            generation = session.pullGeneration,
+                            stableVersionId = "v-invalid-${case.name}",
+                            stableRootJson = kotlinx.serialization.json.JsonObject(stable).toString(),
+                            stableMedia = emptyList(),
+                        ),
+                    ),
+                )
+            }
+
+            val failure = runCatching {
+                rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+            assertThat(failure).hasMessageThat().contains("frozen commit proof invalid")
+            assertThat(rig.wakeObservations.getByClientUuid(wakeUuid))
+                .isEqualTo(requireNotNull(beforeTerminal))
+            assertThat(rig.conflictSummaries.listForRoot("wake_observation", wakeUuid)).isEmpty()
+            assertThat(rig.conflictDetails.getFrozenMutation("wake_observation", wakeUuid))
+                .isNotNull()
+        }
+    }
+
+    @Test
+    fun wakeLiveAndTombstoneCommitDirectlyButDanglingOrMediaRootsWait() = runTest {
+        for (deleted in listOf(false, true)) {
+            val (session, rig, wakeUuid) = seedDirtyWake(
+                pullCursor = 8,
+                clientUuid = "wake-direct-$deleted",
+                deleted = deleted,
+            )
+
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+            val committed = rig.backend.causalCommittedUnits.single().single()
+            assertThat(committed.entityType).isEqualTo("wake_observation")
+            assertThat(committed.clientUuid).isEqualTo(wakeUuid)
+            assertThat(committed.deleted).isEqualTo(deleted)
+            assertThat(committed.media).isEmpty()
+            assertThat(committed.rootJson).doesNotContain("observer_membership_id")
+            assertThat(rig.backend.causalReconciledUnits).isEmpty()
+            assertThat(rig.backend.pullCount).isEqualTo(0)
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(8)
+        }
+
+        val missingSession = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 9)
+        val missingRig = ReplicaEngineRig(missingSession).also { it.backend.enableCausal = true }
+        missingRig.wakeObservations.seed(
+            com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                clientUuid = "wake-missing-sleep",
+                sleepRecordClientUuid = "missing-sleep",
+                wakeTimestamp = 200,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+
+        missingRig.engine.synchronize(missingSession, SyncTrigger.LocalWrite)
+
+        assertThat(missingRig.backend.causalCommittedUnits).isEmpty()
+        assertThat(missingRig.backend.causalReconciledUnits).isEmpty()
+        assertThat(
+            requireNotNull(
+                missingRig.wakeObservations.getByClientUuid("wake-missing-sleep"),
+            ).syncDirty,
+        ).isTrue()
+        assertThat(
+            missingRig.conflictDetails.getFrozenMutation(
+                "wake_observation",
+                "wake-missing-sleep",
+            ),
+        ).isNull()
+
+        val (mediaSession, mediaRig, mediaWakeUuid) = seedDirtyWake(
+            pullCursor = 10,
+            clientUuid = "wake-media-waits",
+        )
+        val wake = requireNotNull(mediaRig.wakeObservations.getByClientUuid(mediaWakeUuid))
+        mediaRig.media.seed(
+            MediaAssetEntity(
+                wakeObservationId = wake.id,
+                clientUuid = "00000000-0000-4000-8000-000000001300",
+                kind = "wake",
+                localUri = "/private/wake.jpg",
+                createdAt = 100,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        assertThat(mediaRig.media.listActiveForWakeObservation(wake.id)).hasSize(1)
+
+        mediaRig.engine.synchronize(mediaSession, SyncTrigger.LocalWrite)
+
+        assertThat(mediaRig.media.listActiveForWakeObservation(wake.id)).hasSize(1)
+        assertThat(mediaRig.backend.causalCommittedUnits).isEmpty()
+        assertThat(mediaRig.backend.causalReconciledUnits).isEmpty()
+        assertThat(requireNotNull(mediaRig.wakeObservations.getByClientUuid(mediaWakeUuid)).syncDirty)
+            .isTrue()
+        assertThat(mediaRig.conflictDetails.getFrozenMutation("wake_observation", mediaWakeUuid))
+            .isNull()
+    }
+
+    @Test
+    fun lostWakeResponseReplaysExactEnvelopeAndBranchedCasPreservesNewerObservation() = runTest {
+        val (session, rig, wakeUuid) = seedDirtyWake(
+            pullCursor = 11,
+            clientUuid = "wake-lost-branch",
+        )
+        var frozen: com.lezi.babylog.sync.backend.CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            frozen = units.single()
+            throw java.io.IOException("wake response lost")
+        }
+        assertThat(
+            runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }.exceptionOrNull(),
+        ).isInstanceOf(java.io.IOException::class.java)
+        val firstEnvelope = requireNotNull(frozen)
+        val firstRow = requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))
+        rig.wakeObservations.update(
+            firstRow.copy(
+                wakeTimestamp = 240,
+                note = "newer observation",
+                withdrawn = true,
+                updatedAt = 300,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+
+        rig.backend.onCausalCommit = { units ->
+            val replay = units.single()
+            assertThat(replay).isEqualTo(firstEnvelope)
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = 999,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = replay.mutationId,
+                        requestHash = causalMutationContentHash(replay),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-wake-stable",
+                        stableRootJson = replay.rootJson.dropLast(1) +
+                            ",\"observer_membership_id\":\"server-observer\"}",
+                        stableMedia = emptyList(),
+                        branchVersionId = "branch-wake",
+                        conflictId = "conflict-wake",
+                    ),
+                ),
+            )
+        }
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        with(requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))) {
+            assertThat(wakeTimestamp).isEqualTo(240)
+            assertThat(note).isEqualTo("newer observation")
+            assertThat(withdrawn).isTrue()
+            assertThat(updatedAt).isEqualTo(300)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-wake-stable")
+            assertThat(openConflictId).isEqualTo("conflict-wake")
+            assertThat(localBranchVersionId).isEqualTo("branch-wake")
+        }
+        assertThat(rig.conflictDetails.getFrozenMutation("wake_observation", wakeUuid)).isNull()
+
+        rig.backend.onCausalCommit = null
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val replanned = rig.backend.causalCommittedUnits.last().single()
+        assertThat(replanned.mutationId).isNotEqualTo(firstEnvelope.mutationId)
+        assertThat(replanned.baseVersion).isEqualTo("v-wake-stable")
+        assertThat(replanned.rootJson).contains("\"wake_timestamp\":240")
+        assertThat(replanned.rootJson).contains("\"withdrawn\":true")
+        assertThat(replanned.rootJson).contains("newer observation")
+        assertThat(replanned.rootJson)
+            .contains("\"sleep_record_client_uuid\":\"sleep-$wakeUuid\"")
+        assertThat(replanned.rootJson).doesNotContain("observer_membership_id")
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(11)
     }
 
     @Test
@@ -1440,6 +1738,51 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 syncDirty = true,
                 deletedAt = if (deleted) 149 else null,
                 baseVersion = "v-plan-base",
+            ),
+        )
+        return Triple(session, rig, clientUuid)
+    }
+
+    private fun seedDirtyWake(
+        pullCursor: Long,
+        clientUuid: String,
+        deleted: Boolean = false,
+    ): Triple<com.lezi.babylog.sync.session.SyncSession, ReplicaEngineRig, String> {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = pullCursor)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
+        val sleepUuid = "sleep-$clientUuid"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = sleepUuid,
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 100,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = false,
+                baseVersion = "v-sleep",
+            ),
+        )
+        rig.wakeObservations.seed(
+            com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                clientUuid = clientUuid,
+                sleepRecordClientUuid = sleepUuid,
+                wakeTimestamp = 200,
+                observerMembershipId = "membership-a",
+                note = "epoch-1",
+                withdrawn = false,
+                updatedAt = 200,
+                deletedAt = if (deleted) 199 else null,
+                syncDirty = true,
+                baseVersion = "v-wake-base",
             ),
         )
         return Triple(session, rig, clientUuid)

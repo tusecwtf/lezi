@@ -54,6 +54,8 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -845,7 +847,13 @@ internal class RecordingSyncBackend : SyncBackend {
                 },
                 generation = session.pullGeneration,
                 stableVersionId = stableVersion,
-                stableRootJson = unit.rootJson.ifBlank { "{}" },
+                stableRootJson = if (unit.entityType == "wake_observation") {
+                    val root = Json.parseToJsonElement(unit.rootJson).jsonObject.toMutableMap()
+                    root["observer_membership_id"] = JsonPrimitive(session.membershipId)
+                    JsonObject(root).toString()
+                } else {
+                    unit.rootJson.ifBlank { "{}" }
+                },
                 stableMedia = unit.media,
                 branchVersionId = null,
                 conflictId = null,
@@ -2699,6 +2707,11 @@ internal class MemoryWakeObservationDao :
         items += entity.copy(id = id)
         return id
     }
+
+    override suspend fun get(
+        id: Long,
+    ): com.lezi.babylog.core.database.causal.WakeObservationEntity? =
+        items.find { it.id == id }
 
     override suspend fun getByClientUuid(
         uuid: String,
