@@ -969,7 +969,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
     }
 
     @Test
-    fun localWriteWithLogPhotoStagesMediaPreimageBetweenReconcileAndCommit() = runTest {
+    fun localWriteWithLogPhotoPreparesReceiptThenCommitsWithoutReconcile() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 4)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
@@ -1014,7 +1014,6 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly(
-                "causal_reconcile:1",
                 "causal_media_preimage:$mediaUuid",
                 "causal_commit:1",
             )

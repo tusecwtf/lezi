@@ -272,11 +272,12 @@ class ReplicaSyncEngineCausalSettlementTest {
                     originalMediaUuid,
                     "00000000-0000-4000-8000-000000000003",
                 )
-                assertThat(rig.backend.causalReconciledUnits).isNotEmpty()
-                rig.backend.causalReconciledUnits.forEach { batch ->
-                    assertThat(batch.single().media.map { it.mediaUuid }.toSet())
-                        .isEqualTo(expectedMedia)
-                }
+                assertThat(rig.backend.causalReconciledUnits).isEmpty()
+                assertThat(
+                    rig.backend.causalCommittedUnits.single().single().media
+                        .map { it.mediaUuid }
+                        .toSet(),
+                ).isEqualTo(expectedMedia)
                 assertThat(rig.records.getByClientUuid("record-media-race-add")!!.syncDirty)
                     .isFalse()
                 assertThat(rig.media.listPendingSync()).isEmpty()
@@ -291,7 +292,7 @@ class ReplicaSyncEngineCausalSettlementTest {
 
     @Test
     fun lostMediaCommitResponseReplaysCommitWithoutUploadingTheDurableReceiptAgain() = runTest {
-        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 72)
         val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
         val babyId = rig.babies.seed(
             localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
@@ -312,12 +313,15 @@ class ReplicaSyncEngineCausalSettlementTest {
             ),
         )
         val mediaUuid = "00000000-0000-4000-8000-000000000011"
+        val originalBytes = byteArrayOf(1, 3, 5, 7, 9)
+        val mediaUri = "/private/lost-response.jpg"
+        rig.mediaFiles.preparedUploadBytes[mediaUri] = originalBytes
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
                 clientUuid = mediaUuid,
                 kind = "log",
-                localUri = "/private/lost-response.jpg",
+                localUri = mediaUri,
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = true,
@@ -349,14 +353,19 @@ class ReplicaSyncEngineCausalSettlementTest {
                 syncDirty = true,
             ),
         )
+        rig.mediaFiles.preparedUploadBytes[mediaUri] = byteArrayOf(2, 4, 6, 8)
 
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
         assertThat(commitAttempts).isEqualTo(2)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits.last().single())
             .isEqualTo(requireNotNull(firstMutation))
         assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
             .containsExactly(mediaUuid)
+        assertThat(rig.backend.causalMediaPreimageBytes.single().second)
+            .isEqualTo(originalBytes)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(72)
         val superseding = requireNotNull(
             rig.records.getByClientUuid("record-media-lost-response"),
         )
@@ -423,17 +432,16 @@ class ReplicaSyncEngineCausalSettlementTest {
             runCatching { rig.engine.synchronize(session, SyncTrigger.LocalWrite) }
                 .exceptionOrNull(),
         ).isInstanceOf(java.io.IOException::class.java)
-        val firstMutation = rig.backend.causalReconciledUnits.single().single()
-        val pendingRow = requireNotNull(
-            rig.conflictDetails.getFrozenMediaSpoolManifest(firstMutation.mutationId),
-        )
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        val pendingRow = rig.conflictDetails.listFrozenMediaSpoolManifests().single()
         val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.snapshotJson))
+        val firstMutation = pending.mutation
         assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.Pending)
         assertThat(pending.receipts.map { it.mediaUuid }).containsExactly(firstMedia)
 
         rig.newEngine().synchronize(session, SyncTrigger.LocalWrite)
 
-        assertThat(rig.backend.causalReconciledUnits.last().single()).isEqualTo(firstMutation)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits.single().single()).isEqualTo(firstMutation)
         assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
             .containsExactly(firstMedia, secondMedia)
@@ -505,6 +513,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
         val frozenMutationId = requireNotNull(mutationId)
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).hasSize(commits)
         assertThat(rig.backend.causalMediaPreimageBytes).hasSize(uploads)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
@@ -514,6 +523,142 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(rig.records.getByClientUuid("record-media-branch")?.syncDirty).isFalse()
         assertThat(rig.records.getByClientUuid("record-media-branch")?.openConflictId)
             .isEqualTo("conflict-media")
+    }
+
+    @Test
+    fun recordTombstoneAndRemovedMediaCommitTogetherAndRemainConflictDiscoverable() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 73)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-media-tombstone",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = """{"amount_ml":60}""",
+                schemaVersion = 2,
+                updatedAt = 200,
+                deletedAt = 200,
+                syncDirty = true,
+                baseVersion = "v-live",
+            ),
+        )
+        val mediaUuid = "00000000-0000-4000-8000-000000000021"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "/private/deleted-record-media.jpg",
+                createdAt = 100,
+                updatedAt = 200,
+                deletedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.onCausalCommit = { units ->
+            val unit = units.single()
+            assertThat(unit.entityType).isEqualTo("record")
+            assertThat(unit.deleted).isTrue()
+            assertThat(unit.media).isEmpty()
+            rig.backend.nextCausalCommit = CausalBatchResult(
+                generation = session.pullGeneration,
+                cursor = session.pullCursor,
+                results = listOf(
+                    CausalUnitResult(
+                        status = CausalCommitStatus.BRANCHED,
+                        mutationId = unit.mutationId,
+                        requestHash = causalMutationContentHash(unit),
+                        generation = session.pullGeneration,
+                        stableVersionId = "v-live",
+                        stableRootJson = unit.rootJson,
+                        stableMedia = emptyList(),
+                        conflictId = "conflict-delete-edit-media",
+                        branchVersionId = "branch-delete-media",
+                    ),
+                ),
+            )
+        }
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
+        assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(73)
+        assertThat(rig.records.getByClientUuid("record-media-tombstone")?.openConflictId)
+            .isEqualTo("conflict-delete-edit-media")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isEqualTo(200)
+        assertThat(
+            rig.conflictSummaries.get("conflict-delete-edit-media")?.branchVersionIdsJson,
+        ).contains("branch-delete-media")
+    }
+
+    @Test
+    fun recordMigrationDoesNotSettleWakeTombstoneMedia() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner, pullCursor = 74)
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "00000000-0000-4000-8000-000000000030",
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        val sleepUuid = "00000000-0000-4000-8000-000000000031"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = sleepUuid,
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 100,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 100,
+                syncDirty = false,
+                baseVersion = "v-sleep-live",
+            ),
+        )
+        val wakeUuid = "00000000-0000-4000-8000-000000000032"
+        val wakeId = rig.wakeObservations.seed(
+            com.lezi.babylog.core.database.causal.WakeObservationEntity(
+                clientUuid = wakeUuid,
+                sleepRecordClientUuid = sleepUuid,
+                wakeTimestamp = 200,
+                observerMembershipId = "membership-a",
+                withdrawn = true,
+                updatedAt = 300,
+                deletedAt = 300,
+                syncDirty = true,
+                baseVersion = "v-wake-live",
+            ),
+        )
+        val mediaUuid = "00000000-0000-4000-8000-000000000033"
+        rig.media.seed(
+            MediaAssetEntity(
+                wakeObservationId = wakeId,
+                clientUuid = mediaUuid,
+                kind = "wake",
+                localUri = "/private/deleted-wake-media.jpg",
+                createdAt = 200,
+                updatedAt = 300,
+                deletedAt = 300,
+                syncDirty = true,
+            ),
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
+            .containsExactly("wake_observation")
+        assertThat(rig.backend.causalReconciledUnits).isEmpty()
+        assertThat(rig.wakeObservations.getByClientUuid(wakeUuid)?.syncDirty).isFalse()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.syncDirty).isTrue()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isEqualTo(300)
     }
 
     @Test

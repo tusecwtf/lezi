@@ -22,7 +22,6 @@ import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalReconcileStatus
 import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.FamilyMemberDirectorySnapshot
@@ -280,7 +279,7 @@ private class DeviceCausalBackend : SyncBackend {
     override suspend fun causalReconcile(
         session: SyncSession,
         units: List<CausalMutationUnit>,
-    ) = batch(session, units, CausalReconcileStatus.PUBLISH)
+    ): CausalBatchResult = error("Record media must not use source reconcile")
 
     override suspend fun putCausalMediaPreimage(
         session: SyncSession,
