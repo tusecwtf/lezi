@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -28,6 +28,79 @@ struct Rig {
     directory: TempDir,
     app: Router,
     now: Arc<AtomicI64>,
+}
+
+type PrepareBlockingHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+type PrepareBlockingRelease = Arc<(Mutex<bool>, Condvar)>;
+
+struct PrepareBlockingReleaseGuard {
+    release: PrepareBlockingRelease,
+}
+
+impl PrepareBlockingReleaseGuard {
+    fn release(&self) {
+        let (released, condition) = &*self.release;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        condition.notify_all();
+    }
+}
+
+impl Drop for PrepareBlockingReleaseGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn blocked_prepare_hook(
+    blocked_phase: &'static str,
+) -> (
+    PrepareBlockingHook,
+    std::sync::mpsc::Receiver<&'static str>,
+    PrepareBlockingReleaseGuard,
+) {
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let hook_release = release.clone();
+    let hook = Arc::new(move |phase: &'static str| {
+        events_tx.send(phase).ok();
+        if phase == blocked_phase {
+            let (released, condition) = &*hook_release;
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                let (next, timeout) = condition
+                    .wait_timeout(released, Duration::from_secs(2))
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                released = next;
+                if !*released && timeout.timed_out() {
+                    drop(released);
+                    panic!("causal media prepare test hook was not released");
+                }
+            }
+        }
+    });
+    (hook, events_rx, PrepareBlockingReleaseGuard { release })
+}
+
+#[test]
+fn blocked_prepare_hook_times_out_once_and_can_still_be_released() {
+    let (hook, _events, release) = blocked_prepare_hook("before_verify");
+    let started = std::time::Instant::now();
+
+    let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hook("before_verify");
+    }));
+
+    assert!(timed_out.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    release.release();
+    let after_release = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hook("before_verify");
+    }));
+    assert!(after_release.is_ok());
 }
 
 #[derive(Clone)]
@@ -16160,8 +16233,21 @@ async fn put_causal_media_bytes(
     media_uuid: Uuid,
     bytes: &[u8],
 ) -> (StatusCode, Value) {
+    let response = put_causal_media_raw(app, token, media_uuid, bytes).await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    (status, value)
+}
+
+async fn put_causal_media_raw(
+    app: &Router,
+    token: &str,
+    media_uuid: Uuid,
+    bytes: &[u8],
+) -> axum::response::Response {
     let sha = hex::encode(Sha256::digest(bytes));
-    let response = request_with_headers(
+    request_with_headers(
         app,
         Method::PUT,
         &format!("/v1/causal/media/{media_uuid}"),
@@ -16170,11 +16256,29 @@ async fn put_causal_media_bytes(
         Some("application/octet-stream"),
         &[("x-lezi-media-sha256", sha.as_str())],
     )
-    .await;
-    let status = response.status();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
-    (status, value)
+    .await
+}
+
+fn spawn_causal_media_put(
+    app: &Router,
+    token: &str,
+    media_uuid: Uuid,
+) -> tokio::task::JoinHandle<axum::response::Response> {
+    let app = app.clone();
+    let token = token.to_owned();
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    tokio::spawn(async move {
+        request_with_headers(
+            &app,
+            Method::PUT,
+            &format!("/v1/causal/media/{media_uuid}"),
+            Some(&token),
+            Body::from(b"xy".to_vec()),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        )
+        .await
+    })
 }
 
 async fn seed_causal_baby(app: &Router, token: &str) -> Uuid {
@@ -17589,6 +17693,689 @@ async fn causal_media_commit_rejects_same_size_different_digest_before_publicati
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn causal_media_prepare_rejects_declared_length_drift_without_a_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-length-owner",
+        "causal-media-length-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"length-bound-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let declared = (bytes.len() + 1).to_string();
+
+    let response = request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/causal/media/{media_id}"),
+        Some(token),
+        Body::from(bytes.to_vec()),
+        Some("application/octet-stream"),
+        &[
+            ("x-lezi-media-sha256", sha.as_str()),
+            ("content-length", declared.as_str()),
+        ],
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "length drift minted a durable receipt");
+    assert!(!rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string())
+        .exists());
+}
+
+#[tokio::test]
+async fn causal_media_prepare_rejects_digest_drift_without_a_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-digest-owner",
+        "causal-media-digest-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"digest-bound-preimage";
+    let wrong_sha = hex::encode(Sha256::digest(b"different-preimage"));
+
+    let response = request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/causal/media/{media_id}"),
+        Some(token),
+        Body::from(bytes.to_vec()),
+        Some("application/octet-stream"),
+        &[("x-lezi-media-sha256", wrong_sha.as_str())],
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "digest drift minted a durable receipt");
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id);
+    let leftovers = fs::read_dir(staging_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "digest drift left incoming bytes");
+}
+
+#[tokio::test]
+async fn causal_media_prepare_binds_receipt_to_membership_and_family() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "causal-media-binding-owner",
+        "causal-media-binding-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let owner_membership_id = owner["membership_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"principal-bound-preimage";
+
+    let (status, staged) = put_causal_media_bytes(&rig.app, owner_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    let (status, conflict) = put_causal_media_bytes(&rig.app, member_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let receipt_membership: String = connection
+        .query_row(
+            "SELECT membership_id FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_membership, owner_membership_id);
+
+    let other_rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let other = create_family(
+        &other_rig.app,
+        "causal-media-binding-other-owner",
+        "causal-media-binding-other-request-00001",
+    )
+    .await;
+    let other_token = other["access_token"].as_str().unwrap();
+    let (status, independent) =
+        put_causal_media_bytes(&other_rig.app, other_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{independent}");
+    assert_ne!(other["family_id"], owner["family_id"]);
+}
+
+#[tokio::test]
+async fn slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_commit() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-slow-owner",
+        "causal-media-slow-request-0000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let media_id = Uuid::new_v4();
+    let bytes = b"slow-streamed-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (first_written_tx, first_written_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let upload_stream = futures_util::stream::unfold(
+        (0, Some(first_written_tx), Some(release_rx)),
+        |(index, mut first_written, mut release)| async move {
+            match index {
+                0 => Some((
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"slow-")),
+                    (1, first_written, release),
+                )),
+                1 => {
+                    first_written.take().unwrap().send(()).ok();
+                    release.take().unwrap().await.ok();
+                    Some((
+                        Ok(Bytes::from_static(b"streamed-preimage")),
+                        (2, first_written, release),
+                    ))
+                }
+                _ => None,
+            }
+        },
+    );
+    let upload_app = rig.app.clone();
+    let upload_token = token.clone();
+    let upload = tokio::spawn(async move {
+        request_with_headers(
+            &upload_app,
+            Method::PUT,
+            &format!("/v1/causal/media/{media_id}"),
+            Some(&upload_token),
+            Body::from_stream(upload_stream),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        )
+        .await
+    });
+    first_written_rx.await.unwrap();
+
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(&family_id);
+    let incoming = fs::read_dir(&staging_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+        .expect("first chunk was streamed to a server-owned incoming file");
+    assert_eq!(incoming.metadata().unwrap().len(), 5);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let receipt_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_rows, 0, "partial body minted a durable receipt");
+
+    let commit = tokio::time::timeout(
+        Duration::from_millis(500),
+        commit_causal_record(
+            &rig.app,
+            &token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            "small-during-slow-upload",
+        ),
+    )
+    .await
+    .expect("small causal commit waited on a slow media body");
+    assert_eq!(commit.0, StatusCode::OK, "{}", commit.1);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
+    let staged_path = staging_dir.join(media_id.to_string());
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+    assert!(!incoming.path().exists());
+}
+
+#[tokio::test]
+async fn causal_media_prepare_inflight_admission_bounds_and_releases_cancelled_streams() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-admission-owner",
+        "causal-media-admission-request-0000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    let mut uploads = Vec::new();
+    let mut releases = Vec::new();
+    for _ in 0..2 {
+        let media_id = Uuid::new_v4();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let stream = futures_util::stream::unfold(
+            (0, Some(started_tx), Some(release_rx)),
+            |(index, mut started, mut release)| async move {
+                match index {
+                    0 => Some((
+                        Ok::<_, std::io::Error>(Bytes::from_static(b"x")),
+                        (1, started, release),
+                    )),
+                    1 => {
+                        started.take().unwrap().send(()).ok();
+                        release.take().unwrap().await.ok();
+                        Some((Ok(Bytes::from_static(b"y")), (2, started, release)))
+                    }
+                    _ => None,
+                }
+            },
+        );
+        let app = rig.app.clone();
+        let upload_token = token.clone();
+        let upload_sha = sha.clone();
+        uploads.push(tokio::spawn(async move {
+            request_with_headers(
+                &app,
+                Method::PUT,
+                &format!("/v1/causal/media/{media_id}"),
+                Some(&upload_token),
+                Body::from_stream(stream),
+                Some("application/octet-stream"),
+                &[("x-lezi-media-sha256", upload_sha.as_str())],
+            )
+            .await
+        }));
+        releases.push(release_tx);
+        started_rx.await.unwrap();
+    }
+
+    let rejected_id = Uuid::new_v4();
+    let rejected = tokio::time::timeout(
+        Duration::from_millis(500),
+        request_with_headers(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/causal/media/{rejected_id}"),
+            Some(&token),
+            Body::from(Bytes::from_static(b"xy")),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        ),
+    )
+    .await
+    .expect("saturated admission waited for a slow body");
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rejected.headers()["retry-after"], "1");
+
+    uploads[0].abort();
+    assert!(uploads.remove(0).await.unwrap_err().is_cancelled());
+    drop(releases.remove(0));
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id);
+    assert_eq!(
+        fs::read_dir(&staging_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+            .count(),
+        1,
+        "cancelled upload kept its temp reservation"
+    );
+
+    let replacement_id = Uuid::new_v4();
+    let replacement = request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/causal/media/{replacement_id}"),
+        Some(&token),
+        Body::from(Bytes::from_static(b"xy")),
+        Some("application/octet-stream"),
+        &[("x-lezi-media-sha256", sha.as_str())],
+    )
+    .await;
+    assert_eq!(replacement.status(), StatusCode::OK);
+
+    releases.remove(0).send(()).unwrap();
+    assert_eq!(uploads.remove(0).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cancelled_prepare_keeps_admission_and_temp_owned_until_verification_finishes() {
+    let (hook, events, release) = blocked_prepare_hook("before_verify");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_prepare_blocking_hook = Some(hook);
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-verify-cancel-owner",
+        "causal-media-verify-cancel-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    let mut uploads = media_ids
+        .iter()
+        .map(|media_id| spawn_causal_media_put(&rig.app, &token, *media_id))
+        .collect::<Vec<_>>();
+    let events = tokio::task::spawn_blocking(move || {
+        for _ in 0..2 {
+            assert_eq!(
+                events.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "before_verify"
+            );
+        }
+        events
+    })
+    .await
+    .unwrap();
+
+    for upload in &uploads {
+        upload.abort();
+    }
+    for upload in uploads.drain(..) {
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id);
+    assert_eq!(
+        fs::read_dir(&staging_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+            .count(),
+        2,
+        "cancel detached the verifier from its temp owner"
+    );
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    let saturated = tokio::time::timeout(
+        Duration::from_millis(500),
+        request_with_headers(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/causal/media/{}", Uuid::new_v4()),
+            Some(&token),
+            Body::from(b"xy".to_vec()),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        ),
+    )
+    .await
+    .expect("verification cancellation released admission into the blocked hook");
+    assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    release.release();
+    tokio::task::spawn_blocking(move || {
+        let mut completed = 0;
+        while completed < 2 {
+            if events.recv_timeout(Duration::from_secs(2)).unwrap() == "after_store" {
+                completed += 1;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let replacement_id = Uuid::new_v4();
+    assert_eq!(
+        spawn_causal_media_put(&rig.app, &token, replacement_id)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        fs::read_dir(&staging_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".upload.tmp"))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn cancelled_prepare_keeps_family_lock_and_admission_until_store_finishes() {
+    let (hook, events, release) = blocked_prepare_hook("before_store");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_prepare_blocking_hook = Some(hook);
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-store-cancel-owner",
+        "causal-media-store-cancel-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let media_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    let mut uploads = media_ids
+        .iter()
+        .map(|media_id| spawn_causal_media_put(&rig.app, &token, *media_id))
+        .collect::<Vec<_>>();
+    let events = tokio::task::spawn_blocking(move || {
+        let mut verifying = 0;
+        let mut storing = 0;
+        while verifying < 2 || storing < 1 {
+            match events.recv_timeout(Duration::from_secs(2)).unwrap() {
+                "before_verify" => verifying += 1,
+                "before_store" => storing += 1,
+                _ => {}
+            }
+        }
+        events
+    })
+    .await
+    .unwrap();
+
+    for upload in &uploads {
+        upload.abort();
+    }
+    for upload in uploads.drain(..) {
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    let saturated = tokio::time::timeout(
+        Duration::from_millis(500),
+        request_with_headers(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/causal/media/{}", Uuid::new_v4()),
+            Some(&token),
+            Body::from(b"xy".to_vec()),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        ),
+    )
+    .await
+    .expect("Store cancellation released admission into the blocked hook");
+    assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+    let commit_app = rig.app.clone();
+    let commit_token = token.clone();
+    let mut commit = tokio::spawn(async move {
+        commit_causal_record(
+            &commit_app,
+            &commit_token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            "small-during-cancelled-store",
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut commit)
+            .await
+            .is_err(),
+        "cancelled handler released the family lock before Store finished"
+    );
+
+    release.release();
+    tokio::task::spawn_blocking(move || {
+        let mut completed = 0;
+        while completed < 2 {
+            if events.recv_timeout(Duration::from_secs(2)).unwrap() == "after_store" {
+                completed += 1;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let committed = commit.await.unwrap();
+    assert_eq!(committed.0, StatusCode::OK, "{}", committed.1);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let staged: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND status = 'staged'",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(staged, 2, "detached Store work split receipt/file state");
+    for media_id in media_ids {
+        assert_eq!(
+            fs::read(
+                rig.directory
+                    .path()
+                    .join("media/.causal-stage")
+                    .join(&family_id)
+                    .join(media_id.to_string())
+            )
+            .unwrap(),
+            b"xy"
+        );
+    }
+}
+
+#[tokio::test]
+async fn causal_media_prepare_exact_replay_repairs_same_size_staged_corruption() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-corruption-owner",
+        "causal-media-corruption-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"verified-preimage";
+    let corrupt = b"corrupt-preimage!";
+    assert_eq!(bytes.len(), corrupt.len());
+    let (status, first) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    fs::write(&staged_path, corrupt).unwrap();
+
+    let (status, replay) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, first, "exact replay changed its receipt semantics");
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn causal_media_prepare_restart_replay_preserves_the_exact_durable_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-restart-owner",
+        "causal-media-restart-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"restart-durable-preimage";
+    let first = put_causal_media_raw(&rig.app, token, media_id, bytes).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_bytes = first.into_body().collect().await.unwrap().to_bytes();
+    let database_path = rig.directory.path().join("lezi.db");
+    let durable_receipt = || {
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .query_row(
+                "SELECT COUNT(*), membership_id, sha256, byte_size,
+                        created_at, expires_at, status
+                 FROM causal_media_staging
+                 WHERE family_id = ?1 AND media_uuid = ?2",
+                rusqlite::params![family_id, media_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before_restart = durable_receipt();
+    assert_eq!(before_restart.0, 1);
+    assert_eq!(before_restart.6, "staged");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    let published_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(media_id.to_string());
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+    assert!(!published_path.exists());
+
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let replay = put_causal_media_raw(&restarted, token, media_id, bytes).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_bytes = replay.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(replay_bytes, first_bytes);
+    assert_eq!(durable_receipt(), before_restart);
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+    assert!(!published_path.exists());
 }
 
 #[tokio::test]

@@ -57,7 +57,8 @@ pub use causal::{
 pub(crate) use causal_admission::CausalAdmissionConfig;
 pub use causal_admission::CausalCommitSaturation;
 pub use causal_media_staging::{
-    CausalMediaStageStatus, CausalMediaStagingLimits, DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+    CausalMediaStageStatus, CausalMediaStagingLimits, VerifiedCausalMediaPreimage,
+    DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
 };
 pub use causal_merge::CausalMediaItem;
 pub use conflict_snapshots::{ConflictDetailPage, ConflictDetailPageRequest};

@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H16 and R12/R17/R18/R19 are implemented; H17 is the serial frontier
+Status: in-progress — H01–H17 and R12/R17/R18/R19 are implemented; H18 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -41,7 +41,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 14 | [`14-authenticated-sync-handshake`](./issues/14-authenticated-sync-handshake.md) | implemented (review/final gates pass; device instrumentation residual) | 12, 13 |
 | 15 | [`15-retry-after-full-jitter`](./issues/15-retry-after-full-jitter.md) | implemented (review/final gates pass; device instrumentation residual) | 14 |
 | 16 | [`16-gzip-bounded-pull`](./issues/16-gzip-bounded-pull.md) | implemented (review/final gates pass; device Room instrumentation residual) | 14, 15 |
-| 17 | [`17-streaming-preimage-receipt`](./issues/17-streaming-preimage-receipt.md) | ready-for-agent | 14, 15 |
+| 17 | [`17-streaming-preimage-receipt`](./issues/17-streaming-preimage-receipt.md) | implemented (review/final gates pass; device instrumentation residual) | 14, 15 |
 | 18 | [`18-android-immutable-media-spool`](./issues/18-android-immutable-media-spool.md) | ready-for-agent | 10, 17 |
 | 19 | [`19-server-receipt-media-commit`](./issues/19-server-receipt-media-commit.md) | ready-for-agent | 17 |
 | 20 | [`20-android-media-settlement`](./issues/20-android-media-settlement.md) | ready-for-agent | 18, 19 |
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H16 is implemented. H17 is the next executable DAG frontier; H17–H43 remain open and follow
+H17 is implemented. H18 is the next executable DAG frontier; H18–H43 remain open and follow
 the serial order above. H27
 completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.

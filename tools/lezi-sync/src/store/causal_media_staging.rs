@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
@@ -48,6 +48,44 @@ pub struct CausalMediaStageStatus {
     pub byte_size: usize,
     pub sha256: String,
     pub expires_at: i64,
+}
+
+/// File-backed preimage whose exact length and digest were verified before the
+/// caller enters a family lock or SQLite write transaction.
+pub struct VerifiedCausalMediaPreimage {
+    path: PathBuf,
+    byte_size: usize,
+    sha256: String,
+}
+
+impl VerifiedCausalMediaPreimage {
+    pub(crate) fn verify(
+        path: PathBuf,
+        expected_sha256: &str,
+        max_file_bytes: usize,
+    ) -> Result<Self, StoreError> {
+        let metadata = fs::symlink_metadata(&path)?;
+        let byte_size =
+            usize::try_from(metadata.len()).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
+        if !metadata.file_type().is_file()
+            || byte_size == 0
+            || byte_size > max_file_bytes
+            || expected_sha256.len() != 64
+            || !expected_sha256
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err(StoreError::InvalidCausalMediaStaging);
+        }
+        if !checked_digest(&path, byte_size, expected_sha256)? {
+            return Err(StoreError::CausalMediaPreimageConflict);
+        }
+        Ok(Self {
+            path,
+            byte_size,
+            sha256: expected_sha256.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -117,7 +155,17 @@ fn checked_digest(path: &Path, byte_size: usize, sha256: &str) -> Result<bool, S
     if !metadata.file_type().is_file() || metadata.len() != byte_size as u64 {
         return Ok(false);
     }
-    Ok(hex::encode(Sha256::digest(fs::read(path)?)) == sha256)
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex::encode(digest.finalize()) == sha256)
 }
 
 fn sync_parent(path: &Path) -> Result<(), StoreError> {
@@ -173,38 +221,35 @@ fn remove_untracked_staging_files(
     Ok(())
 }
 
-fn write_staged_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+fn install_staged_file(
+    path: &Path,
+    incoming: &VerifiedCausalMediaPreimage,
+) -> Result<(), StoreError> {
     let parent = path.parent().ok_or(StoreError::InvalidCausalMediaStaging)?;
     fs::create_dir_all(parent)?;
     crate::secure_directory(parent)?;
     if path.try_exists()? {
-        return Ok(());
-    }
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name().unwrap().to_string_lossy(),
-        Uuid::new_v4()
-    ));
-    let result = (|| -> Result<(), StoreError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        crate::secure_file(&temporary)?;
-        fs::rename(&temporary, path)?;
-        crate::secure_file(path)?;
-        crate::sync_directory(parent)?;
-        if let Some(root) = parent.parent() {
-            crate::sync_directory(root)?;
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::CausalMediaPreimageConflict);
         }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
     }
-    result
+    let incoming_metadata = fs::symlink_metadata(&incoming.path)?;
+    if !incoming_metadata.file_type().is_file()
+        || incoming_metadata.len() != incoming.byte_size as u64
+    {
+        return Err(StoreError::InvalidCausalMediaStaging);
+    }
+    // The incoming file has already been fully verified outside the family
+    // lock. Replacing an exact receipt path repairs same-size corruption with
+    // one metadata operation; no large read/hash occurs in the critical path.
+    fs::rename(&incoming.path, path)?;
+    crate::secure_file(path)?;
+    crate::sync_directory(parent)?;
+    if let Some(root) = parent.parent() {
+        crate::sync_directory(root)?;
+    }
+    Ok(())
 }
 
 fn hard_link_fallback_allowed(error: &std::io::Error) -> bool {
@@ -515,28 +560,17 @@ pub(in crate::store) fn consume_manifest(
 }
 
 impl Store {
-    pub fn stage_causal_media_preimage(
+    pub fn stage_verified_causal_media_preimage(
         &self,
         principal: &Principal,
         media_uuid: &str,
-        bytes: &[u8],
-        expected_sha256: &str,
+        incoming: &VerifiedCausalMediaPreimage,
         now: i64,
         limits: CausalMediaStagingLimits,
     ) -> Result<CausalMediaStageStatus, StoreError> {
         Uuid::parse_str(media_uuid).map_err(|_| StoreError::InvalidCausalMediaStaging)?;
-        if bytes.is_empty()
-            || bytes.len() > limits.max_file_bytes
-            || limits.ttl_seconds <= 0
-            || expected_sha256.len() != 64
-            || !expected_sha256
-                .bytes()
-                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        {
+        if incoming.byte_size > limits.max_file_bytes || limits.ttl_seconds <= 0 {
             return Err(StoreError::InvalidCausalMediaStaging);
-        }
-        if hex::encode(Sha256::digest(bytes)) != expected_sha256 {
-            return Err(StoreError::CausalMediaPreimageConflict);
         }
 
         let mut connection = self.connect()?;
@@ -547,11 +581,10 @@ impl Store {
             {
                 return Err(StoreError::InvalidCausalMediaStaging);
             }
-            if row.sha256 != expected_sha256 || row.byte_size != bytes.len() {
+            if row.sha256 != incoming.sha256 || row.byte_size != incoming.byte_size {
                 return Err(StoreError::CausalMediaPreimageConflict);
             }
-            if row.status != StagingStatus::Consumed && row.membership_id != principal.membership_id
-            {
+            if row.membership_id != principal.membership_id {
                 return Err(StoreError::CausalMediaMembershipMismatch);
             }
             tx.commit()?;
@@ -560,22 +593,24 @@ impl Store {
             } else {
                 staging_path(&self.database_path, &principal.family_id, media_uuid)
             };
-            if !checked_digest(&path, row.byte_size, &row.sha256)? {
-                if row.status == StagingStatus::Consumed {
-                    return Err(StoreError::InvalidCausalMediaStaging);
-                }
-                write_staged_file(&path, bytes)?;
-                if !checked_digest(&path, row.byte_size, &row.sha256)? {
-                    return Err(StoreError::CausalMediaPreimageConflict);
-                }
-            }
+            install_staged_file(&path, incoming)?;
             if row.status == StagingStatus::Writing {
                 let connection = self.connect()?;
-                connection.execute(
+                let updated = connection.execute(
                     "UPDATE causal_media_staging SET status = 'staged'
-                     WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'",
-                    params![principal.family_id, media_uuid],
+                     WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'
+                       AND membership_id = ?3 AND sha256 = ?4 AND byte_size = ?5",
+                    params![
+                        principal.family_id,
+                        media_uuid,
+                        principal.membership_id,
+                        incoming.sha256,
+                        incoming.byte_size,
+                    ],
                 )?;
+                if updated != 1 {
+                    return Err(StoreError::InvalidCausalMediaStaging);
+                }
             }
             return Ok(CausalMediaStageStatus {
                 media_uuid: media_uuid.to_owned(),
@@ -607,7 +642,7 @@ impl Store {
         if family_count >= limits.max_family_count as i64 {
             return Err(StoreError::CausalMediaStagingQuota("family_count"));
         }
-        if family_bytes.saturating_add(bytes.len() as i64) > limits.max_family_bytes as i64 {
+        if family_bytes.saturating_add(incoming.byte_size as i64) > limits.max_family_bytes as i64 {
             return Err(StoreError::CausalMediaStagingQuota("family_bytes"));
         }
         let expires_at = now.saturating_add(limits.ttl_seconds);
@@ -620,8 +655,8 @@ impl Store {
                 principal.family_id,
                 principal.membership_id,
                 media_uuid,
-                expected_sha256,
-                bytes.len(),
+                incoming.sha256,
+                incoming.byte_size,
                 now,
                 expires_at,
             ],
@@ -629,21 +664,28 @@ impl Store {
         tx.commit()?;
 
         let path = staging_path(&self.database_path, &principal.family_id, media_uuid);
-        write_staged_file(&path, bytes)?;
-        if !checked_digest(&path, bytes.len(), expected_sha256)? {
-            return Err(StoreError::CausalMediaPreimageConflict);
-        }
+        install_staged_file(&path, incoming)?;
         let connection = self.connect()?;
-        connection.execute(
+        let updated = connection.execute(
             "UPDATE causal_media_staging SET status = 'staged'
-             WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'",
-            params![principal.family_id, media_uuid],
+             WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'writing'
+               AND membership_id = ?3 AND sha256 = ?4 AND byte_size = ?5",
+            params![
+                principal.family_id,
+                media_uuid,
+                principal.membership_id,
+                incoming.sha256,
+                incoming.byte_size,
+            ],
         )?;
+        if updated != 1 {
+            return Err(StoreError::InvalidCausalMediaStaging);
+        }
         Ok(CausalMediaStageStatus {
             media_uuid: media_uuid.to_owned(),
             status: "staged".to_owned(),
-            byte_size: bytes.len(),
-            sha256: expected_sha256.to_owned(),
+            byte_size: incoming.byte_size,
+            sha256: incoming.sha256.clone(),
             expires_at,
         })
     }
@@ -739,7 +781,8 @@ impl Store {
         self.gc_expired_causal_media_preimages_scoped(None, now)
     }
 
-    pub fn gc_expired_causal_media_preimages_for_family(
+    #[cfg(test)]
+    pub(super) fn gc_expired_causal_media_preimages_for_family(
         &self,
         family_id: &str,
         now: i64,

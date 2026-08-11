@@ -1043,6 +1043,7 @@ class HttpSyncBackend internal constructor(
             extraHeaders = mapOf(
                 "X-Lezi-Media-Sha256" to sha256,
             ),
+            retryOperation = SyncRetryOperation.MediaPrepare,
         )
     }
 
@@ -1635,11 +1636,17 @@ class HttpSyncBackend internal constructor(
         source: SyncMediaUploadSource,
         trustedEndpoint: TrustedEndpointProfile? = null,
         extraHeaders: Map<String, String> = emptyMap(),
+        retryOperation: SyncRetryOperation? = null,
     ): JsonObject {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
             require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
                 "待上传媒体大小超出支持范围"
+            }
+            val retryAttempt = currentCoroutineContext()[SyncRetryAttemptContext]
+                ?.takeIf { it.operation == retryOperation }
+            val remainingMillis = retryAttempt?.remainingMillis()?.also {
+                if (it <= 0) throw SyncRetryBudgetExceededException(requireNotNull(retryOperation))
             }
             val connection = open(
                 base,
@@ -1648,7 +1655,12 @@ class HttpSyncBackend internal constructor(
                 token,
                 extraHeaders = extraHeaders,
                 trustedEndpoint = resolvedEndpoint,
+                retryOperation = retryOperation,
+                remainingMillis = remainingMillis,
             )
+            val deadlineWatchdog = remainingMillis?.let {
+                RetryDeadlineDisconnectWatchdog(connection, it)
+            }
             try {
                 connection.doOutput = true
                 connection.setRequestProperty(
@@ -1701,6 +1713,7 @@ class HttpSyncBackend internal constructor(
                 require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
                 Json.parseToJsonElement(text).jsonObject
             } finally {
+                deadlineWatchdog?.close()
                 connection.disconnect()
             }
         }

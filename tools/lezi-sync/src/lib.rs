@@ -160,6 +160,10 @@ pub struct ServerConfig {
     pub require_protocol_cutover_release: bool,
     /// Optional LAN-only HTTP origin that serves the first-install APK page.
     pub lan_apk_download_origin: Option<String>,
+    /// Deterministic cancellation seam for isolated causal-media tests.
+    #[doc(hidden)]
+    pub causal_media_prepare_blocking_hook:
+        Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     clock: Clock,
 }
 
@@ -191,6 +195,7 @@ impl ServerConfig {
             app_update_apk_path: None,
             require_protocol_cutover_release: false,
             lan_apk_download_origin: None,
+            causal_media_prepare_blocking_hook: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -329,6 +334,7 @@ struct AppState {
     generation: String,
     clock: Clock,
     family_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    causal_media_upload_admission: media::CausalMediaUploadAdmission,
     restore_locks: RestoreLockPool,
     bootstrap_secret: Option<Arc<str>>,
     owner_root_fingerprint: Option<Arc<str>>,
@@ -343,6 +349,7 @@ struct AppState {
     app_update_apk_path: PathBuf,
     app_update_cache: Arc<app_update::AppUpdateCache>,
     lan_apk_landing_url: Option<Arc<str>>,
+    causal_media_prepare_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
 }
 
 impl AppState {
@@ -491,6 +498,19 @@ impl AppState {
             .join(family_id)
             .join(".stage")
             .join(bundle_id.to_string()))
+    }
+
+    fn causal_media_incoming_path(
+        &self,
+        family_id: &str,
+        media_uuid: &Uuid,
+    ) -> Result<PathBuf, ApiError> {
+        let family_id = self.safe_family_id(family_id)?;
+        Ok(self
+            .media_root
+            .join(".causal-stage")
+            .join(family_id)
+            .join(format!(".{}.{}.upload.tmp", media_uuid, Uuid::new_v4(),)))
     }
 
     fn bundle_media_path(
@@ -659,6 +679,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         generation: config.generation.unwrap_or_else(secure_generation),
         clock: config.clock,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
+        causal_media_upload_admission: media::CausalMediaUploadAdmission::default(),
         restore_locks: RestoreLockPool::default(),
         bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
         owner_root_fingerprint: owner_root_fingerprint
@@ -674,6 +695,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         app_update_apk_path,
         app_update_cache,
         lan_apk_landing_url,
+        causal_media_prepare_blocking_hook: config.causal_media_prepare_blocking_hook,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     let state = Arc::new(state);
@@ -1355,6 +1377,25 @@ impl ApiError {
             authenticate: false,
             code: Some(saturation.code()),
             retry_after_seconds: Some(DEFAULT_RATE_LIMIT_WINDOW_SECONDS as u64),
+        }
+    }
+
+    fn causal_media_prepare_saturated(scope: &'static str) -> Self {
+        let code = match scope {
+            "principal" => "causal_media_prepare_principal_saturated",
+            "family" => "causal_media_prepare_family_saturated",
+            _ => "causal_media_prepare_saturated",
+        };
+        tracing::warn!(reason_code = code, scope, "causal media prepare saturated");
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            detail: json!({
+                "scope": scope,
+                "retryable": true,
+            }),
+            authenticate: false,
+            code: Some(code),
+            retry_after_seconds: Some(1),
         }
     }
 

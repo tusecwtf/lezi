@@ -9,9 +9,10 @@ import com.lezi.babylog.sync.backend.PullPageRequest
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
 import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
+import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.SyncSession
 
-/** Applies [SyncRetryPolicy] only to the five idempotent operations owned by H15. */
+/** Applies [SyncRetryPolicy] only to the idempotent operations owned by H15/H17. */
 internal class RetryingSyncBackend(
     private val delegate: SyncBackend,
     clock: SyncRetryClock = SystemSyncRetryClock,
@@ -39,6 +40,15 @@ internal class RetryingSyncBackend(
         return policy.execute(SyncRetryOperation.Commit) {
             delegate.causalCommit(session, units)
         }
+    }
+
+    override suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: SyncMediaUploadSource,
+        sha256: String,
+    ) = policy.execute(SyncRetryOperation.MediaPrepare) {
+        delegate.putCausalMediaPreimage(session, mediaUuid, source, sha256)
     }
 
     override suspend fun fetchConflictSnapshotPage(

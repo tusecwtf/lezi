@@ -17,10 +17,12 @@ import com.lezi.babylog.sync.backend.SyncHandshakePrincipal
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.testPullPage
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.sourceCausalHandshake
+import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Instant
@@ -34,6 +36,46 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Test
 
 class RetryingSyncBackendTest {
+    @Test
+    fun mediaPrepareUsesItsReservedBudgetAndExactFrozenRequest() = runTest {
+        val source = object : SyncMediaUploadSource {
+            override val contentLength = 3L
+            override val mime = "image/jpeg"
+            override fun openStream() = ByteArrayInputStream(byteArrayOf(1, 2, 3))
+        }
+        val requests = mutableListOf<Triple<String, SyncMediaUploadSource, String>>()
+        val delegate = object : SyncBackend by FakeSyncBackend() {
+            override suspend fun putCausalMediaPreimage(
+                session: SyncSession,
+                mediaUuid: String,
+                source: SyncMediaUploadSource,
+                sha256: String,
+            ) {
+                requests += Triple(mediaUuid, source, sha256)
+                if (requests.size == 1) throw SyncHttpException(503)
+            }
+        }
+        val backend = RetryingSyncBackend(
+            delegate,
+            random = SyncRetryRandom { 0 },
+            delay = SyncRetryDelay { },
+        )
+
+        backend.putCausalMediaPreimage(
+            SyncSession(),
+            "00000000-0000-4000-8000-000000000017",
+            source,
+            "17".repeat(32),
+        )
+
+        assertThat(requests).hasSize(2)
+        requests.forEach { (mediaUuid, retriedSource, sha256) ->
+            assertThat(mediaUuid).isEqualTo("00000000-0000-4000-8000-000000000017")
+            assertThat(retriedSource).isSameInstanceAs(source)
+            assertThat(sha256).isEqualTo("17".repeat(32))
+        }
+    }
+
     @Test
     fun pullRetriesPreserveTheExactNegotiatedPageRequest() = runTest {
         val request = PullPageRequest(

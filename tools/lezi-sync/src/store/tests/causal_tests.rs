@@ -8,9 +8,10 @@ use super::test_support::*;
 use rusqlite::params;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread;
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
 fn map(v: Value) -> Map<String, Value> {
@@ -374,12 +375,19 @@ impl CausalFx {
     fn stage_media_bytes(&self, item: &mut CausalMediaItem) {
         let bytes = vec![0u8; item.byte_size as usize];
         item.sha256 = hex::encode(Sha256::digest(&bytes));
+        let incoming = NamedTempFile::new().unwrap();
+        fs::write(incoming.path(), &bytes).unwrap();
+        let verified = VerifiedCausalMediaPreimage::verify(
+            incoming.path().to_owned(),
+            &item.sha256,
+            DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.max_file_bytes,
+        )
+        .unwrap();
         self.store
-            .stage_causal_media_preimage(
+            .stage_verified_causal_media_preimage(
                 &self.owner,
                 &item.media_uuid,
-                &bytes,
-                &item.sha256,
+                &verified,
                 1_700_000_000,
                 DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
             )

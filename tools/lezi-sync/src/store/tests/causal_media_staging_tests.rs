@@ -3,7 +3,7 @@
 use std::fs;
 
 use sha2::{Digest, Sha256};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
 use super::super::*;
@@ -31,15 +31,162 @@ fn limits() -> CausalMediaStagingLimits {
 }
 
 #[test]
+fn causal_media_staging_defaults_and_injected_equality_boundaries_are_frozen() {
+    assert_eq!(
+        DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.max_file_bytes,
+        10 * 1024 * 1024
+    );
+    assert_eq!(DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.max_membership_count, 64);
+    assert_eq!(DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.max_family_count, 256);
+    assert_eq!(
+        DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.max_family_bytes,
+        512 * 1024 * 1024
+    );
+    assert_eq!(
+        DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS.ttl_seconds,
+        24 * 60 * 60
+    );
+
+    let (_directory, store, owner) = fixture();
+    let count_limits = CausalMediaStagingLimits {
+        max_file_bytes: 4,
+        max_membership_count: 3,
+        max_family_count: 2,
+        max_family_bytes: 16,
+        ttl_seconds: 10,
+    };
+    for bytes in [b"a".as_slice(), b"b".as_slice()] {
+        store
+            .stage_test_preimage(
+                &owner,
+                &Uuid::new_v4().to_string(),
+                bytes,
+                &digest(bytes),
+                100,
+                count_limits,
+            )
+            .unwrap();
+    }
+    assert!(matches!(
+        store.stage_test_preimage(
+            &owner,
+            &Uuid::new_v4().to_string(),
+            b"c",
+            &digest(b"c"),
+            100,
+            count_limits,
+        ),
+        Err(StoreError::CausalMediaStagingQuota("family_count"))
+    ));
+
+    let (_directory, store, owner) = fixture();
+    let byte_limits = CausalMediaStagingLimits {
+        max_file_bytes: 4,
+        max_membership_count: 3,
+        max_family_count: 3,
+        max_family_bytes: 5,
+        ttl_seconds: 10,
+    };
+    for bytes in [b"abc".as_slice(), b"de".as_slice()] {
+        store
+            .stage_test_preimage(
+                &owner,
+                &Uuid::new_v4().to_string(),
+                bytes,
+                &digest(bytes),
+                100,
+                byte_limits,
+            )
+            .unwrap();
+    }
+    assert!(matches!(
+        store.stage_test_preimage(
+            &owner,
+            &Uuid::new_v4().to_string(),
+            b"f",
+            &digest(b"f"),
+            100,
+            byte_limits,
+        ),
+        Err(StoreError::CausalMediaStagingQuota("family_bytes"))
+    ));
+
+    let (_directory, store, owner) = fixture();
+    let file_limits = CausalMediaStagingLimits {
+        max_file_bytes: 8,
+        max_membership_count: 2,
+        max_family_count: 2,
+        max_family_bytes: 32,
+        ttl_seconds: 10,
+    };
+    let exact = b"12345678";
+    store
+        .stage_test_preimage(
+            &owner,
+            &Uuid::new_v4().to_string(),
+            exact,
+            &digest(exact),
+            100,
+            file_limits,
+        )
+        .unwrap();
+    let over = b"123456789";
+    assert!(matches!(
+        store.stage_test_preimage(
+            &owner,
+            &Uuid::new_v4().to_string(),
+            over,
+            &digest(over),
+            100,
+            file_limits,
+        ),
+        Err(StoreError::InvalidCausalMediaStaging)
+    ));
+}
+
+trait TestCausalMediaStage {
+    fn stage_test_preimage(
+        &self,
+        principal: &Principal,
+        media_uuid: &str,
+        bytes: &[u8],
+        expected_sha256: &str,
+        now: i64,
+        limits: CausalMediaStagingLimits,
+    ) -> Result<CausalMediaStageStatus, StoreError>;
+}
+
+impl TestCausalMediaStage for Store {
+    fn stage_test_preimage(
+        &self,
+        principal: &Principal,
+        media_uuid: &str,
+        bytes: &[u8],
+        expected_sha256: &str,
+        now: i64,
+        limits: CausalMediaStagingLimits,
+    ) -> Result<CausalMediaStageStatus, StoreError> {
+        let incoming = NamedTempFile::new().unwrap();
+        fs::write(incoming.path(), bytes).unwrap();
+        let verified = VerifiedCausalMediaPreimage::verify(
+            incoming.path().to_owned(),
+            expected_sha256,
+            limits.max_file_bytes,
+        )?;
+        self.stage_verified_causal_media_preimage(principal, media_uuid, &verified, now, limits)
+    }
+}
+
+#[test]
 fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     let (_directory, store, owner) = fixture();
     let first = Uuid::new_v4().to_string();
     store
-        .stage_causal_media_preimage(&owner, &first, b"abc", &digest(b"abc"), 100, limits())
+        .stage_test_preimage(&owner, &first, b"abc", &digest(b"abc"), 100, limits())
         .unwrap();
     // Exact replay is idempotent and does not consume another quota slot.
     store
-        .stage_causal_media_preimage(&owner, &first, b"abc", &digest(b"abc"), 101, limits())
+        .stage_test_preimage(&owner, &first, b"abc", &digest(b"abc"), 101, limits())
         .unwrap();
     let peer = Principal {
         membership_id: "m-peer".to_owned(),
@@ -47,11 +194,11 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
         ..owner.clone()
     };
     assert!(matches!(
-        store.stage_causal_media_preimage(&peer, &first, b"abc", &digest(b"abc"), 101, limits(),),
+        store.stage_test_preimage(&peer, &first, b"abc", &digest(b"abc"), 101, limits(),),
         Err(StoreError::CausalMediaMembershipMismatch)
     ));
     assert!(matches!(
-        store.stage_causal_media_preimage(
+        store.stage_test_preimage(
             &owner,
             &Uuid::new_v4().to_string(),
             b"d",
@@ -67,7 +214,7 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     family_limits.max_membership_count = 2;
     family_limits.max_family_count = 1;
     store
-        .stage_causal_media_preimage(
+        .stage_test_preimage(
             &owner,
             &Uuid::new_v4().to_string(),
             b"a",
@@ -82,7 +229,7 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
         ..owner.clone()
     };
     assert!(matches!(
-        store.stage_causal_media_preimage(
+        store.stage_test_preimage(
             &peer,
             &Uuid::new_v4().to_string(),
             b"b",
@@ -97,7 +244,7 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
     let mut byte_limits = limits();
     byte_limits.max_membership_count = 3;
     store
-        .stage_causal_media_preimage(
+        .stage_test_preimage(
             &owner,
             &Uuid::new_v4().to_string(),
             b"abcd",
@@ -107,7 +254,7 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
         )
         .unwrap();
     assert!(matches!(
-        store.stage_causal_media_preimage(
+        store.stage_test_preimage(
             &owner,
             &Uuid::new_v4().to_string(),
             b"ef",
@@ -120,7 +267,7 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
 
     let too_large = b"123456789";
     assert!(matches!(
-        store.stage_causal_media_preimage(
+        store.stage_test_preimage(
             &owner,
             &Uuid::new_v4().to_string(),
             too_large,
@@ -133,11 +280,79 @@ fn causal_media_staging_enforces_file_membership_family_and_byte_quotas() {
 }
 
 #[test]
+fn causal_media_store_rejects_a_forged_digest_claim() {
+    let (_directory, _store, _owner) = fixture();
+    let incoming = NamedTempFile::new().unwrap();
+    fs::write(incoming.path(), b"evil").unwrap();
+
+    let result = VerifiedCausalMediaPreimage::verify(
+        incoming.path().to_owned(),
+        &digest(b"good"),
+        limits().max_file_bytes,
+    );
+
+    assert!(matches!(
+        result,
+        Err(StoreError::CausalMediaPreimageConflict)
+    ));
+}
+
+#[test]
+fn causal_media_store_repairs_a_writing_crash_replay_from_verified_bytes() {
+    let (directory, store, owner) = fixture();
+    let media_id = Uuid::new_v4().to_string();
+    let bytes = b"good";
+    store
+        .stage_test_preimage(&owner, &media_id, bytes, &digest(bytes), 100, limits())
+        .unwrap();
+    let staged_path = directory
+        .path()
+        .join("media/.causal-stage")
+        .join(&owner.family_id)
+        .join(&media_id);
+    fs::write(&staged_path, vec![b'x'; bytes.len()]).unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET status = 'writing'
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![owner.family_id, media_id],
+        )
+        .unwrap();
+    drop(connection);
+    let incoming = NamedTempFile::new().unwrap();
+    fs::write(incoming.path(), bytes).unwrap();
+    let verified = VerifiedCausalMediaPreimage::verify(
+        incoming.path().to_owned(),
+        &digest(bytes),
+        limits().max_file_bytes,
+    )
+    .unwrap();
+
+    let replay = store
+        .stage_verified_causal_media_preimage(&owner, &media_id, &verified, 101, limits())
+        .unwrap();
+
+    assert_eq!(replay.status, "staged");
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+    let connection = rusqlite::Connection::open(directory.path().join("lezi.db")).unwrap();
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![owner.family_id, media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "staged");
+}
+
+#[test]
 fn causal_media_gc_expires_metadata_bytes_and_untracked_crash_files() {
     let (directory, store, owner) = fixture();
     let media_id = Uuid::new_v4().to_string();
     store
-        .stage_causal_media_preimage(&owner, &media_id, b"abc", &digest(b"abc"), 100, limits())
+        .stage_test_preimage(&owner, &media_id, b"abc", &digest(b"abc"), 100, limits())
         .unwrap();
     let family_stage = directory
         .path()
@@ -155,7 +370,7 @@ fn causal_media_gc_expires_metadata_bytes_and_untracked_crash_files() {
 
     // Expired UUID ownership is released only after metadata and bytes are gone.
     let replay = store
-        .stage_causal_media_preimage(&owner, &media_id, b"xyz", &digest(b"xyz"), 111, limits())
+        .stage_test_preimage(&owner, &media_id, b"xyz", &digest(b"xyz"), 111, limits())
         .unwrap();
     assert_eq!(replay.sha256, digest(b"xyz"));
 }
