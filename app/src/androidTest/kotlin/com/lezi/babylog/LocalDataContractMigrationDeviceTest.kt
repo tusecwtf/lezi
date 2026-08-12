@@ -257,6 +257,10 @@ class LocalDataContractMigrationDeviceTest {
         assertThat(syncPreferences.verifiedEndpoint.first()).isEqualTo(endpoint)
         assertThat(credentialStore.getToken()).isEqualTo("refresh-a")
         assertThat(retainedCredentialFile.readBytes()).isEqualTo(retainedCredentialBytes)
+
+        val reopened = reopenRoomAndAssertQuickCheck()
+        assertThat(reopened.recordDao().getByClientUuid(RECORD_UUID)?.clientUuid)
+            .isEqualTo(RECORD_UUID)
     }
 
     @Test
@@ -383,6 +387,15 @@ class LocalDataContractMigrationDeviceTest {
                 ).use { cursor -> cursor.moveToFirst(); cursor.getLong(0) },
             ).isEqualTo(0L)
         }
+
+        val reopened = reopenRoomAndAssertQuickCheck()
+        assertThat(
+            reopened.conflictSnapshotCacheDao().get(canonicalConflictId)?.snapshotJson,
+        ).isEqualTo("canonical-snapshot")
+        transportKeys.forEach { key ->
+            assertThat(reopened.conflictSnapshotCacheDao().getTransportJournal(key))
+                .isNotNull()
+        }
     }
 
     @Test
@@ -476,10 +489,13 @@ class LocalDataContractMigrationDeviceTest {
         val retry = CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir)
         retry.migrate()
         retry.verify()
+
+        val reopened = reopenRoomAndAssertQuickCheck()
+        assertThat(reopened.recordDao().getByClientUuid(RECORD_UUID)?.syncDirty).isTrue()
     }
 
     @Test
-    fun room26FixtureMigratesTo27PreservingDirtyCareMediaAndClosedSleepWake() = runBlocking {
+    fun room26FixtureMigratesTo28PreservingDirtyCareMediaAndClosedSleepWake() = runBlocking {
         migrationHelper.createDatabase(DATABASE_NAME, 26).apply {
             execSQL(
                 """
@@ -749,6 +765,10 @@ class LocalDataContractMigrationDeviceTest {
             .inOrder()
         assertThat(room.localUserDao().get()?.deviceId).isEqualTo("device-fixture")
         assertThat(room.membershipDao().listForFamily(1L)).hasSize(1)
+
+        val reopened = reopenRoomAndAssertQuickCheck()
+        assertThat(reopened.recordDao().getByClientUuid(TOMBSTONE_UUID)?.deletedAt)
+            .isEqualTo(90L)
     }
 
     private companion object {
@@ -763,6 +783,21 @@ class LocalDataContractMigrationDeviceTest {
         const val TOMBSTONE_UUID = "66666666-6666-4666-8666-666666666666"
         const val CUSTOM_ITEM_UUID = "77777777-7777-4777-8777-777777777777"
         const val CARE_PLAN_UUID = "88888888-8888-4888-8888-888888888888"
+    }
+
+    private fun reopenRoomAndAssertQuickCheck(): LeziDatabase {
+        openedDatabase?.close()
+        val reopened = Room.databaseBuilder(
+            context,
+            LeziDatabase::class.java,
+            DATABASE_NAME,
+        ).build()
+        openedDatabase = reopened
+        reopened.openHelper.readableDatabase.query("PRAGMA quick_check").use { cursor ->
+            assertThat(cursor.moveToFirst()).isTrue()
+            assertThat(cursor.getString(0)).isEqualTo("ok")
+        }
+        return reopened
     }
 
     private class CatalogMigrationStep(
