@@ -4,7 +4,7 @@
 
 **Blocked by:** 07、09、41
 
-**Status:** implemented (local acceptance pass; device interaction residual)
+**Status:** implemented (local and API 35 device interaction acceptance pass)
 
 ## Contract slice
 
@@ -19,16 +19,16 @@
 
 ## Acceptance
 
-- [ ] badge/count/list/detail/choice 流程可操作
-- [ ] provenance/media/deleted/freshness/error 文案可访问
-- [ ] offline/incomplete/stale/unauthorized 不可提交
-- [ ] configuration change/process recreation 不丢合法状态
+- [x] badge/count/list/detail/choice 流程可操作
+- [x] provenance/media/deleted/freshness/error 文案可访问
+- [x] offline/incomplete/stale/unauthorized 不可提交
+- [x] configuration change/process recreation 不丢合法状态
 
 ## Validation
 
 - [x] H42 public-state matrix 与最小 Compose acceptance source 已加入
-- [ ] Compose connected/device tests 与截图/交互 receipts 完整（ADB 无设备）
-- [x] 记录 API/device/APK 限制；未运行物理设备安装、启动、交互、截图
+- [x] Compose connected/device tests 与截图/交互 receipts 完整
+- [x] 记录 API/device/APK 与隔离 fixture 边界
 
 ## Evidence
 
@@ -56,13 +56,24 @@
     and snapshot paging) — PASS; `BUILD SUCCESSFUL`.
   - `git diff --check` — PASS.
 - `adb devices -l` (escalated read-only probe) — `List of devices attached` with no devices.
-- Device residual is explicit: no APK install, launch, connected Compose interaction, API-level
-  receipt, or screenshot was executed. Existing local APK artifacts were only observed, not
-  installed or treated as H42 device evidence: debug SHA-256
-  `e6874f59edb1b82fe1edee64d62addda23f72b450a8a022bb116c92ecde3002e`, release SHA-256
-  `1434e7599b4fb9eaab6b2f162cb5430a61616c99783115e4aab802c2aa24c472`; API level unavailable.
-  No family NAS, isolated server smoke, production CD, H43 review, or TLS/certificate action
-  was performed.
+- **Historical residual closure:** the prior no-device limitation is closed by the API 35
+  receipts below. Family NAS/CD and TLS cutover remain outside H42.
+
+### 2026-08-13 device closure
+
+- API 35 direct instrumentation ran `H42ConflictDeviceAcceptanceTest`,
+  `ConflictInboxDeviceTest`, and `ConflictResolverDeviceTest`: `OK (6 tests)`.
+  The receipt covers the joined-family badge → same five-root inbox transition, conflict-ID
+  routing, tombstone/media/actor accessibility descriptions, full stable/branch provenance,
+  explicit choice before submit, and offline/unauthorized/freshness/error read-only states.
+- `4df9b4ea` corrects Compose test semantics only: content-description checks explicitly use
+  substring matching and each test owns one composition while state changes. No product UI
+  or conflict policy was changed.
+- `c8c8baf0` makes the minimal acceptance source persist reproducible screenshots. The API 35
+  run produced and visual inspection accepted:
+  `h42-family-conflict-badge.png` (1080×126, SHA-256 `6df85bf9…127e`) and
+  `h42-five-root-conflict-inbox.png` (1080×1465, SHA-256 `758ed927…5030`). The PNGs remain
+  ephemeral test evidence under `/tmp`; no generated image was committed.
 
 ## Out of scope
 

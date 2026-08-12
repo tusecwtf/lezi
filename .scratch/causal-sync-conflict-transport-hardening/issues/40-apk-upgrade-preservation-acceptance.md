@@ -4,7 +4,7 @@
 
 **Blocked by:** 27
 
-**Status:** implemented (H40 local gates pass; device upgrade residual; unrelated sync JVM residual)
+**Status:** implemented (local and API 35 device acceptance pass)
 
 ## Contract slice
 
@@ -19,14 +19,14 @@
 
 ## Acceptance
 
-- [ ] code 6 与当前 code 20 均可同签名原地升级到 code 21（ADB 无设备，安装/launch 未执行）
-- [ ] 不清事实、不丢 pending/conflict/media/spool、不强制 rejoin/trust reset（真实 fixture 执行待设备）
-- [ ] 24/25/26/27→28 migration fixtures 行/字节/关系保持，derived cache 可重建（fixture 已编译，运行待设备）
-- [ ] upgrade 后 force-stop/restart 与 quick_check 正常（connected gate 待设备）
+- [x] code 6 与当前 code 20 均可同签名原地升级到 code 21
+- [x] 不清事实、不丢 pending/conflict/media/spool、不强制 rejoin/trust reset
+- [x] 24/25/26/27→28 migration fixtures 行/字节/关系保持，derived cache 可重建
+- [x] upgrade 后 force-stop/restart 与 quick_check 正常
 
 ## Validation
 
-- [x] Room migration acceptance fixture 已扩展并通过 AndroidTest 编译；device execution residual
+- [x] Room migration acceptance fixture 已扩展并在 API 35 设备执行通过
 - [x] signed Release APK、hash/signer/source-target version/schema 与 app-update metadata 对齐
 
 ## Out of scope
@@ -52,5 +52,20 @@
   ./gradlew test --no-parallel --no-daemon                                  FAIL: 4 existing sync causal/local-write tests
   git diff --check                                                          PASS
   ```
-- **Full JVM residual detail:** `lostCarePlanMediaResponseReplaysExactGroupBeforeReplanningLaterEdit` rejects duplicate durable bytes; three `ReplicaSyncEngineLocalWriteNoPullTest` cases observe the extra `causal_media_preimage_started` event. These are outside H40-owned files and were not changed.
-- **Device residual:** same-signer code 6→21 and code 20→21 install/launch, Room fixture execution, force-stop/process reopen and on-device quick-check remain unrun because `adb devices -l` has no devices. H41 process-death matrix, H42 UI interaction, server DB migration, NAS/CD and production cutover were not run.
+- **Historical residual closure:** the four JVM fixture mismatches were corrected in
+  `0c252be9`; the full JVM suite subsequently passed. The device residual is closed by the
+  receipts below. Server schema/NAS cutover remains owned by release/CD work, not H40.
+
+### 2026-08-13 device closure
+
+- API 35 software emulator ran `LocalDataContractMigrationDeviceTest`: `OK (5 tests)`.
+  The real Room 24/25/26/27→28 fixtures reopened Room 28, retained the catalogued
+  facts/tombstones/pending/media/conflict/transport/session/trust evidence, and returned
+  `PRAGMA quick_check = ok`.
+- Same signer `ce1438c…2211` upgrade receipts passed for both permanent sources:
+  code 6 (`0.3.0`) → code 21 (`0.4.0`) and a freshly built fixed-source code 20
+  (`0.3.13`, source `99b71308`) → code 21. Both old and upgraded APKs cold-launched;
+  `adb install -r` succeeded, `firstInstallTime` stayed unchanged across each upgrade,
+  and the code 20 path cold-launched again after `force-stop`.
+- The temporary code 20 worktree, copied signing material, and build outputs were removed
+  immediately after the receipt. No APK or signing material was added to Git.

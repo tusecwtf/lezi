@@ -4,7 +4,7 @@
 
 **Blocked by:** 09、10、20、40
 
-**Status:** implemented (local JVM gates pass; Room/device residual)
+**Status:** implemented (local JVM and API 35 Room/device acceptance pass)
 
 ## Contract slice
 
@@ -76,10 +76,23 @@ An initial 153-test superset also ran; its only failure was the pre-existing
 H40 residual `ReplicaSyncEngineCausalSettlementTest.lostCarePlanMediaResponseReplaysExactGroupBeforeReplanningLaterEdit`.
 The narrowed H41/relevant regression matrix passed without that unrelated test.
 
-**Residuals:** real Room transaction/process-death reopen, spool Room recovery,
-and device install/force-stop/reopen remain unrun because ADB has no device.
-No Rust/server source changed, so Rust gates were not rerun. No server schema,
-NAS, production CD, or H42/H43 work was performed.
+**Historical residual closure:** the real Room transaction/reopen, spool recovery, and device
+execution residuals are closed by the receipts below. Production NAS/CD remains outside H41.
+
+### 2026-08-13 device closure
+
+- API 35 direct instrumentation ran the production Room/spool/checkpoint/projection seams:
+  `ImmutableMediaSpoolRoomRecoveryDeviceTest`, `PullCheckpointRoomReplayTest`,
+  `RecordCommitFirstRoomReplayTest`, and `ConflictSnapshotRoomProjectionTest` —
+  `OK (8 tests)`.
+- Receipts include partial spool promotion, Room rollback, database close/reopen, exact
+  normalized media bytes keyed by media UUID, terminal transaction rollback and replay,
+  reset-receipt rollback in the Room 28 transport journal, durable pull cursor restart,
+  commit-first lost-response replay, and incomplete/complete conflict page recovery.
+- The original device run exposed three stale test seams (non-suspending Room transaction
+  deadlock, pre-H27 reset-receipt injection, and non-production media payloads). Commit
+  `4df9b4ea` fixes only the acceptance fixtures; production fail-closed validation remained
+  unchanged. The final eight-test rerun passed without a connection-pool wait or crash.
 
 ## Out of scope
 
