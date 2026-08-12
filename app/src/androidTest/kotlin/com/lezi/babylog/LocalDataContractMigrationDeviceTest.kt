@@ -486,7 +486,7 @@ class LocalDataContractMigrationDeviceTest {
         // Simulate process death after migrate/verify but before the contract marker commit.
         openedDatabase?.close()
         openedDatabase = null
-        val retry = CausalRoomUpgradeStep(storage.database, storage.recordMedia, context.filesDir)
+        val retry = FinalCausalRoomUpgradeStep(storage.database)
         retry.migrate()
         retry.verify()
 
