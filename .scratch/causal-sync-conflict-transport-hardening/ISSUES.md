@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H41 and R12/R17/R18/R19/R20 are implemented; H42 is the serial frontier
+Status: blocked — H01–H42 are locally implemented/accepted with stated residuals; H43 final review recorded P1 blockers
 
 Spec: [`spec.md`](./spec.md)
 
@@ -67,7 +67,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 40 | [`40-apk-upgrade-preservation-acceptance`](./issues/40-apk-upgrade-preservation-acceptance.md) | implemented (local gates pass; device upgrade residual; unrelated sync JVM residual) | 27 |
 | 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | implemented (local JVM gates pass; Room/device residual) | 09, 10, 20, 40 |
 | 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | implemented (local acceptance pass; device interaction residual) | 07, 09, 41 |
-| 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | ready-for-agent | 32–42 acceptance leaves |
+| 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | blocked (final local review recorded; P1 evidence/gate blockers) | 32–42 acceptance leaves |
 
 External owners: [`R12 admission`](../repository-dedup-algorithm-audit-20260809/issues/12-bounded-conflict-resources.md),
 [`R17 loader`](../repository-dedup-algorithm-audit-20260809/issues/17-bounded-conflict-head-loader.md),
@@ -79,9 +79,11 @@ Production schema cutover/CD remains owned by
 ## Frontier
 
 H42 is implemented at local public/UI seams; its connected/device interaction remains a truthful
-residual because ADB has no attached device. H43 is the next executable DAG frontier and remains
-open. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD and
-rollback locally; H43 hands evidence to release 09.
+residual because ADB has no attached device. H43 completed the final local review pass on the
+fixed code HEAD, but remains blocked by the exact evidence/gate findings recorded in its Evidence
+section. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD and
+rollback locally; release 09 remains locked until the H43 blockers are resolved and a fresh
+maintenance-window confirmation is obtained.
 
 ## Program invariants
 
