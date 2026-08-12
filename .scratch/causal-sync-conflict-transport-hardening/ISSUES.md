@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H35 and R12/R17/R18/R19/R20 are implemented; H36 is the serial frontier
+Status: in-progress — H01–H36 and R12/R17/R18/R19/R20 are implemented; H37 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -60,7 +60,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 33 | [`33-delete-restore-race-acl-acceptance`](./issues/33-delete-restore-race-acl-acceptance.md) | implemented | 32 |
 | 34 | [`34-retry-lost-response-acceptance`](./issues/34-retry-lost-response-acceptance.md) | implemented | 15, 31 |
 | 35 | [`35-pull-page-fault-acceptance`](./issues/35-pull-page-fault-acceptance.md) | implemented | 16, 31 |
-| 36 | [`36-resource-saturation-acceptance`](./issues/36-resource-saturation-acceptance.md) | ready-for-agent | 31, R19 |
+| 36 | [`36-resource-saturation-acceptance`](./issues/36-resource-saturation-acceptance.md) | implemented | 31, R19 |
 | 37 | [`37-media-source-spool-fault-acceptance`](./issues/37-media-source-spool-fault-acceptance.md) | ready-for-agent | 18, 31 |
 | 38 | [`38-media-receipt-fault-acceptance`](./issues/38-media-receipt-fault-acceptance.md) | ready-for-agent | 19, 20, 31 |
 | 39 | [`39-media-branch-performance-acceptance`](./issues/39-media-branch-performance-acceptance.md) | ready-for-agent | 21, 22, 23, 24, 31, 37, 38 |
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H35 is implemented. H36 is the next executable DAG frontier; H36–H43 remain open and follow
+H36 is implemented. H37 is the next executable DAG frontier; H37–H43 remain open and follow
 the serial order above. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD
 and rollback locally; H43 hands evidence to release 09.
 

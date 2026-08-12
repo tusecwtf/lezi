@@ -88,12 +88,18 @@ internal class FakeWakeObservationDao : WakeObservationDao {
 
 internal class FakeConflictSummaryDao : ConflictSummaryDao {
     private val items = mutableListOf<ConflictSummaryEntity>()
-    private var inboxRows = emptyList<ConflictInboxProjectionRow>()
+    private val inboxRows = MutableStateFlow<List<ConflictInboxProjectionRow>>(emptyList())
+    private var manualInboxOverride: List<ConflictInboxProjectionRow>? = null
 
-    override fun observeInboxProjection(): Flow<List<ConflictInboxProjectionRow>> = flowOf(inboxRows)
+    override fun observeInboxProjection(): Flow<List<ConflictInboxProjectionRow>> = inboxRows
 
+    /**
+     * Unit tests that only exercise inbox mapping can inject projection rows without
+     * full summary/root joins. Seam fixtures leave this null so open summaries surface.
+     */
     fun setInboxRows(rows: List<ConflictInboxProjectionRow>) {
-        inboxRows = rows
+        manualInboxOverride = rows
+        inboxRows.value = rows
     }
 
     override suspend fun get(conflictId: String): ConflictSummaryEntity? =
@@ -108,14 +114,41 @@ internal class FakeConflictSummaryDao : ConflictSummaryDao {
     override suspend fun upsert(entity: ConflictSummaryEntity) {
         items.removeAll { it.conflictId == entity.conflictId }
         items += entity
+        publishInbox()
     }
 
     override suspend fun delete(conflictId: String) {
         items.removeAll { it.conflictId == conflictId }
+        publishInbox()
     }
 
     override suspend fun deleteAll() {
         items.clear()
+        publishInbox()
+    }
+
+    private fun publishInbox() {
+        manualInboxOverride?.let {
+            inboxRows.value = it
+            return
+        }
+        inboxRows.value = items
+            .filter { it.status == "open" }
+            .sortedWith(compareBy({ it.updatedAt }, { it.conflictId }))
+            .map { summary ->
+                ConflictInboxProjectionRow(
+                    conflictId = summary.conflictId,
+                    entityType = summary.entityType,
+                    clientUuid = summary.clientUuid,
+                    updatedAt = summary.updatedAt,
+                    localTitle = null,
+                    babyLabel = null,
+                    localActorId = null,
+                    localTombstone = null,
+                    localMediaCount = 0,
+                    snapshotJson = null,
+                )
+            }
     }
 }
 
