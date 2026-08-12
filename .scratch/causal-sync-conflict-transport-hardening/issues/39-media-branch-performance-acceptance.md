@@ -4,7 +4,7 @@
 
 **Blocked by:** 21、22、23、24、31、37、38
 
-**Status:** ready-for-agent
+**Status:** implemented
 
 ## Contract slice
 
@@ -32,3 +32,64 @@ Cases：独立 add/add、同 media delete/edit、选择各 branch、slow large u
 ## Out of scope
 
 不运行家庭 NAS 或真实家庭照片。
+
+## Evidence
+
+- **HEAD:** `c5791b579e59098c42e0b791ade19d3e0c08fa78`
+- **Production fix:** Baby has one avatar slot. Before the fix, the
+  choice-only snapshot exposed only `/avatar_media_uuid`; selecting the
+  incoming avatar rebuilt `root.avatar_media_uuid=B` while retaining media
+  `[A, B]`. `validate_mutation_content` correctly returned
+  `media_limit_exceeded`, which surfaced as `rejected / invalid_domain` with
+  `stable_media=[]`. A counterfactual run with only the Baby snapshot media
+  paths removed reproduced that exact RED. The fix emits `/media/<uuid>` Set or
+  Remove candidates for the complete Baby media union, so one coherent avatar
+  branch is rebuilt and the validator remains strict.
+- **Fixture correction:** the Baby root has no `note` field; the H39 test now
+  asserts `note` only for Record/CarePlan and keeps the Baby media assertions
+  on the actual domain contract.
+- **Fixture paths:**
+  - `tools/lezi-sync/src/store/tests/causal_tests.rs`
+  - `tools/lezi-sync/src/store/conflict_snapshots.rs`
+  - `sync/src/test/kotlin/com/lezi/babylog/sync/engine/MediaBranchPerformanceAcceptanceTest.kt`
+  - H38 receipt/settlement and H37 spool matrices remain the cleanup/source
+    regression owners.
+- **How to run Rust:**
+  ```bash
+  cd tools/lezi-sync
+  cargo fmt --all -- --check
+  cargo check --locked
+  cargo test --locked
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo test --locked h39_media_branch_matrix -- --nocapture
+  ```
+- **How to run JVM acceptance/regression:**
+  ```bash
+  ./gradlew :sync:testDebugUnitTest --rerun-tasks \
+    --tests com.lezi.babylog.sync.engine.MediaBranchPerformanceAcceptanceTest \
+    --tests com.lezi.babylog.sync.media.MediaReceiptFaultAcceptanceTest \
+    --tests com.lezi.babylog.sync.backend.HttpSyncBackendCausalMediaReceiptTest \
+    --tests com.lezi.babylog.sync.engine.CausalMediaSettlementJournalTest \
+    --tests com.lezi.babylog.sync.media.MediaSourceSpoolFaultAcceptanceTest \
+    --tests com.lezi.babylog.sync.media.ImmutableMediaSpoolTest
+  ```
+- **Result:** Rust H39 matrix 1/1; full Rust suite 286 lib + 165 API + 1
+  contract + 3 TLS, all green; Clippy and format/check green. The fresh JVM
+  run was 40/40: H39 1, H38 receipt 11 + HTTP 2 + journal 5, and H37 spool
+  10 + immutable spool 11.
+- **Case coverage:**
+
+  | Case | Seam | Evidence |
+  |---|---|---|
+  | Record/Baby/CarePlan independent add/add | Store causal commit + choice-only resolution | Record/CarePlan merge both media; Baby branches, selects one avatar candidate, and preserves selected bytes exactly |
+  | Record/Baby/CarePlan same-media delete/edit | Store causal commit + choice-only resolution | All three branch; selecting edit preserves the shared media UUID and exact stored bytes, without silent deletion |
+  | Slow large upload + small commit | `ReplicaSyncEngine` + shared `RecordingSyncBackend` | 256 KiB upload is held after spool entry; independent media-free Record commits within 1 s; upload order and SHA-256 remain exact; accepted terminal discards spool |
+  | Pending/branched retention and terminal cleanup | H38 settlement journal/receipt + H37 spool regressions | Pending/CommitUnknown/branched remain retained; accepted terminal cleanup is durable and idempotent; source-once/restart evidence remains green |
+
+- **Isolation:** Rust uses `TempDir` SQLite/media roots; JVM uses in-memory
+  test doubles and isolated spool fixtures. No family NAS, production CD,
+  production certificates, or real family photos were used.
+- **Residuals:** no ADB/device run was performed in this turn, so
+  Room/process-death instrumentation remains a device residual owned by
+  H41/H18/H20. H39 is locally implemented and accepted at Rust and JVM
+  seams; H40–H43 remain open.

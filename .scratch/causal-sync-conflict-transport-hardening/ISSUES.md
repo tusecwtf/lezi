@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H38 and R12/R17/R18/R19/R20 are implemented; H39 is the serial frontier
+Status: in-progress — H01–H39 and R12/R17/R18/R19/R20 are implemented; H40 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -63,7 +63,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 36 | [`36-resource-saturation-acceptance`](./issues/36-resource-saturation-acceptance.md) | implemented | 31, R19 |
 | 37 | [`37-media-source-spool-fault-acceptance`](./issues/37-media-source-spool-fault-acceptance.md) | implemented | 18, 31 |
 | 38 | [`38-media-receipt-fault-acceptance`](./issues/38-media-receipt-fault-acceptance.md) | implemented | 19, 20, 31 |
-| 39 | [`39-media-branch-performance-acceptance`](./issues/39-media-branch-performance-acceptance.md) | ready-for-agent | 21, 22, 23, 24, 31, 37, 38 |
+| 39 | [`39-media-branch-performance-acceptance`](./issues/39-media-branch-performance-acceptance.md) | implemented | 21, 22, 23, 24, 31, 37, 38 |
 | 40 | [`40-apk-upgrade-preservation-acceptance`](./issues/40-apk-upgrade-preservation-acceptance.md) | ready-for-agent | 27 |
 | 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | ready-for-agent | 09, 10, 20, 40 |
 | 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | ready-for-agent | 07, 09, 41 |
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H38 is implemented. H39 is the next executable DAG frontier; H39–H43 remain open and follow
+H39 is implemented. H40 is the next executable DAG frontier; H40–H43 remain open and follow
 the serial order above. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD
 and rollback locally; H43 hands evidence to release 09.
 
