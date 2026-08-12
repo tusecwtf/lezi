@@ -19,15 +19,15 @@ Cases：独立 add/add、同 media delete/edit、选择各 branch、slow large u
 
 ## Acceptance
 
-- [ ] selected bytes 与原 digest 完全相同
-- [ ] delete/edit 不静默丢媒体
-- [ ] 小 commit 在慢上传期间可前进
-- [ ] terminal cleanup 不删 pending/branched evidence
+- [x] selected bytes 与原 digest 完全相同
+- [x] delete/edit 不静默丢媒体
+- [x] 小 commit 在慢上传期间可前进
+- [x] terminal cleanup 不删 pending/branched evidence
 
 ## Validation
 
-- [ ] isolated media branch/performance matrix 通过
-- [ ] 记录 timing/digest/cleanup receipts
+- [x] isolated media branch/performance matrix 通过
+- [x] 记录 timing/digest/cleanup receipts
 
 ## Out of scope
 
