@@ -653,6 +653,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(committed.media.single().role).isEqualTo("plan")
         assertThat(mediaRig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly(
+                "causal_media_preimage_started:00000000-0000-4000-8000-000000000251",
                 "causal_media_preimage:00000000-0000-4000-8000-000000000251",
                 "causal_commit:1",
             )
@@ -868,6 +869,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(avatarBytes)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly(
+                "causal_media_preimage_started:00000000-0000-4000-8000-000000000245",
                 "causal_media_preimage:00000000-0000-4000-8000-000000000245",
                 "causal_commit:1",
             )
@@ -1085,6 +1087,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly(
+                "causal_media_preimage_started:$mediaUuid",
                 "causal_media_preimage:$mediaUuid",
                 "causal_commit:1",
             )

@@ -692,6 +692,15 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(rig.immutableMediaSpool.discardedMutationIds)
             .containsExactly(requireNotNull(frozen).mutationId)
 
+        val replacementMediaUuid = "00000000-0000-4000-8000-000000000063"
+        val settledMedia = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+        rig.media.update(
+            settledMedia.copy(
+                clientUuid = replacementMediaUuid,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
         rig.backend.onCausalCommit = null
         rig.engine.synchronize(session, SyncTrigger.LocalWrite)
 
@@ -699,7 +708,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(replanned.mutationId).isNotEqualTo(requireNotNull(frozen).mutationId)
         assertThat(replanned.rootJson).contains("epoch-2")
         assertThat(rig.backend.causalMediaPreimageBytes.map { it.first })
-            .containsExactly(mediaUuid, mediaUuid)
+            .containsExactly(mediaUuid, replacementMediaUuid)
             .inOrder()
         assertThat(rig.backend.causalMediaPreimageBytes.last().second)
             .isEqualTo(byteArrayOf(2, 3, 5, 7))
