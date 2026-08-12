@@ -163,7 +163,7 @@ No speculative production repair was made here.
   upgrades, and H42 screenshots are all fixed/passed in the commits following the old review.
 - **Final APK:** `:app:assembleRelease --rerun-tasks --no-daemon` passed (682 tasks). Signed
   `com.lezi.babylog` 0.4.0/code 21 SHA-256 is
-  `467596efefb3aeb3eff79c62aacdcc4a2514dc9eb1bfa87b896c1ac14b099081`; signer certificate is
+  `876a904fbc54097a7d44fba8b9a6f88af226fa554b537e2d0b162348abbebef5`; signer certificate is
   `ce1438c8c50fe75f04f89ae2092631a46660480764cd52071cc5c08707462211`.
   `LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1` passed with min-supported 21 and local-data contract 5.1.
 - **Standards re-review:** no P0/P1. Package-locality duplication/naming findings remain P2/P3 and
