@@ -97,19 +97,17 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             assertThat(sourceFile.delete()).isTrue()
 
             val recoveredSpool = fileSpool(mediaFiles)
+            val rollbackTransactions = DatabaseModule.transactionRunner(database)
             val rollbackRunner = object : DatabaseTransactionRunner {
-                override suspend fun <T> run(block: suspend () -> T): T =
-                    database.runInTransaction<T> {
-                        runBlocking {
-                            val result = block()
-                            if (database.conflictSnapshotCacheDao()
-                                    .getFrozenMediaSpoolManifest(MUTATION_ID) != null
-                            ) {
-                                error("injected Room rollback after manifest write")
-                            }
-                            result
-                        }
+                override suspend fun <T> run(block: suspend () -> T): T = rollbackTransactions.run {
+                    val result = block()
+                    if (database.conflictSnapshotCacheDao()
+                            .getFrozenMediaSpoolManifest(MUTATION_ID) != null
+                    ) {
+                        error("injected Room rollback after manifest write")
                     }
+                    result
+                }
             }
             val rollbackFailure = runCatching {
                 settlement(
@@ -129,21 +127,20 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             database = database()
             val backend = DeviceCausalBackend()
             val reopenedSpool = fileSpool(mediaFiles)
+            val terminalRollbackTransactions = DatabaseModule.transactionRunner(database)
             val terminalRollbackRunner = object : DatabaseTransactionRunner {
                 override suspend fun <T> run(block: suspend () -> T): T =
-                    database.runInTransaction<T> {
-                        runBlocking {
-                            val result = block()
-                            val row = database.conflictSnapshotCacheDao()
-                                .getFrozenMediaSpoolManifest(MUTATION_ID)
-                            val phase = row?.let {
-                                decodeCausalMediaSettlementOrNull(it.payloadJson)?.phase
-                            }
-                            if (phase == CausalMediaSettlementPhase.CleanupAccepted) {
-                                error("injected terminal transaction rollback")
-                            }
-                            result
+                    terminalRollbackTransactions.run {
+                        val result = block()
+                        val row = database.conflictSnapshotCacheDao()
+                            .getFrozenMediaSpoolManifest(MUTATION_ID)
+                        val phase = row?.let {
+                            decodeCausalMediaSettlementOrNull(it.payloadJson)?.phase
                         }
+                        if (phase == CausalMediaSettlementPhase.CleanupAccepted) {
+                            error("injected terminal transaction rollback")
+                        }
+                        result
                     }
             }
             val terminalFailure = runCatching {
@@ -172,7 +169,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             val manifestRow = database.conflictSnapshotCacheDao()
                 .getFrozenMediaSpoolManifest(MUTATION_ID)
             assertThat(manifestRow).isNull()
-            assertThat(backend.uploadedBytes).hasSize(1)
+            assertThat(backend.uploadedMedia).hasSize(1)
             assertThat(reopenedSpool.recoverGroup(MUTATION_ID)).isNull()
             assertThat(database.recordDao().getByClientUuid(RECORD_ID)?.syncDirty).isFalse()
         } finally {
@@ -191,7 +188,10 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             }
             bitmap.recycle()
         }
-        val exactBytes = sourceFile.readBytes()
+        val mediaFiles = AndroidSyncMediaFileStore(context)
+        val exactBytes = mediaFiles.prepareUpload(
+            sourceFile.relativeTo(context.filesDir).path,
+        ).use { it.readAll() }
         val database = database()
         try {
             val babyId = database.babyDao().upsert(
@@ -227,7 +227,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             settlement(
                 database = database,
                 backend = backend,
-                spool = fileSpool(AndroidSyncMediaFileStore(context)),
+                spool = fileSpool(mediaFiles),
             ).settle(
                 SESSION,
                 listOf(
@@ -242,14 +242,16 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
                         planId = 2,
                         entityType = "media",
                         clientUuid = AVATAR_MEDIA_ID,
-                        payloadJson = "{}",
+                        payloadJson =
+                            """{"baby_client_uuid":"$AVATAR_BABY_ID","kind":"avatar"}""",
                         updatedAt = 200,
                         localMediaUri = sourceFile.relativeTo(context.filesDir).path,
                     ),
                 ),
             )
 
-            assertThat(backend.uploadedBytes.single()).isEqualTo(exactBytes)
+            assertThat(backend.uploadedMedia.single().first).isEqualTo(AVATAR_MEDIA_ID)
+            assertThat(backend.uploadedMedia.single().second).isEqualTo(exactBytes)
             assertThat(database.babyDao().getByClientUuid(AVATAR_BABY_ID)?.syncDirty).isFalse()
             assertThat(database.mediaAssetDao().getByClientUuid(AVATAR_MEDIA_ID)?.syncDirty)
                 .isFalse()
@@ -277,7 +279,11 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
                 }
             }
         }
-        val exactBytes = sourceFiles.map(File::readBytes)
+        val mediaFiles = AndroidSyncMediaFileStore(context)
+        val exactBytes = sourceFiles.map { sourceFile ->
+            mediaFiles.prepareUpload(sourceFile.relativeTo(context.filesDir).path)
+                .use { it.readAll() }
+        }
         val database = database()
         try {
             val babyId = database.babyDao().upsert(
@@ -329,7 +335,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             settlement(
                 database = database,
                 backend = backend,
-                spool = fileSpool(AndroidSyncMediaFileStore(context)),
+                spool = fileSpool(mediaFiles),
             ).settle(
                 SESSION,
                 listOf(
@@ -345,16 +351,19 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
                         planId = planId + index + 1L,
                         entityType = "media",
                         clientUuid = mediaUuid,
-                        payloadJson = "{}",
+                        payloadJson =
+                            """{"care_plan_client_uuid":"$CARE_PLAN_ID"}""",
                         updatedAt = 300,
                         localMediaUri = sourceFiles[index].relativeTo(context.filesDir).path,
                     )
                 },
             )
 
-            assertThat(backend.uploadedBytes).hasSize(3)
-            backend.uploadedBytes.zip(exactBytes).forEach { (actual, expected) ->
-                assertThat(actual).isEqualTo(expected)
+            assertThat(backend.uploadedMedia).hasSize(3)
+            val uploadedByMediaUuid = backend.uploadedMedia.toMap()
+            assertThat(uploadedByMediaUuid.keys).containsExactlyElementsIn(mediaIds)
+            mediaIds.zip(exactBytes).forEach { (mediaUuid, expected) ->
+                assertThat(uploadedByMediaUuid.getValue(mediaUuid)).isEqualTo(expected)
             }
             assertThat(database.carePlanDao().getByClientUuid(CARE_PLAN_ID)?.syncDirty).isFalse()
             mediaIds.forEach { mediaUuid ->
@@ -463,7 +472,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
 }
 
 private class DeviceCausalBackend : SyncBackend {
-    val uploadedBytes = mutableListOf<ByteArray>()
+    val uploadedMedia = mutableListOf<Pair<String, ByteArray>>()
 
     override fun supportsCausalWire() = true
 
@@ -473,7 +482,7 @@ private class DeviceCausalBackend : SyncBackend {
         source: SyncMediaUploadSource,
         sha256: String,
     ): CausalMediaPreimageReceipt {
-        uploadedBytes += source.readAll()
+        uploadedMedia += mediaUuid to source.readAll()
         return CausalMediaPreimageReceipt(
             mediaUuid = mediaUuid,
             status = "staged",

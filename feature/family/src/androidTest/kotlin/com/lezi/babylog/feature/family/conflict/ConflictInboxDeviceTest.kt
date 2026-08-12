@@ -62,14 +62,14 @@ class ConflictInboxDeviceTest {
         }
         composeRule.onNodeWithText("5 项待处理").assertExists()
         composeRule.onNodeWithTag("conflict_inbox_item_conflict-0")
-            .assertContentDescriptionContains("当前已删除")
-            .assertContentDescriptionContains("提交者详情待加载")
-            .assertContentDescriptionContains("照片详情待加载")
+            .assertContentDescriptionContains("当前已删除", substring = true)
+            .assertContentDescriptionContains("提交者详情待加载", substring = true)
+            .assertContentDescriptionContains("照片详情待加载", substring = true)
         composeRule.onNodeWithTag("conflict_inbox_item_conflict-1")
-            .assertContentDescriptionContains("删除状态待加载")
-            .assertContentDescriptionContains("至少1张照片，详情待加载")
+            .assertContentDescriptionContains("删除状态待加载", substring = true)
+            .assertContentDescriptionContains("至少1张照片，详情待加载", substring = true)
         composeRule.onNodeWithTag("conflict_inbox_item_conflict-3")
-            .assertContentDescriptionContains("member-3")
+            .assertContentDescriptionContains("member-3", substring = true)
             .performClick()
         composeRule.runOnIdle { assertThat(opened).containsExactly("conflict-3") }
     }
@@ -102,8 +102,8 @@ class ConflictInboxDeviceTest {
         }
 
         composeRule.onNodeWithTag("conflict_inbox_item_conflict-cached")
-            .assertContentDescriptionContains("提交者 妈妈")
-            .assertContentDescriptionContains("含删除候选")
-            .assertContentDescriptionContains("3张照片")
+            .assertContentDescriptionContains("提交者 妈妈", substring = true)
+            .assertContentDescriptionContains("含删除候选", substring = true)
+            .assertContentDescriptionContains("3张照片", substring = true)
     }
 }

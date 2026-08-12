@@ -13,7 +13,6 @@ import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
-import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
@@ -221,6 +220,7 @@ class PullCheckpointRoomReplayTest {
             assertThat(preferences.session.first().pullCursor).isEqualTo(2)
             assertThat(database.babyDao().listAllIncludingDeleted().map { it.clientUuid })
                 .containsExactly(BABY_A, BABY_B)
+            Unit
         } finally {
             database.close()
             dataScope.coroutineContext[Job]?.cancelAndJoin()
@@ -343,11 +343,15 @@ class PullCheckpointRoomReplayTest {
     private class FailingResetReceiptCache(
         private val delegate: ConflictSnapshotCacheDao,
     ) : ConflictSnapshotCacheDao by delegate {
-        override suspend fun upsert(entity: ConflictSnapshotCacheEntity) {
-            if (entity.conflictId.startsWith("replica-reset-receipt:")) {
+        override suspend fun putTransportJournal(
+            journalKey: String,
+            payloadJson: String,
+            contentEpoch: Long,
+        ) {
+            if (journalKey.startsWith("replica-reset-receipt:")) {
                 error("reset receipt write interrupted")
             }
-            delegate.upsert(entity)
+            delegate.putTransportJournal(journalKey, payloadJson, contentEpoch)
         }
     }
 

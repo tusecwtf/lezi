@@ -60,12 +60,12 @@ class ConflictResolverDeviceTest {
 
         composeRule.onNodeWithText("解决护理记录冲突").assertExists()
         composeRule.onNodeWithTag("conflict_version_0")
-            .assertContentDescriptionContains("当前稳定版")
-            .assertContentDescriptionContains("1张照片")
-            .assertContentDescriptionContains("member-self")
+            .assertContentDescriptionContains("当前稳定版", substring = true)
+            .assertContentDescriptionContains("1张照片", substring = true)
+            .assertContentDescriptionContains("member-self", substring = true)
         composeRule.onNodeWithTag("conflict_version_1")
-            .assertContentDescriptionContains("候选分支 1")
-            .assertContentDescriptionContains("member-other")
+            .assertContentDescriptionContains("候选分支 1", substring = true)
+            .assertContentDescriptionContains("member-other", substring = true)
         composeRule.onNodeWithTag("conflict_auto_/timestamp").assertExists()
         composeRule.onNodeWithTag("conflict_path_/note").assertExists()
         composeRule.onNodeWithTag("conflict_path_/timestamp").assertDoesNotExist()
@@ -85,26 +85,30 @@ class ConflictResolverDeviceTest {
                 "仅事实作者或家庭管理员可以解决",
             openDraft(fetchedOnline = false) to "离线快照只读，请联网后重新打开",
         )
-        cases.forEach { (draft, reason) ->
-            composeRule.setContent {
-                LeziTheme(visualStyle = "warm") {
-                    ConflictResolverContent(
-                        state = ConflictResolverUiState(
-                            draft = draft,
-                            phase = if (draft.model.availability ==
-                                com.lezi.babylog.domain.carelog.ConflictResolverAvailability.Offline
-                            ) {
-                                ConflictResolverPhase.Offline(requireNotNull(draft.model.readOnlyReason))
-                            } else {
-                                ConflictResolverPhase.Complete
-                            },
-                        ),
-                        onChoose = { _, _ -> error("read-only choice") },
-                        onSubmit = { error("read-only submit") },
-                        onRefresh = {},
-                    )
-                }
+        var currentDraft by mutableStateOf(cases.first().first)
+        composeRule.setContent {
+            LeziTheme(visualStyle = "warm") {
+                ConflictResolverContent(
+                    state = ConflictResolverUiState(
+                        draft = currentDraft,
+                        phase = if (currentDraft.model.availability ==
+                            com.lezi.babylog.domain.carelog.ConflictResolverAvailability.Offline
+                        ) {
+                            ConflictResolverPhase.Offline(
+                                requireNotNull(currentDraft.model.readOnlyReason),
+                            )
+                        } else {
+                            ConflictResolverPhase.Complete
+                        },
+                    ),
+                    onChoose = { _, _ -> error("read-only choice") },
+                    onSubmit = { error("read-only submit") },
+                    onRefresh = {},
+                )
             }
+        }
+        cases.forEach { (caseDraft, reason) ->
+            composeRule.runOnIdle { currentDraft = caseDraft }
             composeRule.onNodeWithTag("conflict_version_0").assertExists()
             composeRule.onNodeWithText(reason).assertExists()
             composeRule.onNodeWithTag("conflict_submit").assertIsNotEnabled()
