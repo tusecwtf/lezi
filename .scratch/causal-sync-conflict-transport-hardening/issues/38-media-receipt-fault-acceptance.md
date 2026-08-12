@@ -4,7 +4,7 @@
 
 **Blocked by:** 19、20、31
 
-**Status:** implemented-supporting — cross-layer real-server fault injection remains H44
+**Status:** implemented — cross-layer real-server fault seam closed by H44
 
 ## Contract slice
 

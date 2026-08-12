@@ -48,6 +48,15 @@ settlement 路径与真实 prepare/commit receipt 服务缝串成同一条测试
 
 - **Production owners touched so the real server can speak H38 codes:**
   - `tools/lezi-sync/src/store/causal.rs` keeps media claim codes instead of collapsing them to `invalid_domain`
-  - `HttpSyncBackend` accepts those terminal codes and treats omitted media `width`/`height` as null
+  - `HttpSyncBackend` accepts those terminal codes
+  - wire §4.6 `width`/`height` stay required keys (value may be null). The server serializes
+    explicit null; Android decodes with `requiredNullableLong`. Omitted keys fail closed.
 - **Isolation:** loopback, `mktemp` data root, openssl localhost cert, non-production ports. No NAS, production TLS, or family media.
-- **Residuals:** device Room/process-death remains H20/H41. Wire PUT/POST counts may include HttpURLConnection reconnects after a truncated 200; the contract is URI-once plus isolated data-root version/receipt uniqueness.
+- **Family binding:** staging is family-keyed. A foreign `family_id` is `missing_media_bytes`,
+  not H38's synthetic `media_family_mismatch` hook.
+- **Uniqueness:** URI-once plus isolated data-root **version** uniqueness (`recordVersionCount == 1`).
+  One HTTP commit batch may write more than one `mutation_receipts` row for the same record when
+  freeze emits two mutations that collapse to one stable version; that is not a second version.
+- **Residuals:** device Room/process-death remains H20/H41. Branched-phase spool retention stays
+  on the H38 engine+controllable-backend C8 seam. Wire PUT/POST counts may include
+  HttpURLConnection reconnects after a truncated 200.
