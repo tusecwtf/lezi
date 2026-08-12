@@ -36,7 +36,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -237,23 +236,17 @@ fun SummaryMetric(
         ) {
             Box(
                 Modifier
-                    .size(28.dp)
+                    .size(LeziIconSize.Chip)
                     .clip(CircleShape)
                     .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)),
                 contentAlignment = Alignment.Center,
             ) {
                 if (icon != null) icon() else LeziPlaceholderDot()
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(LeziSpacing.Xxs))
             Text(
                 value,
-                // 11sp mono keeps full-day sleep totals (e.g. 12h20m) readable in a
-                // 1/5-width chip; 14sp was clipping to "12h2…" on typical phones.
-                style = LeziTypography.Mono.copy(
-                    fontSize = 11.sp,
-                    lineHeight = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                ),
+                style = LeziTypography.ChipMetric,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 softWrap = false,

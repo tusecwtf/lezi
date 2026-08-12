@@ -146,6 +146,25 @@ class MotionDensityTokensTest {
         )
     }
 
+    @Test
+    fun `design tokens json type and icon snapshots cover Compose ramps`() {
+        val json = repositoryRoot().resolve("design/tokens.json").readText()
+        val typeBlock = json.substringAfter("\"type\"").substringBefore("\"icon\"")
+        val iconBlock = json.substringAfter("\"icon\"")
+        for (field in listOf(
+            "hero", "titleSm", "bodyStrong", "labelLg", "eyebrow",
+            "chipMetric", "micro", "metricSm",
+        )) {
+            assertTrue("type must declare $field", typeBlock.contains("\"$field\""))
+        }
+        for (field in listOf("glyph", "disc", "chip", "state", "menuWell", "menuGlyph")) {
+            assertTrue("icon must declare $field", iconBlock.contains("\"$field\""))
+        }
+        assertTrue(Regex(""""glyph"\s*:\s*18\b""").containsMatchIn(iconBlock))
+        assertTrue(Regex(""""disc"\s*:\s*32\b""").containsMatchIn(iconBlock))
+        assertTrue(Regex(""""state"\s*:\s*32\b""").containsMatchIn(iconBlock))
+    }
+
     private fun repositoryRoot(): File = generateSequence(
         seed = File(requireNotNull(System.getProperty("user.dir"))),
         nextFunction = { it.parentFile },

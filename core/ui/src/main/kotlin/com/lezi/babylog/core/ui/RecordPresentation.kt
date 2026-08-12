@@ -31,12 +31,12 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.payloadSummary
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziIconSize
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
@@ -225,7 +225,7 @@ fun RecordType.presentationTone(): LeziTone = when (presentation.colorRole) {
 fun RecordTypeIcon(
     type: RecordType,
     modifier: Modifier = Modifier,
-    size: Dp = 18.dp,
+    size: Dp = LeziIconSize.Glyph,
     tint: Color = leziRecordColor(type.presentation.colorRole),
 ) {
     LeziRecordGlyphIcon(
@@ -305,18 +305,18 @@ fun RecordSummaryStrip(
                 ) {
                     Box(
                         Modifier
-                            .size(26.dp)
+                            .size(LeziIconSize.Chip)
                             .clip(if (journal) LeziShapes.JournalButton else CircleShape)
                             .background(color.copy(alpha = 0.14f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        RecordTypeIcon(item.type, size = 15.dp, tint = color)
+                        RecordTypeIcon(item.type, size = LeziIconSize.Glyph, tint = color)
                     }
                     Text(
                         item.value,
                         // Match warm SummaryMetric: full-day sleep totals (12h20m)
                         // must fit five equal cells without clipping.
-                        style = LeziTypography.Mono.copy(fontSize = 11.sp, lineHeight = 14.sp),
+                        style = LeziTypography.ChipMetric,
                         maxLines = 1,
                         softWrap = false,
                     )

@@ -153,10 +153,10 @@ fun StateContainer(
                 StateKind.Empty -> MaterialTheme.colorScheme.onSurfaceVariant
                 StateKind.Loading -> MaterialTheme.colorScheme.primary
             }
-            Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(LeziIconSize.State), contentAlignment = Alignment.Center) {
                 if (kind == StateKind.Loading) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
+                        modifier = Modifier.size(LeziSpacing.Xl),
                         strokeWidth = 2.5.dp,
                         color = markColor,
                     )
@@ -166,7 +166,7 @@ fun StateContainer(
             }
             Spacer(Modifier.height(LeziSpacing.Xs))
             Text(title, style = LeziTypography.TitleSm)
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(LeziSpacing.Xxs))
             Text(
                 message,
                 style = LeziTypography.Body,

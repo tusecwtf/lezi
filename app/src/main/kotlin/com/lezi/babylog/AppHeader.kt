@@ -258,9 +258,14 @@ internal fun AppHeaderBar(
                     )
                 }
                 Text(
-                    collapsedSyncText?.takeIf { it.isNotBlank() }
-                        ?: babyAge.ifBlank { "本地记录" },
-                    color = if (collapsedSyncText != null && collapsedSyncIsError) {
+                    // Identity line stays the baby age. Collapsed sync only
+                    // replaces it when the status is actionable (error / reauth).
+                    if (collapsedSyncIsError && !collapsedSyncText.isNullOrBlank()) {
+                        collapsedSyncText
+                    } else {
+                        babyAge.ifBlank { "本地记录" }
+                    },
+                    color = if (collapsedSyncIsError && !collapsedSyncText.isNullOrBlank()) {
                         MaterialTheme.colorScheme.error
                     } else {
                         content.copy(alpha = headerSecondaryAlpha)

@@ -58,7 +58,7 @@ fun LeziCustomItemGlyphIcon(
     slot: Int,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
-    size: Dp = 18.dp,
+    size: Dp = LeziIconSize.Glyph,
 ) {
     val safeSlot = slot.coerceIn(0, CustomItemGlyphPaths.lastIndex)
     val path = remember(safeSlot) {

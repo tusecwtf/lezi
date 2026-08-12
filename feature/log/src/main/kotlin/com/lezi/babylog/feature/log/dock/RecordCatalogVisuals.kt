@@ -24,12 +24,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon
+import com.lezi.babylog.designsystem.LeziIconSize
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziSectionLabel
 import com.lezi.babylog.designsystem.LeziShapes
@@ -48,9 +48,9 @@ internal object RecordCatalogVisualSpec {
     val columnSpacing: Dp = LeziSpacing.Xs
     val rowSpacing: Dp = LeziSpacing.Xs
     val cardMinHeight: Dp = 64.dp
-    // Two icon tiers across dock + catalog: 32dp disc, 18dp glyph inside a disc.
-    val iconSize: Dp = 32.dp
-    val innerIconSize: Dp = 18.dp
+    // One icon set for both templates — disc + glyph sizes come from LeziIconSize.
+    val iconSize: Dp = LeziIconSize.Disc
+    val innerIconSize: Dp = LeziIconSize.Glyph
     val iconShape: RoundedCornerShape = LeziShapes.JournalCard
     val contentPadding: PaddingValues = PaddingValues(
         horizontal = LeziSpacing.Xxs,
@@ -179,10 +179,10 @@ internal fun RecordCatalogCard(
                     )
                 }
             }
-            Spacer(Modifier.height(3.dp))
+            Spacer(Modifier.height(LeziSpacing.Xxs))
             Text(
                 text = label,
-                style = LeziTypography.Label.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                style = LeziTypography.LabelLg,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,

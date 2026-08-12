@@ -107,6 +107,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziMotionMillis
+import com.lezi.babylog.designsystem.readableContentColor
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.carelog.babyAgeLabel
@@ -1020,6 +1021,30 @@ private fun LeziMainScaffold(
         )
     }
     val chrome = rootChromeVisibility(current, logLayoutEditActive)
+    // Full-screen routes hide the root header; their own LeziDetailTopBar sits on
+    // surface, so status-bar icons must follow that fill — not babyAccent.
+    val statusBarFill = if (chrome.showTopBar) {
+        leziTopBarBackground(dark)
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val statusBarNeedsLightIcons = readableContentColor(statusBarFill) == Color.White
+    val navigationScrim = MaterialTheme.colorScheme.surface.toArgb()
+    val activity = LocalContext.current as ComponentActivity
+    SideEffect {
+        activity.enableEdgeToEdge(
+            statusBarStyle = if (statusBarNeedsLightIcons) {
+                SystemBarStyle.dark(Color.Transparent.toArgb())
+            } else {
+                SystemBarStyle.light(Color.Transparent.toArgb(), Color.Transparent.toArgb())
+            },
+            navigationBarStyle = if (dark) {
+                SystemBarStyle.dark(navigationScrim)
+            } else {
+                SystemBarStyle.light(navigationScrim, navigationScrim)
+            },
+        )
+    }
     val showContextHeader = current in setOf(
         TopDest.Log.route,
         TopDest.Summary.route,

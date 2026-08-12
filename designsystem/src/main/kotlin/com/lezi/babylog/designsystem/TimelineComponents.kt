@@ -55,7 +55,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 
 /**
@@ -882,7 +881,7 @@ private fun TimelineLegendRow(
                 Spacer(Modifier.width(5.dp))
                 Text(
                     item.label,
-                    style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                    style = LeziTypography.Micro,
                     color = if (selected) {
                         MaterialTheme.colorScheme.onPrimaryContainer
                     } else {

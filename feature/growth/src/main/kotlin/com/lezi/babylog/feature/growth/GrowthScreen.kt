@@ -327,9 +327,6 @@ fun GrowthRoute(
                     com.lezi.babylog.designsystem.PageHero(
                         eyebrow = "",
                         title = "成长",
-                        trailing = {
-                            LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
-                        },
                     )
                 }
 
@@ -359,14 +356,16 @@ fun GrowthRoute(
                     )
                 }
 
+                item(key = "growth_add", contentType = "growth_add") {
+                    LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
+                }
+
                 if (ui.points.isEmpty()) {
                     item(key = "growth_empty", contentType = "growth_empty") {
                         StateContainer(
                             kind = StateKind.Empty,
                             title = "还没有测量",
                             message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
-                            actionLabel = "去录入",
-                            onAction = { openNewMeasurement() },
                         )
                     }
                 } else {

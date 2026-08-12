@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -73,6 +74,7 @@ import com.lezi.babylog.core.common.SingleFlightAction
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.birthWeightValidationError
@@ -81,11 +83,14 @@ import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeMedium
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
+import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.settingsBabyLocalSubtitle
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziIconSize
 import com.lezi.babylog.designsystem.LeziMenuIcon
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziSwitch
@@ -742,14 +747,15 @@ fun SettingsRoute(
             text = {
                 ScrollableDialogColumn {
                     Text("界面模板", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf("warm" to "温暖卡片", "journal" to "紧凑记录簿").forEach { (key, label) ->
-                            LeziFilterChip(selected = ui.settings.visualStyle == key, onClick = { vm.setVisualStyle(key) }, label = label)
-                        }
-                    }
+                    VisualStylePicker(
+                        selected = ui.settings.visualStyle,
+                        onSelect = vm::setVisualStyle,
+                    )
+                    Text(
+                        "两套模板共用同一套记录图标，只改变密度、圆角与配色。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Text("单手操作 · 惯用手", style = LeziTypography.Label)
                     Text(
                         "影响圆盘调时与表单靠边；首页常用坞按你编排的左右序，不镜像。",
@@ -938,6 +944,83 @@ private fun ScrollableDialogColumn(
         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         content = content,
     )
+}
+
+private val visualStylePreviewTypes = listOf(
+    RecordType.PEE,
+    RecordType.SLEEP,
+    RecordType.FORMULA,
+)
+
+@Composable
+private fun VisualStylePicker(
+    selected: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+    ) {
+        VisualStylePreviewCard(
+            title = "温暖卡片",
+            compact = false,
+            selected = selected == "warm",
+            onClick = { onSelect("warm") },
+            modifier = Modifier.weight(1f),
+        )
+        VisualStylePreviewCard(
+            title = "紧凑记录簿",
+            compact = true,
+            selected = selected == "journal",
+            onClick = { onSelect("journal") },
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun VisualStylePreviewCard(
+    title: String,
+    compact: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val wellShape = if (compact) LeziShapes.JournalCard else CircleShape
+    val outline = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+    }
+    Column(
+        modifier = modifier
+            .heightIn(min = LeziSpacing.Touch)
+            .clip(if (compact) LeziShapes.JournalCard else LeziShapes.Sm)
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = outline,
+                shape = if (compact) LeziShapes.JournalCard else LeziShapes.Sm,
+            )
+            .clickable(role = Role.Button, onClickLabel = title, onClick = onClick)
+            .padding(LeziSpacing.Sm),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs)) {
+            visualStylePreviewTypes.forEach { type ->
+                Box(
+                    Modifier
+                        .size(LeziIconSize.Chip)
+                        .clip(wellShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    RecordTypeIcon(type, size = LeziIconSize.Glyph)
+                }
+            }
+        }
+        Text(title, style = LeziTypography.Label)
+    }
 }
 
 @Composable
