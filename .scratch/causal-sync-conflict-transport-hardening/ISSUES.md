@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H40 and R12/R17/R18/R19/R20 are implemented; H41 is the serial frontier
+Status: in-progress — H01–H41 and R12/R17/R18/R19/R20 are implemented; H42 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -65,7 +65,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 38 | [`38-media-receipt-fault-acceptance`](./issues/38-media-receipt-fault-acceptance.md) | implemented | 19, 20, 31 |
 | 39 | [`39-media-branch-performance-acceptance`](./issues/39-media-branch-performance-acceptance.md) | implemented | 21, 22, 23, 24, 31, 37, 38 |
 | 40 | [`40-apk-upgrade-preservation-acceptance`](./issues/40-apk-upgrade-preservation-acceptance.md) | implemented (local gates pass; device upgrade residual; unrelated sync JVM residual) | 27 |
-| 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | ready-for-agent | 09, 10, 20, 40 |
+| 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | implemented (local JVM gates pass; Room/device residual) | 09, 10, 20, 40 |
 | 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | ready-for-agent | 07, 09, 41 |
 | 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | ready-for-agent | 32–42 acceptance leaves |
 
@@ -78,7 +78,7 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H40 is implemented locally. H41 is the next executable DAG frontier; H41–H43 remain open and follow
+H41 is implemented locally at JVM seams. H42 is the next executable DAG frontier; H42–H43 remain open and follow
 the serial order above. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD
 and rollback locally; H43 hands evidence to release 09.
 
