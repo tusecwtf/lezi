@@ -1,14 +1,19 @@
 package com.lezi.babylog.feature.family.conflict
 
+import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertContentDescriptionContains
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.domain.carelog.ConflictInbox
@@ -18,6 +23,7 @@ import com.lezi.babylog.domain.carelog.ConflictInboxItem
 import com.lezi.babylog.domain.carelog.ConflictInboxMedia
 import com.lezi.babylog.feature.family.overview.FamilySyncStatusEntry
 import com.lezi.babylog.sync.conflict.ConflictRootType
+import java.io.File
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -80,9 +86,12 @@ class H42ConflictDeviceAcceptanceTest {
 
         composeRule.onNodeWithTag("family_conflict_inbox_badge")
             .assertContentDescriptionContains("5项待处理", substring = true)
+        captureEvidence("h42-family-conflict-badge.png")
+        composeRule.onNodeWithTag("family_conflict_inbox_badge")
             .performClick()
         composeRule.runOnIdle { assertThat(openedInbox).isTrue() }
         composeRule.onNodeWithText("5 项待处理").assertExists()
+        captureEvidence("h42-five-root-conflict-inbox.png")
         items.forEachIndexed { index, item ->
             composeRule.onNodeWithTag("conflict_inbox_item_${item.conflictId}")
                 .assertContentDescriptionContains(rootLabels[index], substring = true)
@@ -98,6 +107,19 @@ class H42ConflictDeviceAcceptanceTest {
             .assertContentDescriptionContains("含删除候选", substring = true)
         composeRule.onNodeWithTag("conflict_inbox_item_h42-conflict-2")
             .assertContentDescriptionContains("2张照片", substring = true)
+    }
+
+    private fun captureEvidence(fileName: String) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val directory = File(context.cacheDir, "h42-evidence").apply {
+            check(exists() || mkdirs()) { "Cannot create H42 evidence directory" }
+        }
+        File(directory, fileName).outputStream().use { output ->
+            check(
+                composeRule.onRoot().captureToImage().asAndroidBitmap()
+                    .compress(Bitmap.CompressFormat.PNG, 100, output),
+            ) { "Cannot write H42 screenshot evidence" }
+        }
     }
 }
 
