@@ -75,6 +75,5 @@ Cases：lost prepare response、lost commit response、duplicate prepare、expir
 - **Isolation:** no NAS/production certs; controllable backend + settlement journal + spool opens only.
 - **Residuals:** `adb devices -l` returned only `List of devices attached` with no devices, so Android Room/process-death instrumentation
   remains residual (H20/H41 ownership). Media branch resolution / slow upload are H39.
-  The Android settlement matrix and the real-server receipt/replay/fault matrix are separate seams.
-  They do not prove an injected prepare/commit disconnect through one Android→real-server chain;
-  that missing cross-layer receipt is tracked by H44 and blocks H43/release 09.
+  The Android settlement matrix and the real-server receipt/replay/fault matrix were separate
+  seams. H44 now owns the injected Android→real-server chain and is locally green.

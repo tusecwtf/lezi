@@ -13,7 +13,7 @@
 - [x] 历史 v1 证据目标曾为 Android/server 0.3.13、versionCode 20、Room 27、server schema 12；这些数字不自动成为 hardening 发版目标
 - [ ] `causal-sync-conflict-transport-hardening/43` 完成；目标严格为 Android/server 0.4.0、code 21、Room 28、contract 5、server schema 13、floor 21
 - [ ] 同签名 code 6 与当前 code 20 APK 原地升级到 code 21，保留 Room facts/tombstone/pending/conflict/media/spool/session/credentials/endpoint/TLS trust
-- [ ] live NAS preflight 只接受完整且 shape 匹配的 server user_version 11 或 12；其它 source 在 stop/rm 前中止并另立迁移
+- [x] live NAS preflight 只接受完整且 shape 匹配的 server user_version 11 或 12；其它 source 在 stop/rm 前中止并另立迁移（编排已从 attested rollback package 推导 0.3.12/11 或 0.3.13/12；生产 live 探针仍待维护窗）
 - [ ] `offline-migrate` v11/v12→v13 copy-out/dry-run/migrate/validate 与隔离 rollback rehearsal receipts 全通过；source data root 零写入
 - [x] 隔离真实 lezi-sync + 两 joined clients 覆盖不同字段自动 merge、同字段双 branch、作者/Owner resolution 与 peer stable/conflict 可见（HTTP `/v1/causal/*` 两 joined session；**非** CareLog→SyncPort 主缝）
 - [x] E2E 覆盖 current causal delete、delete/edit **两到达顺序**、稳定 tombstone stale replay、lost-response idempotent replay、resolution CAS 失败闭合（stale expected + post-resolve）；process-death / 显式 restore 细表仍以 Store unit 为主 → 未宣称双端完整

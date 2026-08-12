@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: blocked — H01–H42 are locally implemented/accepted with stated residuals; H43 final review recorded P1 blockers
+Status: local-partial — H01–H42 and H44 are locally implemented/accepted with stated residuals; H43 needs a re-review on the new HEAD before release 09
 
 Spec: [`spec.md`](./spec.md)
 
@@ -62,13 +62,13 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 35 | [`35-pull-page-fault-acceptance`](./issues/35-pull-page-fault-acceptance.md) | implemented | 16, 31 |
 | 36 | [`36-resource-saturation-acceptance`](./issues/36-resource-saturation-acceptance.md) | implemented | 31, R19 |
 | 37 | [`37-media-source-spool-fault-acceptance`](./issues/37-media-source-spool-fault-acceptance.md) | implemented | 18, 31 |
-| 38 | [`38-media-receipt-fault-acceptance`](./issues/38-media-receipt-fault-acceptance.md) | implemented-supporting (cross-layer real-server fault seam is H44) | 19, 20, 31 |
+| 38 | [`38-media-receipt-fault-acceptance`](./issues/38-media-receipt-fault-acceptance.md) | implemented (cross-layer real-server fault seam closed by H44) | 19, 20, 31 |
 | 39 | [`39-media-branch-performance-acceptance`](./issues/39-media-branch-performance-acceptance.md) | implemented | 21, 22, 23, 24, 31, 37, 38 |
 | 40 | [`40-apk-upgrade-preservation-acceptance`](./issues/40-apk-upgrade-preservation-acceptance.md) | implemented (API 35 Room + same-signer upgrades pass) | 27 |
 | 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | implemented (API 35 process-death matrix passes) | 09, 10, 20, 40 |
 | 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | implemented (API 35 interaction + screenshot evidence pass) | 07, 09, 41 |
-| 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | blocked (H44 P1; CD preflight blockers recorded) | 32–42, 44 |
-| 44 | [`44-real-server-media-receipt-fault-seam`](./issues/44-real-server-media-receipt-fault-seam.md) | ready-for-agent (P1 release blocker) | 31, 38 |
+| 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | blocked (H44 locally green; needs re-review on new HEAD before CD) | 32–42, 44 |
+| 44 | [`44-real-server-media-receipt-fault-seam`](./issues/44-real-server-media-receipt-fault-seam.md) | implemented (isolated real-server fault seam green) | 31, 38 |
 
 External owners: [`R12 admission`](../repository-dedup-algorithm-audit-20260809/issues/12-bounded-conflict-resources.md),
 [`R17 loader`](../repository-dedup-algorithm-audit-20260809/issues/17-bounded-conflict-head-loader.md),
@@ -80,10 +80,11 @@ Production schema cutover/CD remains owned by
 ## Frontier
 
 H40–H42 are closed on the API 35 device/emulator receipts recorded in their tickets. H39's real
-server critical-section evidence is also green. H43 remains blocked only by the newly isolated H44
-cross-layer real-server media receipt fault seam. H28 completed non-destructive server 11/12→13
-copy-out; H29–H30 prove guarded CD and rollback locally. Production preflight on 2026-08-13 found
-live HTTPS `0.3.12` and an SSH user without Docker socket access, so no stop/rm/replace occurred.
+server critical-section evidence is also green. H44 closed the Android→real-server media receipt
+fault seam on an isolated loopback instance. Guarded 0.4.0 cutover now accepts exactly one attested
+source tuple: `0.3.12`/schema 11 or `0.3.13`/schema 12. H43 still needs a Standards/Spec re-review
+on the new committed HEAD. Production CD still requires a fresh maintenance-window confirmation;
+no stop/rm/replace was performed.
 
 ## Program invariants
 

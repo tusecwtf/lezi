@@ -171,15 +171,17 @@ No speculative production repair was made here.
 - **Spec re-review:** H39 server critical-section P1 was disproved by the real isolated Axum/SQLite
   tests `slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_commit` and
   `causal_media_promotion_runs_outside_the_same_family_commit_lock`; both passed on this basis.
-  One P1 remains: H38's Android settlement fault matrix and real-server fault matrix are separate,
-  not one injected Android→real-server chain. H44 now owns that exact gap. Therefore H43 remains
-  **blocked** and release 09/CD cannot be declared eligible.
+  The H38/H44 P1 is locally closed: H44 proves
+  `ReplicaSyncEngine → HttpSyncBackend → fault proxy → isolated lezi-sync` (6/6). H43 still
+  remains **blocked** until a Standards/Spec re-review runs on the new committed HEAD that
+  includes H44 plus the attested 0.3.12/schema-11 cutover source. Release 09/CD still needs a
+  fresh maintenance-window confirmation.
 - **Production read-only preflight:** `https://192.168.50.4:8765/health` answered version `0.3.12`;
-  plaintext HTTP returned 502. The dedicated 0.4.0 cutover accepts only exact live
-  `lezi-sync:0.3.13`/schema 12. The SSH user is not in the Docker group, `/var/run/docker.sock` is
-  `root:docker 660`, and `sudo -n docker` requires a password. Consequently no schema/container/TLS
-  inventory could be collected through uid 10001, and no NAS write, stop, rm, package push or
-  replacement was attempted.
+  plaintext HTTP returned 502. Guarded 0.4.0 cutover now accepts exactly one attested source
+  tuple: `0.3.12`/schema 11 or `0.3.13`/schema 12, derived from the rollback package. The earlier
+  preflight could not collect schema/container/TLS inventory through uid 10001 because the SSH
+  user lacked Docker-group access; a later login reported docker-group membership. Re-probe
+  read-only before any stop/rm. No NAS write, package push, or replacement was attempted.
 
 ## Out of scope
 
