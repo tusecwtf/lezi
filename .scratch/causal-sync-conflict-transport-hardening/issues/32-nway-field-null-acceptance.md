@@ -34,7 +34,7 @@ Cases：A/B 不同 leaf；A/B 同 leaf 两值；A/B/C 同 leaf 三值；两 chan
 
 ## Evidence
 
-- **HEAD:** _(pinned after feature commit)_
+- **HEAD:** `527820b55128200246ec3fc3ffb021f45c53df1a`
 - **Schema / release pins:** server schema `13`; Android `0.4.0` / versionCode `21`; Room `28`; local-data contract `5`; protocol floor `21`
 - **Fixture path:**
   - `domain/src/test/kotlin/com/lezi/babylog/domain/CareLogRealServerSeamNwayMatrixTest.kt`
