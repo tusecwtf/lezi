@@ -34,7 +34,7 @@ Cases：lost prepare response、lost commit response、duplicate prepare、expir
 
 ## Evidence
 
-- **HEAD:** _(feat commit; docs pin follows)_
+- **HEAD:** `9442bfd0bd00cae31499a61bf1bc2261a45fab51`
 - **Production owners:** H19 receipt claim (`claim_manifest` / `media_membership_mismatch` /
   `media_preimage_expired` / digest+length mismatch codes), H20
   `CausalMediaSettlementJournalOwner`, H18 immutable spool (source-once via H37).
