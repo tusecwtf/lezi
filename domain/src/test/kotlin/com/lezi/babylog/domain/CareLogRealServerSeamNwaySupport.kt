@@ -245,4 +245,3 @@ internal suspend fun SeamClient.stableBabyFact(clientUuid: String): StableBabyFa
         syncDirty = row.syncDirty,
     )
 }
-

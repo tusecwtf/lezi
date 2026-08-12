@@ -2735,13 +2735,12 @@ fn h39_media_branch_matrix_preserves_exact_bytes_for_record_baby_and_care_plan()
                 let candidate = path
                     .candidates
                     .iter()
-                    .filter(|candidate| {
+                    .find(|candidate| {
                         candidate
                             .sources
                             .iter()
                             .any(|source| source.version_id == branch_version)
                     })
-                    .next()
                     .unwrap();
                 ConflictResolutionChoice {
                     path: path.path.clone(),
