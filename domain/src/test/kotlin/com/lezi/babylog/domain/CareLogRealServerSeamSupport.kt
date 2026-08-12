@@ -21,6 +21,7 @@ import com.lezi.babylog.sync.appupdate.AppUpdateApkIdentityReader
 import com.lezi.babylog.sync.appupdate.AppUpdateInstaller
 import com.lezi.babylog.sync.appupdate.StagedApkIdentity
 import com.lezi.babylog.sync.backend.HttpSyncBackend
+import com.lezi.babylog.sync.backend.retry.withForegroundRetryPolicy
 import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
 import com.lezi.babylog.sync.engine.NoOpCarePlanFamilyAppliedListener
@@ -62,8 +63,8 @@ import org.junit.Assume.assumeTrue
 /**
  * Independent CareLog + RealSyncPort clients joined to one isolated real lezi-sync.
  *
- * Public seam only: CareLog → SyncPort/RealSyncPort → ReplicaSyncEngine → HttpSyncBackend
- * → real server → peer Room/domain. No Store/direct-HTTP bypass for the mutation path.
+ * Public seam only: CareLog → SyncPort/RealSyncPort → ReplicaSyncEngine →
+ * RetryingSyncBackend → HttpSyncBackend → real server → peer Room/domain.
  *
  * H31 seeds owner+member. H32 may attach extra Owner devices on the same family for
  * concurrent multi-writer branches without inventing a parallel fixture.
@@ -473,10 +474,12 @@ internal class SeamClient private constructor(
                 packageName = "com.lezi.babylog",
                 localDataContractVersion = 5,
             )
+            // Production parity: RealSyncPort always sits behind RetryingSyncBackend
+            // (see SyncModule). H34 acceptance requires the same request/retry owner.
             val backend = HttpSyncBackend(
                 preferences = preferences,
                 clientAppVersion = clientVersion,
-            )
+            ).withForegroundRetryPolicy()
             val setupProbe = SetupProbe { draft, trusted ->
                 val resolved = trusted
                     ?: runCatching { TrustedEndpointProfile.systemPki(draft) }.getOrNull()

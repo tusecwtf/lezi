@@ -67,3 +67,10 @@ internal class RetryingSyncBackend(
         delegate.resolveConflict(session, conflictId, request)
     }
 }
+
+/**
+ * Production request/retry owner for the six idempotent transport operations.
+ * Cross-module fixtures (CareLog real-server seam) must use this factory so they
+ * share the same H15/H34 budget policy as [com.lezi.babylog.sync.SyncModule].
+ */
+fun SyncBackend.withForegroundRetryPolicy(): SyncBackend = RetryingSyncBackend(this)
