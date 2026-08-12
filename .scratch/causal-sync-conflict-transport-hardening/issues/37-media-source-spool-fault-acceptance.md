@@ -35,8 +35,7 @@ Cases：source changes after freeze、URI disappears、permission revoked、part
 
 ## Evidence
 
-- **HEAD:** _(pinned after feat commit)_
-- **Deterministic seed:** `H37_FAULT_SEED = 0x371831` (`0x37_18_31L`)
+- **HEAD:** `86827f2706041ffce2c6ce9680f5ecc51e20dda3`
 - **Production owner:** `FileImmutableMediaSpool` (H18)
 - **Fixture path:**
   - `sync/src/test/kotlin/com/lezi/babylog/sync/media/MediaSourceSpoolFaultAcceptanceTest.kt`
