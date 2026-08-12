@@ -368,16 +368,18 @@ migrate() {
 validate_migration() {
   local sync_bin
   sync_bin="$(resolve_sync_bin)"
+  # The migrator intentionally excludes the update channel from the new root:
+  # publication and data migration have separate rollback lifetimes. Bind the
+  # already signer-attested target pair into the staged root before validating
+  # the exact bytes that will become live.
+  cp -- "${PACKAGE_DIR}/app-update/app-release.apk" \
+    "${WORK_DIR}/out/app-release.apk"
+  cp -- "${PACKAGE_DIR}/app-update/app-update.json" \
+    "${WORK_DIR}/out/app-update.json"
   "${sync_bin}" offline-migrate validate --out "${WORK_DIR}/out" \
     >"${state_dir}/migration-validation.txt"
   (cd "${WORK_DIR}/out" && find . -type f ! -name lezi.db -print0 | sort -z | xargs -0 -r sha256sum) \
     >"${state_dir}/validated-target-inventory.txt"
-  printf '%s  ./app-release.apk\n' \
-    "$(sha256sum "${PACKAGE_DIR}/app-update/app-release.apk" | awk '{print $1}')" \
-    >>"${state_dir}/validated-target-inventory.txt"
-  printf '%s  ./app-update.json\n' \
-    "$(sha256sum "${PACKAGE_DIR}/app-update/app-update.json" | awk '{print $1}')" \
-    >>"${state_dir}/validated-target-inventory.txt"
   LC_ALL=C sort -o "${state_dir}/validated-target-inventory.txt" \
     "${state_dir}/validated-target-inventory.txt"
   sqlite3 "${WORK_DIR}/out/lezi.db" .dump | sha256sum \

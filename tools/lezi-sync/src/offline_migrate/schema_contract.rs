@@ -10,6 +10,8 @@ use std::path::Path;
 use rusqlite::Connection;
 use thiserror::Error;
 
+use super::immutable::open_immutable;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SchemaContract {
     user_version: i64,
@@ -47,10 +49,7 @@ impl SchemaContract {
     }
 
     pub(crate) fn validate_path(self, path: &Path) -> Result<(), SchemaContractError> {
-        let connection = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let connection = open_immutable(path)?;
         self.validate(&connection)
     }
 

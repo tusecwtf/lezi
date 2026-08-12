@@ -232,6 +232,10 @@ grep -Fq '.schema-cutover-read-only' "${runner_source}" \
   || fail "target activation must retain a write gate through post-check"
 grep -Fq 'postcheck-semantic-inventory.txt' "${runner_source}" \
   || fail "post-check must compare migrated semantic inventory"
+grep -Fq '"${PACKAGE_DIR}/app-update/app-release.apk"' "${runner_source}" \
+  || fail "validated schema-13 root must contain the signer-attested target APK"
+grep -Fq '"${PACKAGE_DIR}/app-update/app-update.json"' "${runner_source}" \
+  || fail "validated schema-13 root must contain the attested target metadata"
 grep -Fq 'LEZI_SYNC_VERSION=0.3.13' "${runner_source}" \
   || fail "automatic pre-open rollback must recreate the pinned source service"
 

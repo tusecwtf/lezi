@@ -45,6 +45,7 @@ pub(crate) mod boundary;
 pub(crate) mod causal;
 pub(crate) mod cli;
 pub(crate) mod cutover;
+pub(crate) mod immutable;
 pub(crate) mod inventory;
 pub(crate) mod live_cutover;
 pub(crate) mod media;

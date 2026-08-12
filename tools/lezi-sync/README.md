@@ -556,10 +556,11 @@ destructive fallback 或部分原地改写均被禁止。
 
 H28 仅提供 schema-13 migrator。H29 已提供独立、显式授权的
 `deploy/schema-cutover.sh`，负责 APK 预发布、outer lease、off-repo age rollback、copy-out、
-migrate/validate、staging swap、guarded CD 与 post-check；普通 CD 仍不调用 migration。在 H30
-隔离 rollback rehearsal 和 release ticket 09 的新维护窗确认完成前，不得把 H29 本地脚本通过
-等同于家庭 NAS 已可切割。旧 `copy-back-nas-data.sh` 仍冻结为 schema-12 legacy path，不接受
-schema 13 output。
+migrate/validate、staging swap、guarded CD 与 post-check；普通 CD 仍不调用 migration。H30 已用
+`deploy/schema-cutover-rehearsal.sh` 在 developer-owned loopback Docker 与临时数据根完成
+schema 11/12→13 成功路径及八个开放写入前失败点的 rollback rehearsal。该入口拒绝 NAS/CD
+变量和非回环地址；其通过不等同于家庭 NAS 已可切割。旧 `copy-back-nas-data.sh` 仍冻结为
+schema-12 legacy path，不接受 schema 13 output。
 
 **权威运维 runbook（步骤与回滚）：**
 [`deploy/copy-back-tls-cutover-runbook.md`](deploy/copy-back-tls-cutover-runbook.md)

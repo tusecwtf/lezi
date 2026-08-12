@@ -41,6 +41,7 @@ operator entrypoint that may replace the production container is `push-and-deplo
 | `init-tls.sh`, `tls-certificate-sha256.sh`, `tls-spki.sh` | NAS or isolated developer fixture | Internal/read-only except authorized bootstrap | Distinguish absent/present/unsafe TLS state, validate the pair, and measure exact certificate/SPKI identity. |
 | `copy-out-nas-data.sh`, `copy-back-nas-data.sh`, `live-cutover-probe.sh` | Maintenance workflow | Authorized maintenance window only | Prepare or execute the separately governed offline-migration cutover; they are never part of ordinary CD. |
 | `schema-cutover.sh`, `schema-cutover-steps.sh` | Developer machine | Exact `LEZI_SCHEMA_CUTOVER_APPROVAL` only | H29 0.4.0/schema-13 state machine; owns APK prepublish, outer lease, encrypted rollback, migration, staged swap, target activation and post-check. |
+| `schema-cutover-rehearsal.sh`, `schema-cutover-rehearsal-steps.sh` | Developer-owned isolated Docker only | Exact `LEZI_ISOLATED_SCHEMA_CUTOVER_REHEARSAL=1`; loopback and `/tmp`/`/var/tmp` roots only | H30 schema 11/12 success plus all eight pre-write failure/rollback cases. Never targets the family NAS and is not a production deploy entrypoint. |
 | `backup-pre-tls-cutover-state.sh`, `restore-pre-tls-cutover-state.sh`, `validate-pre-tls-cutover-state.py` | Developer machine | Authorized maintenance preparation | Capture and validate the pre-cutover container start contract for rollback staging; they do not make the incomplete live rollback executable. |
 | `validate-credential-bundle.sh` | Developer machine | Internal/read-only | Validate the pipe-only credential bundle before encryption or recovery staging. |
 | `docker-compose.nas.yml.tpl`, `.env.example`, `app-update.json` | Package inputs | Never executed directly | Define the rendered runtime shape, a deliberately empty local secret example, and the APK update metadata contract. |
@@ -384,7 +385,7 @@ the operator's approved secure cleanup procedure.
 | 启动合同 | 现网进程只打开精确 current schema；旧库 fail closed，无自动迁移 |
 | 切割流水线 | H28 只提供冻结 11/12→13 migrator；H29 的独立 `schema-cutover.sh` 串联实际维护阶段，普通 CD 仍不可调用 migrator |
 | 权威 runbook | 本节与 [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)；旧 `copy-back-nas-data.sh` 仍冻结在 schema 12，不可用于 H29 |
-| 当前开窗门 | H29 只实现并本地验证编排；H30 必须先在 developer-owned isolated instance 完成 rollback rehearsal，生产仍由 release ticket 09 重新确认 |
+| 当前开窗门 | H30 已在 developer-owned isolated instance 完成 schema 11/12 的成功与八阶段 rollback rehearsal；生产仍由 release ticket 09 重新确认，且不得复用测试证书、fixture 或临时根 |
 | Identity | H28 byte-preserves `server.secret` 与 TLS pair；H29 必须证明 pre/post certificate + SPKI 完全一致 |
 | 发布二进制 | 可含该子命令 ≠ 滚动 schema 兼容产品承诺 |
 
@@ -404,6 +405,16 @@ point automatically restores the frozen source bind, source image, and prior APK
 those checks pass does the workflow remove the gate and restart the target; failures after that
 write-open boundary require explicit incident authorization and reconciliation. Release-specific
 evidence and isolated rehearsal remain mandatory before using this command on a family NAS.
+
+H30 的隔离复验入口是 `schema-cutover-rehearsal.sh`。它只接受回环地址、非特权测试端口和
+`/tmp`/`/var/tmp` 下 mode-700 空目录，并拒绝 `NAS_SSH`、`NAS_REMOTE_DIR`、
+`LEZI_DATA_HOST_PATH`。测试数据可由 `create-schema-cutover-rehearsal-fixture.sh` 生成；运行者必须
+显式提供固定的 schema-11/schema-12 旧镜像、0.4.0 目标镜像以及目标 APK/metadata。输出的
+`matrix.tsv` 与 `receipts.sha256` 记录两条成功路径和 backup、copy-out、migrate、validate、
+copy-back、start、health、APK-hash 八类失败回滚。隔离 adapter 直接驱动 H29
+`schema-cutover.sh`，只把其生产 SSH/NAS phase runner 映射成本机 Docker；receipt 逐行证明
+facts、identity/session、causal associations、media、secret、TLS、APK pair 与 health/pull。
+此入口不获得生产维护权限。
 
 产品 README 摘要：[`../README.md`](../README.md) § 离线 schema 11/12→13 准备。
 

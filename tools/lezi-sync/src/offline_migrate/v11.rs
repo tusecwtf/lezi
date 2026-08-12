@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use super::causal::{finalize_causal_v12, validate_causal_integrity_with_media};
+use super::immutable::open_immutable;
 use super::inventory::AuthoritativeFailure;
 use super::migrator::{remove_db_files, MigrateError, MigrateReport};
 use super::schema_contract::LEGACY_SCHEMA_V12;
@@ -44,10 +45,7 @@ pub(crate) fn migrate_v11_database(
 
     // Validate source first so wrong user_version is reported accurately even
     // when dest already exists (ops diagnostics / fail-closed preserve dest).
-    let source = Connection::open_with_flags(
-        source_db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let source = open_immutable(source_db)?;
     validate_source_v11(&source)?;
 
     if dest_db.try_exists()? {

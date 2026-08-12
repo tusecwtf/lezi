@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use rusqlite::{params_from_iter, types::Value, Connection};
 use sha2::{Digest, Sha256};
 
+use super::immutable::open_immutable;
 use super::migrator::{MigrateError, MigrateReport};
 use super::schema_contract::LEGACY_SCHEMA_V12;
 use super::v11::{migrate_v11_data_dir, SOURCE_V11_USER_VERSION};
@@ -63,10 +64,7 @@ pub(crate) fn migrate_v11_or_v12_data_dir_to_v13(
 }
 
 fn read_user_version(database: &Path) -> Result<i64, MigrateError> {
-    let connection = Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let connection = open_immutable(database)?;
     connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(MigrateError::from)
@@ -175,10 +173,7 @@ fn validate_data_root(root: &Path) -> Result<(), MigrateError> {
     reject_extra_tls_entries(&tls)?;
     validate_tls_identity(&tls)?;
     reject_symlinks(root)?;
-    let connection = Connection::open_with_flags(
-        root.join("lezi.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let connection = open_immutable(&root.join("lezi.db"))?;
     validate_database_integrity(&connection)?;
     Ok(())
 }
@@ -294,10 +289,7 @@ fn openssl_public_key(args: &[&str]) -> Result<Vec<u8>, MigrateError> {
 }
 
 fn rebuild_v12_database(source_path: &Path, dest_path: &Path) -> Result<(), MigrateError> {
-    let source = Connection::open_with_flags(
-        source_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let source = open_immutable(source_path)?;
     LEGACY_SCHEMA_V12
         .validate(&source)
         .map_err(|error| MigrateError::Internal(error.to_string()))?;
@@ -411,10 +403,7 @@ pub(crate) fn validate_schema13_data_dir(root: &Path) -> Result<(), MigrateError
     validate_data_root(root)?;
     Store::preflight_existing_schema(&root.join("lezi.db"))
         .map_err(|error| MigrateError::Internal(format!("schema-13 preflight: {error}")))?;
-    let connection = Connection::open_with_flags(
-        root.join("lezi.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let connection = open_immutable(&root.join("lezi.db"))?;
     validate_media_inventory(&connection, root)?;
     Ok(())
 }
@@ -704,10 +693,7 @@ fn require_regular_nonempty_file(path: &Path) -> Result<(), MigrateError> {
 }
 
 fn migration_report(database: &Path) -> Result<MigrateReport, MigrateError> {
-    let connection = Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let connection = open_immutable(database)?;
     let count = |table: &str| -> Result<u64, MigrateError> {
         Ok(connection.query_row(
             &format!("SELECT COUNT(*) FROM {}", quoted(table)),
@@ -926,6 +912,70 @@ mod tests {
             fs::read(out.join("tls/server.key")).unwrap(),
             fs::read(source.join("tls/server.key")).unwrap(),
         );
+    }
+
+    #[test]
+    fn checkpointed_wal_source_migrates_without_creating_sidecars() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let out = temp.path().join("out");
+        write_v12_fixture(&source);
+        let connection = Connection::open(source.join("lezi.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA journal_mode = WAL", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "wal",
+        );
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(connection);
+        for sidecar in ["lezi.db-wal", "lezi.db-shm"] {
+            let path = source.join(sidecar);
+            if path.exists() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+
+        migrate_v12_data_dir_to_v13(&source, &out).expect("checkpointed WAL source");
+
+        assert!(!source.join("lezi.db-wal").exists());
+        assert!(!source.join("lezi.db-shm").exists());
+        Store::preflight_existing_schema(&out.join("lezi.db")).unwrap();
+    }
+
+    #[test]
+    fn checkpointed_v11_wal_source_migrates_without_creating_sidecars() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let out = temp.path().join("out");
+        write_v11_fixture(&source);
+        let connection = Connection::open(source.join("lezi.db")).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA journal_mode = WAL", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "wal",
+        );
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(connection);
+        for sidecar in ["lezi.db-wal", "lezi.db-shm"] {
+            let path = source.join(sidecar);
+            if path.exists() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+
+        migrate_v11_or_v12_data_dir_to_v13(&source, &out).expect("checkpointed v11 WAL");
+
+        assert!(!source.join("lezi.db-wal").exists());
+        assert!(!source.join("lezi.db-shm").exists());
+        Store::preflight_existing_schema(&out.join("lezi.db")).unwrap();
     }
 
     #[test]
