@@ -354,9 +354,7 @@ internal class RecordingSyncBackend : SyncBackend {
             "record_membership_author",
             "device_disaster_restore_v1",
             "validated_deferred_fulfillment_v1",
-            "causal_versions",
-            "wake_observation",
-            "source_relations",
+            "causal_sync_v2",
         ),
     )
     var anonymousReadyResult = AnonymousReadiness(version = "0.3.3")
@@ -2780,6 +2778,8 @@ internal class MemoryConflictSnapshotCacheDao :
     com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao {
     private val items =
         mutableListOf<com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity>()
+    private val transport =
+        mutableListOf<com.lezi.babylog.core.database.causal.CausalTransportJournalEntity>()
     var deleteFailure: Throwable? = null
 
     override suspend fun get(
@@ -2803,13 +2803,40 @@ internal class MemoryConflictSnapshotCacheDao :
         items.clear()
     }
 
+    override suspend fun getTransportJournal(
+        journalKey: String,
+    ): com.lezi.babylog.core.database.causal.CausalTransportJournalEntity? =
+        transport.find { it.journalKey == journalKey }
+
+    override suspend fun putTransportJournal(
+        journalKey: String,
+        payloadJson: String,
+        contentEpoch: Long,
+    ) {
+        transport.removeAll { it.journalKey == journalKey }
+        transport += com.lezi.babylog.core.database.causal.CausalTransportJournalEntity(
+            journalKey = journalKey,
+            payloadJson = payloadJson,
+            contentEpoch = contentEpoch,
+        )
+    }
+
+    override suspend fun deleteTransportJournal(journalKey: String) {
+        deleteFailure?.let { throw it }
+        transport.removeAll { it.journalKey == journalKey }
+    }
+
+    override suspend fun deleteAllTransportJournals() {
+        transport.clear()
+    }
+
     override suspend fun listFrozenMediaSpoolManifests(): List<
-        com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
-    > = items.filter {
-        it.conflictId.startsWith(
+        com.lezi.babylog.core.database.causal.CausalTransportJournalEntity
+    > = transport.filter {
+        it.journalKey.startsWith(
             com.lezi.babylog.core.database.causal.FROZEN_MEDIA_SPOOL_KEY_PREFIX,
         )
-    }.sortedBy { it.conflictId }
+    }.sortedBy { it.journalKey }
 }
 
 internal class MemorySourceRelationDao : SourceRelationDao() {

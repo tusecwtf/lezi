@@ -134,8 +134,8 @@ internal class CausalSettlement(
         val cache = conflictSnapshotCacheDao ?: return emptySet()
         mediaSettlementJournal?.finishPendingCleanups()
         val roomGroups = cache.listFrozenMediaSpoolManifests().map { row ->
-            val group = decodeFrozenMediaSpoolManifest(row.snapshotJson)
-            require(row.conflictId == frozenMediaSpoolCacheKey(group.mutationId)) {
+            val group = decodeFrozenMediaSpoolManifest(row.payloadJson)
+            require(row.journalKey == frozenMediaSpoolCacheKey(group.mutationId)) {
                 "Room media spool key does not bind its payload mutation"
             }
             group.mutationId to group
@@ -840,8 +840,8 @@ internal class CausalSettlement(
         val cache = conflictSnapshotCacheDao ?: return null
         return transactionRunner.run {
             cache.getFrozenMutation(entityType, clientUuid)?.let { stored ->
-                val restored = decodeFrozenCommitEnvelope(stored.snapshotJson)
-                require(restored.contentEpoch == stored.cachedAt) {
+                val restored = decodeFrozenCommitEnvelope(stored.payloadJson)
+                require(restored.contentEpoch == stored.contentEpoch) {
                     "frozen commit envelope epoch metadata drift"
                 }
                 require(
@@ -1163,7 +1163,7 @@ internal class CausalSettlement(
         currentMutationId: String?,
     ): Boolean {
         val stored = getFrozenMutation(entityType, clientUuid) ?: return false
-        val frozen = runCatching { decodeFrozenCommitEnvelope(stored.snapshotJson) }.getOrNull()
+        val frozen = runCatching { decodeFrozenCommitEnvelope(stored.payloadJson) }.getOrNull()
             ?: return false
         return frozen.mutation.entityType == entityType &&
             frozen.mutation.clientUuid == clientUuid &&
@@ -1247,9 +1247,9 @@ internal class CausalSettlement(
             )
         }
         val stored = cache.getFrozenMediaSpoolManifest(mutationId)?.let { row ->
-            decodeFrozenMediaSpoolManifest(row.snapshotJson).also { group ->
+            decodeFrozenMediaSpoolManifest(row.payloadJson).also { group ->
                 require(group.mutationId == mutationId) { "Room media spool manifest identity drift" }
-                require(row.cachedAt == contentEpoch) { "Room media spool manifest epoch drift" }
+                require(row.contentEpoch == contentEpoch) { "Room media spool manifest epoch drift" }
             }
         }
         val sidecarOnly = if (stored == null) {
@@ -1380,7 +1380,7 @@ internal class CausalSettlement(
             "causal media upload requires durable Room manifest storage"
         }
         val group = cache.getFrozenMediaSpoolManifest(unit.mutation.mutationId)?.let { row ->
-            decodeFrozenMediaSpoolManifest(row.snapshotJson)
+            decodeFrozenMediaSpoolManifest(row.payloadJson)
         } ?: throw AuthorityProofException(
             session.pullGeneration,
             IllegalArgumentException("因果媒体缺少不可变 spool manifest"),

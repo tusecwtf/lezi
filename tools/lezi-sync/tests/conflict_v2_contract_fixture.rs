@@ -11,6 +11,10 @@ fn shared_corpus_conforms_to_the_frozen_schema_and_cross_case_invariants() {
 
     validate(&schema, &corpus, &schema, "$").unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(schema["$id"], corpus["$schema"]);
+    assert_eq!(
+        corpus["capability"]["key"],
+        lezi_sync::CAPABILITY_CAUSAL_SYNC_V2,
+    );
 
     let schema_codes = strings(&schema["$defs"]["terminalCode"]["enum"]);
     assert_eq!(strings(&corpus["terminal_error_codes"]), schema_codes);

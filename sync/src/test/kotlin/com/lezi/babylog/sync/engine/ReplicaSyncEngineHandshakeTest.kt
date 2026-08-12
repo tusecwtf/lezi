@@ -115,9 +115,9 @@ class ReplicaSyncEngineHandshakeTest {
     }
 
     @Test
-    fun extraOrPrematureV2CapabilityStopsBeforeDirectoryOrReplicaWork() = runTest {
+    fun extraOrSourceGenerationCapabilityStopsBeforeDirectoryOrReplicaWork() = runTest {
         val session = joinedReplicaSession()
-        for (extra in listOf("future_extra", "causal_sync_v2")) {
+        for (extra in listOf("future_extra", "causal_versions")) {
             val rig = ReplicaEngineRig(session).also {
                 it.backend.enableCausal = true
                 it.backend.nextHandshake = handshake(session, directoryGeneration = "directory-a")

@@ -6,7 +6,7 @@ import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
+import com.lezi.babylog.core.database.causal.CausalTransportJournalEntity
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
@@ -560,7 +560,7 @@ class ReplicaSyncEngineCausalSettlementTest {
                 .exceptionOrNull(),
         ).isInstanceOf(java.io.IOException::class.java)
         val pendingRow = rig.conflictDetails.listFrozenMediaSpoolManifests().single()
-        val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.snapshotJson))
+        val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.payloadJson))
         val firstMutation = pending.mutation
         assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.Pending)
         assertThat(pending.receipts.map { it.mediaUuid }).containsExactly(firstMedia)
@@ -614,7 +614,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         ).isInstanceOf(java.io.IOException::class.java)
         assertThat(rig.backend.causalCommittedUnits).isEmpty()
         val pendingRow = rig.conflictDetails.listFrozenMediaSpoolManifests().single()
-        val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.snapshotJson))
+        val pending = requireNotNull(decodeCausalMediaSettlementOrNull(pendingRow.payloadJson))
         assertThat(pending.phase).isEqualTo(CausalMediaSettlementPhase.Pending)
         assertThat(pending.receipts.map { it.mediaUuid }).containsExactly(mediaUuids.first())
 
@@ -763,7 +763,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         val row = requireNotNull(
             rig.conflictDetails.getFrozenMediaSpoolManifest(requireNotNull(mutationId)),
         )
-        assertThat(decodeCausalMediaSettlementOrNull(row.snapshotJson)?.phase)
+        assertThat(decodeCausalMediaSettlementOrNull(row.payloadJson)?.phase)
             .isEqualTo(CausalMediaSettlementPhase.Branched)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(79)
@@ -901,7 +901,7 @@ class ReplicaSyncEngineCausalSettlementTest {
         assertThat(rig.backend.causalMediaPreimageBytes).hasSize(uploads)
         assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
         val row = requireNotNull(rig.conflictDetails.getFrozenMediaSpoolManifest(frozenMutationId))
-        assertThat(decodeCausalMediaSettlementOrNull(row.snapshotJson)?.phase)
+        assertThat(decodeCausalMediaSettlementOrNull(row.payloadJson)?.phase)
             .isEqualTo(CausalMediaSettlementPhase.Branched)
         assertThat(rig.records.getByClientUuid("record-media-branch")?.syncDirty).isFalse()
         assertThat(rig.records.getByClientUuid("record-media-branch")?.openConflictId)
@@ -2260,14 +2260,14 @@ class ReplicaSyncEngineCausalSettlementTest {
         val babies: List<BabyEntity>,
         val records: List<RecordEntity>,
         val collateralMedia: MediaAssetEntity?,
-        val envelopes: List<ConflictSnapshotCacheEntity?>,
+        val envelopes: List<CausalTransportJournalEntity?>,
     )
 
     private data class ProviderProofDurableState(
         val session: SyncSession,
         val baby: BabyEntity?,
         val customItem: CustomItemEntity?,
-        val envelope: ConflictSnapshotCacheEntity?,
+        val envelope: CausalTransportJournalEntity?,
         val peer: RecordEntity?,
     )
 

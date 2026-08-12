@@ -42,6 +42,12 @@ internal abstract class LocalDataUpgradeModule {
         implementation: CausalRoomUpgradeStep,
     ): LocalDataUpgradeStep
 
+    @Binds
+    @IntoSet
+    abstract fun finalCausalRoomUpgradeStep(
+        implementation: FinalCausalRoomUpgradeStep,
+    ): LocalDataUpgradeStep
+
     companion object {
         @Provides
         @Singleton

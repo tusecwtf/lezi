@@ -1,12 +1,12 @@
 {
   "application_id": "com.lezi.babylog",
   "permanent_upgrade_baseline_version_code": 6,
-  "minimum_sync_version_code": 20,
+  "minimum_sync_version_code": 21,
   "upgrade_target": {
-    "version_code": 20,
-    "version_name": "0.3.13",
-    "room_schema": 27,
-    "local_data_contract": 4
+    "version_code": 21,
+    "version_name": "0.4.0",
+    "room_schema": 28,
+    "local_data_contract": 5
   },
   "released_versions": [
     {
@@ -92,6 +92,12 @@
       "version_name": "0.3.12",
       "room_schema": 26,
       "local_data_contract": 3
+    },
+    {
+      "version_code": 20,
+      "version_name": "0.3.13",
+      "room_schema": 27,
+      "local_data_contract": 4
     }
   ]
 }

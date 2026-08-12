@@ -1,7 +1,6 @@
 package com.lezi.babylog.sync.engine
 
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
-import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.sync.session.FamilySessionReplica
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -26,25 +25,23 @@ internal class ReplicaResetReceiptJournal(
     private val cache: ConflictSnapshotCacheDao,
 ) {
     suspend fun load(): FamilySessionReplica.ResetReceipt? =
-        cache.get(REPLICA_RESET_RECEIPT_KEY)?.let { row ->
-            decodeReplicaResetReceipt(row.snapshotJson)
+        cache.getTransportJournal(REPLICA_RESET_RECEIPT_KEY)?.let { row ->
+            decodeReplicaResetReceipt(row.payloadJson)
         }
 
     suspend fun replace(receipt: FamilySessionReplica.ResetReceipt) {
-        cache.upsert(
-            ConflictSnapshotCacheEntity(
-                conflictId = REPLICA_RESET_RECEIPT_KEY,
-                snapshotJson = encodeReplicaResetReceipt(receipt),
-                cachedAt = receipt.roots.maxOfOrNull(FamilySessionReplica.ResetRoot::contentEpoch)
-                    ?: 0L,
-            ),
+        cache.putTransportJournal(
+            journalKey = REPLICA_RESET_RECEIPT_KEY,
+            payloadJson = encodeReplicaResetReceipt(receipt),
+            contentEpoch = receipt.roots.maxOfOrNull(FamilySessionReplica.ResetRoot::contentEpoch)
+                ?: 0L,
         )
     }
 
     suspend fun complete(receipt: FamilySessionReplica.ResetReceipt) {
         val current = load() ?: return
         require(current == receipt) { "replica reset receipt changed before completion" }
-        cache.delete(REPLICA_RESET_RECEIPT_KEY)
+        cache.deleteTransportJournal(REPLICA_RESET_RECEIPT_KEY)
     }
 }
 

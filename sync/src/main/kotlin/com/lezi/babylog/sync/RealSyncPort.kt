@@ -100,12 +100,10 @@ import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
-import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_VERSIONS
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
 import com.lezi.babylog.sync.session.CAPABILITY_DISASTER_RESTORE
 import com.lezi.babylog.sync.session.CAPABILITY_RECORD_MEMBERSHIP_AUTHOR
-import com.lezi.babylog.sync.session.CAPABILITY_SOURCE_RELATIONS
 import com.lezi.babylog.sync.session.CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT
-import com.lezi.babylog.sync.session.CAPABILITY_WAKE_OBSERVATION
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilySessionCommand
@@ -2243,10 +2241,8 @@ private val REQUIRED_HEALTH_CAPABILITIES = setOf(
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
     CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
-    // 0.3.13 causal generation (wire §1): all three or stop care sync — no dual-read LWW.
-    CAPABILITY_CAUSAL_VERSIONS,
-    CAPABILITY_WAKE_OBSERVATION,
-    CAPABILITY_SOURCE_RELATIONS,
+    // 0.4.0 causal generation (wire §1): one atomic capability or stop care sync.
+    CAPABILITY_CAUSAL_SYNC_V2,
 )
 
 /** Reauth keeps the family replica/identity; only a true leave/unconfigure retires force UI. */

@@ -358,5 +358,5 @@ _Avoid_: 服务器自动落选、同 membership 连记进组、未确认就改�
 前台、可信 endpoint、健康租约、且后端 advertise 完整对应 capability 时，本机写成功后冻结当前
 pending mutation；0.4.0 直接 commit-first，**不先 reconcile/pull**，也**不推进**增量 pull cursor。
 远端变化只能自动无损合并或建分支，不能覆盖本机。回前台、网络恢复、下拉与常规周期仍完整 pull。
-`causal_sync_v2` 在 H27 前不得 advertise；mixed generation 在 mutation 前 fail closed。
+当前 0.4.0 tree 只 advertise/接受 `causal_sync_v2`；mixed generation 在 mutation 前 fail closed。
 _Avoid_: 无因果协议就去掉 pull、快速路径推进 pull cursor、后台写触发快速路径、把低延迟当无损保证

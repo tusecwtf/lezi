@@ -124,6 +124,7 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         wakeObservationDao.deleteAll()
         conflictSummaryDao.deleteAll()
         conflictSnapshotCacheDao.deleteAll()
+        conflictSnapshotCacheDao.deleteAllTransportJournals()
         suspectedDuplicateGroupDao.deleteAll()
         sourceRelationDao.deleteAllMembers()
         sourceRelationDao.deleteAllDeclarations()

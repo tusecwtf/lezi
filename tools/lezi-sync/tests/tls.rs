@@ -40,9 +40,7 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
                     "record_membership_author",
                     "device_disaster_restore_v1",
                     "validated_deferred_fulfillment_v1",
-                    "causal_versions",
-                    "wake_observation",
-                    "source_relations",
+                    "causal_sync_v2",
                 ],
                 "family_state": "empty",
             })
@@ -97,16 +95,12 @@ fn authenticated_sync_handshake_succeeds_over_isolated_tls() {
         "/v1/sync/handshake",
         &[
             authorization.as_str(),
-            "X-Lezi-Client-Version-Code: 20",
+            "X-Lezi-Client-Version-Code: 21",
             "Content-Type: application/json",
         ],
         json!({
             "protocol_version": 1,
-            "required_capabilities": [
-                "causal_versions",
-                "source_relations",
-                "wake_observation",
-            ],
+            "required_capabilities": ["causal_sync_v2"],
         }),
     );
 
@@ -131,9 +125,9 @@ fn write_protocol_cutover_release(data_root: &Path) {
         data_root.join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 20,
-            "version_name": "0.3.13",
-            "min_supported_version_code": 20,
+            "version_code": 21,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 21,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),

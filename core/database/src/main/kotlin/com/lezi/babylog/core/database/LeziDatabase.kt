@@ -6,6 +6,7 @@ import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
+import com.lezi.babylog.core.database.causal.CausalTransportJournalEntity
 import com.lezi.babylog.core.database.causal.MediaReferenceDao
 import com.lezi.babylog.core.database.causal.MediaReferenceEntity
 import com.lezi.babylog.core.database.causal.SourceRelationDao
@@ -38,8 +39,9 @@ import com.lezi.babylog.core.database.causal.WakeObservationEntity
         SourceRelationMemberEntity::class,
         SourceRelationDeclarationEntity::class,
         MediaReferenceEntity::class,
+        CausalTransportJournalEntity::class,
     ],
-    version = 27,
+    version = 28,
     exportSchema = true,
 )
 abstract class LeziDatabase : RoomDatabase() {

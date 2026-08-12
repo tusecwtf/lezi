@@ -615,9 +615,7 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
             "record_membership_author",
             "device_disaster_restore_v1",
             "validated_deferred_fulfillment_v1",
-            "causal_versions",
-            "wake_observation",
-            "source_relations"
+            "causal_sync_v2"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -1041,9 +1039,7 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "record_membership_author",
                 "device_disaster_restore_v1",
                 "validated_deferred_fulfillment_v1",
-                "causal_versions",
-                "wake_observation",
-                "source_relations",
+                "causal_sync_v2",
             ],
             "family_state": "empty",
         })
@@ -1076,9 +1072,7 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "record_membership_author",
                 "device_disaster_restore_v1",
                 "validated_deferred_fulfillment_v1",
-                "causal_versions",
-                "wake_observation",
-                "source_relations",
+                "causal_sync_v2",
             ],
             "family_state": "configured",
         })
@@ -1103,11 +1097,7 @@ async fn authenticated_sync_handshake_derives_principal_and_transport_contract()
         Some(token),
         json!({
             "protocol_version": 1,
-            "required_capabilities": [
-                "causal_versions",
-                "source_relations",
-                "wake_observation",
-            ],
+            "required_capabilities": ["causal_sync_v2"],
         }),
     )
     .await;
@@ -1139,10 +1129,7 @@ async fn authenticated_sync_handshake_derives_principal_and_transport_contract()
         json!(["gzip", "identity"]),
     );
     assert_eq!(body["retry_hints"]["retry_after"], json!(true));
-    assert_eq!(
-        body["capabilities"],
-        json!(["causal_versions", "wake_observation", "source_relations"]),
-    );
+    assert_eq!(body["capabilities"], json!(["causal_sync_v2"]),);
 }
 
 #[tokio::test]
@@ -1275,9 +1262,7 @@ async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
         None,
         json!({
             "protocol_version": 1,
-            "required_capabilities": [
-                "causal_versions", "source_relations", "wake_observation"
-            ],
+            "required_capabilities": ["causal_sync_v2"],
         }),
     )
     .await;
@@ -1285,13 +1270,8 @@ async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
 
     for required_capabilities in [
         json!([]),
-        json!(["causal_versions"]),
-        json!([
-            "causal_versions",
-            "source_relations",
-            "wake_observation",
-            "future_extra",
-        ]),
+        json!(["causal_versions", "source_relations", "wake_observation"]),
+        json!(["causal_sync_v2", "future_extra"]),
         json!([
             "causal_versions",
             "source_relations",
@@ -1325,9 +1305,7 @@ async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
         Some(token),
         json!({
             "protocol_version": 1,
-            "required_capabilities": [
-                "causal_versions", "source_relations", "wake_observation"
-            ],
+            "required_capabilities": ["causal_sync_v2"],
         }),
     )
     .await;
@@ -1353,9 +1331,7 @@ async fn member_directory_generation_changes_only_with_directory_structure() {
     let token = owner["access_token"].as_str().unwrap();
     let handshake_body = json!({
         "protocol_version": 1,
-        "required_capabilities": [
-            "causal_versions", "source_relations", "wake_observation"
-        ],
+        "required_capabilities": ["causal_sync_v2"],
     });
 
     let (_, first) = json_request(
@@ -8394,19 +8370,19 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     missing_config.require_protocol_cutover_release = true;
     assert!(
         build_app(missing_config).is_err(),
-        "0.3.13 production startup accepted a missing forced-update channel",
+        "0.4.0 production startup accepted a missing forced-update channel",
     );
 
     let valid = TempDir::new().unwrap();
-    let apk_bytes = b"verified-0.3.13-release-channel";
+    let apk_bytes = b"verified-0.4.0-release-channel";
     fs::write(valid.path().join("app-release.apk"), apk_bytes).unwrap();
     fs::write(
         valid.path().join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 20,
-            "version_name": "0.3.13",
-            "min_supported_version_code": 20,
+            "version_code": 21,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 21,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),
@@ -8416,7 +8392,7 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     valid_config.require_protocol_cutover_release = true;
     assert!(build_app(valid_config).is_ok());
 
-    // Floor 16 is not a valid 0.3.13 production cutover channel.
+    // Floor 16 is not a valid 0.4.0 production cutover channel.
     let too_low = TempDir::new().unwrap();
     let low_apk = b"stale-0.3.9-floor-must-fail";
     fs::write(too_low.path().join("app-release.apk"), low_apk).unwrap();
@@ -8436,7 +8412,7 @@ fn protocol_cutover_requires_a_verified_forced_update_channel() {
     low_config.require_protocol_cutover_release = true;
     assert!(
         build_app(low_config).is_err(),
-        "0.3.13 production must reject min_supported/version_code below 20"
+        "0.4.0 production must reject min_supported/version_code below 21"
     );
 }
 fn entity_wire(
@@ -13119,7 +13095,16 @@ async fn slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_comm
             name.starts_with(".upload-") && name.ends_with(".tmp")
         })
         .expect("first chunk was streamed to a server-owned incoming file");
-    assert_eq!(incoming.metadata().unwrap().len(), 5);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if incoming.metadata().unwrap().len() == 5 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first streamed chunk was not flushed to the incoming file");
     let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
     let receipt_rows: i64 = connection
         .query_row(

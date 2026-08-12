@@ -1,8 +1,7 @@
 # 乐记 — 0.4.0 因果同步 Wire 合同（conflict-v2 冻结）
 
-> **状态：** 本文冻结 0.4.0 **目标合同**；运行时实现与 capability 激活仍由
-> `causal-sync-conflict-transport-hardening` 02–27 逐票交付，本文本身不构成交付或生产证据。
-> 当前 tree 的 0.3.13/code 20/Room 27/server schema 12 是升级源；家庭 NAS 的实际 source
+> **状态：** 本文是当前 0.4.0 tree 的 runtime 合同；H27 已完成本地 capability 激活，本文
+> 本身不构成家庭 NAS 生产切割证据。0.3.13/code 20/Room 27/server schema 12 是升级源；家庭 NAS 的实际 source
 > schema 仅允许在获批维护窗 preflight 中只读确认，未确认时不得猜成 11 或 12。历史
 > 0.3.9–0.3.12 叙述见
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 与 [`data-model.md`](./data-model.md)。
@@ -24,7 +23,7 @@
 
 | 项 | 合同 |
 |----|------|
-| 新 capability（认证握手 `capabilities` 数组，字面量冻结） | `causal_sync_v2`；票 27 完成前服务端与客户端都**不得** advertise/接受；旧 `causal_versions`/`wake_observation`/`source_relations` 集合只标识 0.3.13 source wire，不等价于 v2 |
+| 新 capability（认证握手 `capabilities` 数组，字面量冻结） | `causal_sync_v2`；H27 后服务端与客户端只 advertise/接受该单项；旧 `causal_versions`/`wake_observation`/`source_relations` 集合只标识 0.3.13 source wire，不等价于 v2，mixed generation mutation 前拒绝 |
 | minSupported | 抬到 versionCode **21** 之前须先原子发布可安装、签名与 hash 匹配的 code 21 APK + metadata；能力、schema、floor 在票 27 一起激活 |
 | 旧客户端 / mixed generation | mutation 前 `capability_mismatch`；无 dual-read、dual-write、downgrade 或 skip-unknown |
 | Android upgrade | Room **27→28** 相邻非破坏迁移；永久 code 6/Room 24 链连续到 28；facts/tombstone/pending/frozen envelope/conflict/media/spool/session/credentials/endpoint/TLS trust 全保留 |
@@ -58,7 +57,7 @@ endpoint trust 与家庭 session 已成立后，每个普通同步周期只发�
 ```json
 {
   "protocol_version": 1,
-  "required_capabilities": ["causal_versions", "source_relations", "wake_observation"]
+  "required_capabilities": ["causal_sync_v2"]
 }
 ```
 
@@ -67,7 +66,7 @@ endpoint trust 与家庭 session 已成立后，每个普通同步周期只发�
 | 字段 | 合同 |
 |------|------|
 | `protocol_version` / `server_version` / `ready` | 协议字面量、服务端发布版本与当前同步 readiness |
-| `capabilities` | H14 source wire 精确三项 `causal_versions`,`wake_observation`,`source_relations`；H27 前任何额外项（尤其 `causal_sync_v2`）均 mismatch |
+| `capabilities` | 0.4.0 精确单项 `causal_sync_v2`；旧三项、额外项、缺项、重复项与 mixed generation 均 mismatch |
 | `principal` | `{membership_id, device_id, role}`；全部从 session/ACL 派生，客户端不得提供 |
 | `directory_generation` | 成员/设备目录结构 generation；认证活动时间不得使它变化 |
 | `limits` | `{pull_page_max_entities:200,pull_page_max_encoded_bytes:9437184,pull_page_max_decoded_bytes:8388608,pull_max_pages:500,commit_batch_max_units,media_max_bytes}` |
@@ -111,7 +110,7 @@ snapshot 等外部状态改变。
 ### 1.4 gzip 有界普通增量 pull（H16）
 
 本节只冻结 `GET /v1/pull` 的普通增量页；ConflictSnapshot 的 receipt、opaque continuation 与
-分页预算仍由 §8/H18 独占，二者不得复用 token 或状态。H27 前本节也不激活 `causal_sync_v2`。
+分页预算仍由 §8/H18 独占，二者不得复用 token 或状态。
 
 客户端在一次已认证同步周期中复用 §1.2 握手所得合同，并为每页发送
 `cursor`、`generation` 与从 0 单调递增的 `page_index`。客户端进程重启或本轮失败后，以最后耐久
@@ -833,5 +832,5 @@ fingerprint 精确一致，并在同一事务替换为恰有一个 display 的�
 
 1. 字段/枚举/例子以本文与 shared golden corpus 为准；ADR/CONTEXT 不另造标识符方言。
 2. H02–H27 与 external R12/R17/R18/R19 不得发明第二 snapshot/token/choice/error/replay shape。
-3. `causal_sync_v2` 在 H27 前不得 advertise；source runtime 保留到其明确删除票，禁止作为 v2 fallback。
+3. `causal_sync_v2` 已由 H27 激活；source generation 不得作为 v2 fallback，mixed generation 在 mutation 前拒绝。
 4. 无 StructureTest 锁行数/目录布局；Kotlin/Rust 读取同一 fixture，runtime conformance 留给实现票。

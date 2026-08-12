@@ -2,6 +2,7 @@ package com.lezi.babylog.domain.carelog
 
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
+import com.lezi.babylog.core.database.causal.CausalTransportJournalEntity
 import com.lezi.babylog.core.database.causal.ConflictInboxProjectionRow
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
@@ -120,6 +121,7 @@ internal class FakeConflictSummaryDao : ConflictSummaryDao {
 
 internal class FakeConflictSnapshotCacheDao : ConflictSnapshotCacheDao {
     private val items = mutableListOf<ConflictSnapshotCacheEntity>()
+    private val transport = mutableListOf<CausalTransportJournalEntity>()
 
     override suspend fun get(conflictId: String): ConflictSnapshotCacheEntity? =
         items.find { it.conflictId == conflictId }
@@ -137,9 +139,33 @@ internal class FakeConflictSnapshotCacheDao : ConflictSnapshotCacheDao {
         items.clear()
     }
 
-    override suspend fun listFrozenMediaSpoolManifests(): List<ConflictSnapshotCacheEntity> =
-        items.filter { it.conflictId.startsWith(FROZEN_MEDIA_SPOOL_KEY_PREFIX) }
-            .sortedBy(ConflictSnapshotCacheEntity::conflictId)
+    override suspend fun getTransportJournal(journalKey: String): CausalTransportJournalEntity? =
+        transport.find { it.journalKey == journalKey }
+
+    override suspend fun putTransportJournal(
+        journalKey: String,
+        payloadJson: String,
+        contentEpoch: Long,
+    ) {
+        transport.removeAll { it.journalKey == journalKey }
+        transport += CausalTransportJournalEntity(
+            journalKey = journalKey,
+            payloadJson = payloadJson,
+            contentEpoch = contentEpoch,
+        )
+    }
+
+    override suspend fun deleteTransportJournal(journalKey: String) {
+        transport.removeAll { it.journalKey == journalKey }
+    }
+
+    override suspend fun deleteAllTransportJournals() {
+        transport.clear()
+    }
+
+    override suspend fun listFrozenMediaSpoolManifests(): List<CausalTransportJournalEntity> =
+        transport.filter { it.journalKey.startsWith(FROZEN_MEDIA_SPOOL_KEY_PREFIX) }
+            .sortedBy(CausalTransportJournalEntity::journalKey)
 }
 
 internal class FakeSuspectedDuplicateGroupDao : SuspectedDuplicateGroupDao {

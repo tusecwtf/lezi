@@ -2,10 +2,9 @@
 
 > **个人/家庭使用** · Android · 无商业化
 > 决策日：2026-07-25 · **tree 发布线**以 `config/android-release-compatibility.json` 为准
-> 当前运行时升级源为 **0.3.13** / code **20** / Room **27** / server schema **12**。
-> 0.4.0 conflict-v2 合同冻结为 code **21** / Room **28** / local-data contract **5** /
-> server schema **13** / floor **21**，但 `causal_sync_v2` 在 hardening H27 前不得 advertise；
-> 本文档更新不表示 APK/server/NAS 已切换。
+> 当前 tree 已激活 **0.4.0** / code **21** / Room **28** / local-data contract **5** /
+> server schema **13** / floor **21** / `causal_sync_v2`。0.3.13/code 20/Room 27 仍是升级源；
+> 本地激活不表示家庭 NAS 已完成生产切割。
 > Wire 权威：[`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 | 项 | 内容 |
@@ -36,9 +35,9 @@
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约；**tree** SleepStart/WakeObservation 与疑似重复汇总（NAS 切割见 scratch ticket 09） |
 | [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前已交付合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
-| [causal-sync-wire.md](./causal-sync-wire.md) | **0.4.0 conflict-v2 目标合同**：commit-first、N-way ConflictSnapshot、choice-only resolution 与升级边界；当前 runtime 仍是 0.3.13 source，H27 前不激活 |
+| [causal-sync-wire.md](./causal-sync-wire.md) | **0.4.0 conflict-v2 runtime 合同**：commit-first、N-way ConflictSnapshot、choice-only resolution 与升级边界；H27 已完成本地激活，生产切割仍待后续票 |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
-| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收；区分 0.3.13 runtime source 与未激活的 0.4.0 contract |
+| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收；区分 0.3.13 升级源、0.4.0 当前 tree 与尚未执行的生产切割 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 
 ---

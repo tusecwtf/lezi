@@ -132,7 +132,7 @@ class CausalRoomTransactionTest {
             )
         }
         assertThat(
-            envelopes.getFrozenMutation("record", "record-commit-first")?.snapshotJson,
+            envelopes.getFrozenMutation("record", "record-commit-first")?.payloadJson,
         ).isEqualTo("{\"proof\":\"frozen\"}")
 
         val frozen = requireNotNull(records.getByClientUuid("record-commit-first"))

@@ -170,7 +170,7 @@ class RealSyncPortConflictSnapshotPagingTest {
         rig.backend.conflictSnapshotPageHandler = { _, _ -> throw IOException("offline") }
 
         assertThat(runCatching { rig.port.fetchConflictSnapshot(CONFLICT_ID) }.isFailure).isTrue()
-        assertThat(rig.conflictDetails.get(stageKey)).isNull()
+        assertThat(rig.conflictDetails.getTransportJournal(stageKey)).isNull()
 
         val requestStarted = CompletableDeferred<Unit>()
         rig.backend.conflictSnapshotPageHandler = { _, _ ->
@@ -180,7 +180,7 @@ class RealSyncPortConflictSnapshotPagingTest {
         val cancelled = async { rig.port.fetchConflictSnapshot(CONFLICT_ID) }
         requestStarted.await()
         cancelled.cancelAndJoin()
-        assertThat(rig.conflictDetails.get(stageKey)).isNull()
+        assertThat(rig.conflictDetails.getTransportJournal(stageKey)).isNull()
 
         rig.backend.conflictSnapshotPageHandler = { _, _ ->
             FetchedConflictSnapshotPage(
@@ -190,7 +190,7 @@ class RealSyncPortConflictSnapshotPagingTest {
         }
         assertThat(rig.port.fetchConflictSnapshot(CONFLICT_ID).branches.single().versionId)
             .isEqualTo("fresh")
-        assertThat(rig.conflictDetails.get(stageKey)).isNull()
+        assertThat(rig.conflictDetails.getTransportJournal(stageKey)).isNull()
     }
 
     @Test

@@ -97,7 +97,7 @@ internal class CausalMediaSettlementJournalOwner(
         val row = requireNotNull(cache.getFrozenMediaSpoolManifest(mutation.mutationId)) {
             "media settlement lost its Room spool manifest"
         }
-        val existing = decodeCausalMediaSettlementOrNull(row.snapshotJson)
+        val existing = decodeCausalMediaSettlementOrNull(row.payloadJson)
         if (existing != null) {
             require(
                 existing.binding == binding && existing.mutation == mutation &&
@@ -107,7 +107,7 @@ internal class CausalMediaSettlementJournalOwner(
             }
             return@run existing
         }
-        require(decodeFrozenMediaSpoolManifest(row.snapshotJson) == manifest) {
+        require(decodeFrozenMediaSpoolManifest(row.payloadJson) == manifest) {
             "media settlement Room manifest drift"
         }
         CausalMediaSettlementJournal(
@@ -124,8 +124,8 @@ internal class CausalMediaSettlementJournalOwner(
         clientUuid: String,
     ): CausalMediaSettlementJournal? {
         val matches = cache.listFrozenMediaSpoolManifests().mapNotNull { row ->
-            val journal = decodeCausalMediaSettlementOrNull(row.snapshotJson) ?: return@mapNotNull null
-            require(row.conflictId == frozenMediaSpoolCacheKey(journal.binding.mutationId)) {
+            val journal = decodeCausalMediaSettlementOrNull(row.payloadJson) ?: return@mapNotNull null
+            require(row.journalKey == frozenMediaSpoolCacheKey(journal.binding.mutationId)) {
                 "media settlement storage key drift"
             }
             journal.takeIf {
@@ -238,7 +238,7 @@ internal class CausalMediaSettlementJournalOwner(
 
     suspend fun finishPendingCleanups() {
         cache.listFrozenMediaSpoolManifests().forEach { row ->
-            val journal = decodeCausalMediaSettlementOrNull(row.snapshotJson) ?: return@forEach
+            val journal = decodeCausalMediaSettlementOrNull(row.payloadJson) ?: return@forEach
             if (journal.phase.cleanupEligible) finishCleanup(journal.binding.mutationId)
         }
     }
@@ -247,8 +247,8 @@ internal class CausalMediaSettlementJournalOwner(
         val row = requireNotNull(cache.getFrozenMediaSpoolManifest(mutationId)) {
             "media settlement journal is missing"
         }
-        require(row.cachedAt >= 0L) { "media settlement epoch is invalid" }
-        return requireNotNull(decodeCausalMediaSettlementOrNull(row.snapshotJson)) {
+        require(row.contentEpoch >= 0L) { "media settlement epoch is invalid" }
+        return requireNotNull(decodeCausalMediaSettlementOrNull(row.payloadJson)) {
             "media settlement journal is not bound"
         }.also { journal ->
             require(journal.binding.mutationId == mutationId) {

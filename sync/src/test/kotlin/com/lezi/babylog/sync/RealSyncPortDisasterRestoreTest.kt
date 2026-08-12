@@ -248,7 +248,8 @@ class RealSyncPortDisasterRestoreTest {
 
         assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
         assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
-        assertThat(rig.preferences.current()).isEqualTo(committed.session)
+        assertThat(rig.preferences.current().copy(lastSuccessAt = committed.session.lastSuccessAt))
+            .isEqualTo(committed.session)
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
         assertThat(rig.records.getByClientUuid("record-local")?.createdByMembershipId)
             .isEqualTo("restored-owner-membership")

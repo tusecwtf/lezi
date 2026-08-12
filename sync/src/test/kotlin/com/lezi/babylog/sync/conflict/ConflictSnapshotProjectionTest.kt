@@ -4,6 +4,7 @@ import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.MemoryConflictSnapshotCacheDao
 import com.lezi.babylog.sync.MemoryConflictSummaryDao
 import com.lezi.babylog.sync.RecordingTransactionRunner
+import com.lezi.babylog.core.database.causal.conflictSnapshotStageCacheKey
 import com.lezi.babylog.sync.backend.CausalMediaItem
 import com.lezi.babylog.sync.conflict.ConflictSnapshotCodec
 import java.io.IOException
@@ -199,7 +200,8 @@ class ConflictSnapshotProjectionTest {
             }
         }
         val stageKey = "conflict-page-stage:$CONFLICT_THREE"
-        rows.upsert(requireNotNull(rows.get(stageKey)).copy(snapshotJson = "{damaged"))
+        val stage = requireNotNull(rows.getTransportJournal(stageKey))
+        rows.putTransportJournal(stageKey, "{damaged", stage.contentEpoch)
         var recoveredRequest: ConflictSnapshotPageRequest? = null
 
         val failure = runCatching {
@@ -212,7 +214,7 @@ class ConflictSnapshotProjectionTest {
 
         assertThat(failure).isInstanceOf(IOException::class.java)
         assertThat(recoveredRequest).isEqualTo(ConflictSnapshotPageRequest.First)
-        assertThat(rows.get(stageKey)).isNull()
+        assertThat(rows.getTransportJournal(stageKey)).isNull()
         assertThat(projection.read(CONFLICT_ONE)).isEqualTo(oldComplete)
     }
 
@@ -413,9 +415,12 @@ class ConflictSnapshotProjectionTest {
         assertThat(restarted.read(CONFLICT_ONE)).isNull()
         assertThat(summaries.get(CONFLICT_ONE)).isNull()
         assertThat(restarted.read(CONFLICT_TWO)!!.stable.versionId).isEqualTo("v2")
+        val stageKey = conflictSnapshotStageCacheKey(CONFLICT_TWO)
+        rows.putTransportJournal(stageKey, "stale-stage", contentEpoch = 1L)
 
         restarted.clearRoot(ConflictRootType.Record, CLIENT_UUID)
         assertThat(restarted.read(CONFLICT_TWO)).isNull()
+        assertThat(rows.getTransportJournal(stageKey)).isNull()
         assertThat(summaries.listForRoot("record", CLIENT_UUID)).isEmpty()
     }
 

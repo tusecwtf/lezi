@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: in-progress — H01–H26 and R12/R17/R18/R19/R20 are implemented; H27 is the serial frontier
+Status: in-progress — H01–H27 and R12/R17/R18/R19/R20 are implemented; H28 is the serial frontier
 
 Spec: [`spec.md`](./spec.md)
 
@@ -51,7 +51,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 24 | [`24-server-media-staging-gc`](./issues/24-server-media-staging-gc.md) | implemented (review/final gates pass) | 19, 23, R19, R20 (implemented) |
 | 25 | [`25-commit-response-contraction`](./issues/25-commit-response-contraction.md) | implemented (review/final gates pass; device Room instrumentation residual) | 12, 13, 23 |
 | 26 | [`26-delete-legacy-reconcile`](./issues/26-delete-legacy-reconcile.md) | implemented (review/final gates pass; device Room instrumentation residual) | 25 |
-| 27 | [`27-final-schema-capability-activation`](./issues/27-final-schema-capability-activation.md) | ready-for-agent | 09, 15, 16, 23, 24, 25, 26, R19 |
+| 27 | [`27-final-schema-capability-activation`](./issues/27-final-schema-capability-activation.md) | implemented (local gates pass; device Room residual) | 09, 15, 16, 23, 24, 25, 26, R19 |
 | 28 | [`28-server-schema13-offline-migrate`](./issues/28-server-schema13-offline-migrate.md) | ready-for-agent | 27 |
 | 29 | [`29-schema-cutover-cd-orchestration`](./issues/29-schema-cutover-cd-orchestration.md) | ready-for-agent | 28 |
 | 30 | [`30-isolated-schema-cutover-rehearsal`](./issues/30-isolated-schema-cutover-rehearsal.md) | ready-for-agent | 29 |
@@ -78,9 +78,8 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H26 is implemented. H27 is the next executable DAG frontier; H27–H43 remain open and follow
-the serial order above. H27
-completes local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
+H27 is implemented. H28 is the next executable DAG frontier; H28–H43 remain open and follow
+the serial order above. H27 completed local 0.4.0 schemas/capability; H28–H30 prove non-destructive backend migration and guarded CD
 locally; H43 hands evidence to release 09.
 
 ## Program invariants

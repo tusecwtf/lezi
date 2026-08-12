@@ -69,10 +69,14 @@ class ConflictSnapshotProjection(
                 val nextEntity = next.toEntity()
                 persistCurrent(persistenceBarrier, isLoadCurrent) {
                     requireLoadStillCurrent(conflictId, cursor.expectedStageJson)
-                    snapshots.upsert(nextEntity)
+                    snapshots.putTransportJournal(
+                        nextEntity.key,
+                        nextEntity.payload,
+                        nextEntity.epoch,
+                    )
                 }
                 staged = next
-                cursor = LoadCursor(next, nextEntity.snapshotJson)
+                cursor = LoadCursor(next, nextEntity.payload)
                 request = next.nextRequest
             }
         } catch (failure: Throwable) {
@@ -125,18 +129,17 @@ class ConflictSnapshotProjection(
     /** Drops only resumable evidence; the last complete offline snapshot is retained. */
     suspend fun discardStaging(conflictId: String): Boolean {
         val key = conflictSnapshotStageCacheKey(conflictId)
-        if (snapshots.get(key) == null) return false
-        transactions.run { snapshots.delete(key) }
+        if (snapshots.getTransportJournal(key) == null) return false
+        transactions.run { snapshots.deleteTransportJournal(key) }
         return true
     }
 
     private suspend fun beginOrResumeLoad(conflictId: String): LoadCursor {
         val key = conflictSnapshotStageCacheKey(conflictId)
-        val row = snapshots.get(key)
+        val row = snapshots.getTransportJournal(key)
         val staged = row?.let { stored ->
             runCatching {
-                require(stored.hasClosedSentinels())
-                ConflictSnapshotStageCodec.decode(stored.snapshotJson)
+                ConflictSnapshotStageCodec.decode(stored.payloadJson)
                     .also {
                         validateStage(conflictId, it)
                         require(!it.last.complete) {
@@ -146,18 +149,12 @@ class ConflictSnapshotProjection(
             }.getOrNull()
         }
         if (staged != null) {
-            return LoadCursor(staged, requireNotNull(row).snapshotJson)
+            return LoadCursor(staged, requireNotNull(row).payloadJson)
         }
         // A unique durable lease closes the fetch-outside-transaction race: any
         // pull/session/local clear deletes it, so the stale response cannot promote.
         val leaseJson = newLoadLeaseJson()
-        snapshots.upsert(
-            ConflictSnapshotCacheEntity(
-                conflictId = key,
-                snapshotJson = leaseJson,
-                cachedAt = 0,
-            ),
-        )
+        snapshots.putTransportJournal(key, leaseJson, 0)
         return LoadCursor(stage = null, expectedStageJson = leaseJson)
     }
 
@@ -282,22 +279,22 @@ class ConflictSnapshotProjection(
                 cachedAt = snapshot.cachedAt(),
             ),
         )
-        snapshots.delete(conflictSnapshotStageCacheKey(snapshot.conflictId))
+        snapshots.deleteTransportJournal(conflictSnapshotStageCacheKey(snapshot.conflictId))
         summaries.upsert(snapshot.toSummary())
     }
 
     private suspend fun requireLoadStillCurrent(conflictId: String, expectedStageJson: String) {
-        val row = snapshots.get(conflictSnapshotStageCacheKey(conflictId))
-        if (row?.snapshotJson != expectedStageJson || !row.hasClosedSentinels()) {
+        val row = snapshots.getTransportJournal(conflictSnapshotStageCacheKey(conflictId))
+        if (row?.payloadJson != expectedStageJson) {
             throw ConflictSnapshotLoadInvalidatedException()
         }
     }
 
     private suspend fun discardOwnedEmptyLease(conflictId: String, expectedStageJson: String) {
         val key = conflictSnapshotStageCacheKey(conflictId)
-        val row = snapshots.get(key)
-        if (row?.snapshotJson == expectedStageJson && row.hasClosedSentinels()) {
-            snapshots.delete(key)
+        val row = snapshots.getTransportJournal(key)
+        if (row?.payloadJson == expectedStageJson) {
+            snapshots.deleteTransportJournal(key)
         }
     }
 
@@ -349,20 +346,20 @@ private fun newLoadLeaseJson(): String = buildJsonObject {
     put("load_id", JsonPrimitive(UUID.randomUUID().toString()))
 }.toString()
 
-private fun ConflictSnapshotCacheEntity.hasClosedSentinels(): Boolean =
-    legacyStableRootSentinel == "{}" &&
-        legacyBaseRootSentinel == null &&
-        legacyConflictPathsSentinel == "[]"
-
 private fun StagedConflictSnapshot?.orEmptyPages(): List<ConflictSnapshotPageEvidence> =
     this?.pages.orEmpty()
 
-private fun StagedConflictSnapshot.toEntity(): ConflictSnapshotCacheEntity =
-    ConflictSnapshotCacheEntity(
-        conflictId = conflictSnapshotStageCacheKey(first.conflictId),
-        snapshotJson = ConflictSnapshotStageCodec.encode(this),
-        cachedAt = pages.maxOf { it.snapshot.cachedAt() },
-    )
+private data class StagedTransportJournal(
+    val key: String,
+    val payload: String,
+    val epoch: Long,
+)
+
+private fun StagedConflictSnapshot.toEntity(): StagedTransportJournal = StagedTransportJournal(
+    key = conflictSnapshotStageCacheKey(first.conflictId),
+    payload = ConflictSnapshotStageCodec.encode(this),
+    epoch = pages.maxOf { it.snapshot.cachedAt() },
+)
 
 private fun ConflictSnapshot.sameSnapshotView(other: ConflictSnapshot): Boolean =
     conflictId == other.conflictId &&

@@ -47,7 +47,8 @@ class CausalMediaSettlementJournalTest {
         assertThat(runCatching { rig.owner.finishCleanup(MUTATION_ID) }.exceptionOrNull())
             .isInstanceOf(IOException::class.java)
         assertThat(rig.spool.discardedMutationIds).containsExactly(MUTATION_ID)
-        assertThat(rig.cache.get(frozenMediaSpoolCacheKey(MUTATION_ID))).isNotNull()
+        assertThat(rig.cache.getTransportJournal(frozenMediaSpoolCacheKey(MUTATION_ID)))
+            .isNotNull()
 
         rig.cache.deleteFailure = null
         rig.owner.finishPendingCleanups()
@@ -55,7 +56,7 @@ class CausalMediaSettlementJournalTest {
         assertThat(rig.spool.discardedMutationIds)
             .containsExactly(MUTATION_ID, MUTATION_ID)
             .inOrder()
-        assertThat(rig.cache.get(frozenMediaSpoolCacheKey(MUTATION_ID))).isNull()
+        assertThat(rig.cache.getTransportJournal(frozenMediaSpoolCacheKey(MUTATION_ID))).isNull()
     }
 
     @Test
@@ -81,9 +82,9 @@ class CausalMediaSettlementJournalTest {
 
         assertThat(rig.spool.discardedMutationIds).isEmpty()
         val durable = requireNotNull(
-            rig.cache.get(frozenMediaSpoolCacheKey(MUTATION_ID)),
+            rig.cache.getTransportJournal(frozenMediaSpoolCacheKey(MUTATION_ID)),
         )
-        assertThat(decodeCausalMediaSettlementOrNull(durable.snapshotJson)?.phase)
+        assertThat(decodeCausalMediaSettlementOrNull(durable.payloadJson)?.phase)
             .isEqualTo(CausalMediaSettlementPhase.Branched)
     }
 
@@ -95,7 +96,8 @@ class CausalMediaSettlementJournalTest {
         rig.owner.finishPendingCleanups()
 
         assertThat(rig.spool.discardedMutationIds).isEmpty()
-        assertThat(rig.cache.get(frozenMediaSpoolCacheKey(MUTATION_ID))).isNotNull()
+        assertThat(rig.cache.getTransportJournal(frozenMediaSpoolCacheKey(MUTATION_ID)))
+            .isNotNull()
     }
 
     @Test
@@ -104,8 +106,10 @@ class CausalMediaSettlementJournalTest {
         rig.bindPending()
         rig.owner.recordPrepared(MUTATION_ID, receipt())
         rig.owner.markCommitUnknown(MUTATION_ID)
-        val durable = requireNotNull(rig.cache.get(frozenMediaSpoolCacheKey(MUTATION_ID)))
-        val root = Json.parseToJsonElement(durable.snapshotJson).jsonObject
+        val durable = requireNotNull(
+            rig.cache.getTransportJournal(frozenMediaSpoolCacheKey(MUTATION_ID)),
+        )
+        val root = Json.parseToJsonElement(durable.payloadJson).jsonObject
         val exactReceipt = requireNotNull(root["receipts"] as? JsonArray).single()
         val corruptions = listOf(
             JsonArray(emptyList()),

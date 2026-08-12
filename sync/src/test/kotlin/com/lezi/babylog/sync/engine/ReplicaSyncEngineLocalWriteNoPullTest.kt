@@ -1149,7 +1149,7 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
         val durableJournal = requireNotNull(
             rig.conflictDetails.getFrozenMediaSpoolManifest(firstMutation.mutationId),
         )
-        assertThat(decodeCausalMediaSettlementOrNull(durableJournal.snapshotJson)?.phase)
+        assertThat(decodeCausalMediaSettlementOrNull(durableJournal.payloadJson)?.phase)
             .isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
         assertThat(rig.records.getByClientUuid("record-spool-retry")?.mutationId)
             .isEqualTo(firstMutation.mutationId)
@@ -1249,12 +1249,10 @@ class ReplicaSyncEngineLocalWriteNoPullTest {
                 ),
             ),
         )
-        rig.conflictDetails.upsert(
-            com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity(
-                conflictId = "frozen-media-spool:00000000-0000-4000-8000-000000000019",
-                snapshotJson = com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup(group),
-                cachedAt = 100,
-            ),
+        rig.conflictDetails.putTransportJournal(
+            journalKey = "frozen-media-spool:00000000-0000-4000-8000-000000000019",
+            payloadJson = com.lezi.babylog.sync.media.encodeImmutableMediaSpoolGroup(group),
+            contentEpoch = 100,
         )
 
         val failure = runCatching {

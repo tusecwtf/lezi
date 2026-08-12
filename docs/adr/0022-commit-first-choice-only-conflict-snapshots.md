@@ -1,5 +1,5 @@
 ---
-status: accepted (0.4.0 contract frozen; runtime activation waits for hardening ticket 27)
+status: accepted (0.4.0 runtime activated by hardening ticket 27; production cutover pending)
 ---
 
 # Commit-first 与 choice-only ConflictSnapshot

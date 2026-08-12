@@ -388,25 +388,33 @@ interface ConflictSnapshotCacheDao {
     @Transaction
     suspend fun deleteConflictState(conflictId: String) {
         delete(conflictId)
-        delete(conflictSnapshotStageCacheKey(conflictId))
+        deleteTransportJournal(conflictSnapshotStageCacheKey(conflictId))
     }
 
     @Query("DELETE FROM conflict_detail_cache")
     suspend fun deleteAll()
 
-    /**
-     * Durable pre-H27 storage for one immutable commit-first mutation envelope.
-     *
-     * Room 28 owns the final dedicated envelope table. Until that adjacent
-     * migration lands, a private non-UUID row in the existing cache table keeps
-     * the envelope in the same Room transaction as its product fact. Inbox and
-     * conflict joins only use canonical conflict UUIDs, so this row is invisible
-     * outside the transport module.
-     */
+    @Query("SELECT * FROM causal_transport_journal WHERE journalKey = :journalKey LIMIT 1")
+    suspend fun getTransportJournal(journalKey: String): CausalTransportJournalEntity?
+
+    @Query(
+        "INSERT OR REPLACE INTO causal_transport_journal(journalKey, payloadJson, contentEpoch) " +
+            "VALUES(:journalKey, :payloadJson, :contentEpoch)",
+    )
+    suspend fun putTransportJournal(journalKey: String, payloadJson: String, contentEpoch: Long)
+
+    @Query("DELETE FROM causal_transport_journal WHERE journalKey = :journalKey")
+    suspend fun deleteTransportJournal(journalKey: String)
+
+    @Query("DELETE FROM causal_transport_journal")
+    suspend fun deleteAllTransportJournals()
+
+    /** Durable Room 28 transport storage for one immutable commit-first mutation envelope. */
     suspend fun getFrozenMutation(
         entityType: String,
         clientUuid: String,
-    ): ConflictSnapshotCacheEntity? = get(frozenMutationCacheKey(entityType, clientUuid))
+    ): CausalTransportJournalEntity? =
+        getTransportJournal(frozenMutationCacheKey(entityType, clientUuid))
 
     suspend fun putFrozenMutation(
         entityType: String,
@@ -414,44 +422,40 @@ interface ConflictSnapshotCacheDao {
         canonicalEnvelopeJson: String,
         contentEpoch: Long,
     ) {
-        upsert(
-            ConflictSnapshotCacheEntity(
-                conflictId = frozenMutationCacheKey(entityType, clientUuid),
-                snapshotJson = canonicalEnvelopeJson,
-                cachedAt = contentEpoch,
-            ),
+        putTransportJournal(
+            journalKey = frozenMutationCacheKey(entityType, clientUuid),
+            payloadJson = canonicalEnvelopeJson,
+            contentEpoch = contentEpoch,
         )
     }
 
     suspend fun deleteFrozenMutation(entityType: String, clientUuid: String) {
-        delete(frozenMutationCacheKey(entityType, clientUuid))
+        deleteTransportJournal(frozenMutationCacheKey(entityType, clientUuid))
     }
 
     @Query(
-        "SELECT * FROM conflict_detail_cache " +
-            "WHERE conflictId LIKE 'frozen-media-spool:%' ORDER BY conflictId ASC",
+        "SELECT * FROM causal_transport_journal WHERE journalKey LIKE 'frozen-media-spool:%' " +
+            "ORDER BY journalKey ASC",
     )
-    suspend fun listFrozenMediaSpoolManifests(): List<ConflictSnapshotCacheEntity>
+    suspend fun listFrozenMediaSpoolManifests(): List<CausalTransportJournalEntity>
 
-    suspend fun getFrozenMediaSpoolManifest(mutationId: String): ConflictSnapshotCacheEntity? =
-        get(frozenMediaSpoolCacheKey(mutationId))
+    suspend fun getFrozenMediaSpoolManifest(mutationId: String): CausalTransportJournalEntity? =
+        getTransportJournal(frozenMediaSpoolCacheKey(mutationId))
 
     suspend fun putFrozenMediaSpoolManifest(
         mutationId: String,
         canonicalManifestJson: String,
         contentEpoch: Long,
     ) {
-        upsert(
-            ConflictSnapshotCacheEntity(
-                conflictId = frozenMediaSpoolCacheKey(mutationId),
-                snapshotJson = canonicalManifestJson,
-                cachedAt = contentEpoch,
-            ),
+        putTransportJournal(
+            journalKey = frozenMediaSpoolCacheKey(mutationId),
+            payloadJson = canonicalManifestJson,
+            contentEpoch = contentEpoch,
         )
     }
 
     suspend fun deleteFrozenMediaSpoolManifest(mutationId: String) {
-        delete(frozenMediaSpoolCacheKey(mutationId))
+        deleteTransportJournal(frozenMediaSpoolCacheKey(mutationId))
     }
 }
 

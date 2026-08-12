@@ -1,5 +1,5 @@
 {
-  "current_contract": 4,
+  "current_contract": 5,
   "permanent_baseline_contract": 1,
   "minimum_migratable_contract": 1,
   "contracts": [
@@ -34,6 +34,14 @@
       "settings_revision": 1,
       "credentials_revision": 1,
       "media_revision": 1
+    },
+    {
+      "contract_version": 5,
+      "introduced_in_version_code": 21,
+      "room_schema": 28,
+      "settings_revision": 1,
+      "credentials_revision": 1,
+      "media_revision": 1
     }
   ],
   "migrations": [
@@ -54,6 +62,12 @@
       "to_contract": 4,
       "affected_domains": ["room"],
       "implementation": "CausalRoomUpgradeStep"
+    },
+    {
+      "from_contract": 4,
+      "to_contract": 5,
+      "affected_domains": ["room"],
+      "implementation": "FinalCausalRoomUpgradeStep"
     }
   ]
 }

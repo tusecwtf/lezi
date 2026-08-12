@@ -507,6 +507,8 @@ class RealSyncPortSessionLifecycleTest {
         assertThat(restarted.backend.pullCursors).containsExactly(0L)
         assertThat(restarted.port.session().first().pullCursor).isEqualTo(9L)
         assertThat(restarted.port.status().first()).isEqualTo(SyncStatus.Idle)
+        rig.foreground.setForeground(false)
+        restarted.foreground.setForeground(false)
     }
 
     @Test

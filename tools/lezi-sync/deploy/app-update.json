@@ -1,8 +1,8 @@
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 20,
-  "version_name": "0.3.13",
-  "min_supported_version_code": 20,
-  "sha256": "93fa3ab1792958bf4db857d2390f02b476183b78a73a3d0c442a6a190f403edd",
-  "release_notes": "0.3.13 家庭事实无损因果同步：base_version/mutation_id 三方合并与持久冲突分支；WakeObservation 独立醒来；近邻仅疑似重复组不再服务器落选；LocalWrite 无 pull 快速路径；Room 27 / server schema 12；强制 minSupported=20"
+  "version_code": 21,
+  "version_name": "0.4.0",
+  "min_supported_version_code": 21,
+  "sha256": "27bd2cc321165956ac1b6e4839c8808256e244372e0087df1f2017ea727420c6",
+  "release_notes": "0.4.0 无损因果同步：commit-first、完整 ConflictSnapshot 与 choice-only resolution；Room 28 / server schema 13；causal_sync_v2；强制 minSupported=21"
 }

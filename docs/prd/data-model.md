@@ -12,9 +12,8 @@
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
 > membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 >
-> **当前 runtime source：** 0.3.13 / Room 27 因果版本、WakeObservation 与非破坏性疑似重复。
-> **0.4.0 目标 wire** 见 [`causal-sync-wire.md`](./causal-sync-wire.md) 与 ADR-0022：Room 28、
-> commit-first、完整 ConflictSnapshot、choice-only resolution；H27 前 capability 不激活。
+> **当前 tree：** 0.4.0 / Room 28，commit-first、完整 ConflictSnapshot、choice-only
+> resolution，只协商 `causal_sync_v2`。0.3.13 / Room 27 保留为非破坏升级源；生产 NAS 切割未执行。
 
 ---
 
@@ -166,7 +165,7 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 | `end_timestamp` | **0.3.12 及以前已交付**：睡眠等区间结束。**0.3.13 规划**：Sleep wire 根不再同步该字段；醒来见 §3.5.1 WakeObservation |
 | `note` | |
 | `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；尚未加入家庭的本机记录可空 |
-| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire。独立 log 媒体包会抬高 NAS 根 `updated_at`，成功后须把本机回执与（内容 epoch 未变时的）本地 `updated_at` 对齐到同一 `rootUpdatedAt`，不能只 ack 媒体。**0.3.13 规划** 另存服务器 `base_version` / 冻结 `mutation_id`（Room 27），见 [`causal-sync-wire.md`](./causal-sync-wire.md) |
+| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire。独立 log 媒体包会抬高 NAS 根 `updated_at`，成功后须把本机回执与（内容 epoch 未变时的）本地 `updated_at` 对齐到同一 `rootUpdatedAt`，不能只 ack 媒体。0.4.0 另存服务器 `base_version` / 冻结 `mutation_id`（Room 28），见 [`causal-sync-wire.md`](./causal-sync-wire.md) |
 | `payload_json` | 类型扩展 |
 | `schema_version` | 当前固定为 v2 |
 | `updated_at` / `deleted_at` | 软删。**0.3.10 已交付**：家庭权威图上 record tombstone 相对 `updated_at` LWW **永胜**（更高 live 不得清零 `deleted_at`）；误删/近邻落选后需事实时 **新记一条**。**0.3.13 规划**：删除服从因果基线；稳定 tombstone 后陈旧 live replay 不得复活；**仅** 授权 conflict resolution 可恢复同 UUID（ADR-0020） |
@@ -597,7 +596,7 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
 - LocalWrite no-pull **仅** 在因果协议后启用，且不推进 pull cursor（CONTEXT /
   [`causal-sync-wire.md`](./causal-sync-wire.md) §13）。
 
-#### 3.12.3 0.4.0 conflict-v2（合同冻结，runtime 未激活）
+#### 3.12.3 0.4.0 conflict-v2（当前 tree 已激活）
 
 - 已知业务 nullable 字段必须显式具体值或 null；清空为 `set(null)`，普通业务字段没有 remove。
 - stable 与每个 branch 的 root/media/deleted/base/provenance 进入一个完整 ConflictSnapshot；
@@ -605,7 +604,8 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
 - resolution 请求只有 snapshot token、resolution mutation ID 和完整 path→choice ID；服务端重建、
   共用普通 commit validator 并 full-set CAS。纯 restore 只选 tombstone 声明的完整直接 live base。
 - pending mutation 可持久一份不可变 frozen envelope，但 Room product facts 仍是领域真相。
-- `causal_sync_v2` 只在 H27 完成 0.4.0/code21/Room28/contract5/server13/floor21 全链后 advertise。
+- H27 已完成 0.4.0/code21/Room28/contract5/server13/floor21 全链；两端只 advertise/接受
+  `causal_sync_v2`。
 
 ---
 
@@ -794,7 +794,7 @@ interface SyncPort {
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
 | 冲突（已交付） | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
 | 冲突（0.3.13 source） | `base_version` 三方合并 / 持久分支 / client-supplied resolution result；仅作升级源 runtime |
-| 冲突（0.4.0 目标） | 完整 N-way ConflictSnapshot / choice-only resolution / direct-base restore；见 [`causal-sync-wire.md`](./causal-sync-wire.md)，H27 前不激活 |
+| 冲突（0.4.0） | 完整 N-way ConflictSnapshot / choice-only resolution / direct-base restore；见 [`causal-sync-wire.md`](./causal-sync-wire.md) |
 | 同步域扩展（0.3.13 规划） | + WakeObservation（+ wake 媒体）；近邻不再服务器落选 |
 | LocalWrite（0.3.13 规划） | 因果协议后才允许 no-pull；不推进 pull cursor |
 | 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |
@@ -847,15 +847,15 @@ snapshot 再执行 1 次计划读取和 1 次活跃日志媒体读取，共 5 �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；**当前交付** 继续使用契约 v3（由 0.3.6 / versionCode 13 引入）与 Room **v26**
+相邻升级；当前交付使用契约 v5（0.4.0 / versionCode 21）与 Room **v28**
 （tree 以 `config/android-release-compatibility.json` 与 `LeziDatabase` 为准；文档数字若
 漂移以清单重核）。`OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含
 LocalUser、Family、Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、
 CustomItemDef、CarePlan 与 FulfillmentCandidate，并使用真实 `SyncPort` 和 Record/计划媒体
 原子包。
 
-**0.3.13 tree 目标（NAS 切割前重核）：** versionName `0.3.13` / versionCode **20** /
-Room **27**（本地契约版本号以实现票追加清单为准）/ server schema **12**。Room 27 须原地
+**0.4.0 tree 目标（NAS 切割前重核）：** versionName `0.4.0` / versionCode **21** /
+Room **28** / local-data contract **5** / server schema **13**。Room 27→28 须原地
 迁移保留全部业务行、dirty、媒体、会话与 endpoint 信任，并容纳 `baseVersion`、冻结
 `mutation_id`、WakeObservation、冲突摘要/详情、疑似重复与来源关系。后续本地数据契约必须
 通过相邻迁移链保留 Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前

@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync.backend
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -25,7 +26,9 @@ class ConflictV2GoldenCorpusTest {
         assertThat(release.getValue("room").jsonPrimitive.content).isEqualTo("28")
         assertThat(release.getValue("server_schema").jsonPrimitive.content).isEqualTo("13")
         assertThat(corpus.getValue("capability").jsonObject.getValue("key").jsonPrimitive.content)
-            .isEqualTo("causal_sync_v2")
+            .isEqualTo(CAPABILITY_CAUSAL_SYNC_V2)
+        assertThat(REQUIRED_CAUSAL_WIRE_CAPABILITIES)
+            .containsExactly(CAPABILITY_CAUSAL_SYNC_V2)
 
         assertThat(schema.getValue("\$defs").jsonObject)
             .containsKey("snapshotPage")

@@ -137,7 +137,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
                             val row = database.conflictSnapshotCacheDao()
                                 .getFrozenMediaSpoolManifest(MUTATION_ID)
                             val phase = row?.let {
-                                decodeCausalMediaSettlementOrNull(it.snapshotJson)?.phase
+                                decodeCausalMediaSettlementOrNull(it.payloadJson)?.phase
                             }
                             if (phase == CausalMediaSettlementPhase.CleanupAccepted) {
                                 error("injected terminal transaction rollback")
@@ -158,7 +158,7 @@ class ImmutableMediaSpoolRoomRecoveryDeviceTest {
             val unknownRow = requireNotNull(
                 database.conflictSnapshotCacheDao().getFrozenMediaSpoolManifest(MUTATION_ID),
             )
-            assertThat(decodeCausalMediaSettlementOrNull(unknownRow.snapshotJson)?.phase)
+            assertThat(decodeCausalMediaSettlementOrNull(unknownRow.payloadJson)?.phase)
                 .isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
             assertThat(database.recordDao().getByClientUuid(RECORD_ID)?.syncDirty).isTrue()
             assertThat(reopenedSpool.recoverGroup(MUTATION_ID))

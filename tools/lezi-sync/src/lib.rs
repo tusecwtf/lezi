@@ -75,31 +75,19 @@ pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
 pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
 pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
-/// Causal version graph + three-way merge (wire §1). Fail-closed without dual-read LWW.
-pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
-/// WakeObservation atomic root (wire §1 / §4.5).
-pub const CAPABILITY_WAKE_OBSERVATION: &str = "wake_observation";
-/// Non-destructive source relations API surface (wire §1 / §12).
-pub const CAPABILITY_SOURCE_RELATIONS: &str = "source_relations";
-/// Capabilities owned by the authenticated sync handshake. H27 will replace
-/// this source-generation set with the single `causal_sync_v2` activation.
+/// Complete 0.4.0 commit-first/conflict-v2 generation.
+pub const CAPABILITY_CAUSAL_SYNC_V2: &str = "causal_sync_v2";
+/// Capabilities exposed by health after the complete generation is activated.
 pub const HEALTH_CAPABILITIES: &[&str] = &[
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
     CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
-    CAPABILITY_CAUSAL_VERSIONS,
-    CAPABILITY_WAKE_OBSERVATION,
-    CAPABILITY_SOURCE_RELATIONS,
+    CAPABILITY_CAUSAL_SYNC_V2,
 ];
-pub const SOURCE_SYNC_HANDSHAKE_CAPABILITIES: &[&str] = &[
-    CAPABILITY_CAUSAL_VERSIONS,
-    CAPABILITY_WAKE_OBSERVATION,
-    CAPABILITY_SOURCE_RELATIONS,
-];
-/// 0.3.13 causal generation: production requires verified app-update with
-/// version_code and min_supported_version_code at least this floor (versionCode 20).
-const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 20;
+pub const SOURCE_SYNC_HANDSHAKE_CAPABILITIES: &[&str] = &[CAPABILITY_CAUSAL_SYNC_V2];
+/// 0.4.0 causal generation requires the code 21 APK before server activation.
+const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 21;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
@@ -682,7 +670,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
                 "protocol cutover refused before the forced-update floor"
             );
             return Err(ApiError::internal(
-                "protocol cutover release channel does not enforce version code 20",
+                "protocol cutover release channel does not enforce version code 21",
             ));
         }
     } else if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {

@@ -12,9 +12,9 @@
 > atomic pending 投影上增加启动 authority graph 校验及延迟履约能力门闩；发布验收证据
 > 由本地 tracker 固定到实际构建与联调结果。
 >
-> 当前 0.3.13 source runtime 已有版本化原子根、reconcile/commit 与 branch。0.4.0
-> [`causal-sync-wire.md`](./causal-sync-wire.md) 冻结 `causal_sync_v2` 的 commit-first、完整
-> ConflictSnapshot 与 choice-only resolution；H27 前不得 advertise，不能把目标合同写成已上线。
+> 当前 0.4.0 tree 已按 [`causal-sync-wire.md`](./causal-sync-wire.md) 启用 `causal_sync_v2`
+> commit-first、完整 ConflictSnapshot 与 choice-only resolution；家庭 NAS 是否完成生产切割仍须
+> live 证据，不能把本地激活写成已上线。
 
 本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选按 ADR-0016 的先对账临时计划与 ADR-0017 的权威终态裁决生成。
 

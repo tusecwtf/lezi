@@ -6,9 +6,7 @@ import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
 import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_VERSIONS
-import com.lezi.babylog.sync.session.CAPABILITY_SOURCE_RELATIONS
-import com.lezi.babylog.sync.session.CAPABILITY_WAKE_OBSERVATION
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 
@@ -463,11 +461,9 @@ data class DisasterRestoreStatus(
 
 internal const val AUTHENTICATED_SYNC_PROTOCOL_VERSION = 1
 
-/** Frozen H14 source-sync capability set requested by every authenticated handshake. */
+/** Complete 0.4.0 generation requested by every authenticated handshake. */
 internal val REQUIRED_CAUSAL_WIRE_CAPABILITIES = setOf(
-    CAPABILITY_CAUSAL_VERSIONS,
-    CAPABILITY_WAKE_OBSERVATION,
-    CAPABILITY_SOURCE_RELATIONS,
+    CAPABILITY_CAUSAL_SYNC_V2,
 )
 
 data class SyncHandshakePrincipal(
