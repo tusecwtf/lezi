@@ -11,7 +11,7 @@
 
 - [x] 开始时重新 pin 当前 HEAD、git status、Android/server 版本、versionCode、Room schema、server user_version、release compatibility 与 app-update metadata
 - [x] 历史 v1 证据目标曾为 Android/server 0.3.13、versionCode 20、Room 27、server schema 12；这些数字不自动成为 hardening 发版目标
-- [ ] `causal-sync-conflict-transport-hardening/43` 完成；目标严格为 Android/server 0.4.0、code 21、Room 28、contract 5、server schema 13、floor 21
+- [x] `causal-sync-conflict-transport-hardening/43` 本地复审完成（无剩余 P0/P1）；生产 cutover 仍需维护窗确认。目标严格为 Android/server 0.4.0、code 21、Room 28、contract 5、server schema 13、floor 21
 - [ ] 同签名 code 6 与当前 code 20 APK 原地升级到 code 21，保留 Room facts/tombstone/pending/conflict/media/spool/session/credentials/endpoint/TLS trust
 - [x] live NAS preflight 只接受完整且 shape 匹配的 server user_version 11 或 12；其它 source 在 stop/rm 前中止并另立迁移（编排已从 attested rollback package 推导 0.3.12/11 或 0.3.13/12；生产 live 探针仍待维护窗）
 - [ ] `offline-migrate` v11/v12→v13 copy-out/dry-run/migrate/validate 与隔离 rollback rehearsal receipts 全通过；source data root 零写入

@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: local-partial — H01–H42 and H44 are locally implemented/accepted with stated residuals; H43 needs a re-review on the new HEAD before release 09
+Status: local-partial — H01–H44 local review is green; release 09 still needs a maintenance-window confirmation
 
 Spec: [`spec.md`](./spec.md)
 
@@ -67,7 +67,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 40 | [`40-apk-upgrade-preservation-acceptance`](./issues/40-apk-upgrade-preservation-acceptance.md) | implemented (API 35 Room + same-signer upgrades pass) | 27 |
 | 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | implemented (API 35 process-death matrix passes) | 09, 10, 20, 40 |
 | 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | implemented (API 35 interaction + screenshot evidence pass) | 07, 09, 41 |
-| 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | blocked (H44 locally green; needs re-review on new HEAD before CD) | 32–42, 44 |
+| 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | implemented (local re-review green; CD needs maintenance window) | 32–42, 44 |
 | 44 | [`44-real-server-media-receipt-fault-seam`](./issues/44-real-server-media-receipt-fault-seam.md) | implemented (isolated real-server fault seam green) | 31, 38 |
 
 External owners: [`R12 admission`](../repository-dedup-algorithm-audit-20260809/issues/12-bounded-conflict-resources.md),
@@ -82,9 +82,9 @@ Production schema cutover/CD remains owned by
 H40–H42 are closed on the API 35 device/emulator receipts recorded in their tickets. H39's real
 server critical-section evidence is also green. H44 closed the Android→real-server media receipt
 fault seam on an isolated loopback instance. Guarded 0.4.0 cutover now accepts exactly one attested
-source tuple: `0.3.12`/schema 11 or `0.3.13`/schema 12. H43 still needs a Standards/Spec re-review
-on the new committed HEAD. Production CD still requires a fresh maintenance-window confirmation;
-no stop/rm/replace was performed.
+source tuple: `0.3.12`/schema 11 or `0.3.13`/schema 12. H43 local Standards/Spec re-review on that
+HEAD found no remaining P0/P1. Production CD still requires a fresh maintenance-window
+confirmation; no stop/rm/replace was performed.
 
 ## Program invariants
 

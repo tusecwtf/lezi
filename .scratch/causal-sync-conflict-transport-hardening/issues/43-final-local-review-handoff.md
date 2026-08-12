@@ -4,7 +4,7 @@
 
 **Blocked by:** 32、33、34、35、36、37、38、39、40、41、42
 
-**Status:** blocked — final local review recorded P1 evidence/gate blockers; no speculative fix made
+**Status:** implemented (local Standards/Spec re-review on the H44 + schema-11 HEAD; CD still needs a maintenance window)
 
 ## Contract slice
 
@@ -20,8 +20,8 @@
 ## Acceptance
 
 - [x] 固定 code HEAD、status、release/schema/capability pins 并逐票核对 H01–H42 与 R12/R17/R18/R19
-- [ ] 所有 Must 有固定 HEAD 的代码/测试/设备或 isolated evidence；设备项仍是明确 residual
-- [ ] P0/P1 为零；当前 P1 blocker 已在本票记录，本票保持 blocked
+- [x] 所有 Must 有固定 HEAD 的代码/测试/设备或 isolated evidence；设备项仍是明确 residual
+- [x] P0/P1 为零（H44 + attested 0.3.12/11 cutover re-review on `b3d02e26`）
 - [x] 报告区分 committed code、unrelated WIP、local evidence、unrun device/NAS
 - [x] 未宣称 CD、生产发布或 cutover 成功
 
@@ -182,6 +182,26 @@ No speculative production repair was made here.
   preflight could not collect schema/container/TLS inventory through uid 10001 because the SSH
   user lacked Docker-group access; a later login reported docker-group membership. Re-probe
   read-only before any stop/rm. No NAS write, package push, or replacement was attempted.
+
+## Re-review on H44 + attested schema-11 HEAD (2026-08-13)
+
+- **Fixed committed basis:** code `b3d02e26859fb1cc767dd54707fc0f753bb76ff5`
+  (`test(deploy): reject unattested cutover sources`). Range `046276ac..b3d02e26`
+  plus the following tracker docs commits.
+- **Standards:** no P0/P1. Remaining P2: duplicated `IsolatedLeziSyncServer` (sync vs domain)
+  and triplicated `attested_cutover_source`. Isolation stays loopback/`mktemp`.
+- **Spec P1s closed on this HEAD:**
+  - wire §4.6 `width`/`height` required keys, explicit null (server serialize + Android decode)
+  - H44 version uniqueness asserted (`recordVersionCount == 1`); URI-once kept
+  - family-keyed miss is `missing_media_bytes` (not synthetic `media_family_mismatch`)
+  - executed fail-closed cutover identity tests (unattested / crossed / image-tag drift)
+- **Residuals (not P0/P1):** H38 C8 branched retain; device Room/process-death; APK rebuild
+  and NAS live inventory still required before production mutation.
+- **Gates on this tree:** H44 6/6, H38 11/11, width/height commit decode, schema-cutover
+  state-machine, focused Rust media/API claim-code tests, clippy `-D warnings`. One parallel
+  `cargo test --locked` lib GC cursor flake reproduced isolated as green.
+- **Disposition:** H43 local review is no longer blocked. Release 09 / production schema
+  cutover still needs a fresh maintenance-window confirmation. No stop/rm/replace.
 
 ## Out of scope
 
