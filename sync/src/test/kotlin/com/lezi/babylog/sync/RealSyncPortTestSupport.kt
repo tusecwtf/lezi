@@ -250,6 +250,12 @@ internal class RecordingSyncBackend : SyncBackend {
     val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalMediaPreimageBytes = mutableListOf<Pair<String, ByteArray>>()
     var onCausalMediaPreimage: (suspend (String) -> Unit)? = null
+    /** Optional one-shot throw after bytes are recorded (lost prepare response). */
+    var failAfterCausalMediaPreimageUpload: Throwable? = null
+    /** Override durable receipt shape after a successful byte capture. */
+    var causalMediaReceiptFactory:
+        ((mediaUuid: String, uploaded: ByteArray, sha256: String) ->
+            com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt)? = null
     var nextCausalCommit: CausalCommitBatchResult? = null
     var nextCausalCommitFailure: CausalCommitRejectedException? = null
     val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
@@ -700,13 +706,18 @@ internal class RecordingSyncBackend : SyncBackend {
             }
         }
         causalMediaPreimageBytes += mediaUuid to uploaded.toByteArray()
-        return com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt(
-            mediaUuid = mediaUuid,
-            status = "staged",
-            byteSize = source.contentLength,
-            sha256 = sha256,
-            expiresAtEpochSeconds = Long.MAX_VALUE,
-        )
+        failAfterCausalMediaPreimageUpload?.let { failure ->
+            failAfterCausalMediaPreimageUpload = null
+            throw failure
+        }
+        return causalMediaReceiptFactory?.invoke(mediaUuid, uploaded.toByteArray(), sha256)
+            ?: com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt(
+                mediaUuid = mediaUuid,
+                status = "staged",
+                byteSize = source.contentLength,
+                sha256 = sha256,
+                expiresAtEpochSeconds = Long.MAX_VALUE,
+            )
     }
 
     override suspend fun causalCommit(
@@ -1422,6 +1433,7 @@ internal class TestImmutableMediaSpool(
     private val expectedItemCounts = linkedMapOf<String, Int>()
     private val bytes = linkedMapOf<Pair<String, String>, ByteArray>()
     val discardedMutationIds = mutableListOf<String>()
+    val openCounts = mutableMapOf<String, Int>()
 
     override suspend fun freezeGroup(
         mutationId: String,
@@ -1467,10 +1479,13 @@ internal class TestImmutableMediaSpool(
     override suspend fun open(
         mutationId: String,
         item: ImmutableMediaSpoolItem,
-    ): SyncMediaUploadSource = com.lezi.babylog.sync.backend.TestMediaUploadSource(
-        content = requireNotNull(bytes[mutationId to item.mediaUuid]),
-        mime = item.mime,
-    )
+    ): SyncMediaUploadSource {
+        openCounts[mutationId] = (openCounts[mutationId] ?: 0) + 1
+        return com.lezi.babylog.sync.backend.TestMediaUploadSource(
+            content = requireNotNull(bytes[mutationId to item.mediaUuid]),
+            mime = item.mime,
+        )
+    }
 
     override suspend fun discardGroup(mutationId: String) {
         groups.remove(mutationId)
