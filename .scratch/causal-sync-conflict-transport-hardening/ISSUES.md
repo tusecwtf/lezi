@@ -66,7 +66,7 @@ separately authorized maintenance flow. The table records minimal blockers; numb
 | 39 | [`39-media-branch-performance-acceptance`](./issues/39-media-branch-performance-acceptance.md) | implemented | 21, 22, 23, 24, 31, 37, 38 |
 | 40 | [`40-apk-upgrade-preservation-acceptance`](./issues/40-apk-upgrade-preservation-acceptance.md) | implemented (local gates pass; device upgrade residual; unrelated sync JVM residual) | 27 |
 | 41 | [`41-process-death-recovery-acceptance`](./issues/41-process-death-recovery-acceptance.md) | implemented (local JVM gates pass; Room/device residual) | 09, 10, 20, 40 |
-| 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | ready-for-agent | 07, 09, 41 |
+| 42 | [`42-conflict-device-interaction-acceptance`](./issues/42-conflict-device-interaction-acceptance.md) | implemented (local acceptance pass; device interaction residual) | 07, 09, 41 |
 | 43 | [`43-final-local-review-handoff`](./issues/43-final-local-review-handoff.md) | ready-for-agent | 32–42 acceptance leaves |
 
 External owners: [`R12 admission`](../repository-dedup-algorithm-audit-20260809/issues/12-bounded-conflict-resources.md),
@@ -78,9 +78,10 @@ Production schema cutover/CD remains owned by
 
 ## Frontier
 
-H41 is implemented locally at JVM seams. H42 is the next executable DAG frontier; H42–H43 remain open and follow
-the serial order above. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD
-and rollback locally; H43 hands evidence to release 09.
+H42 is implemented at local public/UI seams; its connected/device interaction remains a truthful
+residual because ADB has no attached device. H43 is the next executable DAG frontier and remains
+open. H28 completed non-destructive server 11/12→13 copy-out; H29–H30 prove guarded CD and
+rollback locally; H43 hands evidence to release 09.
 
 ## Program invariants
 
