@@ -113,13 +113,21 @@ fi
 if [[ "${image}" != "lezi-sync:${version}" ]]; then
   fail "manifest image must be lezi-sync:<manifest version>"
 fi
-if [[ "${version}" == "0.4.0" \
-    && ( "${server_schema}" != "13" \
-    || "${android_version_code}" != "21" \
-    || "${minimum_supported_version_code}" != "21" \
-    || "${rollback_source_version}" != "0.3.13" \
-    || "${rollback_source_server_schema}" != "12" ) ]]; then
-  fail "schema-cutover release identity must be 0.4.0/code21/floor21/schema13 with 0.3.13/schema12 rollback source"
+attested_cutover_source() {
+  case "$1:$2" in
+    0.3.12:11|0.3.13:12) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [[ "${version}" == "0.4.0" ]] \
+    && { [[ "${server_schema}" != "13" \
+      || "${android_version_code}" != "21" \
+      || "${minimum_supported_version_code}" != "21" ]] \
+      || ! attested_cutover_source "${rollback_source_version}" "${rollback_source_server_schema}"; }; then
+  fail "schema-cutover release identity must be 0.4.0/code21/floor21/schema13 with attested 0.3.12/11 or 0.3.13/12 rollback source"
+fi
+if [[ "${version}" == "0.3.12" && "${server_schema}" != "11" ]]; then
+  fail "0.3.12 rollback packages must declare server schema 11"
 fi
 if [[ "${version}" == "0.3.13" && "${server_schema}" != "12" ]]; then
   fail "0.3.13 rollback packages must declare server schema 12"

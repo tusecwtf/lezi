@@ -199,10 +199,15 @@ for helper in schema-cutover.sh schema-cutover-steps.sh; do
   grep -Fq "${helper}" "${package_script}" || fail "package omits ${helper}"
   grep -Fq "${helper}" "${validator}" || fail "validator omits ${helper}"
 done
+grep -Fq '0.3.12:11|0.3.13:12' "${validator}" \
+  || fail "validator must accept attested 0.3.12/11 or 0.3.13/12 rollback sources"
+grep -Fq '0.3.12 rollback packages must declare server schema 11' "${validator}" \
+  || fail "validator must pin 0.3.12 packages to schema 11"
 for fixed in \
   'package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"' \
-  'rollback_source_version="0.3.13"' \
-  'rollback_source_server_schema="12"' \
+  'rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.3.13}"' \
+  'rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-12}"' \
+  '0.3.12:11|0.3.13:12' \
   'package_android_version_code' \
   'package_min_supported_version_code'
 do
@@ -236,8 +241,12 @@ grep -Fq '"${PACKAGE_DIR}/app-update/app-release.apk"' "${runner_source}" \
   || fail "validated schema-13 root must contain the signer-attested target APK"
 grep -Fq '"${PACKAGE_DIR}/app-update/app-update.json"' "${runner_source}" \
   || fail "validated schema-13 root must contain the attested target metadata"
-grep -Fq 'LEZI_SYNC_VERSION=0.3.13' "${runner_source}" \
-  || fail "automatic pre-open rollback must recreate the pinned source service"
+grep -Fq 'LEZI_SYNC_VERSION="$(rollback_source_version)"' "${runner_source}" \
+  || fail "automatic pre-open rollback must recreate the attested source service"
+grep -Fq '0.3.12:11|0.3.13:12' "${runner_source}" \
+  || fail "cutover must accept exactly the attested 0.3.12/11 or 0.3.13/12 source tuples"
+grep -Fq 'lezi-sync:${rollback_version}' "${runner_source}" \
+  || fail "live container image tag must match the attested rollback package"
 
 # Execute the production stopped-source rollback phase with isolated command
 # doubles. This covers the real ssh -> tar -> age pipeline and its frozen
@@ -248,9 +257,14 @@ mkdir -p "${production_root}/bin" "${production_root}/state" \
 chmod 700 "${production_root}/state" "${production_root}/backups"
 printf 'recipient\n' >"${production_root}/config/recipients.txt"
 printf '0123456789abcdef0123456789abcdef\n' >"${production_root}/state/operation-id"
-printf 'schema=12\nabc  ./lezi.db\n' >"${production_root}/state/frozen-source-inventory.txt"
+printf 'schema=11\nabc  ./lezi.db\n' >"${production_root}/state/frozen-source-inventory.txt"
 cat >"${production_root}/state/rollback-package-manifest.json" <<'EOF'
-{"image_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{
+  "version": "0.3.12",
+  "server_schema": "11",
+  "image": "lezi-sync:0.3.12",
+  "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
 EOF
 cat >"${production_root}/bin/ssh" <<'EOF'
 #!/usr/bin/env bash
@@ -292,15 +306,15 @@ env PATH="${production_root}/bin:${PATH}" \
   LEZI_AGE_RECIPIENTS_FILE="${production_root}/config/recipients.txt" \
   LEZI_DATA_HOST_PATH=/tmp/lezi-schema-cutover-test/data \
   "${runner_source}" rollback_backup
-[[ -s "${production_root}/backups/lezi-schema12-data-0123456789abcdef0123456789abcdef.tar.age" ]] \
+[[ -s "${production_root}/backups/lezi-schema11-data-0123456789abcdef0123456789abcdef.tar.age" ]] \
   || fail "production rollback phase did not create the encrypted full-data stream"
-[[ -s "${production_root}/backups/lezi-schema12-start-0123456789abcdef0123456789abcdef.json.age" ]] \
+[[ -s "${production_root}/backups/lezi-schema11-start-0123456789abcdef0123456789abcdef.json.age" ]] \
   || fail "production rollback phase did not create the encrypted start contract"
 
 failure_state="${production_root}/failure-state"
 mkdir -m 700 "${failure_state}"
 printf 'fedcba9876543210fedcba9876543210\n' >"${failure_state}/operation-id"
-printf 'schema=12\nabc  ./lezi.db\n' >"${failure_state}/frozen-source-inventory.txt"
+printf 'schema=11\nabc  ./lezi.db\n' >"${failure_state}/frozen-source-inventory.txt"
 cp "${production_root}/state/rollback-package-manifest.json" "${failure_state}/rollback-package-manifest.json"
 if env PATH="${production_root}/bin:${PATH}" LEZI_TEST_INVENTORY_MISMATCH=1 \
     LEZI_SCHEMA_CUTOVER_STATE_DIR="${failure_state}" \
@@ -310,7 +324,29 @@ if env PATH="${production_root}/bin:${PATH}" LEZI_TEST_INVENTORY_MISMATCH=1 \
     "${runner_source}" rollback_backup >/dev/null 2>&1; then
   fail "production rollback phase accepted stopped-source inventory drift"
 fi
-[[ ! -e "${production_root}/backups/lezi-schema12-data-fedcba9876543210fedcba9876543210.tar.age" ]] \
+[[ ! -e "${production_root}/backups/lezi-schema11-data-fedcba9876543210fedcba9876543210.tar.age" ]] \
   || fail "failed rollback capture promoted ciphertext after inventory drift"
+
+# Schema-12 identity still derives backup names from the attested rollback package.
+schema12_state="${production_root}/schema12-state"
+mkdir -m 700 "${schema12_state}"
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >"${schema12_state}/operation-id"
+printf 'schema=12\nabc  ./lezi.db\n' >"${schema12_state}/frozen-source-inventory.txt"
+cat >"${schema12_state}/rollback-package-manifest.json" <<'EOF'
+{
+  "version": "0.3.13",
+  "server_schema": "12",
+  "image": "lezi-sync:0.3.13",
+  "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+EOF
+env PATH="${production_root}/bin:${PATH}" \
+  LEZI_SCHEMA_CUTOVER_STATE_DIR="${schema12_state}" \
+  LEZI_SCHEMA_CUTOVER_ROLLBACK_DIR="${production_root}/backups" \
+  LEZI_AGE_RECIPIENTS_FILE="${production_root}/config/recipients.txt" \
+  LEZI_DATA_HOST_PATH=/tmp/lezi-schema-cutover-test/data \
+  "${runner_source}" rollback_backup
+[[ -s "${production_root}/backups/lezi-schema12-data-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tar.age" ]] \
+  || fail "schema-12 attested source did not derive schema-12 backup names"
 
 echo "schema-cutover state-machine smoke passed"

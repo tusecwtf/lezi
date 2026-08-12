@@ -25,9 +25,14 @@ esac
 sqlite3_bin="${LEZI_REHEARSAL_SQLITE3_BIN:-$(command -v sqlite3 || true)}"
 [[ -x "${sqlite3_bin}" ]] || die "set LEZI_REHEARSAL_SQLITE3_BIN to sqlite3"
 command -v openssl >/dev/null 2>&1 || die "openssl is required"
+if [[ "${schema}" == 11 ]]; then
+  source_version="0.3.12"
+else
+  source_version="0.3.13"
+fi
 source_apk="${LEZI_REHEARSAL_SOURCE_APK:-}"
 [[ -f "${source_apk}" && ! -L "${source_apk}" ]] \
-  || die "LEZI_REHEARSAL_SOURCE_APK must be the signed 0.3.13 release APK"
+  || die "LEZI_REHEARSAL_SOURCE_APK must be the signed ${source_version} release APK"
 [[ "$(od -An -N2 -tx1 "${source_apk}" | tr -d ' \n')" == 504b ]] \
   || die "source APK is not a ZIP/APK"
 
@@ -48,7 +53,7 @@ cat >"${root}/app-update.json" <<EOF
 {
   "package_name": "com.lezi.babylog",
   "version_code": 20,
-  "version_name": "0.3.13",
+  "version_name": "${source_version}",
   "min_supported_version_code": 20,
   "sha256": "${apk_sha}",
   "release_notes": "synthetic isolated rollback fixture"

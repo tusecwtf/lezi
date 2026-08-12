@@ -52,6 +52,36 @@ print(value)
 PY
 }
 
+attested_cutover_source() {
+  case "$1:$2" in
+    0.3.12:11|0.3.13:12) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+rollback_source_version() {
+  manifest_value "${state_dir}/rollback-package-manifest.json" version
+}
+
+rollback_source_schema() {
+  manifest_value "${state_dir}/rollback-package-manifest.json" server_schema
+}
+
+rollback_source_image() {
+  manifest_value "${state_dir}/rollback-package-manifest.json" image
+}
+
+require_attested_rollback_identity() {
+  local version schema image
+  version="$(rollback_source_version)"
+  schema="$(rollback_source_schema)"
+  image="$(rollback_source_image)"
+  attested_cutover_source "${version}" "${schema}" \
+    || die "rollback package must be attested 0.3.12/schema 11 or 0.3.13/schema 12"
+  [[ "${image}" == "lezi-sync:${version}" ]] \
+    || die "rollback package image must be lezi-sync:${version}"
+}
+
 resolve_sync_bin() {
   if [[ -n "${LEZI_SYNC_BIN:-}" && -x "${LEZI_SYNC_BIN}" ]]; then
     printf '%s' "${LEZI_SYNC_BIN}"
@@ -95,11 +125,16 @@ package_preflight() {
 
   [[ -n "${ROLLBACK_PACKAGE_DIR}" && -d "${ROLLBACK_PACKAGE_DIR}" \
       && ! -L "${ROLLBACK_PACKAGE_DIR}" ]] || die "LEZI_SCHEMA_CUTOVER_ROLLBACK_PACKAGE_DIR is required"
-  LEZI_SYNC_VERSION=0.3.13 LEZI_NAS_PACKAGE_DIR="${ROLLBACK_PACKAGE_DIR}" \
+  rollback_version="$(manifest_value "${ROLLBACK_PACKAGE_DIR}/MANIFEST.json" version)"
+  rollback_schema="$(manifest_value "${ROLLBACK_PACKAGE_DIR}/MANIFEST.json" server_schema)"
+  rollback_image="$(manifest_value "${ROLLBACK_PACKAGE_DIR}/MANIFEST.json" image)"
+  attested_cutover_source "${rollback_version}" "${rollback_schema}" \
+    || die "rollback package must be attested 0.3.12/schema 11 or 0.3.13/schema 12"
+  [[ "${rollback_image}" == "lezi-sync:${rollback_version}" ]] \
+    || die "rollback package image must be lezi-sync:${rollback_version}"
+  LEZI_SYNC_VERSION="${rollback_version}" LEZI_NAS_PACKAGE_DIR="${ROLLBACK_PACKAGE_DIR}" \
   LEZI_SKIP_PACKAGE=1 LEZI_DEPLOY_PREFLIGHT_ONLY=1 \
     "${SCRIPT_DIR}/push-and-deploy.sh" >/dev/null
-  [[ "$(manifest_value "${ROLLBACK_PACKAGE_DIR}/MANIFEST.json" version)" == 0.3.13 ]] \
-    || die "rollback package must be 0.3.13"
   rollback_image_id="$(manifest_value "${ROLLBACK_PACKAGE_DIR}/MANIFEST.json" image_id)"
   [[ "${rollback_image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] \
     || die "rollback image id is invalid"
@@ -211,19 +246,23 @@ update_lease_release() {
 }
 
 source_preflight() {
-  local rollback_image_id sync_bin stage
+  local rollback_image_id rollback_image rollback_schema sync_bin stage
+  require_attested_rollback_identity
   rollback_image_id="$(manifest_value "${state_dir}/rollback-package-manifest.json" image_id)"
+  rollback_image="$(rollback_source_image)"
+  rollback_schema="$(rollback_source_schema)"
   stage="$(remote_stage)"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s -- \
-    "${CONTAINER_NAME}" "${rollback_image_id}" "${stage}" <<'REMOTE' \
+    "${CONTAINER_NAME}" "${rollback_image_id}" "${rollback_image}" "${stage}" <<'REMOTE' \
     >"${state_dir}/source-preflight.txt"
 set -euo pipefail
 container="$1"
 expected_image="$2"
-stage="$3"
+expected_tag="$3"
+stage="$4"
 test "$(docker inspect "${container}" --format '{{.State.Running}}')" = true
 test "$(docker inspect "${container}" --format '{{.Image}}')" = "${expected_image}"
-test "$(docker inspect "${container}" --format '{{.Config.Image}}')" = lezi-sync:0.3.13
+test "$(docker inspect "${container}" --format '{{.Config.Image}}')" = "${expected_tag}"
 docker exec "${container}" /bin/sh -ec '
   test -s /data/lezi.db
   test -s /data/server.secret
@@ -249,9 +288,9 @@ REMOTE
     "docker cp '${CONTAINER_NAME}:/data/.' -" \
     | tar -C "${WORK_DIR}/preflight-source" -xf -
   command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 is required for source schema preflight"
-  [[ "$(sqlite3 "${WORK_DIR}/preflight-source/lezi.db" 'PRAGMA user_version;')" == 12 ]] \
-    || die "0.3.13 cutover source must be exact server schema 12"
-  printf 'schema=12\n' >>"${state_dir}/source-preflight.txt"
+  [[ "$(sqlite3 "${WORK_DIR}/preflight-source/lezi.db" 'PRAGMA user_version;')" == "${rollback_schema}" ]] \
+    || die "cutover source must be exact server schema ${rollback_schema} for ${rollback_image}"
+  printf 'schema=%s\n' "${rollback_schema}" >>"${state_dir}/source-preflight.txt"
   cmp -s "${WORK_DIR}/preflight-source/app-release.apk" \
     "${PACKAGE_DIR}/app-update/app-release.apk" \
     || die "live prepublished APK differs from the signer-attested target package"
@@ -276,7 +315,7 @@ rollback_backup() {
   fi
   [[ ! -L "${backup_dir}" && "$(stat -c '%a' "${backup_dir}")" == 700 ]] \
     || die "rollback backup directory must be a real mode-700 directory"
-  output="${backup_dir}/lezi-schema12-data-$(operation_id).tar.age"
+  output="${backup_dir}/lezi-schema$(rollback_source_schema)-data-$(operation_id).tar.age"
   [[ ! -e "${output}" ]] || die "rollback backup already exists"
   temporary="${output}.tmp"
   frozen="$(sed '/^schema=/d' "${state_dir}/frozen-source-inventory.txt")"
@@ -306,7 +345,7 @@ rollback_backup() {
   printf '%s\n' "${output}" >"${state_dir}/data-rollback-bundle.path"
 
   # The exact Docker start contract may contain credentials; stream it directly to age.
-  inspect_output="${backup_dir}/lezi-schema12-start-$(operation_id).json.age"
+  inspect_output="${backup_dir}/lezi-schema$(rollback_source_schema)-start-$(operation_id).json.age"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" "docker inspect '${CONTAINER_NAME}'" \
     | age --encrypt --recipients-file "${recipients}" --output "${inspect_output}"
   [[ -s "${inspect_output}" ]] || die "encrypted start-contract backup is empty"
@@ -335,7 +374,7 @@ stop_source() {
 frozen_inventory() {
   local old_image
   old_image="$(manifest_value "${state_dir}/rollback-package-manifest.json" image_id)"
-  printf 'schema=12\n' >"${state_dir}/frozen-source-inventory.txt"
+  printf 'schema=%s\n' "$(rollback_source_schema)" >"${state_dir}/frozen-source-inventory.txt"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" docker run --rm --user 10001:10001 \
     -v "${DATA_PATH}:/source:ro" --entrypoint /bin/sh "${old_image}" -ec \
     "'cd /source; find . -type f -print0 | sort -z | xargs -0 -r sha256sum'" \
@@ -352,7 +391,7 @@ copy_out() {
   frozen_inventory="$(sed '/^schema=/d' "${state_dir}/frozen-source-inventory.txt")"
   [[ "${local_inventory}" == "${frozen_inventory}" ]] \
     || die "copy-out inventory differs from the frozen source"
-  [[ "$(sqlite3 "${WORK_DIR}/source/lezi.db" 'PRAGMA user_version;')" == 12 ]] \
+  [[ "$(sqlite3 "${WORK_DIR}/source/lezi.db" 'PRAGMA user_version;')" == "$(rollback_source_schema)" ]] \
     || die "copy-out source schema differs from the frozen schema"
 }
 
@@ -404,7 +443,7 @@ activate_target() {
   local token staging previous parent old_image
   token="$(<"${state_dir}/lease-token")"
   staging="$(<"${state_dir}/remote-staging-data.path")"
-  previous="${DATA_PATH}.schema12-pre-cutover-${token}"
+  previous="${DATA_PATH}.schema$(rollback_source_schema)-pre-cutover-${token}"
   parent="$(dirname -- "${DATA_PATH}")"
   old_image="$(manifest_value "${state_dir}/rollback-package-manifest.json" image_id)"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" docker run --rm --user 0 \
@@ -493,7 +532,7 @@ rollback_preopen() {
   old_image="$(manifest_value "${state_dir}/rollback-package-manifest.json" image_id)"
   if [[ -f "${state_dir}/lease-token" ]]; then
     token="$(<"${state_dir}/lease-token")"
-    previous="${DATA_PATH}.schema12-pre-cutover-${token}"
+    previous="${DATA_PATH}.schema$(rollback_source_schema)-pre-cutover-${token}"
     staging="${DATA_PATH}.schema13-staging-${token}"
   fi
   if [[ -n "${previous:-}" ]] \
@@ -502,7 +541,7 @@ rollback_preopen() {
       -v "${data_parent}:/lezi-parent" --entrypoint /bin/sh "${old_image}" -ec \
       "'set -e; test ! -e /lezi-parent/$(basename -- "${staging}"); test -d /lezi-parent/$(basename -- "${DATA_PATH}"); mv /lezi-parent/$(basename -- "${DATA_PATH}") /lezi-parent/$(basename -- "${staging}"); mv /lezi-parent/$(basename -- "${previous}") /lezi-parent/$(basename -- "${DATA_PATH}")'"
     NAS_SSH="${NAS_SSH}" NAS_SSH_PORT="${NAS_SSH_PORT}" \
-    LEZI_SYNC_VERSION=0.3.13 LEZI_DATA_HOST_PATH="${DATA_PATH}" \
+    LEZI_SYNC_VERSION="$(rollback_source_version)" LEZI_DATA_HOST_PATH="${DATA_PATH}" \
     LEZI_NAS_PACKAGE_DIR="${ROLLBACK_PACKAGE_DIR}" LEZI_SKIP_PACKAGE=1 \
     LEZI_ALLOW_SECRET_RECOVERY=1 \
     LEZI_SCHEMA_CUTOVER_APPROVAL=I_ACKNOWLEDGE_0_4_0_SCHEMA_CUTOVER \
@@ -534,7 +573,7 @@ REMOTE
 mark_manual_rollback() {
   printf '%s\n' \
     'TARGET MAY HAVE ACCEPTED SCHEMA-13 WRITES.' \
-    'Do not restore schema-12 data without explicit incident authorization and write reconciliation.' \
+    "Do not restore schema-$(rollback_source_schema) data without explicit incident authorization and write reconciliation." \
     >"${state_dir}/MANUAL_ROLLBACK_REQUIRED"
   chmod 600 "${state_dir}/MANUAL_ROLLBACK_REQUIRED"
 }

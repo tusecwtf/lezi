@@ -512,16 +512,33 @@ created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 apk_sha="$(sha256sum "${out_root}/app-update/app-release.apk" | awk '{print $1}')"
 package_android_version_code="$({ sed -nE 's/^[[:space:]]*"version_code"[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*,?[[:space:]]*$/\1/p' "${out_root}/app-update/app-update.json"; } | head -1)"
 package_min_supported_version_code="$({ sed -nE 's/^[[:space:]]*"min_supported_version_code"[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*,?[[:space:]]*$/\1/p' "${out_root}/app-update/app-update.json"; } | head -1)"
+attested_cutover_source() {
+  case "$1:$2" in
+    0.3.12:11|0.3.13:12) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 case "${version}" in
   0.4.0)
     package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
-    rollback_source_version="0.3.13"
-    rollback_source_server_schema="12"
+    rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.3.13}"
+    rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-12}"
+    attested_cutover_source "${rollback_source_version}" "${rollback_source_server_schema}" \
+      || {
+        echo "error: 0.4.0 rollback source must be 0.3.12/schema 11 or 0.3.13/schema 12" >&2
+        exit 1
+      }
     ;;
   0.3.13)
     package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-12}"
     rollback_source_version="0.3.13"
     rollback_source_server_schema="12"
+    ;;
+  0.3.12)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-11}"
+    rollback_source_version="0.3.12"
+    rollback_source_server_schema="11"
     ;;
   *)
     [[ -n "${LEZI_PACKAGE_SERVER_SCHEMA:-}" \

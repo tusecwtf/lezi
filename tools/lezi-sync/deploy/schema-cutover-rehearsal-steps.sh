@@ -293,8 +293,13 @@ case "${action}" in
       || die "fixture user_version does not match ${source_schema}"
     [[ "$(od -An -N2 -tx1 "${live}/app-release.apk" | tr -d ' \n')" == 504b ]] \
       || die "source rollback APK is not installable"
-    grep -q '"version_name"[[:space:]]*:[[:space:]]*"0.3.13"' "${live}/app-update.json" \
-      || die "source rollback metadata is not pinned to 0.3.13"
+    if [[ "${source_schema}" == 11 ]]; then
+      grep -q '"version_name"[[:space:]]*:[[:space:]]*"0.3.12"' "${live}/app-update.json" \
+        || die "source rollback metadata is not pinned to 0.3.12"
+    else
+      grep -q '"version_name"[[:space:]]*:[[:space:]]*"0.3.13"' "${live}/app-update.json" \
+        || die "source rollback metadata is not pinned to 0.3.13"
+    fi
     printf '%s\n' "$(sha256sum "${target_apk}" | awk '{print $1}')" >"${case_dir}/target-apk.sha256"
     printf '%s\n' "$(sha256sum "${target_metadata}" | awk '{print $1}')" \
       >"${case_dir}/target-app-update.sha256"
