@@ -1,4 +1,4 @@
-//! Private offline v3/v11→legacy schema 12 migration contract (family NAS ops only).
+//! Private offline migration contracts (family NAS ops only).
 //!
 //! Crate-internal inventory + one-shot migrator. **Not** wired into
 //! lezi-sync startup; daily open remains fail-closed on the current schema only.
@@ -18,6 +18,8 @@
 //!   help + probe script pointer (execution evidence under tracker `evidence/07/`).
 //! - **21** — [`boundary`]: ADR/README/DEPLOY/PRD + CLI help seams; locks prep-before-
 //!   window vs cutover fixed order (does **not** add a second migrator).
+//! - **H28** — [`v13`]: exact schema 11/12 → current schema 13 copy-out while
+//!   preserving identity, sessions, media, `server.secret`, and TLS bytes.
 //!
 //! ## Re-auth after cutover (no silent restore)
 //!
@@ -49,6 +51,7 @@ pub(crate) mod media;
 pub(crate) mod migrator;
 pub(crate) mod schema_contract;
 pub(crate) mod v11;
+pub(crate) mod v13;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -77,3 +80,7 @@ pub(crate) use migrator::{
 };
 #[allow(unused_imports)]
 pub(crate) use v11::{migrate_v11_data_dir, migrate_v11_database, SOURCE_V11_USER_VERSION};
+#[allow(unused_imports)]
+pub(crate) use v13::{
+    migrate_v11_or_v12_data_dir_to_v13, migrate_v12_data_dir_to_v13, validate_schema13_data_dir,
+};

@@ -108,7 +108,8 @@ pub(crate) fn cutover_help_text() -> String {
 #   - out/ from `offline-migrate migrate` then `validate` (copy-back-ready; full preflight)
 #   - record migration-time new root password (= post-cutover LEZI_BOOTSTRAP_SECRET)
 #   - schema-12-compatible TLS package ready; deploy only after user confirms replace
-#   - after live current requires schema 13, stop: 11/12→13 is not implemented by this flow
+#   - schema 11/12→13 is implemented by H28, but this legacy flow cannot copy it back;
+#     stop until H29 guarded schema-cutover orchestration is implemented
 #   - Step 0: docker inspect image id + docker save pre-cutover image tar BEFORE stop/rm
 #
 # Step 1 — stop live container (on NAS, data bind kept):
@@ -153,7 +154,7 @@ pub(crate) fn cutover_help_text() -> String {
 #   Protocol cutover risk: live may still be HTTP :8765; current tree publishes HTTPS :8765
 #   + container-internal HTTP :8766 (not on host) and creates persistent tls/ under the data bind.
 #   Future boundary: if the selected image requires schema 13, abort before copy-back and
-#   follow the separately owned H27/H28 path; this legacy command does not implement 11/12→13.
+#   H28 may prepare schema 13 locally; this legacy command cannot copy it back. Wait for H29.
 #
 # Step 5 — health/ready (probe actual protocol; do not assume):
 #   Client-facing success = LAN HTTPS (required for APK TOFU):
@@ -422,14 +423,15 @@ mod tests {
         let help = cutover_help_text();
         assert!(help.contains("LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID=sha256:"));
         assert!(help.contains("LEZI_SKIP_PACKAGE=1"));
-        assert!(help.contains("11/12→13") && help.contains("not implemented"));
+        assert!(help.contains("11/12→13") && help.contains("H29"));
         assert!(
             COPY_BACK_SCRIPT_SRC.contains("LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID"),
             "copy-back must bind schema-12 compatibility to an exact image digest"
         );
         assert!(
-            COPY_BACK_RUNBOOK_SRC.contains("schema-12-compatible TLS image"),
-            "runbook must pin the image contract instead of following live current"
+            COPY_BACK_RUNBOOK_SRC.contains("frozen schema-12 legacy runbook")
+                && COPY_BACK_RUNBOOK_SRC.contains("H29"),
+            "runbook must block H28 schema-13 output until H29"
         );
         assert!(
             PUSH_AND_DEPLOY_SRC.contains("LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID")

@@ -36,7 +36,7 @@
 | versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
 | 本地数据契约 | 当前 tree `v5` / Room **v28**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | **0.3.13 已发布 source 基线** | versionName `0.3.13`、versionCode **20**、Room **27**、历史 server schema **12**；作为非破坏升级源保留 |
-| **0.4.0 当前 tree（生产切割待维护窗）** | versionName `0.4.0`、versionCode **21**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；H27 已原子激活版本/capability，H28–H30 仍负责迁移与 guarded CD；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
+| **0.4.0 当前 tree（生产切割待维护窗）** | versionName `0.4.0`、versionCode **21**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；H27 已原子激活版本/capability，H28 已完成离线迁移，H29–H30 仍负责 guarded CD/rollback；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
 | 应用名 | 乐记 |
 
 ---
@@ -411,7 +411,8 @@ media reachability reverse index、durable GC cursor 与 upload marker）。**v1
 R20 历史工具仅能冻结产生/validate schema **12**，不会跟随 live current。历史 v3 数据根
 **不得**在 server startup 自动迁移；维护窗内的 schema 11/12→13 copy-out mapping 专属 H28，唯一出路
 是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md) 的两阶段路径：
-维护窗前在备份上用显式 `lezi-sync offline-migrate`（源 user_version **3 或 11**→legacy 12；H28 再处理 **11 或 12**→13）、
+维护窗前在备份上用当前显式 `lezi-sync offline-migrate`（仅接受冻结 user_version **11 或 12**→13；
+历史 R20 内部迁移链曾以 v3/11 产生 legacy 12，但不是当前 CLI 入口）、
 独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。0.3.13 的 wire
 minSupported / 客户端能力门与 schema 12 落地分开叙述。发布二进制含该子命令 ≠ 滚动兼容；
 普通 CD 不执行。权威 runbook：

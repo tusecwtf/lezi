@@ -190,11 +190,11 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 在替换前强制生成新的凭据密文备份。pre-TLS/schema 切割回滚是例外，不能用当前 TLS harness；
 其权威 runbook 当前明确把尚未提供的可执行 exact-recreation helper 作为开窗 blocker。
 
-**离线 v3→current 切割（`offline-migrate`）**：仅已授权**维护窗**使用的离线切割 CLI，
+**离线 schema 11/12→13 准备（`offline-migrate`）**：开发机上的显式只读 copy-out CLI，
 **不是**服务启动自动迁移，也**不**构成一般滚动 schema 兼容。日常 NAS 仍
 fresh-current / fail-closed（[ADR-0008](docs/adr/0008-support-only-fresh-current-product-contracts.md)）；
 边界见 [ADR-0013](docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)。
-**普通 CD 不执行**该子命令。权威步骤：
+**普通 CD 不执行**该子命令；H29 完成并重新确认维护窗前不 copy-back。权威边界：
 [`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)；
 摘要：[`tools/lezi-sync/README.md`](tools/lezi-sync/README.md) § 离线切割、
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md) § offline-migrate。

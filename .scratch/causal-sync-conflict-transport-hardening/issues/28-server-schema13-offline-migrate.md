@@ -4,7 +4,7 @@
 
 **Blocked by:** 27
 
-**Status:** ready-for-agent
+**Status:** implemented (review/final gates pass)
 
 ## Contract slice
 
@@ -19,16 +19,26 @@
 
 ## Acceptance
 
-- [ ] v11 与 v12 fixtures 均无损产生可打开的 schema 13
-- [ ] wrong version/shape/WAL/media/secret/TLS 状态不创建可 promote 输出
-- [ ] source tree hash 迁移前后完全一致
-- [ ] schema 13 Store 能读取全部事实、branch/conflict、identity 与 media
+- [x] v11 与 v12 fixtures 均无损产生可打开的 schema 13
+- [x] wrong version/shape/WAL/media/secret/TLS 状态不创建可 promote 输出
+- [x] source tree hash 迁移前后完全一致
+- [x] schema 13 Store 能读取全部事实、branch/conflict、identity 与 media
 
 ## Validation
 
-- [ ] dry-run/migrate/validate/failure/large-fixture tests 通过
-- [ ] Rust fmt/test/clippy 与 isolated source→13 smoke 通过
+- [x] dry-run/migrate/validate/failure/large-fixture tests 通过
+- [x] Rust fmt/test/clippy 与 isolated source→13 smoke 通过
 
 ## Out of scope
 
 不 copy-back 家庭 NAS，不改变 ordinary server startup。
+
+## Evidence
+
+- `offline-migrate` 仅接受冻结 schema 11/12，copy-out 到全新 schema 13 root；源目录前后
+  tree digest 必须一致，任何失败清理临时/目标输出。
+- source 与 target 均执行 SQLite quick/integrity/foreign-key 检查；schema shape、WAL/SHM、
+  secret、TLS identity、published/version/bundle/causal media 路径与摘要全部 fail closed。
+- v11/v12、failure matrix 与 2,000-row fixture 由 `offline_migrate::v13::tests` 覆盖；完整
+  `cargo test --locked`（281 unit + 164 API + 1 corpus + 3 isolated TLS）、fmt、Clippy 通过。
+- Standards/Spec 冻结快照复核均无 findings；未访问家庭 NAS，copy-back/CD 仍由 H29 负责。

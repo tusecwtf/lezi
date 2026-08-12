@@ -371,7 +371,7 @@ the operator's approved secure cleanup procedure.
 
 ## offline-migrate 架构边界（非普通 CD）
 
-`lezi-sync offline-migrate` 是已授权**维护窗**中的 v3→current **离线切割** CLI，
+`lezi-sync offline-migrate` 是 schema 11/12→13 的显式 copy-out **离线准备** CLI，
 **不是**服务启动/runtime 自动迁移，也**不**推翻 NAS fresh-current / fail-closed
 （[ADR-0008](../../../docs/adr/0008-support-only-fresh-current-product-contracts.md)）。
 架构 disposition 见
@@ -381,13 +381,13 @@ the operator's approved secure cleanup procedure.
 |------|------|
 | 普通 CD | `package-nas` / `push-and-deploy` / 容器重启 **不得执行** `offline-migrate` |
 | 启动合同 | 现网进程只打开精确 current schema；旧库 fail closed，无自动迁移 |
-| 切割流水线 | 显式 CLI、停服、固定源 v3→current、独立临时 `out/`、`validate` 后再 copy-back |
+| 切割流水线 | H28 仅在开发机从冻结 11/12 写独立 schema-13 `out/`；H29 才拥有停服/copy-back/CD 编排 |
 | 权威 runbook | [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)（步骤、双备份、回滚、secret 转发） |
 | 当前开窗门 | pre-TLS rollback 的 exact container recreation 尚无审计过的可执行 helper；runbook 将其列为 blocker，未补齐前不得开始 live cutover |
-| Cutover secret | 仅维护窗：迁移期新根密码 → `LEZI_BOOTSTRAP_SECRET`；可用 `LEZI_FORWARD_BOOTSTRAP_SECRET=1`；**普通 CD 勿设** |
+| Identity | H28 byte-preserves `server.secret` 与 TLS pair；H29 必须证明 pre/post certificate + SPKI 完全一致 |
 | 发布二进制 | 可含该子命令 ≠ 滚动 schema 兼容产品承诺 |
 
-产品 README 摘要：[`../README.md`](../README.md) § 离线 v3→current 切割。
+产品 README 摘要：[`../README.md`](../README.md) § 离线 schema 11/12→13 准备。
 
 ## TLS identity
 
