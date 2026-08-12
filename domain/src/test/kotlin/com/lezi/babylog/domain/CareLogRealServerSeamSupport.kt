@@ -60,21 +60,86 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assume.assumeTrue
 
 /**
- * Two independent CareLog + RealSyncPort clients joined to one isolated real lezi-sync.
+ * Independent CareLog + RealSyncPort clients joined to one isolated real lezi-sync.
  *
  * Public seam only: CareLog → SyncPort/RealSyncPort → ReplicaSyncEngine → HttpSyncBackend
  * → real server → peer Room/domain. No Store/direct-HTTP bypass for the mutation path.
+ *
+ * H31 seeds owner+member. H32 may attach extra Owner devices on the same family for
+ * concurrent multi-writer branches without inventing a parallel fixture.
  */
 internal class CareLogRealServerSeamFixture private constructor(
     val server: IsolatedLeziSyncServer,
     val owner: SeamClient,
     val member: SeamClient,
+    private val extraOwners: MutableList<SeamClient> = mutableListOf(),
 ) : AutoCloseable {
+    /** Primary owner followed by any extra Owner devices joined later. */
+    val ownerClients: List<SeamClient>
+        get() = listOf(owner) + extraOwners
+
+    val allClients: List<SeamClient>
+        get() = ownerClients + member
+
     override fun close() {
+        extraOwners.asReversed().forEach { it.close() }
+        extraOwners.clear()
         owner.close()
         member.close()
         server.close()
     }
+
+    /**
+     * Join another Owner device using the fixture bootstrap secret as root password.
+     * Distinct device identities enable concurrent same-base branches under one ACL.
+     */
+    suspend fun joinExtraOwner(
+        label: String,
+        deviceId: String = "h32-$label-device",
+        deviceName: String = "H32 $label Phone",
+    ): SeamClient {
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            server.origin,
+            server.spkiSha256Base64,
+        )
+        val client = SeamClient.create(
+            label = label,
+            endpoint = endpoint,
+            deviceId = deviceId,
+        )
+        try {
+            client.port.rememberEndpoint(endpoint).getOrThrow()
+            client.port.saveEndpointConfig(
+                FamilyEndpointConfig(
+                    host = "127.0.0.1",
+                    port = server.publicPort,
+                    scheme = "https",
+                ),
+            ).getOrThrow()
+            client.port.ownerLogin(
+                deviceName = deviceName,
+                rootPassword = server.bootstrapSecret,
+                takeover = false,
+            ).getOrThrow()
+            client.awaitIdle()
+            client.seedLocalFamilyAnchor()
+            client.port.sync(SyncTrigger.Foreground).getOrThrow()
+            client.awaitIdle()
+            extraOwners += client
+            return client
+        } catch (error: Throwable) {
+            client.close()
+            throw IllegalStateException(
+                "joinExtraOwner($label) failed; origin=${server.origin} err=$error",
+                error,
+            )
+        }
+    }
+
+    suspend fun pullAll(clients: List<SeamClient> = allClients) {
+        clients.forEach { it.pullForeground() }
+    }
+
 
     companion object {
         suspend fun open(): CareLogRealServerSeamFixture {
@@ -468,11 +533,20 @@ internal class SeamClient private constructor(
     }
 }
 
-internal fun formulaPayloadJson(amountMl: Int): String =
+internal fun formulaPayloadJson(
+    amountMl: Int,
+    preparedMl: Int? = null,
+    durationMinutes: Int? = null,
+): String =
     RecordPayloadCodec.encode(
         RecordPayloadDocument(
             type = RecordType.FORMULA,
-            payload = MilkPayload(type = RecordType.FORMULA, amountMl = amountMl),
+            payload = MilkPayload(
+                type = RecordType.FORMULA,
+                amountMl = amountMl,
+                preparedMl = preparedMl,
+                durationMinutes = durationMinutes,
+            ),
             schemaVersion = com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         ),
     )
