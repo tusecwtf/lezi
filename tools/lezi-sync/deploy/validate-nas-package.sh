@@ -44,6 +44,8 @@ fixed_files=(
   init-tls.sh
   promote-nas-package.sh
   remote-deploy.sh
+  schema-cutover.sh
+  schema-cutover-steps.sh
   tls-certificate-sha256.sh
   tls-spki.sh
   validate-nas-package.sh
@@ -66,6 +68,11 @@ archive="$(manifest_string tar)"
 data_host_path="$(manifest_string data_host_path)"
 tls_host="$(manifest_string tls_host)"
 lan_apk_download_origin="$(manifest_string lan_apk_download_origin)"
+server_schema="$(manifest_string server_schema)"
+android_version_code="$(manifest_string android_version_code)"
+minimum_supported_version_code="$(manifest_string minimum_supported_version_code)"
+rollback_source_version="$(manifest_string rollback_source_version)"
+rollback_source_server_schema="$(manifest_string rollback_source_server_schema)"
 
 if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
   fail "MANIFEST.json version is outside the release-version contract"
@@ -105,6 +112,24 @@ if [[ "${lan_apk_download_origin}" != "http://${tls_host}:8767" ]]; then
 fi
 if [[ "${image}" != "lezi-sync:${version}" ]]; then
   fail "manifest image must be lezi-sync:<manifest version>"
+fi
+if [[ "${version}" == "0.4.0" \
+    && ( "${server_schema}" != "13" \
+    || "${android_version_code}" != "21" \
+    || "${minimum_supported_version_code}" != "21" \
+    || "${rollback_source_version}" != "0.3.13" \
+    || "${rollback_source_server_schema}" != "12" ) ]]; then
+  fail "schema-cutover release identity must be 0.4.0/code21/floor21/schema13 with 0.3.13/schema12 rollback source"
+fi
+if [[ "${version}" == "0.3.13" && "${server_schema}" != "12" ]]; then
+  fail "0.3.13 rollback packages must declare server schema 12"
+fi
+if [[ ! "${server_schema}" =~ ^[0-9]+$ \
+    || ! "${android_version_code}" =~ ^[0-9]+$ \
+    || ! "${minimum_supported_version_code}" =~ ^[0-9]+$ \
+    || ! "${rollback_source_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ \
+    || ! "${rollback_source_server_schema}" =~ ^[0-9]+$ ]]; then
+  fail "manifest release/schema/Android rollback identity is malformed"
 fi
 if [[ "${archive}" != "lezi-sync-${version}-linux-amd64.tar" ]]; then
   fail "manifest tar must be the exact archive for its version and platform"

@@ -19,7 +19,14 @@ use crate::store::{Store, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
 use crate::SERVER_SECRET_BYTES;
 
 const SOURCE_V12_USER_VERSION: i64 = 12;
-const DATA_ROOT_ENTRIES: &[&str] = &["lezi.db", "media", "server.secret", "tls"];
+const DATA_ROOT_ENTRIES: &[&str] = &[
+    "app-release.apk",
+    "app-update.json",
+    "lezi.db",
+    "media",
+    "server.secret",
+    "tls",
+];
 
 /// Auto-detect a frozen v11/v12 source and rebuild it as schema 13.
 pub(crate) fn migrate_v11_or_v12_data_dir_to_v13(
@@ -150,6 +157,7 @@ fn validate_data_root(root: &Path) -> Result<(), MigrateError> {
             )));
         }
     }
+    validate_optional_app_update_pair(root)?;
     require_regular_file(&root.join("lezi.db"))?;
     let secret = root.join("server.secret");
     require_regular_file(&secret)?;
@@ -172,6 +180,60 @@ fn validate_data_root(root: &Path) -> Result<(), MigrateError> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     validate_database_integrity(&connection)?;
+    Ok(())
+}
+
+fn validate_optional_app_update_pair(root: &Path) -> Result<(), MigrateError> {
+    let apk = root.join("app-release.apk");
+    let metadata = root.join("app-update.json");
+    match (apk.try_exists()?, metadata.try_exists()?) {
+        (false, false) => return Ok(()),
+        (true, true) => {}
+        _ => {
+            return Err(MigrateError::Internal(
+                "app-update APK and metadata must be present as an atomic pair".to_owned(),
+            ));
+        }
+    }
+    require_regular_nonempty_file(&apk)?;
+    require_regular_nonempty_file(&metadata)?;
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(&metadata)?)
+        .map_err(|error| MigrateError::Internal(format!("invalid app-update metadata: {error}")))?;
+    let object = value.as_object().ok_or_else(|| {
+        MigrateError::Internal("app-update metadata must be a JSON object".to_owned())
+    })?;
+    let expected = object
+        .get("sha256")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            MigrateError::Internal("app-update metadata is missing sha256".to_owned())
+        })?;
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(MigrateError::Internal(
+            "app-update sha256 must be 64 lowercase hexadecimal characters".to_owned(),
+        ));
+    }
+    let actual = hex::encode(Sha256::digest(fs::read(&apk)?));
+    if actual != expected {
+        return Err(MigrateError::Internal(
+            "app-update APK sha256 does not match metadata".to_owned(),
+        ));
+    }
+    let version = object.get("version_code").and_then(|value| value.as_u64());
+    let floor = object
+        .get("min_supported_version_code")
+        .and_then(|value| value.as_u64());
+    if version != Some(crate::PROTOCOL_CUTOVER_CLIENT_VERSION_CODE)
+        || floor != Some(crate::PROTOCOL_CUTOVER_CLIENT_VERSION_CODE)
+    {
+        return Err(MigrateError::Internal(
+            "schema-13 cutover app-update pair must enforce client version code 21".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -697,6 +759,7 @@ mod tests {
     use std::fs;
 
     use rusqlite::{params, Connection};
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     use crate::offline_migrate::schema_contract::LEGACY_SCHEMA_V12;
@@ -863,6 +926,51 @@ mod tests {
             fs::read(out.join("tls/server.key")).unwrap(),
             fs::read(source.join("tls/server.key")).unwrap(),
         );
+    }
+
+    #[test]
+    fn integrity_checked_update_pair_may_quiesce_source_without_entering_migrated_root() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let out = temp.path().join("out");
+        write_v12_fixture(&source);
+        let apk = b"signed-release-apk";
+        fs::write(source.join("app-release.apk"), apk).unwrap();
+        fs::write(
+            source.join("app-update.json"),
+            format!(
+                r#"{{"version_code":21,"min_supported_version_code":21,"sha256":"{}"}}"#,
+                hex::encode(Sha256::digest(apk)),
+            ),
+        )
+        .unwrap();
+        let source_before = super::tree_digest(&source).unwrap();
+
+        migrate_v12_data_dir_to_v13(&source, &out).expect("v12 update channel to v13");
+
+        assert_eq!(super::tree_digest(&source).unwrap(), source_before);
+        assert!(!out.join("app-release.apk").exists());
+        assert!(!out.join("app-update.json").exists());
+        Store::preflight_existing_schema(&out.join("lezi.db")).unwrap();
+    }
+
+    #[test]
+    fn update_channel_requires_an_atomic_integrity_checked_pair() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let out = temp.path().join("out");
+        write_v12_fixture(&source);
+        fs::write(source.join("app-release.apk"), b"apk").unwrap();
+        let error = migrate_v12_data_dir_to_v13(&source, &out).unwrap_err();
+        assert!(error.to_string().contains("atomic pair"));
+
+        fs::write(
+            source.join("app-update.json"),
+            r#"{"version_code":21,"min_supported_version_code":21,"sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
+        )
+        .unwrap();
+        let error = migrate_v12_data_dir_to_v13(&source, &out).unwrap_err();
+        assert!(error.to_string().contains("does not match metadata"));
     }
 
     #[test]

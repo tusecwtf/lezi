@@ -107,7 +107,8 @@ mod tests {
         assert!(
             ADR_0013.contains("H28")
                 && ADR_0013.contains("H29")
-                && ADR_0013.contains("只完成")
+                && ADR_0013.contains("只实现")
+                && ADR_0013.contains("schema-cutover.sh")
                 && ADR_0013.contains("copy-back"),
             "ADR-0013 must separate local migration from cutover orchestration"
         );

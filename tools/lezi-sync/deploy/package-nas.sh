@@ -488,6 +488,8 @@ cp -a "${SCRIPT_DIR}/.env.example" "${out_root}/.env.example"
 cp -a "${SCRIPT_DIR}/credential-deploy-lock.sh" "${out_root}/credential-deploy-lock.sh"
 cp -a "${SCRIPT_DIR}/docker-compose.nas.yml.tpl" "${out_root}/docker-compose.nas.yml.tpl"
 cp -a "${SCRIPT_DIR}/remote-deploy.sh" "${out_root}/remote-deploy.sh"
+cp -a "${SCRIPT_DIR}/schema-cutover.sh" "${out_root}/schema-cutover.sh"
+cp -a "${SCRIPT_DIR}/schema-cutover-steps.sh" "${out_root}/schema-cutover-steps.sh"
 cp -a "${SCRIPT_DIR}/export-nas-credentials.sh" "${out_root}/export-nas-credentials.sh"
 cp -a "${SCRIPT_DIR}/init-tls.sh" "${out_root}/init-tls.sh"
 cp -a "${SCRIPT_DIR}/promote-nas-package.sh" "${out_root}/promote-nas-package.sh"
@@ -496,6 +498,8 @@ cp -a "${SCRIPT_DIR}/tls-spki.sh" "${out_root}/tls-spki.sh"
 cp -a "${SCRIPT_DIR}/validate-nas-package.sh" "${out_root}/validate-nas-package.sh"
 cp -a "${SCRIPT_DIR}/DEPLOY.md" "${out_root}/DEPLOY.md"
 chmod +x "${out_root}/remote-deploy.sh"
+chmod +x "${out_root}/schema-cutover.sh"
+chmod +x "${out_root}/schema-cutover-steps.sh"
 chmod +x "${out_root}/credential-deploy-lock.sh"
 chmod +x "${out_root}/export-nas-credentials.sh"
 chmod +x "${out_root}/init-tls.sh"
@@ -506,6 +510,31 @@ chmod +x "${out_root}/validate-nas-package.sh"
 git_sha="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 apk_sha="$(sha256sum "${out_root}/app-update/app-release.apk" | awk '{print $1}')"
+package_android_version_code="$({ sed -nE 's/^[[:space:]]*"version_code"[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*,?[[:space:]]*$/\1/p' "${out_root}/app-update/app-update.json"; } | head -1)"
+package_min_supported_version_code="$({ sed -nE 's/^[[:space:]]*"min_supported_version_code"[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*,?[[:space:]]*$/\1/p' "${out_root}/app-update/app-update.json"; } | head -1)"
+case "${version}" in
+  0.4.0)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
+    rollback_source_version="0.3.13"
+    rollback_source_server_schema="12"
+    ;;
+  0.3.13)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-12}"
+    rollback_source_version="0.3.13"
+    rollback_source_server_schema="12"
+    ;;
+  *)
+    [[ -n "${LEZI_PACKAGE_SERVER_SCHEMA:-}" \
+        && -n "${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-}" \
+        && -n "${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-}" ]] || {
+      echo "error: unknown releases must explicitly declare server schema and rollback source identity" >&2
+      exit 1
+    }
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA}"
+    rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION}"
+    rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA}"
+    ;;
+esac
 
 cat > "${out_root}/MANIFEST.json" <<EOF
 {
@@ -516,6 +545,11 @@ cat > "${out_root}/MANIFEST.json" <<EOF
   "platform": "${platform}",
   "os": "${image_os}",
   "architecture": "${image_architecture}",
+  "server_schema": "${package_server_schema}",
+  "android_version_code": "${package_android_version_code}",
+  "minimum_supported_version_code": "${package_min_supported_version_code}",
+  "rollback_source_version": "${rollback_source_version}",
+  "rollback_source_server_schema": "${rollback_source_server_schema}",
   "apk_signer_certificate_sha256": "${expected_signer_sha256}",
   "tar": "${tar_name}",
   "data_host_path": "${data_host_path}",
@@ -539,6 +573,7 @@ EOF
     credential-deploy-lock.sh docker-compose.nas.yml.tpl docker-compose.yml \
     export-nas-credentials.sh init-tls.sh \
     "${tar_name}" promote-nas-package.sh remote-deploy.sh \
+    schema-cutover.sh schema-cutover-steps.sh \
     tls-certificate-sha256.sh tls-spki.sh \
     validate-nas-package.sh \
     > SHA256SUMS

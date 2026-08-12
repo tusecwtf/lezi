@@ -554,8 +554,12 @@ destructive fallback 或部分原地改写均被禁止。
 | 备份 / 回滚 | H29 必须绑定本地 copy-out、NAS 侧备份、旧 image/package 与 off-repo encrypted full-data rollback |
 | 目标校验 | exact schema-13 Store shape、row counts、quick/integrity/FK、媒体 digest、secret、TLS（≠ 完整 `/ready`） |
 
-H28 仅产出本地 schema-13 `out/`。copy-back、container replace 与 CD 属于 H29；在 H29
-通过且用户重新确认维护窗之前，不得把输出写回家庭 NAS。
+H28 仅提供 schema-13 migrator。H29 已提供独立、显式授权的
+`deploy/schema-cutover.sh`，负责 APK 预发布、outer lease、off-repo age rollback、copy-out、
+migrate/validate、staging swap、guarded CD 与 post-check；普通 CD 仍不调用 migration。在 H30
+隔离 rollback rehearsal 和 release ticket 09 的新维护窗确认完成前，不得把 H29 本地脚本通过
+等同于家庭 NAS 已可切割。旧 `copy-back-nas-data.sh` 仍冻结为 schema-12 legacy path，不接受
+schema 13 output。
 
 **权威运维 runbook（步骤与回滚）：**
 [`deploy/copy-back-tls-cutover-runbook.md`](deploy/copy-back-tls-cutover-runbook.md)
@@ -568,7 +572,7 @@ copy-out / copy-back 脚本：[`deploy/copy-out-nas-data.sh`](deploy/copy-out-na
 lezi-sync offline-migrate dry-run  --in "$BACKUP_DIR"
 lezi-sync offline-migrate migrate  --in "$BACKUP_DIR" --out "$OUT_DIR"
 lezi-sync offline-migrate validate --out "$OUT_DIR"
-# 阶段 B 尚由 H29 阻塞；help 指针：
+# 阶段 B 只能由显式授权的 deploy/schema-cutover.sh 编排；help 指针：
 # lezi-sync offline-migrate copy-out-help | copy-back-help | live-cutover-help
 ```
 

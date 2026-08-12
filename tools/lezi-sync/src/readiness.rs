@@ -44,12 +44,22 @@ async fn refresh(state: &AppState, now: i64, cache: &mut Option<CachedReadiness>
     let store = state.store.clone();
     let data_root = state.data_root.clone();
     let media_root = state.media_root.clone();
+    let maintenance_read_only = state.maintenance_read_only;
     let result = tokio::task::spawn_blocking(move || {
         store
             .health_check()
             .map_err(|error| error.to_string())
-            .and_then(|()| probe_directory_writable(&data_root).map_err(|error| error.to_string()))
-            .and_then(|()| probe_directory_writable(&media_root).map_err(|error| error.to_string()))
+            .and_then(|()| {
+                if maintenance_read_only {
+                    Ok(())
+                } else {
+                    probe_directory_writable(&data_root)
+                        .map_err(|error| error.to_string())
+                        .and_then(|()| {
+                            probe_directory_writable(&media_root).map_err(|error| error.to_string())
+                        })
+                }
+            })
     })
     .await;
     let healthy = match result {

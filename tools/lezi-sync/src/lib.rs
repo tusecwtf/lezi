@@ -27,9 +27,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::header::{AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -142,6 +143,9 @@ pub struct ServerConfig {
     pub require_protocol_cutover_release: bool,
     /// Optional LAN-only HTTP origin that serves the first-install APK page.
     pub lan_apk_download_origin: Option<String>,
+    /// Blocks the public sync API while a schema cutover validates the newly
+    /// activated database. Only health/readiness and the separate LAN installer stay available.
+    pub maintenance_read_only: bool,
     /// Deterministic cancellation seam for isolated causal-media tests.
     #[doc(hidden)]
     pub causal_media_prepare_blocking_hook:
@@ -176,6 +180,7 @@ impl ServerConfig {
             app_update_apk_path: None,
             require_protocol_cutover_release: false,
             lan_apk_download_origin: None,
+            maintenance_read_only: false,
             causal_media_prepare_blocking_hook: None,
             causal_media_commit_blocking_hook: None,
             clock: Arc::new(system_epoch_seconds),
@@ -218,6 +223,7 @@ impl ServerConfig {
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
         config.require_protocol_cutover_release = true;
+        config.maintenance_read_only = config.data_dir.join(".schema-cutover-read-only").is_file();
         config.lan_apk_download_origin = match std::env::var("LEZI_LAN_APK_DOWNLOAD_ORIGIN") {
             Ok(value) if !value.is_empty() => Some(value),
             Ok(_) | Err(std::env::VarError::NotPresent) => None,
@@ -323,6 +329,7 @@ struct AppState {
     lan_apk_landing_url: Option<Arc<str>>,
     causal_media_prepare_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     causal_media_commit_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    maintenance_read_only: bool,
 }
 
 impl AppState {
@@ -586,17 +593,27 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
         );
     }
-    let store = Store::open_with_snapshot_key(database_path, &signing_secret)?;
-    store.reconcile_owner_root_fingerprint((config.clock)(), owner_root_fingerprint.as_deref())?;
-    let restore_family_ids = disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
-    media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
-    media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
-    // Complete any causal DB-accepted publication before the authority graph is
-    // validated or public routes can observe it, then durably collect one
-    // bounded media batch without discarding live/version-referenced bytes.
-    store.promote_consumed_causal_media()?;
-    store.gc_causal_media((config.clock)())?;
-    store.gc_conflict_metadata((config.clock)())?;
+    let store = if config.maintenance_read_only {
+        Store::open_read_only_with_snapshot_key(database_path, &signing_secret)?
+    } else {
+        Store::open_with_snapshot_key(database_path, &signing_secret)?
+    };
+    if !config.maintenance_read_only {
+        store.reconcile_owner_root_fingerprint(
+            (config.clock)(),
+            owner_root_fingerprint.as_deref(),
+        )?;
+        let restore_family_ids =
+            disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
+        media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
+        media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
+        // Complete any causal DB-accepted publication before the authority graph is
+        // validated or public routes can observe it, then durably collect one
+        // bounded media batch without discarding live/version-referenced bytes.
+        store.promote_consumed_causal_media()?;
+        store.gc_causal_media((config.clock)())?;
+        store.gc_conflict_metadata((config.clock)())?;
+    }
     let validation_media_root = media_root.clone();
     let validation = store
         .validate_authority_graph(
@@ -713,10 +730,14 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         lan_apk_landing_url,
         causal_media_prepare_blocking_hook: config.causal_media_prepare_blocking_hook,
         causal_media_commit_blocking_hook: config.causal_media_commit_blocking_hook,
+        maintenance_read_only: config.maintenance_read_only,
     };
+    let maintenance_read_only = config.maintenance_read_only;
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     let state = Arc::new(state);
-    state.start_causal_media_gc_maintenance();
+    if !maintenance_read_only {
+        state.start_causal_media_gc_maintenance();
+    }
     let public = Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(readiness))
@@ -859,6 +880,19 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECONDS),
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(from_fn(move |request: Request, next: Next| async move {
+            let maintenance_probe = matches!(request.uri().path(), "/health" | "/ready")
+                && matches!(*request.method(), Method::GET | Method::HEAD);
+            if maintenance_read_only && !maintenance_probe {
+                return ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Schema cutover validation is in progress; writes are temporarily disabled",
+                )
+                .with_code("schema_cutover_read_only")
+                .into_response();
+            }
+            next.run(request).await
+        }))
         .with_state(state.clone());
     let lan_apk_download = state.lan_apk_landing_url.is_some().then(|| {
         Router::new()

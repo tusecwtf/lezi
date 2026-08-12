@@ -579,6 +579,7 @@ impl Store {
             database_path,
             CausalAdmissionConfig::default(),
             Arc::from(b"lezi-sync-test-snapshot-key".as_slice()),
+            false,
         )
     }
 
@@ -590,6 +591,19 @@ impl Store {
             database_path,
             CausalAdmissionConfig::default(),
             Arc::from(snapshot_receipt_key),
+            false,
+        )
+    }
+
+    pub(crate) fn open_read_only_with_snapshot_key(
+        database_path: impl Into<PathBuf>,
+        snapshot_receipt_key: &[u8],
+    ) -> Result<Self, StoreError> {
+        Self::open_configured(
+            database_path,
+            CausalAdmissionConfig::default(),
+            Arc::from(snapshot_receipt_key),
+            true,
         )
     }
 
@@ -602,6 +616,7 @@ impl Store {
             database_path,
             admission,
             Arc::from(b"lezi-sync-test-snapshot-key".as_slice()),
+            false,
         )
     }
 
@@ -609,10 +624,12 @@ impl Store {
         database_path: impl Into<PathBuf>,
         admission: CausalAdmissionConfig,
         snapshot_receipt_key: Arc<[u8]>,
+        read_only: bool,
     ) -> Result<Self, StoreError> {
         let admission = admission.validate()?;
         let store = Self {
             database_path: database_path.into(),
+            read_only,
             snapshot_receipt_key,
             causal_commit_limiter: Arc::new(RateLimiter::new_with_group_limit(
                 RateLimitConfig {
@@ -630,6 +647,9 @@ impl Store {
             )),
         };
         Self::preflight_existing_schema(&store.database_path)?;
+        if read_only {
+            return Ok(store);
+        }
         if let Some(parent) = store.database_path.parent() {
             fs::create_dir_all(parent)?;
             crate::secure_directory(parent)?;

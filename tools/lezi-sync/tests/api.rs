@@ -608,6 +608,7 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
     assert_eq!(body["version"], VERSION);
+    assert_eq!(body["server_schema"], 13);
     assert_eq!(
         body["capabilities"],
         json!([
@@ -669,6 +670,34 @@ async fn internal_router_exposes_only_health_and_readiness() {
         get_json(&public, "/v1/setup-status", None).await.0,
         StatusCode::OK,
     );
+}
+
+#[tokio::test]
+async fn schema_cutover_read_only_gate_keeps_health_open_and_rejects_mutations() {
+    let directory = TempDir::new().unwrap();
+    drop(build_app(ServerConfig::new(directory.path())).unwrap());
+    let mut config = ServerConfig::new(directory.path());
+    config.maintenance_read_only = true;
+    let app = build_app(config).unwrap();
+
+    assert_eq!(get_json(&app, "/health", None).await.0, StatusCode::OK);
+    assert_eq!(
+        get_json(&app, "/v1/setup-status", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+    let response = request(
+        &app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["code"], json!("schema_cutover_read_only"));
 }
 
 #[test]

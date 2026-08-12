@@ -4,7 +4,7 @@
 
 **Blocked by:** 28
 
-**Status:** ready-for-agent
+**Status:** implemented — local gates and Standards/Spec review passed; H30 isolated rehearsal remains required
 
 ## Contract slice
 
@@ -19,16 +19,28 @@ Ordinary `push-and-deploy` 仍禁止 migration；schema-cutover 必须单独授�
 
 ## Acceptance
 
-- [ ] ordinary CD 无法意外触发 offline-migrate
-- [ ] cutover 需要明确维护授权、outer lease、credential backup 与 off-repo age 加密的完整 data rollback bundle
-- [ ] stop 前记录 old image/package、source schema/inventory、certificate SHA/SPKI
-- [ ] post-check 要求 0.4.0/schema13/health/ready、数据 inventory 与 TLS 完全匹配
+- [x] ordinary CD 无法意外触发 offline-migrate
+- [x] cutover 需要明确维护授权、outer lease、credential backup 与 off-repo age 加密的完整 data rollback bundle
+- [x] stop 前记录 old image/package、source schema/inventory、certificate SHA/SPKI
+- [x] post-check 要求 0.4.0/schema13/health/ready、数据 inventory 与 TLS 完全匹配
 
 ## Validation
 
-- [ ] deploy script contract/failure-injection/syntax tests 通过
-- [ ] package inventory 包含当前 guarded helpers，不携带秘密或 DB backup
+- [x] deploy script contract/failure-injection/syntax tests 通过
+- [x] package inventory 包含当前 guarded helpers，不携带秘密或 DB backup
 
 ## Out of scope
 
 不执行家庭 NAS cutover；真实演练由票 30。
+
+## Evidence
+
+- `deploy/schema-cutover.sh` + `schema-cutover-steps.sh` implement the authorized state machine,
+  publication/data lease handoff, frozen rollback capture, read-only activation, logical DB/non-DB
+  inventory checks, and pre-open versus post-open recovery boundary.
+- `deploy/test-schema-cutover.sh` covers phase failure injection plus the production stopped-source
+  ssh/tar/age path, including frozen-inventory drift rejection without ciphertext promotion.
+- Rust gates passed: fmt, 282 unit tests, 165 API tests, corpus, 3 isolated TLS tests, and Clippy.
+- Android JVM suite passed (`./gradlew test`; 872 tasks). Standards and Spec reviews passed after
+  remediation. No image/package build, family NAS access, CD, or frontend-backend live smoke was
+  performed; H30 owns the isolated rehearsal and release ticket 09 owns any production window.

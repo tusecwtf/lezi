@@ -48,9 +48,11 @@ schema 13 根；`validate` 复核 exact Store shape、quick/integrity/FK、媒�
 
 ## 维护窗边界
 
-H28 只完成本地 source→13 准备。H29 才能实现 schema-13 copy-back/CD orchestration；
-在 H29 通过且用户重新明确确认维护窗口之前，当前 legacy copy-back runbook 不可用于
-schema 13 现网切割。
+H28 只实现 source→13 migrator。H29 的独立 `deploy/schema-cutover.sh` 实现 schema-13
+copy-back/CD orchestration，并复用 outer lease、age credential/TLS guards；ordinary
+`push-and-deploy.sh` 仍不可调用 migrator。H29 通过不等于生产可切割：H30 的隔离 rollback
+rehearsal 与 release ticket 09 的重新明确维护窗确认仍是前置门。当前 legacy
+`copy-back-nas-data.sh` 不可用于 schema 13 现网切割。
 
 最终维护窗仍必须在外层 lease、签名 APK/image/package attestation、off-repo age 加密的
 credential/full-data rollback、旧 image/package pin、TLS certificate/SPKI pre/post equality

@@ -433,6 +433,7 @@ pub struct CommittedPendingBundleMedia {
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
+    read_only: bool,
     snapshot_receipt_key: Arc<[u8]>,
     causal_commit_limiter: Arc<crate::rate_limit::RateLimiter>,
     max_open_causal_branches_per_root: usize,
@@ -476,6 +477,16 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
 
 impl Store {
     fn connect(&self) -> Result<Connection, StoreError> {
+        if self.read_only {
+            let connection = Connection::open_with_flags(
+                &self.database_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            connection.busy_timeout(Duration::from_secs(10))?;
+            connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+            return Ok(connection);
+        }
         let connection = Connection::open(&self.database_path)?;
         #[cfg(test)]
         let mut connection = connection;

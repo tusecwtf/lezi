@@ -60,7 +60,7 @@ From tickets 01–05 (local only):
 2. Dry-run: `lezi-sync offline-migrate dry-run --in "$BACKUP_DIR"` (password flag or `LEZI_MIGRATE_NEW_ROOT_PASSWORD`).
 3. Migrate: `lezi-sync offline-migrate migrate --in "$BACKUP_DIR" --out "$OUT_DIR"`.
 4. Validate: `lezi-sync offline-migrate validate --out "$OUT_DIR"` → `validate ok`.
-5. This is a frozen schema-12 legacy runbook. H28 now produces schema 13, but H29 guarded schema-cutover orchestration is not implemented here. Never hand a v12 bind to a schema-13-only binary, and never copy a schema-13 H28 output with these legacy steps. **Do not** run `push-and-deploy` until H29 passes and the operator confirms a new replace window.
+5. This is a frozen schema-12 legacy runbook. H29's schema-13 path is the dedicated `schema-cutover.sh`; never copy a schema-13 output with these legacy steps. H30 isolated rollback rehearsal and release ticket 09 confirmation remain required before a family-NAS window.
 6. Record the **migration-time new root password** — it becomes `LEZI_BOOTSTRAP_SECRET` after cutover. The pre-cutover container secret is **void** for owner re-login (`OwnerReauth::NewRootPasswordAtMigration`).
 
 `out/` must be copy-back-ready: frozen legacy schema-12 `lezi.db` (full exact-shape validation, not version alone), regenerated `server.secret` (≥32 bytes), media authority files as migrated, **no** residual `lezi.db-wal` / `-shm` / `-journal`. **`tls/` is not required inside `out/`** (`AbsentOrCreateAtCutover`); only the explicitly confirmed cutover sets `LEZI_ALLOW_TLS_BOOTSTRAP=1` so a schema-12-compatible `remote-deploy` / `init-tls.sh` may create the first identity under the data bind.

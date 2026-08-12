@@ -20,7 +20,7 @@ operator entrypoint that may replace the production container is `push-and-deplo
 | Compose engine on NAS | **zdocker** bundled `docker-compose` v2 (`/zspace/applications/services/zdocker/bin/docker-compose`) |
 | Bootstrap secret | Live container is authoritative during ordinary CD; a matching mode-`600` persistent NAS file is seeded/verified before replace |
 | Credential backup | `push-and-deploy.sh` must stream the root secret + TLS pair into a local `age`-encrypted off-repo backup before ordinary replace |
-| Concurrency | One NAS-side owner-token lease spans package transfer, credential snapshot, replace, and any deferred post-start snapshot; competing export/CD fails closed |
+| Concurrency | Ordinary CD holds an app-update publication lease plus the data owner-token lease across package transfer and replace. Schema cutover holds the publication lease while it publishes the forced-update pair, then acquires the data lease before releasing the publication lease; competing CD cannot enter the handoff gap. |
 | Package identity | Measured linux/amd64 image + full image id + pinned Lezi APK signer certificate + closed file inventory/SHA-256; extra/stale remote files are fatal |
 | TLS identity | Ordinary CD never rotates it; generate once only on a verified fresh data root, then validate and reuse the exact pair on every replace |
 | System `docker compose` | Not required / not installed |
@@ -40,6 +40,7 @@ operator entrypoint that may replace the production container is `push-and-deplo
 | `promote-nas-package.sh` | NAS | Internal | Atomically replace the stable release directory only after staging and the prior package are validated. |
 | `init-tls.sh`, `tls-certificate-sha256.sh`, `tls-spki.sh` | NAS or isolated developer fixture | Internal/read-only except authorized bootstrap | Distinguish absent/present/unsafe TLS state, validate the pair, and measure exact certificate/SPKI identity. |
 | `copy-out-nas-data.sh`, `copy-back-nas-data.sh`, `live-cutover-probe.sh` | Maintenance workflow | Authorized maintenance window only | Prepare or execute the separately governed offline-migration cutover; they are never part of ordinary CD. |
+| `schema-cutover.sh`, `schema-cutover-steps.sh` | Developer machine | Exact `LEZI_SCHEMA_CUTOVER_APPROVAL` only | H29 0.4.0/schema-13 state machine; owns APK prepublish, outer lease, encrypted rollback, migration, staged swap, target activation and post-check. |
 | `backup-pre-tls-cutover-state.sh`, `restore-pre-tls-cutover-state.sh`, `validate-pre-tls-cutover-state.py` | Developer machine | Authorized maintenance preparation | Capture and validate the pre-cutover container start contract for rollback staging; they do not make the incomplete live rollback executable. |
 | `validate-credential-bundle.sh` | Developer machine | Internal/read-only | Validate the pipe-only credential bundle before encryption or recovery staging. |
 | `docker-compose.nas.yml.tpl`, `.env.example`, `app-update.json` | Package inputs | Never executed directly | Define the rendered runtime shape, a deliberately empty local secret example, and the APK update metadata contract. |
@@ -381,11 +382,28 @@ the operator's approved secure cleanup procedure.
 |------|------|
 | 普通 CD | `package-nas` / `push-and-deploy` / 容器重启 **不得执行** `offline-migrate` |
 | 启动合同 | 现网进程只打开精确 current schema；旧库 fail closed，无自动迁移 |
-| 切割流水线 | H28 仅在开发机从冻结 11/12 写独立 schema-13 `out/`；H29 才拥有停服/copy-back/CD 编排 |
-| 权威 runbook | [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)（步骤、双备份、回滚、secret 转发） |
-| 当前开窗门 | pre-TLS rollback 的 exact container recreation 尚无审计过的可执行 helper；runbook 将其列为 blocker，未补齐前不得开始 live cutover |
+| 切割流水线 | H28 只提供冻结 11/12→13 migrator；H29 的独立 `schema-cutover.sh` 串联实际维护阶段，普通 CD 仍不可调用 migrator |
+| 权威 runbook | 本节与 [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)；旧 `copy-back-nas-data.sh` 仍冻结在 schema 12，不可用于 H29 |
+| 当前开窗门 | H29 只实现并本地验证编排；H30 必须先在 developer-owned isolated instance 完成 rollback rehearsal，生产仍由 release ticket 09 重新确认 |
 | Identity | H28 byte-preserves `server.secret` 与 TLS pair；H29 必须证明 pre/post certificate + SPKI 完全一致 |
 | 发布二进制 | 可含该子命令 ≠ 滚动 schema 兼容产品承诺 |
+
+### Dedicated schema cutover
+
+`schema-cutover.sh` is the release-specific one-shot orchestration entry; its exact source/target
+tuple and approval token live in the release ticket and cutover runbook, not this version-neutral CD
+runbook. It performs every local image/package/signer check before acquiring the data-bind-derived
+data lease. A separate publication lease serializes the required APK-before-data-lease step with
+ordinary CD and remains held through every automatic rollback boundary. The data lease spans encrypted
+credential capture, stopped-source rollback capture, migration, staged activation, validation, and release;
+the publication lease is released last.
+
+The target starts behind an explicit read-only gate. Health/readiness, image identity, TLS identity,
+and migrated data semantics are checked while mutations still return `503`. Any failure through that
+point automatically restores the frozen source bind, source image, and prior APK pair. Only after
+those checks pass does the workflow remove the gate and restart the target; failures after that
+write-open boundary require explicit incident authorization and reconciliation. Release-specific
+evidence and isolated rehearsal remain mandatory before using this command on a family NAS.
 
 产品 README 摘要：[`../README.md`](../README.md) § 离线 schema 11/12→13 准备。
 

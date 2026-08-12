@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
+use crate::store::DATABASE_SCHEMA_VERSION;
 use crate::{AppState, HEALTH_CAPABILITIES};
 
 /// HTTP route entrypoint — `pub(crate)` so crate-root `build_apps` can bind via
@@ -14,6 +15,7 @@ pub(crate) async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "version": state.version,
+        "server_schema": DATABASE_SCHEMA_VERSION,
         "capabilities": HEALTH_CAPABILITIES,
     }))
 }
