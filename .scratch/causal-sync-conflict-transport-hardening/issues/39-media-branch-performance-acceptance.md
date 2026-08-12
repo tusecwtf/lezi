@@ -84,11 +84,15 @@ Cases：独立 add/add、同 media delete/edit、选择各 branch、slow large u
   | Record/Baby/CarePlan independent add/add | Store causal commit + choice-only resolution | Record/CarePlan merge both media; Baby branches, selects one avatar candidate, and preserves selected bytes exactly |
   | Record/Baby/CarePlan same-media delete/edit | Store causal commit + choice-only resolution | All three branch; selecting edit preserves the shared media UUID and exact stored bytes, without silent deletion |
   | Slow large upload + small commit | `ReplicaSyncEngine` + shared `RecordingSyncBackend` | 256 KiB upload is held after spool entry; independent media-free Record commits within 1 s; upload order and SHA-256 remain exact; accepted terminal discards spool |
+  | Server slow stream + small commit | real isolated Axum/SQLite Router | `slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_commit` holds a partial streamed body while a small same-family commit completes within 500 ms; `causal_media_promotion_runs_outside_the_same_family_commit_lock` separately blocks promotion while another same-family commit completes within 500 ms |
   | Pending/branched retention and terminal cleanup | H38 settlement journal/receipt + H37 spool regressions | Pending/CommitUnknown/branched remain retained; accepted terminal cleanup is durable and idempotent; source-once/restart evidence remains green |
 
 - **Isolation:** Rust uses `TempDir` SQLite/media roots; JVM uses in-memory
   test doubles and isolated spool fixtures. No family NAS, production CD,
   production certificates, or real family photos were used.
+- **Final focused rerun (2026-08-13, committed `27fe6cae`):** both real-server
+  critical-section tests above passed individually from `/tmp/lezi-h43-cargo-target`; this closes
+  the server-critical-section evidence independently of the JVM timing fixture.
 - **Residuals:** no ADB/device run was performed in this turn, so
   Room/process-death instrumentation remains a device residual owned by
   H41/H18/H20. H39 is locally implemented and accepted at Rust and JVM

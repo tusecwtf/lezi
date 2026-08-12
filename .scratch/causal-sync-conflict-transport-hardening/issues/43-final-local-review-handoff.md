@@ -153,6 +153,34 @@ H39 checklist/evidence inconsistency, the Clippy gate, and the APK metadata/hash
 own owned tickets or release preparation; then rerun this handoff from a newly fixed code HEAD.
 No speculative production repair was made here.
 
+## Re-review and release preparation (2026-08-13)
+
+- **Fixed committed basis:** `27fe6cae425f3cbbfd7c7a4448b8cb5e0d41fd84`; the main worktree also
+  contained unrelated UI/design-token WIP, so all release work used `/tmp/lezi-release-final` at
+  that detached committed HEAD.
+- **Previously recorded blockers cleared:** H38 exact SHA, H39 checklist, Clippy, diff whitespace,
+  four JVM failures, H40/H41/H42 API 35 device matrices, same-signer code 6→21 and code 20→21
+  upgrades, and H42 screenshots are all fixed/passed in the commits following the old review.
+- **Final APK:** `:app:assembleRelease --rerun-tasks --no-daemon` passed (682 tasks). Signed
+  `com.lezi.babylog` 0.4.0/code 21 SHA-256 is
+  `9615b2732975999bd45565351022547ee3569b13bd06a5ed4e9dff68f4d435d4`; signer certificate is
+  `ce1438c8c50fe75f04f89ae2092631a46660480764cd52071cc5c08707462211`.
+  `LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1` passed with min-supported 21 and local-data contract 5.1.
+- **Standards re-review:** no P0/P1. Package-locality duplication/naming findings remain P2/P3 and
+  do not change runtime behavior or the H43 P0/P1 gate.
+- **Spec re-review:** H39 server critical-section P1 was disproved by the real isolated Axum/SQLite
+  tests `slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_commit` and
+  `causal_media_promotion_runs_outside_the_same_family_commit_lock`; both passed on this basis.
+  One P1 remains: H38's Android settlement fault matrix and real-server fault matrix are separate,
+  not one injected Android→real-server chain. H44 now owns that exact gap. Therefore H43 remains
+  **blocked** and release 09/CD cannot be declared eligible.
+- **Production read-only preflight:** `https://192.168.50.4:8765/health` answered version `0.3.12`;
+  plaintext HTTP returned 502. The dedicated 0.4.0 cutover accepts only exact live
+  `lezi-sync:0.3.13`/schema 12. The SSH user is not in the Docker group, `/var/run/docker.sock` is
+  `root:docker 660`, and `sudo -n docker` requires a password. Consequently no schema/container/TLS
+  inventory could be collected through uid 10001, and no NAS write, stop, rm, package push or
+  replacement was attempted.
+
 ## Out of scope
 
 不构建 image、不打包/推送、不 stop/rm/replace 家庭 NAS。

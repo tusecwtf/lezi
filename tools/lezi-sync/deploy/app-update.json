@@ -3,6 +3,6 @@
   "version_code": 21,
   "version_name": "0.4.0",
   "min_supported_version_code": 21,
-  "sha256": "b8cf1a1da8aadc776259a43924db8c148707a8a6dada1c70dadb93a3e14ef48c",
+  "sha256": "9615b2732975999bd45565351022547ee3569b13bd06a5ed4e9dff68f4d435d4",
   "release_notes": "0.4.0 无损因果同步：commit-first、完整 ConflictSnapshot 与 choice-only resolution；Room 28 / server schema 13；causal_sync_v2；强制 minSupported=21"
 }
