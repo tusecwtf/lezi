@@ -45,13 +45,14 @@ internal suspend fun SeamClient.loadConflict(
 
 /**
  * Choice-only resolution through the public CareLog seam.
- * When [preferValueByPath] is set, pick the candidate whose set-value matches;
- * otherwise take the first candidate on each conflicting path.
+ * Preference order per path: exact [preferOutcomeByPath], then set-value
+ * [preferValueByPath], otherwise the first candidate.
  */
 internal suspend fun SeamClient.resolveOpenConflict(
     conflictId: String,
     resolutionMutationId: String = UUID.randomUUID().toString(),
     preferValueByPath: Map<String, JsonElement> = emptyMap(),
+    preferOutcomeByPath: Map<String, ConflictOutcome> = emptyMap(),
 ): Pair<ConflictSnapshot, ConflictResolveOutcome> {
     val loaded = loadConflict(conflictId, forceRefresh = true)
     check(loaded.fetchedOnline) { "$label conflict detail must be online for resolution" }
@@ -59,14 +60,18 @@ internal suspend fun SeamClient.resolveOpenConflict(
     // Ensure coordinator.resolve can re-read the same token from the local projection.
     careLog.loadConflictDetail(conflictId, forceRefresh = false)
     val choices = snapshot.conflicting.map { path ->
-        val preferred = preferValueByPath[path.path]
-        val candidate = if (preferred != null) {
-            path.candidates.firstOrNull { candidate ->
-                val outcome = candidate.outcome
-                outcome is ConflictOutcome.Set && outcome.value == preferred
-            } ?: path.candidates.first()
-        } else {
-            path.candidates.first()
+        val preferredOutcome = preferOutcomeByPath[path.path]
+        val preferredValue = preferValueByPath[path.path]
+        val candidate = when {
+            preferredOutcome != null ->
+                path.candidates.firstOrNull { it.outcome == preferredOutcome }
+                    ?: path.candidates.first()
+            preferredValue != null ->
+                path.candidates.firstOrNull { candidate ->
+                    val outcome = candidate.outcome
+                    outcome is ConflictOutcome.Set && outcome.value == preferredValue
+                } ?: path.candidates.first()
+            else -> path.candidates.first()
         }
         ConflictResolutionChoice(path = path.path, choiceId = candidate.choiceId)
     }

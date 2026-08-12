@@ -73,15 +73,22 @@ internal class CareLogRealServerSeamFixture private constructor(
     val owner: SeamClient,
     val member: SeamClient,
     private val extraOwners: MutableList<SeamClient> = mutableListOf(),
+    private val extraMembers: MutableList<SeamClient> = mutableListOf(),
 ) : AutoCloseable {
     /** Primary owner followed by any extra Owner devices joined later. */
     val ownerClients: List<SeamClient>
         get() = listOf(owner) + extraOwners
 
+    /** Primary member followed by any extra ordinary members joined later. */
+    val memberClients: List<SeamClient>
+        get() = listOf(member) + extraMembers
+
     val allClients: List<SeamClient>
-        get() = ownerClients + member
+        get() = ownerClients + memberClients
 
     override fun close() {
+        extraMembers.asReversed().forEach { it.close() }
+        extraMembers.clear()
         extraOwners.asReversed().forEach { it.close() }
         extraOwners.clear()
         owner.close()
@@ -131,6 +138,79 @@ internal class CareLogRealServerSeamFixture private constructor(
             client.close()
             throw IllegalStateException(
                 "joinExtraOwner($label) failed; origin=${server.origin} err=$error",
+                error,
+            )
+        }
+    }
+
+    /**
+     * Join another ordinary Member device via request/approve.
+     * Used for author/other ACL cases that must not share Owner privilege.
+     */
+    suspend fun joinExtraMember(
+        label: String,
+        displayName: String = "成员$label",
+        deviceId: String = "h33-$label-device",
+        deviceName: String = "H33 $label Phone",
+    ): SeamClient {
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            server.origin,
+            server.spkiSha256Base64,
+        )
+        val client = SeamClient.create(
+            label = label,
+            endpoint = endpoint,
+            deviceId = deviceId,
+        )
+        try {
+            client.port.rememberEndpoint(endpoint).getOrThrow()
+            client.port.saveEndpointConfig(
+                FamilyEndpointConfig(
+                    host = "127.0.0.1",
+                    port = server.publicPort,
+                    scheme = "https",
+                ),
+            ).getOrThrow()
+            client.port.requestMemberLogin(
+                displayName = displayName,
+                deviceName = deviceName,
+            ).getOrThrow()
+
+            val pending = withTimeout(10_000) {
+                while (true) {
+                    val listed = owner.port.listPendingMemberLogins().getOrThrow()
+                    val hit = listed.firstOrNull {
+                        it.displayName == displayName || it.deviceName == deviceName
+                    }
+                    if (hit != null) return@withTimeout hit
+                    delay(50)
+                }
+                error("unreachable")
+            }
+            owner.port.approveNewMemberLogin(pending.requestId).getOrThrow()
+
+            val joined = withTimeout(15_000) {
+                while (true) {
+                    when (val check = client.port.checkMemberLogin().getOrThrow()) {
+                        is MemberLoginCheckResult.Joined -> return@withTimeout check
+                        is MemberLoginCheckResult.Waiting -> delay(50)
+                        is MemberLoginCheckResult.Terminal ->
+                            error("member login terminal: ${check.status}")
+                    }
+                }
+                error("unreachable")
+            }
+            check(joined.session.isJoined)
+            client.awaitIdle()
+            client.seedLocalFamilyAnchor()
+            client.port.sync(SyncTrigger.Foreground).getOrThrow()
+            client.awaitIdle()
+            extraMembers += client
+            return client
+        } catch (error: Throwable) {
+            client.close()
+            throw IllegalStateException(
+                "joinExtraMember($label) failed; origin=${server.origin} err=$error",
                 error,
             )
         }
