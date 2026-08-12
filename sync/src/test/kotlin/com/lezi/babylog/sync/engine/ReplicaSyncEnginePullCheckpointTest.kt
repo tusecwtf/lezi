@@ -1,47 +1,17 @@
 package com.lezi.babylog.sync.engine
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.BabyEntity
-import com.lezi.babylog.core.database.CarePlanEntity
-import com.lezi.babylog.core.database.CustomItemEntity
-import com.lezi.babylog.core.database.FamilyEntity
-import com.lezi.babylog.core.database.FulfillmentCandidateEntity
-import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityProofException
-import com.lezi.babylog.sync.backend.AuthorityResult
-import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
-import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.session.PolicyClock
-import com.lezi.babylog.sync.session.SyncSession
-import com.lezi.babylog.sync.session.receiptFor
-import com.lezi.babylog.sync.MemoryBabyDao
-import com.lezi.babylog.sync.MemoryCarePlanDao
-import com.lezi.babylog.sync.MemoryCustomItemDao
-import com.lezi.babylog.sync.MemoryFamilyDao
-import com.lezi.babylog.sync.MemoryFulfillmentCandidateDao
-import com.lezi.babylog.sync.MemoryMediaDao
-import com.lezi.babylog.sync.MemoryRecordDao
-import com.lezi.babylog.sync.MemorySyncPreferences
-import com.lezi.babylog.sync.RecordingSyncBackend
-import com.lezi.babylog.sync.RecordingTransactionRunner
-import com.lezi.babylog.sync.TestMediaFileStore
 
 class ReplicaSyncEnginePullCheckpointTest {
     @Test
@@ -103,19 +73,27 @@ class ReplicaSyncEnginePullCheckpointTest {
         )
         val rig = ReplicaEngineRig(session)
         rig.babies.seed(localReplicaBaby().copy(syncDirty = true, familyAuthority = false))
-        rig.backend.nextPull = PullResult(
+        rig.backend.pullFailures += memberAuthorityFullResync()
+        rig.backend.pullResults += PullResult(
             entities = listOf(remoteReplicaBaby()),
             cursor = 1,
-            generation = "generation-a",
+            generation = "member-authority-generation",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "member-authority-generation",
             hasMore = false,
         )
 
         rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
 
-        assertThat(rig.backend.pushes.flatMap { it.entities }.none { it.type == "baby" }).isTrue()
+        assertThat(rig.backend.causalCommittedUnits.flatten().none { it.entityType == "baby" })
+            .isTrue()
         assertThat(rig.babies.getByClientUuid("baby-local")!!.syncDirty).isFalse()
         assertThat(rig.babies.getByClientUuid("baby-remote")!!.familyAuthority).isTrue()
-        assertThat(rig.familyBabyAppliedCalls).isEqualTo(1)
+        assertThat(rig.familyBabyAppliedCalls).isEqualTo(2)
         assertThat(rig.authorityVisibleAtCallback).isTrue()
     }
 
@@ -140,13 +118,20 @@ class ReplicaSyncEnginePullCheckpointTest {
                 syncDirty = true,
             ),
         )
-        rig.backend.nextPull = PullResult(
+        rig.backend.pullFailures += memberAuthorityFullResync()
+        rig.backend.pullResults += PullResult(
             entities = listOf(
                 remoteReplicaBaby(),
                 remoteReplicaBaby().copy(clientUuid = "baby-remote-2", updatedAt = 101),
             ),
             cursor = 2,
-            generation = "generation-a",
+            generation = "member-authority-generation",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 2,
+            generation = "member-authority-generation",
             hasMore = false,
         )
 
@@ -454,7 +439,7 @@ class ReplicaSyncEnginePullCheckpointTest {
         assertThat(rig.preferences.current().membershipId)
             .isEqualTo("session-membership")
         assertThat(rig.backend.pullCount).isEqualTo(0)
-        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
     }
 
     @Test
@@ -479,12 +464,16 @@ class ReplicaSyncEnginePullCheckpointTest {
 
     @Test
     fun cursorAheadRequeuesTheCleanReplicaBeforeTheAuthoritativePull() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000301"
         val session = joinedReplicaSession().copy(
             pullCursor = 9,
             pullGeneration = "old-generation",
         )
         val rig = ReplicaEngineRig(session)
-        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.backend.enableCausal = true
+        rig.babies.seed(
+            localReplicaBaby().copy(clientUuid = babyUuid, syncDirty = false),
+        )
         rig.backend.pullFailures += SyncHttpException(
             statusCode = 409,
             responseBody = """
@@ -512,8 +501,25 @@ class ReplicaSyncEnginePullCheckpointTest {
         )
 
         assertThat(rig.backend.pullCursors).containsExactly(9L, 0L, 2L).inOrder()
-        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid }).contains("baby-local")
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
+            .contains(babyUuid)
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
     }
 }
+
+private fun memberAuthorityFullResync() = SyncHttpException(
+    statusCode = 409,
+    responseBody =
+        """
+        {
+          "detail":{
+            "code":"generation_changed",
+            "action":"full_resync",
+            "reset_cursor":0,
+            "server_cursor":1,
+            "server_generation":"member-authority-generation"
+          }
+        }
+        """.trimIndent(),
+)

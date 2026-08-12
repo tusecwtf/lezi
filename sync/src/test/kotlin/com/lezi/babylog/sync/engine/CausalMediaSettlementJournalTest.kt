@@ -10,7 +10,7 @@ import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalMediaItem
 import com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalUnitResult
+import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.media.CausalMediaRole
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolGroup
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolItem
@@ -257,11 +257,10 @@ class CausalMediaSettlementJournalTest {
             status: String,
             conflictId: String? = null,
             branchVersionId: String? = null,
-        ) = CausalUnitResult(
+        ) = CausalCommitUnitResult(
             status = status,
             mutationId = mutation.mutationId,
             requestHash = REQUEST_HASH,
-            generation = "generation-a",
             stableVersionId = "v1",
             stableRootJson = mutation.rootJson,
             stableMedia = mutation.media,

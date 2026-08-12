@@ -288,7 +288,7 @@ class HttpSyncBackendMemberEndpointTest {
         }
 
     @Test
-        fun verifiedEndpointResolverAlsoPinsAuthenticatedMediaUploadAndDownload() = runTest {
+        fun verifiedEndpointResolverPinsAuthenticatedMediaDownload() = runTest {
             val endpoint = TrustedEndpointProfile.tofuSpki(
                 "https://family.example.com:9443",
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -303,33 +303,17 @@ class HttpSyncBackendMemberEndpointTest {
                 accessToken = "access-token",
                 pullGeneration = "generation",
             )
-            val upload = RejectingPinnedHttpsConnection()
-            val uploadBackend = HttpSyncBackend(
-                connectionFactory = SyncHttpConnectionFactory { upload },
-                trustedEndpointResolver = TrustedEndpointResolver { endpoint },
-            )
             val download = RejectingPinnedReadHttpsConnection()
             val downloadBackend = HttpSyncBackend(
                 connectionFactory = SyncHttpConnectionFactory { download },
                 trustedEndpointResolver = TrustedEndpointResolver { endpoint },
             )
 
-            val uploadFailure = runCatching {
-                uploadBackend.putBundleMedia(
-                    session,
-                    bundleId = "bundle",
-                    clientUuid = "media",
-                    source = TestMediaUploadSource(byteArrayOf(1)),
-                )
-            }.exceptionOrNull()
             val downloadFailure = runCatching {
                 downloadBackend.getMedia(session, "media")
             }.exceptionOrNull()
 
-            assertThat(uploadFailure).isInstanceOf(SSLHandshakeException::class.java)
             assertThat(downloadFailure).isInstanceOf(SSLHandshakeException::class.java)
-            assertThat(upload.sslSocketFactory)
-                .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory())
             assertThat(download.sslSocketFactory)
                 .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory())
         }

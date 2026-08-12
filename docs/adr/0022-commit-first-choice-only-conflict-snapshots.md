@@ -23,6 +23,10 @@ status: accepted (0.4.0 contract frozen; runtime activation waits for hardening 
   领域真相；envelope 不是第二份可编辑事实、事件日志或通用 outbox。
 - 0.3.13 source runtime 在各迁移票完成前仍可使用旧 reconcile 路径；它只服务升级源，绝不是
   0.4.0 dual-read/downgrade。H26 独占最终删除。
+- H26 删除 reconcile 时必须保留 reset/full-resync 的用户意图边界。H27 前允许在现有
+  `conflict_detail_cache` 以一个 closed private key 暂存**恰一个** replica-reset receipt；它与五类
+  root 的 pending capture/requeue 同一 Room 事务写入，恢复成功即删除，不进入冲突收件箱，也不是
+  产品事实、事件日志或通用 outbox。H27 独占把该 receipt 迁入 Room 28 专用 transport 存储。
 
 ## 决策
 

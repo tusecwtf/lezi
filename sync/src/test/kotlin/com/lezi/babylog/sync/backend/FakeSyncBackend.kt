@@ -1,5 +1,7 @@
 package com.lezi.babylog.sync.backend
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -11,25 +13,19 @@ import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
 import com.lezi.babylog.sync.session.requireMemberDisplayName
-
-data class LegacyPushResult(
-    val applied: Int,
-    val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
-)
+import com.lezi.babylog.sync.engine.causalMutationContentHash
 
 /**
  * Deterministic in-memory backend for coordinator and dual-client tests.
  *
- * Mirrors core lezi-sync push rules used by client tests: LWW with existing
- * win on equal `updatedAt`, member Baby/avatar ACL, immutable media association,
- * and basic baby/record/media reference checks.
+ * Mutable roots use the causal commit seam. The retained atomic-bundle seam accepts only
+ * immutable fulfillment facts, matching the production protocol contraction.
  */
 class FakeSyncBackend : SyncBackend {
     private data class Row(val entity: SyncEntity, val rev: Long)
 
     private data class StagedBundle(
         val draft: AtomicBundleDraft,
-        val stagedMedia: MutableSet<String> = mutableSetOf(),
         var committed: Boolean = false,
         var committedCursor: Long = 0,
         var committedApplied: Int = 0,
@@ -47,8 +43,6 @@ class FakeSyncBackend : SyncBackend {
     private var ownerDeviceId: String? = null
     private var ownerTokenSeq = 0
     private val bundles = mutableMapOf<String, MutableMap<String, StagedBundle>>()
-    private val bundleMediaBytes =
-        mutableMapOf<String, MutableMap<String, MutableMap<String, ByteArray>>>()
     private var revision = 0L
     private var membershipSeq = 0
 
@@ -59,16 +53,6 @@ class FakeSyncBackend : SyncBackend {
             "membership-$membershipSeq"
         }
     }
-
-    suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int> =
-        runCatching {
-            pushRows(
-                familyId,
-                entities,
-                FamilyRole.Owner,
-                membershipIdFor(familyId, deviceId),
-            )
-        }
 
     suspend fun pull(familyId: String, cursor: Long): Result<PullResult> =
         runCatching { pullRows(familyId, cursor) }
@@ -128,14 +112,6 @@ class FakeSyncBackend : SyncBackend {
         )
     }
 
-    suspend fun push(session: SyncSession, entities: List<SyncEntity>): LegacyPushResult {
-        val applied = pushRows(session.familyId, entities, session.role, session.membershipId)
-        return LegacyPushResult(
-            applied = applied,
-            recordAuthors = canonicalRecordAuthors(session.familyId, entities),
-        )
-    }
-
     override suspend fun pull(session: SyncSession, page: PullPageRequest) =
         pullRows(session.familyId, session.pullCursor).copy(pageIndex = page.pageIndex)
 
@@ -149,52 +125,50 @@ class FakeSyncBackend : SyncBackend {
             directoryGeneration = "fake-directory-v1",
         )
 
-    override suspend fun reconcile(
+    override fun supportsCausalWire(): Boolean = true
+
+    override suspend fun causalCommit(
         session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult {
-        val family = rows[session.familyId].orEmpty()
-        return ReconcileResult(
+        units: List<CausalMutationUnit>,
+    ): CausalCommitBatchResult {
+        val entities = units.map { unit ->
+            val root = Json.parseToJsonElement(unit.rootJson).jsonObject
+            val updatedAt = root["updated_at"]?.jsonPrimitive?.content?.toLong()
+                ?: error("causal root updated_at is required")
+            val deletedAt = when (val value = root["deleted_at"]) {
+                null, JsonNull -> null
+                else -> value.jsonPrimitive.content.toLong()
+            }
+            SyncEntity(
+                type = unit.entityType,
+                clientUuid = unit.clientUuid,
+                payloadJson = JsonObject(
+                    root.filterKeys { it != "updated_at" && it != "deleted_at" },
+                ).toString(),
+                updatedAt = updatedAt,
+                deletedAt = deletedAt,
+            )
+        }
+        pushRows(session.familyId, entities, session.role, session.membershipId)
+        return CausalCommitBatchResult(
             generation = session.pullGeneration,
-            cursor = revision,
             results = units.map { unit ->
-                val remote = family["${unit.root.type}:${unit.root.clientUuid}"]?.entity
-                val remoteMedia = family.values.map(Row::entity).filter { media ->
-                    if (media.type != "media") return@filter false
-                    when (unit.root.type) {
-                        "record" -> payloadString(media, "record_client_uuid") == unit.root.clientUuid
-                        "care_plan" ->
-                            payloadString(media, "care_plan_client_uuid") == unit.root.clientUuid
-                        "baby" -> payloadString(media, "baby_client_uuid") == unit.root.clientUuid &&
-                            mediaKind(media) == "avatar"
-                        else -> false
-                    }
-                }.sortedBy(SyncEntity::clientUuid)
-                val exact = remote == unit.root && remoteMedia == unit.media.sortedBy(
-                    SyncEntity::clientUuid,
-                )
-                val disposition = when {
-                    exact -> AuthorityDisposition.Confirmed
-                    remote != null && remote.updatedAt >= unit.root.updatedAt ->
-                        AuthorityDisposition.AdoptRemote
-                    remote == null && session.role == FamilyRole.Member &&
-                        unit.root.type == "baby" -> AuthorityDisposition.RemoteAbsentRejected
-                    else -> AuthorityDisposition.Publish
-                }
-                AuthorityResult(
-                    type = unit.root.type,
-                    clientUuid = unit.root.clientUuid,
-                    requestContentHash = unit.contentHash,
-                    disposition = disposition,
-                    reason = when (disposition) {
-                        AuthorityDisposition.Confirmed -> "canonical_equivalent"
-                        AuthorityDisposition.AdoptRemote -> "server_lww_winner"
-                        AuthorityDisposition.RemoteAbsentRejected -> "forbidden_baby"
-                        AuthorityDisposition.Publish -> "authoritative_absence"
-                        AuthorityDisposition.RetryAuthority -> "dependency_unresolved"
+                CausalCommitUnitResult(
+                    status = CausalCommitStatus.ACCEPTED,
+                    mutationId = unit.mutationId,
+                    requestHash = causalMutationContentHash(unit),
+                    stableVersionId = "fake-v-${unit.mutationId}",
+                    stableRootJson = unit.rootJson,
+                    stableMedia = unit.media,
+                    stableDeleted = unit.deleted,
+                    stableDeletedAt = if (unit.deleted) {
+                        Json.parseToJsonElement(unit.rootJson).jsonObject["deleted_at"]
+                            ?.jsonPrimitive
+                            ?.contentOrNull
+                            ?.toLongOrNull()
+                    } else {
+                        null
                     },
-                    remoteRoot = remote,
-                    remoteMedia = remoteMedia,
                 )
             },
         )
@@ -259,20 +233,6 @@ class FakeSyncBackend : SyncBackend {
         mediaBytes.remove(session.familyId)
     }
 
-    suspend fun putMedia(
-        session: SyncSession,
-        clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
-    ) {
-        val existing = rows[session.familyId]?.get("media:$clientUuid")?.entity
-        val kind = existing?.let(::mediaKind)
-        if (session.role == FamilyRole.Member && kind == "avatar") {
-            throw SyncHttpException(403, "Only owner may change avatar")
-        }
-        mediaBytes.getOrPut(session.familyId) { mutableMapOf() }[clientUuid] = bytes
-    }
-
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         mediaBytes[session.familyId]?.get(clientUuid) ?: byteArrayOf()
 
@@ -295,8 +255,8 @@ class FakeSyncBackend : SyncBackend {
         session: SyncSession,
         draft: AtomicBundleDraft,
     ): BundleStageStatus {
-        require(draft.root.type == "record" || draft.root.type == "care_plan") {
-            "bundle root type must be record or care_plan"
+        require(draft.root.type == "fulfillment_candidate" && draft.media.isEmpty()) {
+            "bundle must contain one fulfillment_candidate and no media"
         }
         val familyBundles = bundles.getOrPut(session.familyId) { mutableMapOf() }
         val existing = familyBundles[draft.bundleId]
@@ -308,35 +268,6 @@ class FakeSyncBackend : SyncBackend {
         }
         familyBundles[draft.bundleId] = StagedBundle(draft = draft)
         return familyBundles.getValue(draft.bundleId).toStatus()
-    }
-
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus {
-        val staged = bundles[session.familyId]?.get(bundleId)
-            ?: throw SyncHttpException(404, "Bundle not found")
-        if (staged.committed) return staged.toStatus()
-        require(staged.draft.media.any { it.clientUuid == clientUuid }) {
-            "media is not listed in the bundle manifest"
-        }
-        val mediaEntity = staged.draft.media.first { it.clientUuid == clientUuid }
-        require(mediaEntity.deletedAt == null) { "tombstone media does not accept bytes" }
-        val declared = payloadLong(mediaEntity, "byte_size")
-        if (declared != null && declared != source.contentLength) {
-            throw SyncHttpException(422, "Media body size does not match declared byte_size")
-        }
-        val bytes = source.openStream().use { it.readBytes() }
-        require(bytes.size.toLong() == source.contentLength) {
-            "Media source length does not match contentLength"
-        }
-        bundleMediaBytes
-            .getOrPut(session.familyId) { mutableMapOf() }
-            .getOrPut(bundleId) { mutableMapOf() }[clientUuid] = bytes
-        staged.stagedMedia += clientUuid
-        return staged.toStatus()
     }
 
     override suspend fun commitBundle(
@@ -351,37 +282,20 @@ class FakeSyncBackend : SyncBackend {
                 status = "committed",
                 applied = staged.committedApplied,
                 cursor = staged.committedCursor,
-                recordAuthors = canonicalRecordAuthors(
-                    session.familyId,
-                    listOf(staged.draft.root),
-                ),
             )
-        }
-        val missing = staged.draft.media
-            .filter { it.deletedAt == null && it.clientUuid !in staged.stagedMedia }
-            .map { it.clientUuid }
-        if (missing.isNotEmpty()) {
-            throw SyncHttpException(422, "bundle media bytes are incomplete")
         }
         val family = rows.getOrPut(session.familyId) { mutableMapOf() }
         val publishedRoot = family["${staged.draft.root.type}:${staged.draft.root.clientUuid}"]
         if (publishedRoot != null && publishedRoot.entity.updatedAt > staged.draft.root.updatedAt) {
             throw SyncHttpException(409, "bundle root is not newer than the published version")
         }
-        val packageEntities = listOf(staged.draft.root) + staged.draft.media
+        val packageEntities = listOf(staged.draft.root)
         val applied = pushRows(
             session.familyId,
             packageEntities,
             session.role,
             session.membershipId,
         )
-        // Install staged media into published media store.
-        staged.draft.media.filter { it.deletedAt == null }.forEach { media ->
-            val bytes = bundleMediaBytes[session.familyId]?.get(bundleId)?.get(media.clientUuid)
-            if (bytes != null) {
-                mediaBytes.getOrPut(session.familyId) { mutableMapOf() }[media.clientUuid] = bytes
-            }
-        }
         staged.committed = true
         staged.committedApplied = applied
         staged.committedCursor = revision
@@ -390,20 +304,15 @@ class FakeSyncBackend : SyncBackend {
             status = "committed",
             applied = applied,
             cursor = revision,
-            recordAuthors = canonicalRecordAuthors(
-                session.familyId,
-                listOf(staged.draft.root),
-            ),
         )
     }
 
     private fun StagedBundle.toStatus(): BundleStageStatus {
-        val required = draft.media.filter { it.deletedAt == null }.map { it.clientUuid }
         return BundleStageStatus(
             bundleId = draft.bundleId,
             status = if (committed) "committed" else "staging",
-            missingMedia = required.filter { it !in stagedMedia },
-            stagedMedia = stagedMedia.sorted(),
+            missingMedia = emptyList(),
+            stagedMedia = emptyList(),
         )
     }
 
@@ -477,27 +386,6 @@ class FakeSyncBackend : SyncBackend {
         return entity.copy(
             payloadJson = kotlinx.serialization.json.JsonObject(payload).toString(),
         )
-    }
-
-    private fun canonicalRecordAuthors(
-        familyId: String,
-        requested: List<SyncEntity>,
-    ): List<CanonicalRecordAuthor> {
-        val family = rows[familyId].orEmpty()
-        return requested
-            .asSequence()
-            .filter { it.type == "record" }
-            .distinctBy(SyncEntity::clientUuid)
-            .mapNotNull { request ->
-                val stored = family["record:${request.clientUuid}"]?.entity
-                    ?: return@mapNotNull null
-                val membershipId = payloadString(stored, "created_by_membership_id")
-                    ?.trim()
-                    ?.takeIf(String::isNotEmpty)
-                    ?: return@mapNotNull null
-                CanonicalRecordAuthor(request.clientUuid, membershipId)
-            }
-            .toList()
     }
 
     private fun stampCustomItem(

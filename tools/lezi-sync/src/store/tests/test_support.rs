@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 use super::super::*;
+use crate::model::Entity;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -102,37 +103,12 @@ pub(super) fn publish_bundle(
     max_updated_at: i64,
 ) -> Result<BundleCommitResult, StoreError> {
     let bundle_id = Uuid::new_v4().to_string();
-    let mut media_ready = media
-        .iter()
-        .filter(|entity| entity.deleted_at.is_none())
-        .map(|entity| (entity.client_uuid.clone(), true))
-        .collect::<BTreeMap<_, _>>();
-    let staged_media = media
-        .iter()
-        .filter(|entity| entity.deleted_at.is_none())
-        .map(|entity| {
-            Ok::<_, StoreError>((
-                entity.client_uuid.clone(),
-                entity
-                    .payload
-                    .get("byte_size")
-                    .and_then(Value::as_u64)
-                    .and_then(|value| usize::try_from(value).ok())
-                    .ok_or(StoreError::InvalidStoredPayload)?,
-            ))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        media.is_empty(),
+        "current fulfillment bundles are media-free"
+    );
+    let mut media_ready = BTreeMap::new();
     store.stage_bundle(principal, &bundle_id, root, media, 1_700_000_000)?;
-    for (media_id, byte_size) in staged_media {
-        store.mark_bundle_media_staged(
-            principal,
-            &bundle_id,
-            &media_id,
-            byte_size,
-            &"a".repeat(64),
-            1_700_000_000,
-        )?;
-    }
     media_ready.extend(
         store
             .deferred_fulfillment_media_integrity_for_bundle(&principal.family_id, &bundle_id)?
@@ -155,7 +131,37 @@ pub(super) fn publish_root(
     root: Entity,
     max_updated_at: i64,
 ) -> Result<BundleCommitResult, StoreError> {
-    publish_bundle(store, principal, root, vec![], max_updated_at)
+    if root.entity_type == "fulfillment_candidate" {
+        return publish_bundle(store, principal, root, vec![], max_updated_at);
+    }
+    let mut causal_root = root.payload.clone();
+    causal_root.insert("updated_at".to_owned(), json!(root.updated_at));
+    let result = store.causal_commit(
+        principal,
+        vec![CausalMutation {
+            mutation_id: Uuid::new_v4().to_string(),
+            base_version: None,
+            entity_type: root.entity_type,
+            client_uuid: root.client_uuid,
+            root: causal_root,
+            media: vec![],
+            deleted: root.deleted_at.is_some(),
+        }],
+        1_700_000_000,
+    )?;
+    let applied = usize::from(
+        result
+            .results
+            .first()
+            .is_some_and(|unit| unit.status == "accepted" || unit.status == "merged"),
+    );
+    Ok(BundleCommitResult {
+        bundle_id: "causal-test-setup".to_owned(),
+        status: "committed".to_owned(),
+        applied,
+        cursor: store.pull(&principal.family_id, 0)?.cursor,
+        record_authors: vec![],
+    })
 }
 
 pub(super) struct FulfillmentCandidateFixture {

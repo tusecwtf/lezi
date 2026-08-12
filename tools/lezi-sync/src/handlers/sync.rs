@@ -16,25 +16,18 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::media::media_entity_is_pullable;
-use crate::model::{
-    validate_bundle_media_for_root, Entity, EntityValidationContext, RawEntity,
-    MAX_BUNDLE_MEDIA_ENTITIES,
-};
 use crate::readiness::is_ready;
 use crate::store::{
     CausalMediaItem, CausalMutation, ConflictDetailPage, ConflictDetailPageRequest,
-    ConflictResolutionChoice, PullPage, PulledEntity, ReconcileResult, ReconcileUnit,
-    ResolveConflictInput, StoreError, MAX_CAUSAL_UNITS,
+    ConflictResolutionChoice, PullPage, PulledEntity, ResolveConflictInput, StoreError,
+    MAX_CAUSAL_UNITS,
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, ApiError, AppState,
-    MAX_ENTITY_FUTURE_SKEW_MILLIS, PULL_MAX_PAGES, PULL_PAGE_ENTITY_LIMIT,
-    PULL_PAGE_MAX_ENCODED_BYTES, PULL_PAGE_TARGET_BYTES, SETUP_PROTOCOL_VERSION,
-    SOURCE_SYNC_HANDSHAKE_CAPABILITIES,
+    PULL_MAX_PAGES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_MAX_ENCODED_BYTES, PULL_PAGE_TARGET_BYTES,
+    SETUP_PROTOCOL_VERSION, SOURCE_SYNC_HANDSHAKE_CAPABILITIES,
 };
 
-const MAX_RECONCILE_UNITS: usize = 64;
-const MAX_RECONCILE_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_CAUSAL_COMMIT_REQUEST_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -121,187 +114,6 @@ pub(crate) async fn authenticated_handshake(
             "retry_hints": { "retry_after": true },
         })),
     ))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ReconcileRequest {
-    generation: String,
-    units: Vec<RawReconcileUnit>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawReconcileUnit {
-    root: RawEntity,
-    #[serde(default)]
-    media: Vec<RawEntity>,
-    content_hash: String,
-}
-
-fn validate_reconcile_request(
-    request: ReconcileRequest,
-    max_media_bytes: usize,
-) -> Result<(String, Vec<ReconcileUnit>), ApiError> {
-    if request.generation.trim().is_empty() || request.generation.len() > 128 {
-        return Err(ApiError::unprocessable("generation is invalid"));
-    }
-    if request.units.is_empty() || request.units.len() > MAX_RECONCILE_UNITS {
-        return Err(ApiError::unprocessable(format!(
-            "reconcile units must contain 1..={MAX_RECONCILE_UNITS} items"
-        )));
-    }
-    let mut keys = BTreeSet::new();
-    let mut units = Vec::with_capacity(request.units.len());
-    for raw in request.units {
-        if raw.content_hash.trim().is_empty() || raw.content_hash.len() > 128 {
-            return Err(ApiError::unprocessable("content_hash is invalid"));
-        }
-        if raw.media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
-            return Err(ApiError::unprocessable(
-                "reconcile media manifest is too large",
-            ));
-        }
-        let root = raw
-            .root
-            .validate_as(max_media_bytes, EntityValidationContext::AtomicBundleRoot)?;
-        if !keys.insert((root.entity_type.clone(), root.client_uuid.clone())) {
-            return Err(ApiError::unprocessable(
-                "reconcile unit keys must be unique",
-            ));
-        }
-        let mut media = Vec::with_capacity(raw.media.len());
-        let mut media_keys = BTreeSet::new();
-        for value in raw.media {
-            let entity =
-                value.validate_as(max_media_bytes, EntityValidationContext::AtomicBundleMedia)?;
-            if !media_keys.insert(entity.client_uuid.clone()) {
-                return Err(ApiError::unprocessable(
-                    "reconcile media client_uuid values must be unique",
-                ));
-            }
-            media.push(entity);
-        }
-        validate_bundle_media_for_root(&root, &media)?;
-        units.push(ReconcileUnit {
-            root,
-            media,
-            content_hash: raw.content_hash,
-        });
-    }
-    if serde_json::to_vec(&units.iter().map(|unit| {
-        json!({"root": unit.root, "media": unit.media, "content_hash": unit.content_hash})
-    }).collect::<Vec<_>>())
-    .map_err(|_| ApiError::internal("failed to size reconcile request"))?
-    .len() > MAX_RECONCILE_REQUEST_BYTES
-    {
-        return Err(ApiError::unprocessable("reconcile request is too large"));
-    }
-    Ok((request.generation, units))
-}
-
-fn reconcile_response_fits(response: &Value, max_bytes: usize) -> Result<bool, ApiError> {
-    let response_size = serde_json::to_vec(&response)
-        .map_err(|_| ApiError::internal("failed to size reconcile response"))?
-        .len();
-    Ok(response_size <= max_bytes)
-}
-
-fn reconcile_entity_value(entity: Entity) -> Value {
-    json!({
-        "type": entity.entity_type,
-        "client_uuid": entity.client_uuid,
-        "updated_at": entity.updated_at,
-        "deleted_at": entity.deleted_at,
-        "payload": entity.payload,
-    })
-}
-
-fn reconcile_result_value(result: ReconcileResult) -> Value {
-    json!({
-        "entity_type": result.entity_type,
-        "client_uuid": result.client_uuid,
-        "request_content_hash": result.request_content_hash,
-        "disposition": result.disposition,
-        "reason": result.reason,
-        "remote_content_hash": result.remote_content_hash,
-        "remote_root": result.remote_root.map(reconcile_entity_value),
-        "remote_media": result.remote_media
-            .into_iter()
-            .map(reconcile_entity_value)
-            .collect::<Vec<_>>(),
-    })
-}
-
-pub(crate) async fn reconcile_entities(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Result<Json<ReconcileRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, &headers).await?;
-    require_supported_client(&state, &headers).await?;
-    let rate_scope = format!(
-        "reconcile:{}:{}:{}",
-        principal.family_id, principal.membership_id, principal.device_id,
-    );
-    if !state
-        .reconcile_limiter
-        .check_and_record(&rate_scope, state.now())
-    {
-        return Err(ApiError::too_many_requests(
-            "Too many authoritative reconcile attempts; try again later",
-        ));
-    }
-    let (generation, units) = validate_reconcile_request(json_body(body)?, state.max_media_bytes)?;
-    if generation != state.generation {
-        return Err(ApiError::conflict_value(
-            state
-                .recovery_detail(&principal.family_id, "generation_changed")
-                .await?,
-        ));
-    }
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let family_id = principal.family_id.clone();
-    let blocking_state = state.clone();
-    let result = run_blocking(move || {
-        let now = blocking_state.now();
-        blocking_state
-            .store
-            .reconcile_units(
-                &principal,
-                units,
-                now.saturating_mul(1_000)
-                    .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS),
-                now,
-            )
-            .map_err(|error| match error {
-                StoreError::InvalidReconcileBatch => {
-                    ApiError::unprocessable("authoritative reconcile batch is invalid")
-                }
-                StoreError::TimestampOutOfRange => {
-                    ApiError::unprocessable("updated_at is outside the accepted server time window")
-                }
-                other => other.into(),
-            })
-    })
-    .await?;
-    let response = json!({
-        "generation": state.generation,
-        "cursor": result.cursor,
-        "results": result.results
-            .into_iter()
-            .map(reconcile_result_value)
-            .collect::<Vec<_>>(),
-    });
-    if !reconcile_response_fits(&response, state.max_reconcile_response_bytes)? {
-        return Err(ApiError::conflict_value(
-            state
-                .recovery_detail(&family_id, "authority_response_too_large")
-                .await?,
-        ));
-    }
-    Ok(Json(response))
 }
 
 /// HTTP route entrypoint — `pub(crate)` so crate-root `build_apps` can bind via
@@ -568,19 +380,6 @@ fn classify_causal_commit_request(raw: &[u8]) -> Result<CausalBatchRequest, Json
     Ok(request)
 }
 
-fn causal_unit_json(result: crate::store::CausalUnitResult, generation: &str) -> Value {
-    let mut value = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("replay");
-        obj.remove("stable_deleted_at");
-        obj.insert(
-            "generation".to_owned(),
-            Value::String(generation.to_owned()),
-        );
-    }
-    value
-}
-
 fn causal_commit_unit_json(result: crate::store::CausalUnitResult) -> Value {
     let mut unit = serde_json::Map::from_iter([
         ("status".to_owned(), Value::String(result.status)),
@@ -611,62 +410,6 @@ fn causal_commit_unit_json(result: crate::store::CausalUnitResult) -> Value {
         unit.insert("conflict_id".to_owned(), Value::String(conflict_id));
     }
     Value::Object(unit)
-}
-
-pub(crate) async fn causal_reconcile(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Result<Json<CausalBatchRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, &headers).await?;
-    require_supported_client(&state, &headers).await?;
-    let rate_scope = format!(
-        "causal_reconcile:{}:{}:{}",
-        principal.family_id, principal.membership_id, principal.device_id,
-    );
-    if !state
-        .reconcile_limiter
-        .check_and_record(&rate_scope, state.now())
-    {
-        return Err(ApiError::too_many_requests(
-            "Too many causal reconcile attempts; try again later",
-        ));
-    }
-    let request = json_body(body)?;
-    if let Some(gen) = request.generation.as_deref() {
-        if gen != state.generation {
-            return Err(ApiError::conflict_value(
-                state
-                    .recovery_detail(&principal.family_id, "generation_changed")
-                    .await?,
-            ));
-        }
-    }
-    let units = parse_causal_units(request)?;
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let blocking_state = state.clone();
-    let generation = state.generation.clone();
-    let result = run_blocking(move || {
-        blocking_state
-            .store
-            .causal_reconcile(&principal, units, blocking_state.now())
-            .map_err(|error| match error {
-                StoreError::InvalidReconcileBatch => {
-                    ApiError::unprocessable("causal reconcile batch is invalid")
-                }
-                other => other.into(),
-            })
-    })
-    .await?;
-    Ok(Json(json!({
-        "generation": generation,
-        "cursor": result.cursor,
-        "results": result.results
-            .into_iter()
-            .map(|unit| causal_unit_json(unit, &generation))
-            .collect::<Vec<_>>(),
-    })))
 }
 
 pub(crate) async fn causal_commit(
@@ -737,7 +480,7 @@ pub(crate) async fn causal_commit(
                     mutation_id: Some(mutation_id),
                     code,
                 }),
-                StoreError::InvalidReconcileBatch => Ok(Dispatch::Rejected {
+                StoreError::InvalidCausalBatch => Ok(Dispatch::Rejected {
                     mutation_id: first_mutation_id,
                     code: "invalid_domain".to_owned(),
                 }),
@@ -915,17 +658,6 @@ pub(crate) async fn resolve_conflict(
     Ok(Json(serde_json::to_value(result).map_err(|_| {
         ApiError::internal("failed to serialize resolve result")
     })?))
-}
-
-#[cfg(test)]
-mod reconcile_bounds_tests {
-    use super::*;
-
-    #[test]
-    fn reconcile_response_serialization_is_bounded_at_the_byte_limit() {
-        assert!(reconcile_response_fits(&json!({"ok": true}), 64).unwrap());
-        assert!(!reconcile_response_fits(&json!({"payload": "x".repeat(65)}), 64).unwrap());
-    }
 }
 
 // --- Source relations (wire §12) --------------------------------------------

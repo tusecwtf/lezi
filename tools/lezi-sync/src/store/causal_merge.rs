@@ -1,6 +1,6 @@
 //! Three-way merge for causal atomic roots (wire §8–§9).
 //!
-//! Pure functions: no I/O. Observed only via commit/reconcile outcomes at the
+//! Pure functions: no I/O. Observed only via commit outcomes at the
 //! Store façade; tests also exercise this module's public merge result shape
 //! as the merge decision seam.
 

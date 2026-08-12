@@ -220,7 +220,7 @@ class RetryingSyncBackendTest {
     }
 
     @Test
-    fun everyConnectedOperationStopsAtThreeAttemptsAndSourceReconcileIsNotRetried() = runTest {
+    fun everyConnectedOperationStopsAtThreeAttempts() = runTest {
         val attempts = linkedMapOf<String, Int>()
         fun fail(name: String): Nothing {
             attempts[name] = attempts.getOrDefault(name, 0) + 1
@@ -243,10 +243,6 @@ class RetryingSyncBackendTest {
                 conflictId: String,
                 request: ConflictResolveRequest,
             ) = fail("resolution")
-            override suspend fun causalReconcile(
-                session: SyncSession,
-                units: List<CausalMutationUnit>,
-            ) = fail("source-reconcile")
         }
         val backend = RetryingSyncBackend(
             delegate = delegate,
@@ -267,7 +263,6 @@ class RetryingSyncBackendTest {
             )
         }
         runCatching { backend.resolveConflict(session, "conflict", resolve) }
-        runCatching { backend.causalReconcile(session, emptyList()) }
 
         assertThat(attempts).containsExactly(
             "handshake", 3,
@@ -275,7 +270,6 @@ class RetryingSyncBackendTest {
             "commit", 3,
             "detail", 3,
             "resolution", 3,
-            "source-reconcile", 1,
         )
     }
 

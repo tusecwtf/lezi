@@ -57,10 +57,12 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   dirty，较新根须在下一周期从 Room 重建临时发布候选；较旧回执不得倒退较新水印。不引入
   媒体-only wire。发布规划的长期真相由 ADR-0016 约束。
 - 客户端只要求 `/health` 为 `ok` 且 capabilities 至少包含 `atomic_bundle`、
-  `record_membership_author`、`authoritative_reconcile_v1` 与
+  `record_membership_author` 与
   `validated_deferred_fulfillment_v1`；最后一项只在启动语义校验完成且生产进程已验证
   versionCode 16 强制升级包/最低版本门后暴露，展示用
   `version` 不参与兼容门闩。
+- H26 删除了 `authoritative_reconcile_v1` 普通发表路径；所有 mutable roots 只走 causal
+  commit，且客户端不再接受 reconcile capability 作为兼容 fallback。
 - `membership_id` 是记录作者与 ACL 的唯一家庭身份。`device_id` 只用于当前建家、加入与
   token 会话绑定，不进入 members 响应或 Record 作者 payload。当前 Record 合同允许任一
   active 家庭成员按 LWW 编辑或删除任意护理记录；CarePlan 与 CustomItemDef 仍遵循

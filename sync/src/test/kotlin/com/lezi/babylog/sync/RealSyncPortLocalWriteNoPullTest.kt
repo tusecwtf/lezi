@@ -29,7 +29,6 @@ class RealSyncPortLocalWriteNoPullTest {
             val session = joinedSession("family-a").copy(pullCursor = 19)
             val rig = SyncRig(
                 session = session,
-                allowHistoricalMutableRootEvidence = false,
             )
             rig.backend.enableCausal = true
             val babyId = rig.babies.seed(
@@ -83,7 +82,6 @@ class RealSyncPortLocalWriteNoPullTest {
             assertThat(
                 rig.conflictDetails.getFrozenMutation("wake_observation", wakeUuid),
             ).isNotNull()
-            assertThat(rig.backend.causalReconciledUnits).isEmpty()
             assertThat(rig.backend.pullCount).isEqualTo(0)
             assertThat(rig.preferences.current().pullCursor).isEqualTo(19)
 
@@ -92,7 +90,6 @@ class RealSyncPortLocalWriteNoPullTest {
 
             assertThat(replayed.isSuccess).isTrue()
             assertThat(rig.backend.causalCommittedUnits.last()).isEqualTo(frozen)
-            assertThat(rig.backend.causalReconciledUnits).isEmpty()
             assertThat(rig.backend.pullCount).isEqualTo(0)
             assertThat(rig.preferences.current().pullCursor).isEqualTo(19)
             with(requireNotNull(rig.wakeObservations.getByClientUuid(wakeUuid))) {
@@ -113,7 +110,6 @@ class RealSyncPortLocalWriteNoPullTest {
         val session = joinedSession("family-a").copy(pullCursor = 17)
         val rig = SyncRig(
             session = session,
-            allowHistoricalMutableRootEvidence = false,
         )
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
@@ -185,7 +181,6 @@ class RealSyncPortLocalWriteNoPullTest {
             val session = joinedSession("family-a").copy(pullCursor = 16)
             val rig = SyncRig(
                 session = session,
-                allowHistoricalMutableRootEvidence = false,
             )
             rig.backend.enableCausal = true
             val babyId = rig.babies.seed(
@@ -258,7 +253,6 @@ class RealSyncPortLocalWriteNoPullTest {
             assertThat(result.isSuccess).isTrue()
             assertThat(rig.media.getByClientUuid(mediaUuid)).isEqualTo(before)
             assertThat(rig.backend.causalCommittedUnits).isEmpty()
-            assertThat(rig.backend.causalReconciledUnits).isEmpty()
             assertThat(
                 rig.conflictDetails.getFrozenMutation("wake_observation", "wake-media-$bytesCase"),
             ).isNull()
@@ -272,7 +266,6 @@ class RealSyncPortLocalWriteNoPullTest {
         val session = joinedSession("family-a").copy(pullCursor = 14)
         val rig = SyncRig(
             session = session,
-            allowHistoricalMutableRootEvidence = false,
         )
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
@@ -329,7 +322,6 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(result.isSuccess).isTrue()
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(14)
-        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
             .containsExactly("baby", "custom_item", "record", "care_plan")
             .inOrder()
@@ -348,7 +340,6 @@ class RealSyncPortLocalWriteNoPullTest {
         val session = joinedSession("family-a").copy(pullCursor = 15)
         val rig = SyncRig(
             session = session,
-            allowHistoricalMutableRootEvidence = false,
         )
         rig.backend.enableCausal = true
         val planBabyId = rig.babies.seed(
@@ -390,7 +381,6 @@ class RealSyncPortLocalWriteNoPullTest {
 
         assertThat(result.isSuccess).isTrue()
         assertThat(rig.backend.causalCommittedUnits).isEmpty()
-        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(15)
         assertThat(rig.carePlans.getByClientUuid("plan-facade-cross-baby")?.syncDirty).isTrue()
@@ -404,7 +394,6 @@ class RealSyncPortLocalWriteNoPullTest {
         val session = joinedSession("family-a").copy(pullCursor = 12)
         val rig = SyncRig(
             session = session,
-            allowHistoricalMutableRootEvidence = false,
         )
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
@@ -444,7 +433,6 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(rig.backend.syncOrder.filter { it.startsWith("pull:") }).isEmpty()
         assertThat(rig.backend.syncOrder.filter { it.startsWith("causal_") })
             .containsExactly("causal_commit:1")
-        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).hasSize(1)
         assertThat(rig.backend.causalCommittedUnits.single().single().media).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(12)
@@ -464,7 +452,6 @@ class RealSyncPortLocalWriteNoPullTest {
         val session = joinedSession("family-a").copy(pullCursor = 0)
         val rig = SyncRig(
             session = session,
-            allowHistoricalMutableRootEvidence = false,
         )
         rig.backend.enableCausal = true
         val babyId = rig.babies.seed(
@@ -545,7 +532,6 @@ class RealSyncPortLocalWriteNoPullTest {
 
         assertThat(result.isFailure).isTrue()
         assertThat(rig.backend.pullCount).isEqualTo(0)
-        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(6)
         assertThat(requireNotNull(rig.records.getByClientUuid("record-background")).syncDirty)
@@ -579,7 +565,6 @@ class RealSyncPortLocalWriteNoPullTest {
 
         assertThat(result.isFailure).isTrue()
         assertThat(rig.backend.pullCount).isEqualTo(0)
-        assertThat(rig.backend.causalReconciledUnits).isEmpty()
         assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.backend.handshakeCalls).isEqualTo(1)
         assertThat(rig.backend.anonymousHealthCalls).isEqualTo(0)
@@ -593,9 +578,8 @@ class RealSyncPortLocalWriteNoPullTest {
         val session = joinedSession("family-a").copy(pullCursor = 2)
         val rig = SyncRig(
             session = session,
-            allowHistoricalMutableRootEvidence = false,
         )
-        // enableCausal defaults false → no-pull must not apply.
+        rig.backend.enableCausal = false
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = true))
         rig.records.seed(localRecord(babyId).copy(syncDirty = true))
 
@@ -606,6 +590,5 @@ class RealSyncPortLocalWriteNoPullTest {
         assertThat(result.exceptionOrNull()).hasMessageThat().contains("因果同步协议")
         assertThat(rig.backend.pullCount).isEqualTo(1)
         assertThat(rig.backend.syncOrder.take(2)).containsExactly("handshake", "pull:2").inOrder()
-        assertThat(rig.backend.causalReconciledUnits).isEmpty()
     }
 }

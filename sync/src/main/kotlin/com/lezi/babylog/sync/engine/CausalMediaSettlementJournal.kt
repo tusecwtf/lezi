@@ -7,7 +7,7 @@ import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalMediaItem
 import com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalProofUnit
+import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolGroup
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolItem
@@ -194,7 +194,7 @@ internal class CausalMediaSettlementJournalOwner(
     /** Called inside the same Room transaction that settles the product fact. */
     suspend fun markTerminal(
         mutationId: String,
-        result: CausalProofUnit,
+        result: CausalCommitUnitResult,
     ): CausalMediaSettlementJournal {
         val journal = loadRequired(mutationId)
         require(result.mutationId == mutationId && result.requestHash == journal.binding.requestHash) {

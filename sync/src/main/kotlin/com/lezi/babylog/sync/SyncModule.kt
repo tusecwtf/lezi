@@ -99,10 +99,6 @@ abstract class SyncModule {
         fun causalMediaSpoolSlotReservationBytes(): Long = CausalMediaPolicy.maxSpoolSlotBytes
 
         @Provides
-        @Named("allowHistoricalMutableRootEvidence")
-        fun allowHistoricalMutableRootEvidence(): Boolean = false
-
-        @Provides
         @Singleton
         fun clientAppVersion(@ApplicationContext context: Context): ClientAppVersion {
             val packageInfo = context.packageManager.getPackageInfoCompat(

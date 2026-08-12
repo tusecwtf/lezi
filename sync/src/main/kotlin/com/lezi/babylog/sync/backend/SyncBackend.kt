@@ -153,7 +153,7 @@ data class CausalMediaPreimageReceipt(
 )
 
 /**
- * Wire §3.1 frozen mutation unit for `/v1/causal/reconcile` and `/v1/causal/commit`.
+ * Wire §3.1 frozen mutation unit for `/v1/causal/commit`.
  * [rootJson] is the closed-key root object (includes `updated_at`).
  */
 data class CausalMutationUnit(
@@ -166,84 +166,28 @@ data class CausalMutationUnit(
     val deleted: Boolean = false,
 )
 
-sealed interface CausalProofUnit {
-    val status: String
-    val mutationId: String
-    val requestHash: String
-    val stableVersionId: String?
-    val stableRootJson: String
-    val stableMedia: List<CausalMediaItem>
-    val stableRootPresent: Boolean
-    val stableMediaPresent: Boolean
-    val stableDeleted: Boolean
-    val stableDeletedAt: Long?
-    val replay: Boolean
-    val branchVersionId: String?
-    val conflictId: String?
-    val code: String?
-    val reason: String?
-    val conflictingPaths: List<String>
-}
-
-/** Legacy reconcile result retained until H26 removes the route. */
-data class CausalUnitResult(
-    override val status: String,
-    override val mutationId: String,
-    override val requestHash: String,
-    val generation: String,
-    override val stableVersionId: String? = null,
-    override val stableRootJson: String = "{}",
-    override val stableMedia: List<CausalMediaItem> = emptyList(),
-    /** Adapter evidence: required stable projection members were present on the wire. */
-    override val stableRootPresent: Boolean = true,
-    override val stableMediaPresent: Boolean = true,
-    override val stableDeleted: Boolean = false,
-    override val stableDeletedAt: Long? = null,
-    override val replay: Boolean = false,
-    override val branchVersionId: String? = null,
-    override val conflictId: String? = null,
-    override val code: String? = null,
-    override val reason: String? = null,
-    override val conflictingPaths: List<String> = emptyList(),
-) : CausalProofUnit
-
 /** Wire §3.2 contracted commit unit; no cursor, generation, or rejection payload. */
 data class CausalCommitUnitResult(
-    override val status: String,
-    override val mutationId: String,
-    override val requestHash: String,
-    override val replay: Boolean,
-    override val stableVersionId: String,
-    override val stableRootJson: String,
-    override val stableMedia: List<CausalMediaItem>,
-    override val stableDeleted: Boolean,
-    override val stableDeletedAt: Long?,
+    val status: String,
+    val mutationId: String,
+    val requestHash: String,
+    val replay: Boolean = false,
+    val stableVersionId: String,
+    val stableRootJson: String,
+    val stableMedia: List<CausalMediaItem> = emptyList(),
+    val stableDeleted: Boolean = false,
+    val stableDeletedAt: Long? = null,
     /** Adapter evidence: required stable projection members were present on the wire. */
-    override val stableRootPresent: Boolean = true,
-    override val stableMediaPresent: Boolean = true,
-    override val branchVersionId: String? = null,
-    override val conflictId: String? = null,
-) : CausalProofUnit {
-    override val code: String? = null
-    override val reason: String? = null
-    override val conflictingPaths: List<String> = emptyList()
-}
-
-sealed interface CausalProofBatch {
-    val generation: String
-    val results: List<CausalProofUnit>
-}
-
-data class CausalBatchResult(
-    override val generation: String,
-    val cursor: Long,
-    override val results: List<CausalUnitResult>,
-) : CausalProofBatch
+    val stableRootPresent: Boolean = true,
+    val stableMediaPresent: Boolean = true,
+    val branchVersionId: String? = null,
+    val conflictId: String? = null,
+)
 
 data class CausalCommitBatchResult(
-    override val generation: String,
-    override val results: List<CausalCommitUnitResult>,
-) : CausalProofBatch
+    val generation: String,
+    val results: List<CausalCommitUnitResult>,
+)
 
 class CausalCommitRejectedException(
     val mutationId: String?,
@@ -307,51 +251,12 @@ internal val CONFLICT_TERMINAL_REJECTION_CODES = setOf(
     "cas_mismatch",
 )
 
-/** Closed causal reconcile statuses (wire §5). */
-object CausalReconcileStatus {
-    const val CONFIRMED = "confirmed"
-    const val PUBLISH = "publish"
-    const val CONFLICT_PREVIEW = "conflict_preview"
-    const val REJECTED = "rejected"
-}
-
 /** Closed causal commit statuses (wire §6). */
 object CausalCommitStatus {
     const val ACCEPTED = "accepted"
     const val MERGED = "merged"
     const val BRANCHED = "branched"
 }
-
-enum class AuthorityDisposition {
-    Confirmed,
-    Publish,
-    AdoptRemote,
-    RemoteAbsentRejected,
-    RetryAuthority,
-}
-
-data class ReconcileUnitDraft(
-    val contentHash: String,
-    val root: SyncEntity,
-    val media: List<SyncEntity> = emptyList(),
-)
-
-data class AuthorityResult(
-    val type: String,
-    val clientUuid: String,
-    val requestContentHash: String,
-    val disposition: AuthorityDisposition,
-    val reason: String,
-    val remoteContentHash: String? = null,
-    val remoteRoot: SyncEntity? = null,
-    val remoteMedia: List<SyncEntity> = emptyList(),
-)
-
-data class ReconcileResult(
-    val generation: String,
-    val cursor: Long,
-    val results: List<AuthorityResult>,
-)
 
 /** A syntactically successful response that cannot prove every frozen authority key. */
 class AuthorityProofException(
@@ -808,27 +713,12 @@ interface SyncBackend {
     suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult
 
     suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake
-    suspend fun reconcile(
-        session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult = throw UnsupportedOperationException("Authoritative reconcile is not implemented")
-
     /**
      * Production [HttpSyncBackend] returns true only when the last health probe
      * advertised the frozen causal capability set. A false value makes mutable
-     * roots fail closed; only immutable FulfillmentCandidate evidence may use the
-     * historical reconcile path.
+     * roots fail closed rather than falling back to a legacy publish protocol.
      */
     fun supportsCausalWire(): Boolean = false
-
-    /**
-     * Causal dry-run reconcile (wire §5). Does not create stable versions or branches.
-     * Proof is bound to generation, stable versions and request hashes in each unit result.
-     */
-    suspend fun causalReconcile(
-        session: SyncSession,
-        units: List<CausalMutationUnit>,
-    ): CausalBatchResult = throw UnsupportedOperationException("Causal reconcile is not implemented")
 
     /**
      * Causal atomic commit (wire §6). Successful units are accepted / merged / branched;
@@ -947,14 +837,6 @@ interface SyncBackend {
      * Nothing is visible on family pull until [commitBundle].
      */
     suspend fun stageBundle(session: SyncSession, draft: AtomicBundleDraft): BundleStageStatus
-
-    /** Upload one media blob into a staged bundle manifest slot. */
-    suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus
 
     /** Publish a complete package in one server transaction (idempotent). */
     suspend fun commitBundle(session: SyncSession, bundleId: String): BundleCommitResult

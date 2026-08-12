@@ -123,17 +123,44 @@ internal sealed interface FamilySessionOutcome {
  * session transition.
  */
 internal interface FamilySessionReplica {
+    data class RecoveryTarget(
+        val baseUrl: String,
+        val familyId: String? = null,
+        val membershipId: String? = null,
+        val deviceId: String? = null,
+    )
+
+    data class ResetRoot(
+        val entityType: String,
+        val clientUuid: String,
+        val contentEpoch: Long,
+        val wasPending: Boolean,
+    )
+
+    data class ResetReceipt(
+        val previousFamilyId: String,
+        val previousMembershipId: String,
+        val previousDeviceId: String,
+        val crossingFamilyBoundary: Boolean,
+        val recoveryTarget: RecoveryTarget?,
+        val roots: List<ResetRoot>,
+    )
+
     /** [crossingFamilyBoundary] invalidates server-owned evidence from the previous family. */
     suspend fun resetLocalSyncReceipts(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean = false,
         crossingFamilyBoundary: Boolean = false,
-    )
+        recoveryTarget: RecoveryTarget? = null,
+    ): ResetReceipt
 
     suspend fun applyInitialEntities(
         session: SyncSession,
         entities: List<SyncEntity>,
+        resetReceipt: ResetReceipt? = null,
     )
+
+    suspend fun completeLocalSyncReset(receipt: ResetReceipt)
 
     suspend fun convergeAuthenticatedSelfMembership(
         session: SyncSession,
@@ -213,6 +240,7 @@ internal class FamilySessionCoordinator(
             replica.resetLocalSyncReceipts(
                 previous,
                 crossingFamilyBoundary = true,
+                recoveryTarget = FamilySessionReplica.RecoveryTarget(normalized.baseUrl),
             )
         }
         preferences.saveEndpointConfig(
@@ -723,16 +751,20 @@ internal class FamilySessionCoordinator(
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = joined.membershipId.trim(),
         )
-        if (!replicaIdentityUnchanged(previous, session)) {
+        val resetReceipt = if (!replicaIdentityUnchanged(previous, session)) {
             replica.resetLocalSyncReceipts(
                 previous,
                 crossingFamilyBoundary = previous.familyId != session.familyId,
+                recoveryTarget = session.toRecoveryTarget(),
             )
+        } else {
+            null
         }
         if (joined.entities.isNotEmpty()) {
-            replica.applyInitialEntities(session, joined.entities)
+            replica.applyInitialEntities(session, joined.entities, resetReceipt)
         }
         preferences.saveSession(session)
+        resetReceipt?.let { replica.completeLocalSyncReset(it) }
         onSessionChanged(session)
         return session
     }
@@ -787,10 +819,18 @@ internal class FamilySessionCoordinator(
         replica.resetLocalSyncReceipts(
             previous,
             crossingFamilyBoundary = previous.familyId != pending.familyId,
+            recoveryTarget = pending.toRecoveryTarget(),
         )
         preferences.completePendingReplicaReset()
         onSessionChanged(preferences.session.first())
     }
+
+    private fun SyncSession.toRecoveryTarget() = FamilySessionReplica.RecoveryTarget(
+        baseUrl = baseUrl,
+        familyId = familyId,
+        membershipId = membershipId,
+        deviceId = deviceId,
+    )
 
     private suspend fun <T> withAllowedSession(
         block: suspend (SyncSession) -> T,

@@ -20,14 +20,11 @@ import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.database.causal.frozenMediaSpoolCacheKey
 import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.sync.backend.AuthorityProofException
-import com.lezi.babylog.sync.backend.CausalBatchResult
+import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalMediaItem
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalProofBatch
-import com.lezi.babylog.sync.backend.CausalReconcileStatus
-import com.lezi.babylog.sync.backend.CausalProofUnit
-import com.lezi.babylog.sync.backend.CausalUnitResult
+import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.media.ImmutableMediaSpoolGroup
@@ -62,13 +59,10 @@ internal val CAUSAL_ROOT_TYPES = setOf(
 
 private val MEDIA_COMMIT_FIRST_ROOT_TYPES = setOf("baby", "record", "care_plan")
 
-/** Reconcile-only generation evidence; contracted commit units carry none. */
-private fun CausalProofUnit.authorityGeneration() =
-    (this as? CausalUnitResult)?.generation.orEmpty()
-
+/** Contracted commit units carry generation only at batch level. */
 /**
  * One frozen causal atomic unit. Migrated roots restore one immutable Room-backed
- * envelope; roots not yet migrated retain the source reconcile path.
+ * envelope; every publishable root uses commit-first.
  */
 private data class FrozenCausalUnit(
     val mutation: CausalMutationUnit,
@@ -127,7 +121,6 @@ internal class CausalSettlement(
     private val immutableMediaSpool: ImmutableMediaSpool,
     private val transactionRunner: DatabaseTransactionRunner,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
-    private val protectDirtyCausalRoots: Boolean = true,
 ) {
     private val mediaSettlementJournal = conflictSnapshotCacheDao?.let { cache ->
         CausalMediaSettlementJournalOwner(cache, immutableMediaSpool, transactionRunner)
@@ -184,7 +177,7 @@ internal class CausalSettlement(
         }
     }
 
-    /** Keeps both direct commit and source reconcile batches within the 64-root bound. */
+    /** Keeps direct commit batches within the 64-root bound. */
     private suspend fun settleBatch(
         session: SyncSession,
         frozen: List<FrozenCausalUnit>,
@@ -197,12 +190,9 @@ internal class CausalSettlement(
         if (mediaCommitUnknown.isNotEmpty()) {
             replayMediaCommitUnknown(session, mediaCommitUnknown)
         }
-        val sourceReconcile = frozen - directCommit.toSet() - mediaCommitUnknown.toSet()
-        if (sourceReconcile.isEmpty()) return
-        require(sourceReconcile.none { it.mutation.entityType in MEDIA_COMMIT_FIRST_ROOT_TYPES }) {
-            "Migrated media roots must not use source reconcile"
+        require((directCommit + mediaCommitUnknown).toSet() == frozen.toSet()) {
+            "Every causal root must have one durable commit-first envelope"
         }
-        reconcileFirst(session, sourceReconcile)
     }
 
     /** Lost-response recovery: replay the exact durable envelope before a superseding local edit. */
@@ -217,13 +207,16 @@ internal class CausalSettlement(
             session = session,
             frozen = frozen,
             batch = commit,
-            forCommit = true,
             localFrozenProof = true,
         )
-        val byMutation = commit.results.associateBy(CausalProofUnit::mutationId)
+        val byMutation = commit.results.associateBy(CausalCommitUnitResult::mutationId)
         transactionRunner.run {
             frozen.forEach { unit ->
-                applyCommitFirstResult(unit, byMutation.getValue(unit.mutation.mutationId))
+                applyCommitFirstResult(
+                    unit,
+                    byMutation.getValue(unit.mutation.mutationId),
+                    commit.generation,
+                )
             }
         }
         frozen.forEach { unit ->
@@ -243,9 +236,7 @@ internal class CausalSettlement(
         session = session,
         frozen = frozen,
         localFrozenProof = true,
-    ) { unit, result ->
-        applyCommitFirstResult(unit, result)
-    }
+    )
 
     /**
      * One ordering owner for receipt completion, commit-unknown durability, commit proof,
@@ -255,7 +246,6 @@ internal class CausalSettlement(
         session: SyncSession,
         frozen: List<FrozenCausalUnit>,
         localFrozenProof: Boolean,
-        settleResult: suspend (FrozenCausalUnit, CausalProofUnit) -> Unit,
     ) {
         for (unit in frozen) {
             stageCausalMediaPreimages(session, unit)
@@ -271,13 +261,16 @@ internal class CausalSettlement(
             session = session,
             frozen = frozen,
             batch = commit,
-            forCommit = true,
             localFrozenProof = localFrozenProof,
         )
-        val commitByMutation = commit.results.associateBy(CausalProofUnit::mutationId)
+        val commitByMutation = commit.results.associateBy(CausalCommitUnitResult::mutationId)
         transactionRunner.run {
             for (unit in frozen) {
-                settleResult(unit, commitByMutation.getValue(unit.mutation.mutationId))
+                applyCommitFirstResult(
+                    unit,
+                    commitByMutation.getValue(unit.mutation.mutationId),
+                    commit.generation,
+                )
             }
         }
         frozen.forEach { unit ->
@@ -291,71 +284,10 @@ internal class CausalSettlement(
         }
     }
 
-    private suspend fun reconcileFirst(
-        session: SyncSession,
-        frozen: List<FrozenCausalUnit>,
-    ) {
-        requireRemoteAllowed(session)
-        val reconcile = backend.causalReconcile(session, frozen.map(FrozenCausalUnit::mutation))
-        validateCausalProof(session, frozen, reconcile, forCommit = false)
-        val stillCurrent = frozen.filter { unitStillCurrent(it) }
-        val byMutation = reconcile.results.associateBy(CausalProofUnit::mutationId)
-        val publishable = mutableListOf<FrozenCausalUnit>()
-        transactionRunner.run {
-            for (unit in stillCurrent) {
-                val result = byMutation.getValue(unit.mutation.mutationId)
-                when (result.status) {
-                    CausalReconcileStatus.CONFIRMED -> {
-                        applyConfirmed(unit, result)
-                    }
-                    CausalReconcileStatus.PUBLISH,
-                    CausalReconcileStatus.CONFLICT_PREVIEW,
-                    -> publishable += unit
-                    CausalReconcileStatus.REJECTED -> {
-                        // Fail closed for authority/content drift; retain pending for recoverable rejects.
-                        if (result.code in FATAL_REJECT_CODES) {
-                            throw AuthorityProofException(
-                                result.authorityGeneration(),
-                                IllegalArgumentException(
-                                    "因果 reconcile 拒绝: ${result.code ?: result.reason}",
-                                ),
-                            )
-                        }
-                    }
-                    else -> throw AuthorityProofException(
-                        result.authorityGeneration(),
-                        IllegalArgumentException("未知因果 reconcile status: ${result.status}"),
-                    )
-                }
-            }
-        }
-        if (publishable.isEmpty()) return
-        commitPreparedCausalUnits(session, publishable, localFrozenProof = false) { unit, result ->
-            if (unitStillCurrent(unit)) {
-                applyCommitResult(unit, result)
-            }
-        }
-    }
-
-    private suspend fun applyCommitResult(
-        unit: FrozenCausalUnit,
-        result: CausalProofUnit,
-    ) {
-        when (result.status) {
-            CausalCommitStatus.ACCEPTED,
-            CausalCommitStatus.MERGED,
-            -> applyAcceptedOrMerged(unit, result)
-            CausalCommitStatus.BRANCHED -> applyBranched(unit, result)
-            else -> throw AuthorityProofException(
-                result.authorityGeneration(),
-                IllegalArgumentException("未知因果 commit status: ${result.status}"),
-            )
-        }
-    }
-
     private suspend fun applyCommitFirstResult(
         unit: FrozenCausalUnit,
-        result: CausalProofUnit,
+        result: CausalCommitUnitResult,
+        authorityGeneration: String,
     ) {
         require(
             (unit.durableCommitFirst || unit.durableMediaCommitUnknown) &&
@@ -372,7 +304,7 @@ internal class CausalSettlement(
             CausalCommitStatus.MERGED,
             -> {
                 val version = stableVersion ?: throw AuthorityProofException(
-                    result.authorityGeneration(),
+                    authorityGeneration,
                     IllegalArgumentException("accepted/merged 缺少 stable_version_id"),
                 )
                 val settled = settleCommitFirstAcceptedOrMerged(unit, version) ?: return
@@ -385,16 +317,16 @@ internal class CausalSettlement(
             CausalCommitStatus.BRANCHED -> {
                 val conflictId = result.conflictId?.takeIf { it.isNotBlank() }
                     ?: throw AuthorityProofException(
-                        result.authorityGeneration(),
+                        authorityGeneration,
                         IllegalArgumentException("branched 缺少 conflict_id"),
                     )
                 val branchVersionId = result.branchVersionId?.takeIf { it.isNotBlank() }
                     ?: throw AuthorityProofException(
-                        result.authorityGeneration(),
+                        authorityGeneration,
                         IllegalArgumentException("branched 缺少 branch_version_id"),
                     )
                 val version = stableVersion ?: throw AuthorityProofException(
-                    result.authorityGeneration(),
+                    authorityGeneration,
                     IllegalArgumentException("branched 缺少 stable_version_id"),
                 )
                 val settled = settleCommitFirstBranched(
@@ -422,14 +354,14 @@ internal class CausalSettlement(
                 )
                 settleCommitFirstEvidence(unit, result, cache)
             }
-            else -> applyCommitResult(unit, result)
+            else -> error("unknown causal commit status: ${result.status}")
         }
     }
 
     /** One terminal owner for empty roots and roots with a durable media journal. */
     private suspend fun settleCommitFirstEvidence(
         unit: FrozenCausalUnit,
-        result: CausalProofUnit,
+        result: CausalCommitUnitResult,
         cache: ConflictSnapshotCacheDao,
     ) {
         if (unit.mutation.media.isEmpty()) {
@@ -550,7 +482,7 @@ internal class CausalSettlement(
         if (forceAuthority) return true
         if (entityType !in CAUSAL_ROOT_TYPES) return true
         val local = loadCausalLocal(entityType, clientUuid) ?: return true
-        if (local.syncDirty && protectDirtyCausalRoots) {
+        if (local.syncDirty) {
             if (local.baseVersion == null && remoteVersionId != null) {
                 establishMigratedDirtyBaseline(
                     entityType = entityType,
@@ -571,10 +503,42 @@ internal class CausalSettlement(
     }
 
     /**
+     * A recovery full pull may replace reset-derived replicas, but a row that was already dirty
+     * before reset owns local intent. Rebase that intent onto the observed stable version without
+     * replacing its content, tombstone, or pending state. A new mutation id is minted on freeze.
+     */
+    suspend fun rebaseRecoveryPendingIntent(
+        entityType: String,
+        clientUuid: String,
+        remoteVersionId: String?,
+    ) {
+        if (remoteVersionId == null || entityType !in CAUSAL_ROOT_TYPES) return
+        val local = loadCausalLocal(entityType, clientUuid) ?: return
+        if (!local.syncDirty || local.baseVersion == remoteVersionId) return
+        updateDirtyBaseline(
+            entityType = entityType,
+            clientUuid = clientUuid,
+            expectedContentEpoch = local.contentEpoch,
+            remoteVersionId = remoteVersionId,
+            requireMissingBaseline = false,
+        )
+    }
+
+    suspend fun shouldPreserveRecoveryIntent(
+        resetRoot: com.lezi.babylog.sync.session.FamilySessionReplica.ResetRoot,
+        crossingFamilyBoundary: Boolean,
+    ): Boolean {
+        val local = loadCausalLocal(resetRoot.entityType, resetRoot.clientUuid) ?: return false
+        return local.syncDirty &&
+            (local.contentEpoch != resetRoot.contentEpoch ||
+                (!crossingFamilyBoundary && resetRoot.wasPending))
+    }
+
+    /**
      * Room 26 dirty rows have no causal identity. The first causal full pull is the
      * only authoritative place to learn the stable parent they were edited from.
      * Persist only that parent; the local revision, tombstone, media references and
-     * dirty intent remain untouched and are reconciled immediately after the pull.
+     * dirty intent remains untouched and is committed after the pull.
      *
      * A previously frozen null-base mutation cannot be reused after the envelope
      * gains a base_version, so clear only its mutation identity. Freeze will mint a
@@ -585,39 +549,53 @@ internal class CausalSettlement(
         clientUuid: String,
         expectedContentEpoch: Long,
         remoteVersionId: String,
+    ) = updateDirtyBaseline(
+        entityType = entityType,
+        clientUuid = clientUuid,
+        expectedContentEpoch = expectedContentEpoch,
+        remoteVersionId = remoteVersionId,
+        requireMissingBaseline = true,
+    )
+
+    private suspend fun updateDirtyBaseline(
+        entityType: String,
+        clientUuid: String,
+        expectedContentEpoch: Long,
+        remoteVersionId: String,
+        requireMissingBaseline: Boolean,
     ) {
         when (entityType) {
             "baby" -> babyDao.getByClientUuid(clientUuid)?.let { current ->
                 if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
-                    current.baseVersion == null
+                    (!requireMissingBaseline || current.baseVersion == null)
                 ) {
                     babyDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
                 }
             }
             "record" -> recordDao.getByClientUuid(clientUuid)?.let { current ->
                 if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
-                    current.baseVersion == null
+                    (!requireMissingBaseline || current.baseVersion == null)
                 ) {
                     recordDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
                 }
             }
             "care_plan" -> carePlanDao.getByClientUuid(clientUuid)?.let { current ->
                 if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
-                    current.baseVersion == null
+                    (!requireMissingBaseline || current.baseVersion == null)
                 ) {
                     carePlanDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
                 }
             }
             "custom_item" -> customItemDao.getByClientUuid(clientUuid)?.let { current ->
                 if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
-                    current.baseVersion == null
+                    (!requireMissingBaseline || current.baseVersion == null)
                 ) {
                     customItemDao.update(current.copy(baseVersion = remoteVersionId, mutationId = null))
                 }
             }
             "wake_observation" -> wakeObservationDao.getByClientUuid(clientUuid)?.let { current ->
                 if (current.syncDirty && current.updatedAt == expectedContentEpoch &&
-                    current.baseVersion == null
+                    (!requireMissingBaseline || current.baseVersion == null)
                 ) {
                     wakeObservationDao.update(
                         current.copy(baseVersion = remoteVersionId, mutationId = null),
@@ -754,8 +732,7 @@ internal class CausalSettlement(
                 contentEpoch = contentEpoch,
                 candidates = candidates,
             )?.let { return it }
-            // Wake has no reconcile-first fallback. Media-bearing observations
-            // wait for the immutable spool/receipt owner (H18/H20).
+            // Media-bearing Wake observations wait for the immutable spool/receipt owner.
             return null
         } else if (entityType == "care_plan") {
             freezeEmptyMediaCommitEnvelope(
@@ -765,7 +742,7 @@ internal class CausalSettlement(
                 candidates = candidates,
             )?.let { return it }
             // A complete empty manifest that cannot yet satisfy its dependency
-            // order must wait; falling through would resurrect reconcile-first.
+            // order must wait; there is no legacy fallback.
             if (!hasCarePlanMediaPublishOrRepairEvidence(clientUuid, candidates)) return null
             val cache = conflictSnapshotCacheDao ?: return null
             if (!carePlanDependenciesReady(clientUuid, cache)) return null
@@ -1428,123 +1405,6 @@ internal class CausalSettlement(
         }
     }
 
-    private suspend fun applyConfirmed(unit: FrozenCausalUnit, result: CausalProofUnit) {
-        val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() }
-            ?: throw AuthorityProofException(
-                result.authorityGeneration(),
-                IllegalArgumentException("confirmed 缺少 stable_version_id"),
-            )
-        // CAS on frozen contentEpoch first — never rewrite updatedAt before ack.
-        val acked = acknowledgeAccepted(unit, stableVersion)
-        if (!acked) return
-        if (result.stableRootJson.isNotBlank() && result.stableRootJson != "{}") {
-            applyStableProjectionAfterAck(unit, result)
-        }
-        unit.candidates.filter { it.entityType == "media" }.forEach { media ->
-            mediaDao.markSynced(media.clientUuid, media.updatedAt)
-        }
-    }
-
-    private suspend fun applyAcceptedOrMerged(unit: FrozenCausalUnit, result: CausalProofUnit) {
-        val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() }
-            ?: throw AuthorityProofException(
-                result.authorityGeneration(),
-                IllegalArgumentException("accepted/merged 缺少 stable_version_id"),
-            )
-        // CAS clears mutation on frozen contentEpoch, then project stable business fields.
-        val acked = acknowledgeAccepted(unit, stableVersion)
-        if (!acked) return
-        applyStableProjectionAfterAck(unit, result)
-        unit.candidates.filter { it.entityType == "media" }.forEach { media ->
-            mediaDao.markSynced(media.clientUuid, media.updatedAt)
-        }
-        if (unit.mutation.media.isNotEmpty()) {
-            requireNotNull(mediaSettlementJournal).markTerminal(unit.mutation.mutationId, result)
-        }
-    }
-
-    private suspend fun applyBranched(unit: FrozenCausalUnit, result: CausalProofUnit) {
-        val conflictId = result.conflictId?.takeIf { it.isNotBlank() }
-            ?: throw AuthorityProofException(
-                result.authorityGeneration(),
-                IllegalArgumentException("branched 缺少 conflict_id"),
-            )
-        val branchVersionId = result.branchVersionId?.takeIf { it.isNotBlank() }
-            ?: throw AuthorityProofException(
-                result.authorityGeneration(),
-                IllegalArgumentException("branched 缺少 branch_version_id"),
-            )
-        val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() }
-            ?: throw AuthorityProofException(
-                result.authorityGeneration(),
-                IllegalArgumentException("branched 缺少 stable_version_id"),
-            )
-        // CAS first on frozen epoch so openConflictId sticks; then project prior stable root.
-        val acked = when (unit.mutation.entityType) {
-            "baby" -> babyDao.acknowledgeCausalBranched(
-                clientUuid = unit.mutation.clientUuid,
-                expectedMutationId = unit.mutation.mutationId,
-                expectedContentEpoch = unit.contentEpoch,
-                conflictId = conflictId,
-                branchVersionId = branchVersionId,
-                stableBaseVersion = stableVersion,
-            )
-            "record" -> recordDao.acknowledgeCausalBranched(
-                clientUuid = unit.mutation.clientUuid,
-                expectedMutationId = unit.mutation.mutationId,
-                expectedContentEpoch = unit.contentEpoch,
-                conflictId = conflictId,
-                branchVersionId = branchVersionId,
-                stableBaseVersion = stableVersion,
-            )
-            "care_plan" -> carePlanDao.acknowledgeCausalBranched(
-                clientUuid = unit.mutation.clientUuid,
-                expectedMutationId = unit.mutation.mutationId,
-                expectedContentEpoch = unit.contentEpoch,
-                conflictId = conflictId,
-                branchVersionId = branchVersionId,
-                stableBaseVersion = stableVersion,
-            )
-            "custom_item" -> customItemDao.acknowledgeCausalBranched(
-                clientUuid = unit.mutation.clientUuid,
-                expectedMutationId = unit.mutation.mutationId,
-                expectedContentEpoch = unit.contentEpoch,
-                conflictId = conflictId,
-                branchVersionId = branchVersionId,
-                stableBaseVersion = stableVersion,
-            )
-            "wake_observation" -> wakeObservationDao.acknowledgeCausalBranched(
-                clientUuid = unit.mutation.clientUuid,
-                expectedMutationId = unit.mutation.mutationId,
-                expectedContentEpoch = unit.contentEpoch,
-                conflictId = conflictId,
-                branchVersionId = branchVersionId,
-                stableBaseVersion = stableVersion,
-            )
-            else -> false
-        }
-        if (!acked) return
-        applyStableProjectionAfterAck(unit, result)
-        conflictSummaryDao.upsert(
-            ConflictSummaryEntity(
-                conflictId = conflictId,
-                entityType = unit.mutation.entityType,
-                clientUuid = unit.mutation.clientUuid,
-                baseVersionId = unit.mutation.baseVersion,
-                stableVersionId = stableVersion,
-                status = "open",
-                kind = "concurrent",
-                branchVersionIdsJson = encodeBranchVersionIdsJson(listOf(branchVersionId)),
-                updatedAt = unit.contentEpoch,
-            ),
-        )
-        if (unit.mutation.media.isNotEmpty()) {
-            requireNotNull(mediaSettlementJournal).markTerminal(unit.mutation.mutationId, result)
-        }
-        // A commit response is not a complete ConflictSnapshot receipt. Persist
-        // only the pull/list summary; detail is fetched and projected losslessly.
-    }
-
     private suspend fun acknowledgeAccepted(unit: FrozenCausalUnit, stableVersion: String): Boolean =
         when (unit.mutation.entityType) {
             "baby" -> babyDao.acknowledgeCausalAcceptedOrMerged(
@@ -1586,7 +1446,7 @@ internal class CausalSettlement(
      */
     private suspend fun applyStableProjectionAfterAck(
         unit: FrozenCausalUnit,
-        result: CausalProofUnit,
+        result: CausalCommitUnitResult,
     ) {
         val stableVersion = result.stableVersionId?.takeIf { it.isNotBlank() } ?: return
         val root = runCatching {
@@ -1634,25 +1494,47 @@ internal class CausalSettlement(
         deletedAt: Long?,
     ) {
         val existing = recordDao.getByClientUuid(clientUuid) ?: return
-        val note = root.stringOrNull("note")
-        val timestamp = root["timestamp"]?.jsonPrimitive?.longOrNull ?: existing.timestamp
-        val endTimestamp = if ("end_timestamp" in root) {
-            root["end_timestamp"]?.let { value ->
-                if (value is JsonNull) null else value.jsonPrimitive.longOrNull
+        val currentRoot = root
+            .filterKeys { it != "updated_at" && it != "deleted_at" }
+            .toMutableMap()
+            .also { fields ->
+                if ("created_by_membership_id" !in fields) {
+                    fields["created_by_membership_id"] = existing.createdByMembershipId
+                        .takeIf(String::isNotBlank)
+                        ?.let(::JsonPrimitive)
+                        ?: JsonNull
+                }
+                if ("end_timestamp" !in fields) {
+                    fields["end_timestamp"] = JsonNull
+                }
             }
-        } else {
-            existing.endTimestamp
+        val wire = parseRecordWire(
+            JsonObject(currentRoot),
+        )
+        val baby = requireNotNull(babyDao.getByClientUuid(wire.babyClientUuid)) {
+            "record stable_root Baby 引用无效"
         }
-        val updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull ?: existing.updatedAt
-        val payload = root["payload_json"] as? JsonObject
-        val payloadJson = payload?.toString() ?: existing.payloadJson
+        val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
+            requireNotNull(customItemDao.getByClientUuid(customItemUuid)?.id) {
+                "record stable_root CustomItem 引用无效"
+            }
+        }
         recordDao.update(
             existing.copy(
-                note = note,
-                timestamp = timestamp,
-                endTimestamp = endTimestamp,
-                payloadJson = payloadJson,
-                updatedAt = updatedAt,
+                babyId = baby.id,
+                type = wire.type.key,
+                timestamp = wire.timestamp,
+                endTimestamp = wire.endTimestamp,
+                note = wire.note,
+                createdByMembershipId = wire.createdByMembershipId,
+                payloadJson = SyncWireMapper.localPayloadFromWire(
+                    wire.type,
+                    wire.payload,
+                    customItemId,
+                ),
+                schemaVersion = wire.schemaVersion,
+                updatedAt = root["updated_at"]?.jsonPrimitive?.longOrNull
+                    ?: existing.updatedAt,
                 deletedAt = deletedAt,
                 baseVersion = stableVersion,
                 // Ack already cleared mutation/dirty/conflict; keep those columns.
@@ -1661,8 +1543,8 @@ internal class CausalSettlement(
                 openConflictId = existing.openConflictId,
                 localBranchVersionId = existing.localBranchVersionId,
                 effectiveWakeObservationClientUuid =
-                    if ("effective_wake_observation_client_uuid" in root) {
-                        root.stringOrNull("effective_wake_observation_client_uuid")
+                    if (wire.effectiveWakeObservationPresent) {
+                        wire.effectiveWakeObservationClientUuid
                     } else {
                         existing.effectiveWakeObservationClientUuid
                     },
@@ -1849,8 +1731,7 @@ internal class CausalSettlement(
     private suspend fun validateCausalProof(
         session: SyncSession,
         frozen: List<FrozenCausalUnit>,
-        batch: CausalProofBatch,
-        forCommit: Boolean,
+        batch: CausalCommitBatchResult,
         localFrozenProof: Boolean = false,
     ) {
         fun fail(message: String, generationDrift: Boolean = false): Nothing {
@@ -1869,11 +1750,11 @@ internal class CausalSettlement(
         }
         val expectedMutationOrder = frozen.map { it.mutation.mutationId }
         val expectedMutations = expectedMutationOrder.toSet()
-        val byMutation = batch.results.groupBy(CausalProofUnit::mutationId)
+        val byMutation = batch.results.groupBy(CausalCommitUnitResult::mutationId)
         if (byMutation.keys != expectedMutations || byMutation.values.any { it.size != 1 }) {
             fail("家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key")
         }
-        if (batch.results.map(CausalProofUnit::mutationId) != expectedMutationOrder) {
+        if (batch.results.map(CausalCommitUnitResult::mutationId) != expectedMutationOrder) {
             fail("家庭服务器因果响应顺序与请求不一致")
         }
         val expectedKeys = frozen.map { it.mutation.entityType to it.mutation.clientUuid }.toSet()
@@ -1886,24 +1767,11 @@ internal class CausalSettlement(
         }
         val frozenByMutation = frozen.associateBy { it.mutation.mutationId }
         batch.results.forEach { result ->
-            val legacyGeneration = (result as? CausalUnitResult)?.generation
-            if (!legacyGeneration.isNullOrBlank() && legacyGeneration != session.pullGeneration) {
-                fail("家庭服务器因果 unit generation 漂移", generationDrift = true)
-            }
-            val known = if (forCommit) {
-                setOf(
-                    CausalCommitStatus.ACCEPTED,
-                    CausalCommitStatus.MERGED,
-                    CausalCommitStatus.BRANCHED,
-                )
-            } else {
-                setOf(
-                    CausalReconcileStatus.CONFIRMED,
-                    CausalReconcileStatus.PUBLISH,
-                    CausalReconcileStatus.CONFLICT_PREVIEW,
-                    CausalReconcileStatus.REJECTED,
-                )
-            }
+            val known = setOf(
+                CausalCommitStatus.ACCEPTED,
+                CausalCommitStatus.MERGED,
+                CausalCommitStatus.BRANCHED,
+            )
             if (result.status !in known) {
                 fail("家庭服务器返回未知因果 disposition: ${result.status}")
             }
@@ -1913,24 +1781,16 @@ internal class CausalSettlement(
             ) {
                 fail("因果 request_hash 不是冻结内容的 canonical SHA-256")
             }
-            val settleStatuses = setOf(
-                CausalReconcileStatus.CONFIRMED,
-                CausalCommitStatus.ACCEPTED,
-                CausalCommitStatus.MERGED,
-                CausalCommitStatus.BRANCHED,
-            )
-            if (result.status in settleStatuses) {
-                if (result.stableVersionId.isNullOrBlank()) {
-                    fail("因果 ${result.status} 缺少 stable_version_id")
-                }
-                validateStableProjection(unit, result, ::fail)
+            if (result.stableVersionId.isNullOrBlank()) {
+                fail("因果 ${result.status} 缺少 stable_version_id")
             }
+            validateStableProjection(unit, result, ::fail)
         }
     }
 
     private suspend fun validateStableProjection(
         unit: FrozenCausalUnit,
-        result: CausalProofUnit,
+        result: CausalCommitUnitResult,
         fail: (String) -> Nothing,
     ) {
         if (!result.stableRootPresent || !result.stableMediaPresent) {

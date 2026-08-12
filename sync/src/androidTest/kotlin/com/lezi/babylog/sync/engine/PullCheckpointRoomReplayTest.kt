@@ -5,12 +5,15 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.DatabaseModule
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LeziDatabase
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
@@ -34,7 +37,6 @@ import com.lezi.babylog.sync.media.LocalMediaInfo
 import com.lezi.babylog.sync.media.PreparedMedia
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
-import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.DataStoreSyncPreferences
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.InMemorySecureRefreshTokenStore
@@ -53,6 +55,86 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class PullCheckpointRoomReplayTest {
+    @Test
+    fun resetReceiptRollsBackWithRootsAndSurvivesRoomReopen() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val suffix = System.nanoTime()
+        val databaseName = "replica-reset-$suffix.db"
+        val preferencesFile = File(context.filesDir, "datastore/replica-reset-$suffix.preferences_pb")
+        preferencesFile.parentFile?.mkdirs()
+        val tokens = InMemorySecureRefreshTokenStore()
+        var database = Room.databaseBuilder(context, LeziDatabase::class.java, databaseName).build()
+        var dataScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            var preferences = DataStoreSyncPreferences(
+                PreferenceDataStoreFactory.create(scope = dataScope) { preferencesFile },
+                tokens,
+            )
+            preferences.saveSession(SESSION)
+            preferences.saveFamilyMemberDirectorySnapshot(DIRECTORY_GENERATION, emptyList())
+            database.familyDao().insert(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
+            database.babyDao().upsert(
+                BabyEntity(
+                    familyId = 1,
+                    nickname = "重置前副本",
+                    birthdayEpochDay = 20_000,
+                    themeColorArgb = 0,
+                    clientUuid = BABY_A,
+                    updatedAt = 100,
+                    syncDirty = false,
+                    baseVersion = "v-before-reset",
+                ),
+            )
+            val failingCache = FailingResetReceiptCache(database.conflictSnapshotCacheDao())
+
+            val failure = runCatching {
+                engine(database, preferences, PullOnlyBackend(ArrayDeque()), failingCache)
+                    .resetLocalSyncReceipts(SESSION, invalidateCurrentReceipts = true)
+            }.exceptionOrNull()
+
+            assertThat(failure).hasMessageThat().isEqualTo("reset receipt write interrupted")
+            assertThat(database.babyDao().getByClientUuid(BABY_A)!!.syncDirty).isFalse()
+
+            engine(database, preferences, PullOnlyBackend(ArrayDeque()))
+                .resetLocalSyncReceipts(SESSION, invalidateCurrentReceipts = true)
+            assertThat(database.babyDao().getByClientUuid(BABY_A)!!.syncDirty).isTrue()
+
+            database.close()
+            dataScope.coroutineContext[Job]?.cancelAndJoin()
+            dataScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            database = Room.databaseBuilder(context, LeziDatabase::class.java, databaseName).build()
+            preferences = DataStoreSyncPreferences(
+                PreferenceDataStoreFactory.create(scope = dataScope) { preferencesFile },
+                tokens,
+            )
+            val backend = PullOnlyBackend(
+                ArrayDeque(
+                    listOf(
+                        PullResult(
+                            listOf(remoteBaby(BABY_A, "服务端权威副本", 200).copy(versionId = "v-remote")),
+                            1,
+                            GENERATION,
+                            false,
+                        ),
+                    ),
+                ),
+            )
+
+            val outcome = engine(database, preferences, backend)
+                .synchronize(SESSION, SyncTrigger.PullToRefresh)
+
+            assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+            val recovered = requireNotNull(database.babyDao().getByClientUuid(BABY_A))
+            assertThat(recovered.nickname).isEqualTo("服务端权威副本")
+            assertThat(recovered.syncDirty).isFalse()
+        } finally {
+            database.close()
+            dataScope.coroutineContext[Job]?.cancelAndJoin()
+            context.deleteDatabase(databaseName)
+            preferencesFile.delete()
+        }
+    }
+
     @Test
     fun failedSecondPageRollsBackRoomAndReopensFromTheLastDurableCursor() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -151,6 +233,7 @@ class PullCheckpointRoomReplayTest {
         database: LeziDatabase,
         preferences: DataStoreSyncPreferences,
         backend: SyncBackend,
+        conflictCache: ConflictSnapshotCacheDao = database.conflictSnapshotCacheDao(),
     ): ReplicaSyncEngine {
         val transactionRunner = DatabaseModule.transactionRunner(database)
         val mediaFiles = NoMediaFileStore
@@ -184,7 +267,7 @@ class PullCheckpointRoomReplayTest {
             requireRemoteAllowed = {},
             wakeObservationDao = database.wakeObservationDao(),
             conflictSummaryDao = database.conflictSummaryDao(),
-            conflictSnapshotCacheDao = database.conflictSnapshotCacheDao(),
+            conflictSnapshotCacheDao = conflictCache,
             sourceRelationDao = database.sourceRelationDao(),
         )
     }
@@ -249,19 +332,23 @@ class PullCheckpointRoomReplayTest {
             draft: AtomicBundleDraft,
         ): BundleStageStatus = unsupported()
 
-        override suspend fun putBundleMedia(
-            session: SyncSession,
-            bundleId: String,
-            clientUuid: String,
-            source: SyncMediaUploadSource,
-        ): BundleStageStatus = unsupported()
-
         override suspend fun commitBundle(
             session: SyncSession,
             bundleId: String,
         ): BundleCommitResult = unsupported()
 
         private fun unsupported(): Nothing = error("unused backend seam")
+    }
+
+    private class FailingResetReceiptCache(
+        private val delegate: ConflictSnapshotCacheDao,
+    ) : ConflictSnapshotCacheDao by delegate {
+        override suspend fun upsert(entity: ConflictSnapshotCacheEntity) {
+            if (entity.conflictId.startsWith("replica-reset-receipt:")) {
+                error("reset receipt write interrupted")
+            }
+            delegate.upsert(entity)
+        }
     }
 
     private object NoMediaFileStore : SyncMediaFileStore {

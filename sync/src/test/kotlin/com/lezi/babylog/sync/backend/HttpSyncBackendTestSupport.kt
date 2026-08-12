@@ -1,6 +1,5 @@
 package com.lezi.babylog.sync.backend
 import com.google.common.truth.Truth.assertThat
-import java.io.IOException
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.HttpURLConnection
@@ -10,9 +9,6 @@ import java.net.Socket
 import java.net.URL
 import java.security.cert.Certificate
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLHandshakeException
@@ -74,34 +70,6 @@ internal fun readRequest(socket: Socket): String {
         read += count
     }
     return headers.joinToString("\n") + "\n\n" + String(body, 0, read)
-}
-
-internal class BlockingUploadConnection : HttpURLConnection(
-    URL("https://family.example.com:8765/v1/bundles/bundle/media/media"),
-) {
-    val disconnected = AtomicBoolean(false)
-    internal val released = CountDownLatch(1)
-
-    override fun getOutputStream(): OutputStream = object : OutputStream() {
-        override fun write(value: Int) {
-            write(byteArrayOf(value.toByte()), 0, 1)
-        }
-
-        override fun write(buffer: ByteArray, offset: Int, length: Int) {
-            if (!released.await(2, TimeUnit.SECONDS)) {
-                throw IOException("test upload did not disconnect")
-            }
-            throw IOException("connection disconnected")
-        }
-    }
-
-    override fun disconnect() {
-        disconnected.set(true)
-        released.countDown()
-    }
-
-    override fun usingProxy(): Boolean = false
-    override fun connect() = Unit
 }
 
 internal class RejectingPinnedHttpsConnection : HttpsURLConnection(

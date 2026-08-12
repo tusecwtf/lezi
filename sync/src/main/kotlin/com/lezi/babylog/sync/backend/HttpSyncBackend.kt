@@ -62,8 +62,6 @@ internal const val MEMBER_REQUEST_VIEW_HEADER = "X-Lezi-Member-Request-View"
 internal const val OPEN_MEMBER_REQUEST_VIEW = "open-v1"
 private val REFRESH_REQUEST_ID_PATTERN = Regex("[A-Za-z0-9_-]{32,128}")
 internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
-private const val MAX_RECONCILE_UNITS = 64
-private const val MAX_RECONCILE_MEDIA_ENTITIES = 8
 internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Self-hosted release APK download bound (full package, not media). */
 internal const val MAX_SYNC_APP_UPDATE_APK_BYTES = 100 * 1024 * 1024
@@ -675,151 +673,6 @@ class HttpSyncBackend internal constructor(
         return result.requireValidPage(page)
     }
 
-    override suspend fun reconcile(
-        session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult {
-        session.requireCurrentReplicaTransport()
-        require(units.isNotEmpty() && units.size <= MAX_RECONCILE_UNITS) {
-            "家庭权威裁决批次必须包含 1..$MAX_RECONCILE_UNITS 个原子单元"
-        }
-        val expected = units.associateBy { it.root.type to it.root.clientUuid }
-        require(expected.size == units.size) { "家庭权威裁决请求 key 必须唯一" }
-        val response = post(
-            session.baseUrl,
-            "/v1/reconcile",
-            session.accessToken,
-            buildJsonObject {
-                put("generation", session.pullGeneration)
-                put("units", buildJsonArray {
-                    units.forEach { unit ->
-                        add(buildJsonObject {
-                            put("content_hash", unit.contentHash)
-                            put("root", unit.root.toJson())
-                            put("media", buildJsonArray {
-                                unit.media.forEach { add(it.toJson()) }
-                            })
-                        })
-                    }
-                })
-            },
-        )
-        return try {
-            val generation = response.requiredNonBlankString("generation", "reconcile")
-            require(generation == session.pullGeneration) {
-                "家庭服务器在权威裁决期间变更了同步代际"
-            }
-            val cursor = response.requiredLong("cursor", "reconcile")
-            require(cursor >= session.pullCursor) {
-                "家庭服务器权威裁决游标早于本机已拉取检查点"
-            }
-            val results = response.requiredArray("results", "reconcile").mapIndexed { index, item ->
-                val value = item as? JsonObject
-                    ?: throw IllegalArgumentException("reconcile.results[$index] 不是对象")
-                val context = "reconcile.results[$index]"
-                val type = value.requiredNonBlankString("entity_type", context)
-                val clientUuid = value.requiredNonBlankString("client_uuid", context)
-                val disposition = when (value.requiredString("disposition", context)) {
-                    "confirmed" -> AuthorityDisposition.Confirmed
-                    "publish" -> AuthorityDisposition.Publish
-                    "adopt_remote" -> AuthorityDisposition.AdoptRemote
-                    "remote_absent_rejected" -> AuthorityDisposition.RemoteAbsentRejected
-                    "retry_authority" -> AuthorityDisposition.RetryAuthority
-                    else -> throw IllegalArgumentException("$context.disposition 无效")
-                }
-                val remoteRoot = when (val root = value["remote_root"]) {
-                    null, JsonNull -> null
-                    is JsonObject -> root.toSyncEntity("$context.remote_root")
-                    else -> throw IllegalArgumentException("$context.remote_root 无效")
-                }
-                val remoteMedia = value.requiredArray("remote_media", context)
-                    .mapIndexed { mediaIndex, media ->
-                        (media as? JsonObject)?.toSyncEntity(
-                            "$context.remote_media[$mediaIndex]",
-                        ) ?: throw IllegalArgumentException(
-                            "$context.remote_media[$mediaIndex] 不是对象",
-                        )
-                    }
-                validateAuthorityRemoteMedia(remoteRoot, remoteMedia, context)
-                if (disposition == AuthorityDisposition.AdoptRemote) {
-                    require(remoteRoot?.type == type && remoteRoot.clientUuid == clientUuid) {
-                        "$context adopt_remote 缺少匹配的 canonical root"
-                    }
-                }
-                AuthorityResult(
-                    type = type,
-                    clientUuid = clientUuid,
-                    requestContentHash = value.requiredNonBlankString(
-                        "request_content_hash",
-                        context,
-                    ),
-                    disposition = disposition,
-                    reason = value.requiredNonBlankString("reason", context),
-                    remoteContentHash = value.optionalString("remote_content_hash", context),
-                    remoteRoot = remoteRoot,
-                    remoteMedia = remoteMedia,
-                )
-            }
-            val grouped = results.groupBy { it.type to it.clientUuid }
-            require(grouped.keys == expected.keys && grouped.values.all { it.size == 1 }) {
-                "家庭服务器权威裁决响应不完整、重复或包含多余 key"
-            }
-            results.forEach { result ->
-                val expectedUnit = expected.getValue(result.type to result.clientUuid)
-                require(
-                    expectedUnit.contentHash == result.requestContentHash,
-                ) {
-                    "家庭服务器权威裁决响应不匹配冻结内容"
-                }
-                when (result.disposition) {
-                    AuthorityDisposition.Confirmed -> {
-                        require(
-                            result.remoteRoot?.authorityEquivalentTo(expectedUnit.root) == true,
-                        ) {
-                            "家庭服务器 confirmed 未返回匹配的 canonical root"
-                        }
-                        require(
-                            result.remoteMedia.sortedBy(SyncEntity::clientUuid)
-                                .zip(expectedUnit.media.sortedBy(SyncEntity::clientUuid))
-                                .let { pairs ->
-                                    pairs.size == expectedUnit.media.size &&
-                                        pairs.size == result.remoteMedia.size &&
-                                        pairs.all { (remote, frozen) ->
-                                            remote.authorityEquivalentTo(frozen)
-                                        }
-                                },
-                        ) {
-                            "家庭服务器 confirmed 未返回完整的 canonical media manifest"
-                        }
-                        require(!result.remoteContentHash.isNullOrBlank()) {
-                            "家庭服务器 confirmed 未证明 canonical content hash"
-                        }
-                    }
-                    AuthorityDisposition.AdoptRemote -> require(
-                        !result.remoteContentHash.isNullOrBlank(),
-                    ) {
-                        "家庭服务器 adopt_remote 未证明 canonical content hash"
-                    }
-                    AuthorityDisposition.Publish,
-                    AuthorityDisposition.RemoteAbsentRejected,
-                    AuthorityDisposition.RetryAuthority,
-                    -> Unit
-                }
-            }
-            ReconcileResult(
-                generation = generation,
-                cursor = cursor,
-                results = results,
-            )
-        } catch (error: IllegalArgumentException) {
-            val serverGeneration = response["generation"]?.jsonPrimitive?.contentOrNull
-                ?.trim()
-                ?.takeIf(String::isNotEmpty)
-                ?: session.pullGeneration
-            throw AuthorityProofException(serverGeneration, error)
-        }
-    }
-
     /**
      * Last health/setup capabilities observed by this backend. Null until the first
      * successful probe — fail closed (no causal publish) rather than assume the wire.
@@ -860,16 +713,6 @@ class HttpSyncBackend internal constructor(
         val result = decodeAuthenticatedSyncHandshake(json)
         lastAdvertisedCapabilities = result.capabilities
         return result
-    }
-
-    override suspend fun causalReconcile(
-        session: SyncSession,
-        units: List<CausalMutationUnit>,
-    ): CausalBatchResult {
-        val posted = postCausalBatch(session, "/v1/causal/reconcile", units)
-        return decodeCausalProof(session, posted.response) {
-            parseCausalReconcileBatchResult(posted, session, "/v1/causal/reconcile")
-        }
     }
 
     override suspend fun causalCommit(
@@ -1393,22 +1236,6 @@ class HttpSyncBackend internal constructor(
             put("generation", session.pullGeneration)
         }
         return post(session.baseUrl, "/v1/bundles", session.accessToken, body).toBundleStageStatus()
-    }
-
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus {
-        val json = requestJsonStream(
-            session.baseUrl,
-            "/v1/bundles/$bundleId/media/$clientUuid",
-            "PUT",
-            session.accessToken,
-            source,
-        )
-        return json.toBundleStageStatus()
     }
 
     override suspend fun commitBundle(
@@ -1972,13 +1799,6 @@ private fun SyncEntity.toJson() = buildJsonObject {
     deletedAt?.let { put("deleted_at", it) }
 }
 
-private fun SyncEntity.authorityEquivalentTo(other: SyncEntity): Boolean =
-    type == other.type &&
-        clientUuid == other.clientUuid &&
-        updatedAt == other.updatedAt &&
-        deletedAt == other.deletedAt &&
-        Json.parseToJsonElement(payloadJson) == Json.parseToJsonElement(other.payloadJson)
-
 private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     type = requiredNonBlankString("type", context),
     clientUuid = requiredNonBlankString("client_uuid", context),
@@ -1991,70 +1811,6 @@ private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     conflictSummary = optionalConflictSummary(context),
     sourceRelationSummary = optionalSourceRelationSummary(context),
 )
-
-private fun validateAuthorityRemoteMedia(
-    root: SyncEntity?,
-    media: List<SyncEntity>,
-    context: String,
-) {
-    require(media.size <= MAX_RECONCILE_MEDIA_ENTITIES) {
-        "$context.remote_media 超过原子清单上限"
-    }
-    require(media.map(SyncEntity::clientUuid).toSet().size == media.size) {
-        "$context.remote_media 包含重复 client_uuid"
-    }
-    if (root == null) {
-        require(media.isEmpty()) { "$context 缺少 remote_root 时不得携带 remote_media" }
-        return
-    }
-    if (root.type in setOf("custom_item", "fulfillment_candidate")) {
-        require(media.isEmpty()) { "$context 的 ${root.type} 根不得携带媒体" }
-        return
-    }
-    val rootPayload = Json.parseToJsonElement(root.payloadJson).jsonObject
-    val rootBaby = rootPayload.authorityOptionalString("baby_client_uuid", context)
-    val selectedAvatar = if (root.type == "baby") {
-        rootPayload.authorityOptionalString("avatar_media_uuid", context)
-    } else {
-        null
-    }
-    media.forEachIndexed { index, entity ->
-        val mediaContext = "$context.remote_media[$index]"
-        require(entity.type == "media") { "$mediaContext.type 必须是 media" }
-        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val kind = payload.authorityOptionalString("kind", mediaContext)
-        val record = payload.authorityOptionalString("record_client_uuid", mediaContext)
-        val baby = payload.authorityOptionalString("baby_client_uuid", mediaContext)
-        val carePlan = payload.authorityOptionalString("care_plan_client_uuid", mediaContext)
-        val matches = when (root.type) {
-            "record" -> kind == "log" && record == root.clientUuid && carePlan == null &&
-                (baby == null || baby == rootBaby)
-            "care_plan" -> kind == "log" && carePlan == root.clientUuid && record == null &&
-                (baby == null || baby == rootBaby)
-            "baby" -> kind == "avatar" && baby == root.clientUuid && record == null &&
-                carePlan == null
-            else -> false
-        }
-        require(matches) { "$mediaContext 不属于对应的 canonical root" }
-    }
-    if (root.type == "baby") {
-        val liveAvatarUuids = media
-            .filter { it.deletedAt == null }
-            .mapTo(mutableSetOf(), SyncEntity::clientUuid)
-        require(liveAvatarUuids == setOfNotNull(selectedAvatar)) {
-            "$context 的 live avatar manifest 与 avatar_media_uuid 不一致"
-        }
-    }
-}
-
-private fun JsonObject.authorityOptionalString(key: String, context: String): String? =
-    when (val value = get(key)) {
-        null, JsonNull -> null
-        is JsonPrimitive -> value.contentOrNull?.also {
-            require(value.isString && it.isNotBlank()) { "$context.$key 无效" }
-        }
-        else -> throw IllegalArgumentException("$context.$key 无效")
-    }
 
 private fun JsonObject.entities(context: String): List<SyncEntity> =
     requiredArray("entities", context).mapIndexed { index, element ->
@@ -2131,42 +1887,6 @@ private inline fun <T> decodeCausalProof(
     throw AuthorityProofException(serverGeneration, error)
 }
 
-private fun parseCausalReconcileBatchResult(
-    posted: PostedCausalBatch,
-    session: SyncSession,
-    context: String,
-): CausalBatchResult {
-    val response = posted.response
-    val generation = response.requiredNonBlankString("generation", context)
-    require(generation == session.pullGeneration) {
-        "家庭服务器在因果同步期间变更了同步代际"
-    }
-    response.requireExactKeys(setOf("generation", "cursor", "results"), context)
-    val results = response.requiredArray("results", context).mapIndexed { index, item ->
-        val value = item as? JsonObject
-            ?: throw IllegalArgumentException("$context.results[$index] 不是对象")
-        value.toCausalUnitResult("$context.results[$index]", generation)
-    }
-    validateCausalResultBinding(results, posted, context)
-    results.forEach { result ->
-        when (result.status) {
-            CausalReconcileStatus.CONFIRMED -> require(!result.stableVersionId.isNullOrBlank()) {
-                "$context confirmed 缺少 stable_version_id"
-            }
-            CausalReconcileStatus.PUBLISH,
-            CausalReconcileStatus.CONFLICT_PREVIEW,
-            CausalReconcileStatus.REJECTED,
-            -> Unit
-            else -> throw IllegalArgumentException("$context 未知因果 reconcile status: ${result.status}")
-        }
-    }
-    val cursor = response.requiredLong("cursor", context)
-    require(cursor >= session.pullCursor) {
-        "家庭服务器因果游标早于本机已拉取检查点"
-    }
-    return CausalBatchResult(generation, cursor, results)
-}
-
 private fun parseCausalCommitBatchResult(
     posted: PostedCausalBatch,
     session: SyncSession,
@@ -2188,15 +1908,15 @@ private fun parseCausalCommitBatchResult(
 }
 
 private fun validateCausalResultBinding(
-    results: List<CausalProofUnit>,
+    results: List<CausalCommitUnitResult>,
     posted: PostedCausalBatch,
     context: String,
 ) {
-    val byMutation = results.groupBy(CausalProofUnit::mutationId)
+    val byMutation = results.groupBy(CausalCommitUnitResult::mutationId)
     require(byMutation.keys == posted.expectedByMutation.keys && byMutation.values.all { it.size == 1 }) {
         "家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key"
     }
-    require(results.map(CausalProofUnit::mutationId) == posted.expectedByMutation.keys.toList()) {
+    require(results.map(CausalCommitUnitResult::mutationId) == posted.expectedByMutation.keys.toList()) {
         "家庭服务器因果响应顺序与请求不一致"
     }
     val byKey = results.groupBy { result ->
@@ -2294,53 +2014,6 @@ private val CAUSAL_COMMIT_TERMINAL_CODES = setOf(
     "missing_restore_media",
     "cas_mismatch",
 )
-
-private fun JsonObject.toCausalUnitResult(
-    context: String,
-    fallbackGeneration: String,
-): CausalUnitResult {
-    val status = requiredNonBlankString("status", context)
-    val generation = optionalNonBlankString("generation", context) ?: fallbackGeneration
-    val stableRootPresent = get("stable_root") is JsonObject
-    val stableRoot = when (val root = get("stable_root")) {
-        null, JsonNull -> "{}"
-        is JsonObject -> root.toString()
-        else -> throw IllegalArgumentException("$context.stable_root 无效")
-    }
-    val stableMediaPresent = get("stable_media") is JsonArray
-    val media = when (val raw = get("stable_media")) {
-        null, JsonNull -> emptyList()
-        is JsonArray -> raw.mapIndexed { index, element ->
-            (element as? JsonObject)?.toCausalMediaItem("$context.stable_media[$index]")
-                ?: throw IllegalArgumentException("$context.stable_media[$index] 不是对象")
-        }
-        else -> throw IllegalArgumentException("$context.stable_media 无效")
-    }
-    val conflictingPaths = when (val raw = get("conflicting_paths")) {
-        null, JsonNull -> emptyList()
-        is JsonArray -> raw.mapIndexed { index, element ->
-            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
-                ?: throw IllegalArgumentException("$context.conflicting_paths[$index] 无效")
-        }
-        else -> throw IllegalArgumentException("$context.conflicting_paths 无效")
-    }
-    return CausalUnitResult(
-        status = status,
-        mutationId = requiredNonBlankString("mutation_id", context),
-        requestHash = requiredNonBlankString("request_hash", context),
-        generation = generation,
-        stableVersionId = optionalNonBlankString("stable_version_id", context),
-        stableRootJson = stableRoot,
-        stableMedia = media,
-        stableRootPresent = stableRootPresent,
-        stableMediaPresent = stableMediaPresent,
-        branchVersionId = optionalNonBlankString("branch_version_id", context),
-        conflictId = optionalNonBlankString("conflict_id", context),
-        code = optionalNonBlankString("code", context),
-        reason = optionalNonBlankString("reason", context),
-        conflictingPaths = conflictingPaths,
-    )
-}
 
 private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = CausalMediaItem(
     mediaUuid = requiredNonBlankString("media_uuid", context),
@@ -2749,15 +2422,6 @@ private fun JsonObject.requiredString(key: String, context: String): String {
 private fun JsonObject.requiredNonBlankString(key: String, context: String): String =
     requiredString(key, context).trim().also {
         require(it.isNotEmpty()) { "$context 响应 $key 为空" }
-    }
-
-private fun JsonObject.optionalString(key: String, context: String): String? =
-    when (val value = get(key)) {
-        null, JsonNull -> null
-        is JsonPrimitive -> value.contentOrNull?.also {
-            require(value.isString && it.isNotBlank()) { "$context.$key 无效" }
-        }
-        else -> throw IllegalArgumentException("$context.$key 无效")
     }
 
 private fun JsonObject.requiredLong(key: String, context: String): Long {

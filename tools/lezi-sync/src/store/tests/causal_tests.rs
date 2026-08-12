@@ -1,4 +1,4 @@
-//! Causal reconcile / commit / pull summary / resolution — Store façade seams.
+//! Causal commit / pull summary / resolution — Store façade seams.
 
 use super::super::causal::{MAX_CAUSAL_UNITS, VERSION_PROVENANCE_PRINCIPAL};
 use super::super::causal_admission::MAX_OPEN_CAUSAL_BRANCHES_PER_ROOT;
@@ -742,7 +742,7 @@ fn causal_commit_charges_oversize_and_content_rejections_and_mixed_batches() {
         oversize
             .store
             .causal_commit(&oversize.owner, units, 1_700_000_001),
-        Err(StoreError::InvalidReconcileBatch)
+        Err(StoreError::InvalidCausalBatch)
     ));
     assert_principal_saturated(&oversize, 1_700_000_001);
 
@@ -877,41 +877,6 @@ fn causal_commit_mixed_live_delete_and_media_units_share_one_terminal_batch() {
     assert!(committed.results[0].stable_deleted_at.is_none());
     assert!(committed.results[1].stable_deleted_at.is_some());
     assert_eq!(committed.results[2].stable_media, vec![media]);
-}
-
-#[test]
-fn causal_reconcile_publish_then_commit_accepted() {
-    let fx = CausalFx::new();
-    let record_id = Uuid::new_v4();
-    let unit = mut_unit(
-        "record",
-        record_id,
-        None,
-        record_root(fx.baby_id, "n", 80, 15),
-        false,
-    );
-    let dry = fx
-        .store
-        .causal_reconcile(&fx.owner, vec![unit.clone()], 1_700_000_000)
-        .unwrap();
-    assert_eq!(dry.results[0].status, "publish");
-
-    let committed = fx
-        .store
-        .causal_commit(&fx.owner, vec![unit.clone()], 1_700_000_000)
-        .unwrap();
-    assert_eq!(committed.results[0].status, "accepted");
-    let v = committed.results[0].stable_version_id.clone().unwrap();
-
-    // Confirmed when expectation matches stable.
-    let mut same = unit;
-    same.mutation_id = Uuid::new_v4().to_string();
-    same.base_version = Some(v.clone());
-    let conf = fx
-        .store
-        .causal_reconcile(&fx.owner, vec![same], 1_700_000_001)
-        .unwrap();
-    assert_eq!(conf.results[0].status, "confirmed");
 }
 
 #[test]
@@ -1189,7 +1154,6 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
     assert_eq!(left_result.results[0].status, "accepted");
     let v2 = left_result.results[0].stable_version_id.clone().unwrap();
 
-    // Reconcile preview before commit.
     let right = mut_unit(
         "record",
         record_id,
@@ -1197,12 +1161,6 @@ fn causal_same_field_conflict_branches_and_resolve_cas() {
         record_root(fx.baby_id, "c", 100, 40),
         false,
     );
-    let preview = fx
-        .store
-        .causal_reconcile(&fx.owner, vec![right.clone()], 1_700_000_002)
-        .unwrap();
-    assert_eq!(preview.results[0].status, "conflict_preview");
-
     let branched = fx
         .store
         .causal_commit(&fx.owner, vec![right], 1_700_000_002)
@@ -5417,57 +5375,6 @@ fn pull_paginates_every_mandatory_conflict_summary_without_cursor_loss() {
 }
 
 #[test]
-fn causal_reconcile_live_over_tombstone_is_conflict_preview_not_branched() {
-    let fx = CausalFx::new();
-    let record_id = Uuid::new_v4();
-    let create = mut_unit(
-        "record",
-        record_id,
-        None,
-        record_root(fx.baby_id, "a", 100, 20),
-        false,
-    );
-    let v1 = fx
-        .store
-        .causal_commit(&fx.owner, vec![create], 1_700_000_000)
-        .unwrap()
-        .results[0]
-        .stable_version_id
-        .clone()
-        .unwrap();
-    let del = mut_unit(
-        "record",
-        record_id,
-        Some(&v1),
-        record_root(fx.baby_id, "a", 100, 21),
-        true,
-    );
-    fx.store
-        .causal_commit(&fx.owner, vec![del], 1_700_000_001)
-        .unwrap();
-    let edit = mut_unit(
-        "record",
-        record_id,
-        Some(&v1),
-        record_root(fx.baby_id, "b", 100, 22),
-        false,
-    );
-    let dry = fx
-        .store
-        .causal_reconcile(&fx.owner, vec![edit], 1_700_000_002)
-        .unwrap();
-    assert_eq!(dry.results[0].status, "conflict_preview");
-    assert!(dry.results[0].branch_version_id.is_none());
-    assert!(dry.results[0].conflict_id.is_none());
-    assert!(dry.results[0]
-        .conflicting_paths
-        .as_ref()
-        .unwrap()
-        .iter()
-        .any(|p| p == "/_mutation.deleted"));
-}
-
-#[test]
 fn causal_unknown_root_field_rejected() {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();
@@ -6368,25 +6275,10 @@ fn causal_commit_projects_stable_media_into_pull_entities() {
 }
 
 #[test]
-fn causal_stable_head_blocks_legacy_bundle_commit() {
+fn legacy_bundle_rejects_mutable_root_without_or_with_causal_head() {
     let fx = CausalFx::new();
     let record_id = Uuid::new_v4();
-    let create = mut_unit(
-        "record",
-        record_id,
-        None,
-        record_root(fx.baby_id, "a", 100, 20),
-        false,
-    );
-    let committed = fx
-        .store
-        .causal_commit(&fx.owner, vec![create], 1_700_000_000)
-        .unwrap();
-    assert_eq!(committed.results[0].status, "accepted");
-
-    let err = publish_root(
-        &fx.store,
-        &fx.owner,
+    let legacy_record = || {
         entity(
             "record",
             record_id,
@@ -6401,10 +6293,47 @@ fn causal_stable_head_blocks_legacy_bundle_commit() {
                 "payload_json": {"amount_ml": 200},
                 "schema_version": 2,
             }),
-        ),
-        100,
-    )
-    .unwrap_err();
+        )
+    };
+    let fresh_err = fx
+        .store
+        .stage_bundle(
+            &fx.owner,
+            &Uuid::new_v4().to_string(),
+            legacy_record(),
+            vec![],
+            100,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        fresh_err,
+        StoreError::LegacyBundleCausalRootUnsupported(ref entity_type)
+            if entity_type == "record"
+    ));
+
+    let create = mut_unit(
+        "record",
+        record_id,
+        None,
+        record_root(fx.baby_id, "a", 100, 20),
+        false,
+    );
+    let committed = fx
+        .store
+        .causal_commit(&fx.owner, vec![create], 1_700_000_000)
+        .unwrap();
+    assert_eq!(committed.results[0].status, "accepted");
+
+    let err = fx
+        .store
+        .stage_bundle(
+            &fx.owner,
+            &Uuid::new_v4().to_string(),
+            legacy_record(),
+            vec![],
+            100,
+        )
+        .unwrap_err();
     assert!(matches!(
         err,
         StoreError::LegacyBundleCausalRootUnsupported(ref entity_type)

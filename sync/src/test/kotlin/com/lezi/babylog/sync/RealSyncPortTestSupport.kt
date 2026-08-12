@@ -77,23 +77,17 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
-import com.lezi.babylog.sync.backend.CanonicalRecordAuthor
-import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalCommitRejectedException
 import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitUnitResult
 import com.lezi.babylog.sync.backend.CausalMutationUnit
-import com.lezi.babylog.sync.backend.CausalReconcileStatus
-import com.lezi.babylog.sync.backend.CausalUnitResult
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.DisasterRestoreBatch
@@ -106,8 +100,6 @@ import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
 import com.lezi.babylog.sync.backend.PullPageRequest
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.REQUIRED_CAUSAL_WIRE_CAPABILITIES
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
@@ -122,7 +114,6 @@ import com.lezi.babylog.sync.backend.SyncHandshakeLimits
 import com.lezi.babylog.sync.backend.SyncHandshakeRetryHints
 import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
-import com.lezi.babylog.sync.engine.AtomicBundleId
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
@@ -154,7 +145,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
 import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
@@ -249,49 +239,26 @@ internal fun remoteRecord() = SyncEntity(
     updatedAt = 210,
 )
 
-internal data class PushedBatch(
-    val session: SyncSession,
-    val entities: List<SyncEntity>,
-)
-
 internal class RecordingSyncBackend : SyncBackend {
-    val pushes = mutableListOf<PushedBatch>()
-    val pushAttempts = mutableListOf<SyncSession>()
     val operationOrder = mutableListOf<String>()
     val syncOrder = mutableListOf<String>()
-    val mediaUploads = mutableListOf<String>()
     var pullCount = 0
     var nextPull: PullResult? = null
     val pullResults = ArrayDeque<PullResult>()
     val pullFailures = ArrayDeque<Throwable>()
-    val pushFailures = ArrayDeque<Throwable>()
     val pullCursors = mutableListOf<Long>()
-    val reconciledUnits = mutableListOf<List<ReconcileUnitDraft>>()
-    var nextReconcile: ReconcileResult? = null
-    var onReconcile: (suspend (List<ReconcileUnitDraft>) -> Unit)? = null
-    val causalReconciledUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalMediaPreimageBytes = mutableListOf<Pair<String, ByteArray>>()
     var onCausalMediaPreimage: (suspend (String) -> Unit)? = null
-    var nextCausalReconcile: CausalBatchResult? = null
-    var nextCausalCommit: CausalBatchResult? = null
+    var nextCausalCommit: CausalCommitBatchResult? = null
     var nextCausalCommitFailure: CausalCommitRejectedException? = null
     val conflictSnapshotPages = ArrayDeque<FetchedConflictSnapshotPage>()
     val conflictSnapshotPageFailures = ArrayDeque<Throwable>()
     val conflictSnapshotPageRequests = mutableListOf<ConflictSnapshotPageRequest>()
     var conflictSnapshotPageHandler:
         (suspend (String, ConflictSnapshotPageRequest) -> FetchedConflictSnapshotPage)? = null
-    var onCausalReconcile: (suspend (List<CausalMutationUnit>) -> Unit)? = null
     var onCausalCommit: (suspend (List<CausalMutationUnit>) -> Unit)? = null
-    /**
-     * Opt-in causal path for ReplicaSyncEngine tests. When false and no causal
-     * hooks/results are prepared, methods throw [UnsupportedOperationException]
-     * so the engine falls back to the legacy authority reconcile path.
-     */
-    var enableCausal: Boolean = false
-    /** When true, default causal reconcile returns confirmed instead of publish. */
-    var causalReconcileConfirmed: Boolean = false
-    var afterPush: (() -> Unit)? = null
+    var enableCausal: Boolean = true
     var afterCommit: (suspend () -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
     var nextPullPageIndexOverride: Int? = null
@@ -316,8 +283,6 @@ internal class RecordingSyncBackend : SyncBackend {
     var handshakeFailure: Throwable? = null
     var handshakeCalls = 0
     var handshakeGate: CompletableDeferred<Unit>? = null
-    var rejectMemberAvatarPointers = false
-    var enforceBundleReferences = false
     var beforeGetMediaReturn: (suspend () -> Unit)? = null
     var beforePullReturn: (suspend () -> Unit)? = null
     var getMediaFailure: Throwable? = null
@@ -374,7 +339,6 @@ internal class RecordingSyncBackend : SyncBackend {
     val updatedDisplayNames = mutableListOf<String>()
     val renamedFamilyNames = mutableListOf<String?>()
     var renameFamilyFailure: Throwable? = null
-    var nextPushRecordAuthors: List<CanonicalRecordAuthor>? = null
     var nextCreateFamilyName: String? = null
     var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextCreateReclaimed: Boolean = false
@@ -389,7 +353,6 @@ internal class RecordingSyncBackend : SyncBackend {
             "atomic_bundle",
             "record_membership_author",
             "device_disaster_restore_v1",
-            "authoritative_reconcile_v1",
             "validated_deferred_fulfillment_v1",
             "causal_versions",
             "wake_observation",
@@ -699,63 +662,6 @@ internal class RecordingSyncBackend : SyncBackend {
         return nextMemberLoginClaim
     }
 
-    suspend fun push(session: SyncSession, entities: List<SyncEntity>): LegacyPushResult {
-        pushAttempts += session
-        pushFailures.removeFirstOrNull()?.let { throw it }
-        val available = knownEntities + entities.map { it.type to it.clientUuid }
-        entities.forEach { entity ->
-            val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-            when (entity.type) {
-                "baby" -> payload["avatar_media_uuid"]
-                    ?.jsonPrimitive
-                    ?.contentOrNull
-                    ?.takeUnless { it == "null" }
-                    ?.let {
-                        if (rejectMemberAvatarPointers && session.role == FamilyRole.Member) {
-                            throw SyncHttpException(403)
-                        }
-                        require("media" to it in available)
-                    }
-                "record" -> payload["baby_client_uuid"]
-                    ?.jsonPrimitive
-                    ?.contentOrNull
-                    ?.let { require("baby" to it in available) }
-                "media" -> when (payload["kind"]?.jsonPrimitive?.contentOrNull) {
-                    "avatar" -> payload["baby_client_uuid"]
-                        ?.jsonPrimitive
-                        ?.contentOrNull
-                        ?.let { require("baby" to it in available) }
-                    "log" -> payload["record_client_uuid"]
-                        ?.jsonPrimitive
-                        ?.contentOrNull
-                        ?.let { require("record" to it in available) }
-                }
-            }
-        }
-        val pushOperation = "push:${entities.joinToString(",") { it.type }}"
-        operationOrder += pushOperation
-        syncOrder += pushOperation
-        pushes += PushedBatch(session, entities)
-        knownEntities += entities.map { it.type to it.clientUuid }
-        afterPush?.invoke()
-        return LegacyPushResult(
-            applied = entities.size,
-            recordAuthors = nextPushRecordAuthors ?: entities
-                .filter { it.type == "record" }
-                .map { entity ->
-                    val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-                    CanonicalRecordAuthor(
-                        clientUuid = entity.clientUuid,
-                        createdByMembershipId = payload["created_by_membership_id"]
-                            ?.jsonPrimitive
-                            ?.contentOrNull
-                            ?.takeIf(String::isNotBlank)
-                            ?: session.membershipId,
-                    )
-                },
-        )
-    }
-
     override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
         pullCount++
         pullCursors += session.pullCursor
@@ -772,41 +678,8 @@ internal class RecordingSyncBackend : SyncBackend {
         )).copy(pageIndex = nextPullPageIndexOverride ?: page.pageIndex)
     }
 
-    override suspend fun reconcile(
-        session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult {
-        reconciledUnits += units
-        syncOrder += "reconcile:${units.size}"
-        onReconcile?.invoke(units)
-        return nextReconcile ?: ReconcileResult(
-            generation = session.pullGeneration,
-            cursor = session.pullCursor,
-            results = units.map { unit ->
-                val isMemberLocalBaby = session.role == FamilyRole.Member &&
-                    unit.root.type == "baby"
-                AuthorityResult(
-                    type = unit.root.type,
-                    clientUuid = unit.root.clientUuid,
-                    requestContentHash = unit.contentHash,
-                    disposition = if (isMemberLocalBaby) {
-                        AuthorityDisposition.RemoteAbsentRejected
-                    } else {
-                        AuthorityDisposition.Publish
-                    },
-                    reason = if (isMemberLocalBaby) {
-                        "member_local_baby"
-                    } else {
-                        "authoritative_absence"
-                    },
-                )
-            },
-        )
-    }
-
     override fun supportsCausalWire(): Boolean =
-        enableCausal || onCausalReconcile != null || nextCausalReconcile != null ||
-            onCausalCommit != null || nextCausalCommit != null
+        enableCausal || onCausalCommit != null || nextCausalCommit != null
 
     override suspend fun putCausalMediaPreimage(
         session: SyncSession,
@@ -838,30 +711,6 @@ internal class RecordingSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun causalReconcile(
-        session: SyncSession,
-        units: List<CausalMutationUnit>,
-    ): CausalBatchResult {
-        if (!supportsCausalWire()) {
-            throw UnsupportedOperationException("Causal reconcile is not implemented")
-        }
-        causalReconciledUnits += units
-        syncOrder += "causal_reconcile:${units.size}"
-        onCausalReconcile?.invoke(units)
-        val prepared = nextCausalReconcile
-        nextCausalReconcile = null
-        if (prepared != null) return prepared
-        return defaultCausalBatch(
-            session = session,
-            units = units,
-            status = when {
-                causalReconcileConfirmed -> CausalReconcileStatus.CONFIRMED
-                else -> CausalReconcileStatus.PUBLISH
-            },
-            useContentHash = true,
-        )
-    }
-
     override suspend fun causalCommit(
         session: SyncSession,
         units: List<CausalMutationUnit>,
@@ -878,39 +727,16 @@ internal class RecordingSyncBackend : SyncBackend {
         }
         val prepared = nextCausalCommit
         nextCausalCommit = null
-        if (prepared != null) return CausalCommitBatchResult(
-            prepared.generation,
-            prepared.results.map { it.toCommitResult() },
-        )
-        return defaultCausalBatch(
+        val result = prepared ?: defaultCausalBatch(
             session = session,
             units = units,
             status = CausalCommitStatus.ACCEPTED,
             mintStableVersion = true,
             useContentHash = true,
-        ).let { batch ->
-            CausalCommitBatchResult(
-                batch.generation,
-                batch.results.map { it.toCommitResult() },
-            )
-        }
+        )
+        afterCommit?.invoke()
+        return result
     }
-
-    private fun CausalUnitResult.toCommitResult() = CausalCommitUnitResult(
-        status = status,
-        mutationId = mutationId,
-        requestHash = requestHash,
-        replay = replay,
-        stableVersionId = stableVersionId.orEmpty(),
-        stableRootJson = stableRootJson,
-        stableMedia = stableMedia,
-        stableDeleted = stableDeleted,
-        stableDeletedAt = stableDeletedAt,
-        stableRootPresent = stableRootPresent,
-        stableMediaPresent = stableMediaPresent,
-        branchVersionId = branchVersionId,
-        conflictId = conflictId,
-    )
 
     override suspend fun fetchConflictSnapshotPage(
         session: SyncSession,
@@ -930,16 +756,15 @@ internal class RecordingSyncBackend : SyncBackend {
         status: String,
         mintStableVersion: Boolean = false,
         useContentHash: Boolean = false,
-    ): CausalBatchResult = CausalBatchResult(
+    ): CausalCommitBatchResult = CausalCommitBatchResult(
         generation = session.pullGeneration,
-        cursor = session.pullCursor,
         results = units.map { unit ->
             val stableVersion = when {
                 mintStableVersion -> "v-${unit.mutationId.take(8)}"
                 unit.baseVersion != null -> unit.baseVersion
                 else -> "v-confirmed-${unit.mutationId.take(8)}"
             }
-            CausalUnitResult(
+            CausalCommitUnitResult(
                 status = status,
                 mutationId = unit.mutationId,
                 requestHash = if (useContentHash) {
@@ -947,14 +772,26 @@ internal class RecordingSyncBackend : SyncBackend {
                 } else {
                     "hash-${unit.mutationId}"
                 },
-                generation = session.pullGeneration,
+                replay = false,
                 stableVersionId = stableVersion,
-                stableRootJson = if (unit.entityType == "wake_observation") {
-                    val root = Json.parseToJsonElement(unit.rootJson).jsonObject.toMutableMap()
-                    root["observer_membership_id"] = JsonPrimitive(session.membershipId)
-                    JsonObject(root).toString()
-                } else {
-                    unit.rootJson.ifBlank { "{}" }
+                stableRootJson = when (unit.entityType) {
+                    "wake_observation" -> {
+                        val root = Json.parseToJsonElement(unit.rootJson).jsonObject.toMutableMap()
+                        root["observer_membership_id"] = JsonPrimitive(session.membershipId)
+                        JsonObject(root).toString()
+                    }
+
+                    "record", "custom_item", "care_plan" -> {
+                        val root = Json.parseToJsonElement(unit.rootJson).jsonObject.toMutableMap()
+                        if (root["created_by_membership_id"]?.toString() in
+                            setOf(null, "null", "\"\"")
+                        ) {
+                            root["created_by_membership_id"] = JsonPrimitive(session.membershipId)
+                        }
+                        JsonObject(root).toString()
+                    }
+
+                    else -> unit.rootJson.ifBlank { "{}" }
                 },
                 stableMedia = unit.media,
                 stableDeleted = unit.deleted,
@@ -1034,16 +871,6 @@ internal class RecordingSyncBackend : SyncBackend {
         onDeleteFamily()
     }
 
-    suspend fun putMedia(
-        session: SyncSession,
-        clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
-    ) {
-        operationOrder += "put_media:$clientUuid"
-        mediaUploads += clientUuid
-    }
-
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray {
         beforeGetMediaReturn?.also { beforeGetMediaReturn = null }?.invoke()
         getMediaFailure?.let { throw it }
@@ -1076,70 +903,24 @@ internal class RecordingSyncBackend : SyncBackend {
     }
 
     val stagedBundles = mutableListOf<AtomicBundleDraft>()
-    val bundleMediaUploads = mutableListOf<Pair<String, String>>()
     val committedBundles = mutableListOf<String>()
-    var stageBundleFailure: Throwable? = null
-    var putBundleMediaFailure: Throwable? = null
-    var onPutBundleMedia: (suspend (clientUuid: String) -> Unit)? = null
-    var commitBundleFailure: Throwable? = null
     var failCommitRootTypeOnce: Pair<String, Throwable>? = null
-    var nextCommitRecordAuthors: List<CanonicalRecordAuthor>? = null
-    var stageBundleStatus = "staging"
-    var stageBundleMissingMedia: List<String>? = null
-    var stageBundleStagedMedia: List<String> = emptyList()
 
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,
     ): BundleStageStatus {
-        stageBundleFailure?.let { throw it }
-        if (enforceBundleReferences) {
-            val payload = Json.parseToJsonElement(draft.root.payloadJson).jsonObject
-            listOf(
-                "baby_client_uuid" to "baby",
-                "custom_item_client_uuid" to "custom_item",
-            ).forEach { (payloadKey, entityType) ->
-                payload[payloadKey]
-                    ?.jsonPrimitive
-                    ?.contentOrNull
-                    ?.takeIf(String::isNotBlank)
-                    ?.let { clientUuid ->
-                        if (entityType to clientUuid !in knownEntities) {
-                            throw SyncHttpException(
-                                statusCode = 409,
-                                responseBody =
-                                    """{"detail":"${draft.root.type} $payloadKey does not exist"}""",
-                            )
-                        }
-                    }
-            }
+        require(draft.root.type == "fulfillment_candidate" && draft.media.isEmpty()) {
+            "bundle must contain one fulfillment_candidate and no media"
         }
         operationOrder += "stage:${draft.root.type}"
         syncOrder += "stage:${draft.root.type}"
         stagedBundles += draft
         return BundleStageStatus(
             bundleId = draft.bundleId,
-            status = stageBundleStatus,
-            missingMedia = stageBundleMissingMedia
-                ?: draft.media.filter { it.deletedAt == null }.map { it.clientUuid },
-            stagedMedia = stageBundleStagedMedia,
-        )
-    }
-
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus {
-        putBundleMediaFailure?.let { throw it }
-        onPutBundleMedia?.invoke(clientUuid)
-        operationOrder += "put_bundle_media:$clientUuid"
-        bundleMediaUploads += bundleId to clientUuid
-        return BundleStageStatus(
-            bundleId = bundleId,
             status = "staging",
-            stagedMedia = listOf(clientUuid),
+            missingMedia = emptyList(),
+            stagedMedia = emptyList(),
         )
     }
 
@@ -1154,37 +935,18 @@ internal class RecordingSyncBackend : SyncBackend {
                 failCommitRootTypeOnce = null
                 throw failure
             }
-        commitBundleFailure?.let { throw it }
         committedBundles += bundleId
         stagedDraft?.let { draft ->
             knownEntities += draft.root.type to draft.root.clientUuid
             draft.media.forEach { knownEntities += it.type to it.clientUuid }
         }
         afterCommit?.invoke()
-        val recordAuthors = nextCommitRecordAuthors ?: stagedBundles
-            .lastOrNull { it.bundleId == bundleId }
-            ?.root
-            ?.takeIf { it.type == "record" }
-            ?.let { root ->
-                val payload = Json.parseToJsonElement(root.payloadJson).jsonObject
-                listOf(
-                    CanonicalRecordAuthor(
-                        clientUuid = root.clientUuid,
-                        createdByMembershipId = payload["created_by_membership_id"]
-                            ?.jsonPrimitive
-                            ?.contentOrNull
-                            ?.takeIf(String::isNotBlank)
-                            ?: session.membershipId,
-                    ),
-                )
-            }
-            .orEmpty()
         return BundleCommitResult(
             bundleId = bundleId,
             status = "committed",
             applied = 1,
             cursor = session.pullCursor,
-            recordAuthors = recordAuthors,
+            recordAuthors = emptyList(),
         )
     }
 }
@@ -1816,7 +1578,6 @@ internal class SyncRig(
     appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     apkIdentityReader: AppUpdateApkIdentityReader = FakeAppUpdateApkIdentityReader(),
     appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
-    allowHistoricalMutableRootEvidence: Boolean = true,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = (syncPreferences ?: MemorySyncPreferences(session)).also {
@@ -1895,7 +1656,6 @@ internal class SyncRig(
         appUpdateInstaller = appUpdateInstaller,
         apkIdentityReader = apkIdentityReader,
         appUpdateCacheDir = appUpdateCacheDir,
-        allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
 
     suspend fun awaitStartupRecovery() {
@@ -2275,9 +2035,14 @@ internal class RecordingTransactionRunner : DatabaseTransactionRunner {
     var runCount = 0
     var depth = 0
     var maxDepth = 0
+    var failBeforeNextBlock: Throwable? = null
 
     override suspend fun <T> run(block: suspend () -> T): T {
         runCount += 1
+        failBeforeNextBlock?.let {
+            failBeforeNextBlock = null
+            throw it
+        }
         depth += 1
         maxDepth = maxOf(maxDepth, depth)
         return try {

@@ -28,7 +28,6 @@ mod conflict_snapshots;
 mod identity;
 mod media;
 mod pull;
-mod reconciliation;
 mod restore;
 mod schema;
 mod source_relations;
@@ -44,14 +43,12 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::model::Entity;
-
 #[allow(unused_imports)]
 use self::SourceRelationReceipt as _;
 pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
 pub use causal::{
-    CausalBatchResult, CausalCommitResult, CausalMutation, CausalUnitResult,
-    ConflictResolutionChoice, ConflictSummary, ResolveConflictInput, ResolveConflictResult,
+    CausalCommitResult, CausalMutation, CausalUnitResult, ConflictResolutionChoice,
+    ConflictSummary, ResolveConflictInput, ResolveConflictResult,
 };
 pub(crate) use causal::{DurableCausalCommit, MAX_CAUSAL_UNITS};
 pub(crate) use causal_admission::CausalAdmissionConfig;
@@ -71,10 +68,7 @@ pub use source_relations::{
 
 // Re-exported types are the public Store/HTTP causal seams (ticket 03).
 #[allow(unused_imports)]
-use self::{
-    CausalBatchResult as _, CausalCommitResult as _, ConflictDetailPage as _,
-    ResolveConflictResult as _,
-};
+use self::{CausalCommitResult as _, ConflictDetailPage as _, ResolveConflictResult as _};
 pub(crate) use identity::anonymize_membership_authorship_fields;
 pub(crate) use schema::VERSIONED_ENTITY_TYPES;
 #[cfg(test)]
@@ -224,42 +218,6 @@ pub struct PullPage {
     pub family_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ReconcileUnit {
-    pub root: Entity,
-    pub media: Vec<Entity>,
-    /// Opaque client-computed identity for the frozen local package.
-    pub content_hash: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReconcileDisposition {
-    Confirmed,
-    Publish,
-    AdoptRemote,
-    RemoteAbsentRejected,
-    RetryAuthority,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ReconcileResult {
-    pub entity_type: String,
-    pub client_uuid: String,
-    pub request_content_hash: String,
-    pub disposition: ReconcileDisposition,
-    pub reason: String,
-    pub remote_content_hash: Option<String>,
-    pub remote_root: Option<Entity>,
-    pub remote_media: Vec<Entity>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ReconcileBatch {
-    pub cursor: i64,
-    pub results: Vec<ReconcileResult>,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RecordAuthor {
     pub client_uuid: String,
@@ -398,11 +356,11 @@ pub enum StoreError {
     CausalMediaStagingQuota(&'static str),
     #[error("causal media staging metadata is invalid")]
     InvalidCausalMediaStaging,
-    /// A legacy timestamp-LWW bundle may never advance a root after causal cutover.
-    #[error("legacy bundle cannot advance causal root type {0}")]
+    /// Atomic bundles are retained only for immutable fulfillment facts.
+    #[error("atomic bundle does not accept mutable root type {0}")]
     LegacyBundleCausalRootUnsupported(String),
-    #[error("authoritative reconcile batch is invalid")]
-    InvalidReconcileBatch,
+    #[error("causal commit batch is invalid")]
+    InvalidCausalBatch,
     #[error("causal commit rejected for mutation {mutation_id}: {code}")]
     CausalCommitRejected { mutation_id: String, code: String },
     #[error("causal commit admission saturated: {0:?}")]
@@ -451,7 +409,6 @@ pub struct BundleCommitResult {
 
 #[derive(Debug, Clone)]
 pub struct StoredBundle {
-    pub media: Vec<Entity>,
     pub required_media: Vec<String>,
     pub media_integrity: BTreeMap<String, BundleMediaIntegrity>,
     pub status: String,

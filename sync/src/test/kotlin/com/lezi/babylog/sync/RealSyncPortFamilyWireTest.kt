@@ -71,8 +71,6 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
@@ -88,8 +86,6 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -99,7 +95,6 @@ import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
-import com.lezi.babylog.sync.engine.AtomicBundleId
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
@@ -125,7 +120,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
@@ -133,7 +127,6 @@ class RealSyncPortFamilyWireTest {
     @Test
     fun switchingFamilyRequeuesEverySharedEntityBeforePublishingDependencies() = runTest {
         val rig = SyncRig(session = joinedSession("family-old"))
-        rig.backend.enforceBundleReferences = true
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val customItemId = rig.customItems.seed(
             CustomItemEntity(
@@ -186,33 +179,34 @@ class RealSyncPortFamilyWireTest {
         ).isTrue()
         assertThat(rig.records.getByClientUuid(recordUuid)?.familyPublishedUpdatedAt).isNull()
         assertThat(rig.carePlans.getByClientUuid(planUuid)?.familyPublishedUpdatedAt).isNull()
-        rig.preferences.saveSession(joinedSession("family-new"))
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
-
-        assertThat(result.exceptionOrNull()).isNull()
-        assertThat(rig.backend.operationOrder)
-            .containsExactly(
-                "stage:baby",
-                "stage:custom_item",
-                "stage:care_plan",
-                "stage:record",
-                "stage:fulfillment_candidate",
-            )
-            .inOrder()
-        assertThat(rig.customItems.get("custom-local")?.syncDirty).isFalse()
-        assertThat(rig.fulfillmentCandidates.getByClientUuid("candidate-local")?.syncDirty)
-            .isFalse()
+        assertThat(rig.babies.listPendingSync().map(BabyEntity::clientUuid))
+            .containsExactly("baby-local")
+        assertThat(rig.customItems.listPendingSync().map(CustomItemEntity::clientUuid))
+            .containsExactly("custom-local")
+        assertThat(rig.records.listPendingSync().map(RecordEntity::clientUuid))
+            .containsExactly(recordUuid)
+        assertThat(rig.carePlans.listPendingSync().map(CarePlanEntity::clientUuid))
+            .containsExactly(planUuid)
+        assertThat(rig.fulfillmentCandidates.listPendingSync().map { it.clientUuid })
+            .containsExactly("candidate-local")
     }
 
     @Test
     fun switchingFamilyReplacesFamilyScopedOwnershipStamps() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000101"
+        val customItemUuid = "00000000-0000-0000-0000-000000000102"
+        val recordUuid = "00000000-0000-0000-0000-000000000103"
+        val planUuid = "00000000-0000-0000-0000-000000000104"
+        val candidateUuid = "00000000-0000-0000-0000-000000000105"
         val rig = SyncRig(
             session = joinedSession("family-old").copy(membershipId = "membership-old"),
         )
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyId = rig.babies.seed(
+            localBaby().copy(clientUuid = babyUuid, syncDirty = false),
+        )
         val customItemId = rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "custom-family-stamp",
+                clientUuid = customItemUuid,
                 familyId = 1,
                 name = "抚触",
                 iconSlot = 2,
@@ -221,8 +215,6 @@ class RealSyncPortFamilyWireTest {
                 syncDirty = false,
             ),
         )
-        val recordUuid = "record-family-stamp"
-        val planUuid = "plan-family-stamp"
         rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = recordUuid,
@@ -247,7 +239,7 @@ class RealSyncPortFamilyWireTest {
         )
         rig.fulfillmentCandidates.seed(
             FulfillmentCandidateEntity(
-                clientUuid = "candidate-family-stamp",
+                clientUuid = candidateUuid,
                 carePlanClientUuid = planUuid,
                 recordClientUuid = recordUuid,
                 confirmedAt = 121,
@@ -266,11 +258,26 @@ class RealSyncPortFamilyWireTest {
         rig.preferences.saveSession(
             joinedSession("family-new").copy(membershipId = "membership-new"),
         )
-        rig.backend.nextPull = PullResult(
+        rig.backend.pullFailures += generationChangedForFamilySwitch()
+        rig.backend.pullResults += PullResult(
             entities = listOf(
+                com.lezi.babylog.sync.engine.SyncWireMapper.baby(
+                    rig.babies.getIncludingDeleted(babyId)!!,
+                    avatarMediaUuid = null,
+                ),
+                com.lezi.babylog.sync.engine.SyncWireMapper.record(
+                    rig.records.getByClientUuid(recordUuid)!!,
+                    babyClientUuid = babyUuid,
+                    customItemClientUuid = null,
+                ).let { record ->
+                    record.copy(payloadJson = record.payloadJson.replace(
+                        "membership-old",
+                        "membership-new",
+                    ))
+                },
                 SyncEntity(
                     type = "custom_item",
-                    clientUuid = "custom-family-stamp",
+                    clientUuid = customItemUuid,
                     payloadJson =
                         """{"name":"抚触","icon_slot":2,"created_by_membership_id":"membership-new"}""",
                     updatedAt = 100,
@@ -279,19 +286,25 @@ class RealSyncPortFamilyWireTest {
                     type = "care_plan",
                     clientUuid = planUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"custom","custom_item_client_uuid":"custom-family-stamp","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"title":"抚触"},"schema_version":2,"status":"completed","created_by_membership_id":"membership-new","fulfilled_record_client_uuid":"$recordUuid","fulfilled_at":121}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"$customItemUuid","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"title":"抚触"},"schema_version":2,"status":"completed","created_by_membership_id":"membership-new","fulfilled_record_client_uuid":"$recordUuid","fulfilled_at":121}""",
                     updatedAt = 121,
                 ),
                 SyncEntity(
                     type = "fulfillment_candidate",
-                    clientUuid = "candidate-family-stamp",
+                    clientUuid = candidateUuid,
                     payloadJson =
                         """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"$recordUuid","actual_timestamp":120,"submitter_membership_id":"membership-new","submitter_role":"owner","confirmed_at":121}""",
                     updatedAt = 121,
                 ),
             ),
             cursor = 2,
-            generation = "current-generation",
+            generation = "family-new-generation",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 2,
+            generation = "family-new-generation",
             hasMore = false,
         )
 
@@ -299,13 +312,13 @@ class RealSyncPortFamilyWireTest {
         val result = rig.port.sync(SyncTrigger.Foreground)
 
         assertThat(result.exceptionOrNull()).isNull()
-        assertThat(rig.backend.pullCount).isEqualTo(1)
-        assertThat(rig.customItems.get("custom-family-stamp")?.createdByMembershipId)
+        assertThat(rig.backend.pullCount).isEqualTo(3)
+        assertThat(rig.customItems.get(customItemUuid)?.createdByMembershipId)
             .isEqualTo("membership-new")
         assertThat(rig.carePlans.getByClientUuid(planUuid)?.createdByMembershipId)
             .isEqualTo("membership-new")
         val candidate = requireNotNull(
-            rig.fulfillmentCandidates.getByClientUuid("candidate-family-stamp"),
+            rig.fulfillmentCandidates.getByClientUuid(candidateUuid),
         )
         assertThat(candidate.submitterMembershipId).isEqualTo("membership-new")
         assertThat(candidate.submitterRole).isEqualTo("owner")
@@ -313,13 +326,17 @@ class RealSyncPortFamilyWireTest {
 
     @Test
     fun switchingFamilyCarePlanCreatorSchedulesAuthoritativeAcknowledgementPull() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000111"
+        val planUuid = "00000000-0000-0000-0000-000000000112"
         val rig = SyncRig(
             session = joinedSession("family-old").copy(membershipId = "membership-old"),
         )
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyId = rig.babies.seed(
+            localBaby().copy(clientUuid = babyUuid, syncDirty = false),
+        )
         rig.carePlans.seed(
             localCarePlan(babyId).copy(
-                clientUuid = "plan-family-stamp-only",
+                clientUuid = planUuid,
                 createdByMembershipId = "membership-old",
                 syncDirty = false,
             ),
@@ -333,18 +350,29 @@ class RealSyncPortFamilyWireTest {
         rig.preferences.saveSession(
             joinedSession("family-new").copy(membershipId = "membership-new"),
         )
-        rig.backend.nextPull = PullResult(
+        rig.backend.pullFailures += generationChangedForFamilySwitch()
+        rig.backend.pullResults += PullResult(
             entities = listOf(
+                com.lezi.babylog.sync.engine.SyncWireMapper.baby(
+                    rig.babies.getIncludingDeleted(babyId)!!,
+                    avatarMediaUuid = null,
+                ),
                 SyncEntity(
                     type = "care_plan",
-                    clientUuid = "plan-family-stamp-only",
+                    clientUuid = planUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"amount_ml":120},"schema_version":2,"status":"pending","created_by_membership_id":"membership-new","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"amount_ml":120},"schema_version":2,"status":"pending","created_by_membership_id":"membership-new","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 100,
                 ),
             ),
             cursor = 1,
-            generation = "current-generation",
+            generation = "family-new-generation",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "family-new-generation",
             hasMore = false,
         )
 
@@ -352,9 +380,9 @@ class RealSyncPortFamilyWireTest {
         val result = rig.port.sync(SyncTrigger.Foreground)
 
         assertThat(result.exceptionOrNull()).isNull()
-        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(rig.backend.pullCount).isEqualTo(3)
         assertThat(
-            rig.carePlans.getByClientUuid("plan-family-stamp-only")?.createdByMembershipId,
+            rig.carePlans.getByClientUuid(planUuid)?.createdByMembershipId,
         ).isEqualTo("membership-new")
     }
 
@@ -534,3 +562,19 @@ class RealSyncPortFamilyWireTest {
     }
 
 }
+
+private fun generationChangedForFamilySwitch() = SyncHttpException(
+    statusCode = 409,
+    responseBody =
+        """
+        {
+          "detail":{
+            "code":"generation_changed",
+            "action":"full_resync",
+            "reset_cursor":0,
+            "server_cursor":1,
+            "server_generation":"family-new-generation"
+          }
+        }
+        """.trimIndent(),
+)

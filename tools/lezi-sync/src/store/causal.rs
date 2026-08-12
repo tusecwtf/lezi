@@ -1,4 +1,4 @@
-//! Causal reconcile / commit / conflict detail / resolution (wire §5–§8).
+//! Causal commit / conflict detail / resolution (wire §5–§9).
 //!
 //! Public Store façade methods are the only observed seam. No neighbor
 //! adjudication runs on this path.
@@ -80,12 +80,6 @@ pub struct CausalUnitResult {
     pub conflicting_paths: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CausalBatchResult {
-    pub cursor: i64,
-    pub results: Vec<CausalUnitResult>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -2818,45 +2812,6 @@ fn branch_unit(
 }
 
 impl Store {
-    /// Dry-run causal reconcile (wire §5). Never writes stable versions/branches.
-    pub fn causal_reconcile(
-        &self,
-        principal: &Principal,
-        units: Vec<CausalMutation>,
-        now: i64,
-    ) -> Result<CausalBatchResult, StoreError> {
-        if units.is_empty() || units.len() > MAX_CAUSAL_UNITS {
-            return Err(StoreError::InvalidReconcileBatch);
-        }
-        let mut connection = self.connect()?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let cursor: i64 = tx.query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
-            params![principal.family_id],
-            |row| row.get(0),
-        )?;
-        let ctx = EvalContext {
-            tx: &tx,
-            principal,
-            now,
-            dry_run: true,
-            max_open_branches_per_root: self.max_open_causal_branches_per_root,
-        };
-        let mut results = Vec::with_capacity(units.len());
-        for unit in &units {
-            // Dry-run must not persist open conflicts from tombstone handle minting.
-            // Use savepoint so side effects roll back.
-            tx.execute("SAVEPOINT causal_reconcile_unit", [])?;
-            let result = evaluate_unit(&ctx, unit)?;
-            tx.execute("ROLLBACK TO causal_reconcile_unit", [])?;
-            tx.execute("RELEASE causal_reconcile_unit", [])?;
-            results.push(result);
-        }
-        // Entire reconcile is read-only: roll back any accidental writes.
-        tx.rollback()?;
-        Ok(CausalBatchResult { cursor, results })
-    }
-
     /// Atomic causal commit (wire §6). Distinct roots remain distinct facts.
     pub(crate) fn causal_commit_durable(
         &self,
@@ -2865,7 +2820,7 @@ impl Store {
         now: i64,
     ) -> Result<DurableCausalCommit, StoreError> {
         if units.is_empty() {
-            return Err(StoreError::InvalidReconcileBatch);
+            return Err(StoreError::InvalidCausalBatch);
         }
         let mut connection = self.connect()?;
         #[cfg(test)]
@@ -2905,7 +2860,7 @@ impl Store {
             }
         }
         if units.len() > MAX_CAUSAL_UNITS {
-            return Err(StoreError::InvalidReconcileBatch);
+            return Err(StoreError::InvalidCausalBatch);
         }
         let ctx = EvalContext {
             tx: &tx,

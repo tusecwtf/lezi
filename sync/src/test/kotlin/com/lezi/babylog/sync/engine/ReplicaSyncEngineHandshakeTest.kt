@@ -86,8 +86,6 @@ class ReplicaSyncEngineHandshakeTest {
             assertThat(rig.backend.memberCalls).isEqualTo(0)
             assertThat(rig.backend.pullCount).isEqualTo(0)
             assertThat(rig.backend.causalCommittedUnits).isEmpty()
-            assertThat(rig.backend.causalReconciledUnits).isEmpty()
-            assertThat(rig.backend.reconciledUnits).isEmpty()
         }
     }
 

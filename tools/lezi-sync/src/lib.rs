@@ -61,7 +61,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
 pub const DEFAULT_MEMBER_REQUEST_RATE_LIMIT: u32 = 10;
-pub const DEFAULT_RECONCILE_RATE_LIMIT: u32 = 120;
 pub const DEFAULT_MEMBER_REQUEST_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_PENDING_MEMBER_REQUESTS: usize = 32;
 pub const MEMBER_LOGIN_GRANT_TTL_SECONDS: i64 = 10 * 60;
@@ -75,7 +74,6 @@ pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 /// to servers that accept and canonicalize it.
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
 pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
-pub const CAPABILITY_AUTHORITATIVE_RECONCILE: &str = "authoritative_reconcile_v1";
 pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
 /// Causal version graph + three-way merge (wire §1). Fail-closed without dual-read LWW.
 pub const CAPABILITY_CAUSAL_VERSIONS: &str = "causal_versions";
@@ -89,7 +87,6 @@ pub const HEALTH_CAPABILITIES: &[&str] = &[
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
-    CAPABILITY_AUTHORITATIVE_RECONCILE,
     CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
     CAPABILITY_CAUSAL_VERSIONS,
     CAPABILITY_WAKE_OBSERVATION,
@@ -135,9 +132,6 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub version: String,
     pub max_media_bytes: usize,
-    /// Serialized `/v1/reconcile` response ceiling. Public for isolated
-    /// protocol tests; production uses the fail-closed 2 MiB default.
-    pub max_reconcile_response_bytes: usize,
     pub server_secret: Option<Vec<u8>>,
     pub generation: Option<String>,
     /// When set (non-empty), POST /v1/family/create requires matching
@@ -146,7 +140,6 @@ pub struct ServerConfig {
     pub bootstrap_secret: Option<String>,
     pub create_rate_limit: RateLimitConfig,
     pub member_request_rate_limit: RateLimitConfig,
-    pub reconcile_rate_limit: RateLimitConfig,
     pub member_request_ttl_hours: u16,
     pub max_pending_member_requests: usize,
     /// Deploy-readable app-update metadata JSON (`app-update.json` by default).
@@ -178,7 +171,6 @@ impl ServerConfig {
             data_dir: data_dir.into(),
             version: VERSION.to_owned(),
             max_media_bytes: DEFAULT_MAX_MEDIA_BYTES,
-            max_reconcile_response_bytes: 2 * 1024 * 1024,
             server_secret: None,
             generation: None,
             bootstrap_secret: None,
@@ -188,10 +180,6 @@ impl ServerConfig {
             },
             member_request_rate_limit: RateLimitConfig {
                 max_attempts: DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
-                window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
-            },
-            reconcile_rate_limit: RateLimitConfig {
-                max_attempts: DEFAULT_RECONCILE_RATE_LIMIT,
                 window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
             },
             member_request_ttl_hours: DEFAULT_MEMBER_REQUEST_TTL_HOURS,
@@ -227,8 +215,6 @@ impl ServerConfig {
             "LEZI_MEMBER_REQUEST_RATE_LIMIT",
             DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
         )?;
-        config.reconcile_rate_limit.max_attempts =
-            parse_env("LEZI_RECONCILE_RATE_LIMIT", DEFAULT_RECONCILE_RATE_LIMIT)?;
         config.member_request_ttl_hours = parse_env(
             "LEZI_MEMBER_REQUEST_TTL_HOURS",
             DEFAULT_MEMBER_REQUEST_TTL_HOURS,
@@ -255,7 +241,6 @@ impl ServerConfig {
         )?;
         config.create_rate_limit.window_seconds = window;
         config.member_request_rate_limit.window_seconds = window;
-        config.reconcile_rate_limit.window_seconds = window;
         config.validate()?;
         Ok(config)
     }
@@ -269,18 +254,13 @@ impl ServerConfig {
         if self.max_media_bytes == 0 {
             return Err("LEZI_MAX_MEDIA_BYTES must be greater than zero".to_owned());
         }
-        if self.max_reconcile_response_bytes == 0 {
-            return Err("max_reconcile_response_bytes must be greater than zero".to_owned());
-        }
         if self.create_rate_limit.max_attempts == 0
             || self.member_request_rate_limit.max_attempts == 0
-            || self.reconcile_rate_limit.max_attempts == 0
         {
             return Err("rate limit max_attempts must be greater than zero".to_owned());
         }
         if self.create_rate_limit.window_seconds <= 0
             || self.member_request_rate_limit.window_seconds <= 0
-            || self.reconcile_rate_limit.window_seconds <= 0
         {
             return Err("LEZI_RATE_LIMIT_WINDOW_SECONDS must be greater than zero".to_owned());
         }
@@ -335,7 +315,6 @@ struct AppState {
     media_root: PathBuf,
     version: String,
     max_media_bytes: usize,
-    max_reconcile_response_bytes: usize,
     signing_secret: Arc<Vec<u8>>,
     generation: String,
     clock: Clock,
@@ -347,7 +326,6 @@ struct AppState {
     create_limiter: Arc<RateLimiter>,
     root_auth_limiter: Arc<RateLimiter>,
     member_request_limiter: Arc<RateLimiter>,
-    reconcile_limiter: Arc<RateLimiter>,
     member_request_ttl_seconds: i64,
     max_pending_member_requests: usize,
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
@@ -726,7 +704,6 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         media_root,
         version: config.version,
         max_media_bytes: config.max_media_bytes,
-        max_reconcile_response_bytes: config.max_reconcile_response_bytes,
         signing_secret: Arc::new(signing_secret),
         generation: config.generation.unwrap_or_else(secure_generation),
         clock: config.clock,
@@ -739,7 +716,6 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
         root_auth_limiter: Arc::new(RateLimiter::new(root_auth_rate_limit)),
         member_request_limiter: Arc::new(RateLimiter::new(config.member_request_rate_limit)),
-        reconcile_limiter: Arc::new(RateLimiter::new(config.reconcile_rate_limit)),
         member_request_ttl_seconds: i64::from(config.member_request_ttl_hours) * 60 * 60,
         max_pending_member_requests: config.max_pending_member_requests,
         readiness_cache: Arc::new(Mutex::new(None)),
@@ -864,8 +840,6 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         .route("/v1/family/delete", post(identity::delete_family))
         .route("/v1/push", post(sync::retired_ordinary_push))
         .route("/v1/pull", get(sync::pull_entities))
-        .route("/v1/reconcile", post(sync::reconcile_entities))
-        .route("/v1/causal/reconcile", post(sync::causal_reconcile))
         .route("/v1/causal/commit", post(sync::causal_commit))
         .route(
             "/v1/causal/media/{client_uuid}",
@@ -890,10 +864,6 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         )
         .route("/v1/bundles", post(media::stage_bundle))
         .route("/v1/bundles/{bundle_id}", get(media::get_bundle))
-        .route(
-            "/v1/bundles/{bundle_id}/media/{client_uuid}",
-            put(media::put_bundle_media),
-        )
         .route("/v1/bundles/{bundle_id}/commit", post(media::commit_bundle))
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TimeoutLayer::with_status_code(
@@ -1363,10 +1333,6 @@ impl ApiError {
         }
     }
 
-    fn bad_request(detail: impl Into<Value>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, detail)
-    }
-
     fn unauthorized() -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -1480,10 +1446,6 @@ impl ApiError {
 
     fn payload_too_large(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, detail)
-    }
-
-    fn request_timeout(detail: impl Into<Value>) -> Self {
-        Self::new(StatusCode::REQUEST_TIMEOUT, detail)
     }
 
     pub(crate) fn internal(detail: impl Into<Value>) -> Self {

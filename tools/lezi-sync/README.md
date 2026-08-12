@@ -201,7 +201,6 @@ docker buildx build \
 | `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | 唯一 Owner 根密码；create、Owner 登录/接管要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
 | `LEZI_MEMBER_REQUEST_RATE_LIMIT` | `10` | 每个来源地址每窗口的成员申请上限 |
-| `LEZI_RECONCILE_RATE_LIMIT` | `120` | 每个家庭成员设备每窗口的权威对账请求上限 |
 | `LEZI_MEMBER_REQUEST_TTL_HOURS` | `24` | 成员申请有效期；当前协议固定为 24 |
 | `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多开放的 pending + approved-unclaimed 成员申请数 |
 | `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/成员申请/权威对账限流窗口秒数 |
@@ -281,9 +280,9 @@ secret 的 request/status/cancel/claim 外，接口都要求
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
-| GET | `/health` | 廉价进程存活检查，正常返回 `ok`、`version` 与完整协议能力（含 `authoritative_reconcile_v1`、`validated_deferred_fulfillment_v1`），不访问 DB/文件系统 |
+| GET | `/health` | 廉价进程存活检查，正常返回 `ok`、`version` 与完整协议能力（含 `validated_deferred_fulfillment_v1`），不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（包括灾备、权威对账与已验证延迟履约能力）与 `family_state:empty\|configured`，维护中返回无正文 503 |
+| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（包括灾备、因果提交与已验证延迟履约能力）与 `family_state:empty\|configured`，维护中返回无正文 503 |
 | POST | `/v1/family/create` | 仅空服务器可用；根密码幂等创建唯一家庭、Owner membership、首台 Device 与 DeviceSession |
 | POST | `/v1/owner/login` | configured 家庭用根密码幂等新增一个 Device 到唯一 Owner membership；旧 Owner Device 不受影响 |
 | POST | `/v1/owner/takeover` | 明确接管：原子撤销全部旧 Owner DeviceSession 后为当前 Device 签发 session；Member session 不受影响 |
@@ -465,7 +464,7 @@ accepted/merged/branched manifest 标记为 `consumed`；commit 后才 no-replac
 
 `GET /health` 广告 `capabilities`（与 `handlers/health.rs` 一致）包含：
 `atomic_bundle`、`record_membership_author`、`device_disaster_restore_v1`、
-`authoritative_reconcile_v1`、`validated_deferred_fulfillment_v1`、
+`validated_deferred_fulfillment_v1`、
 `causal_versions`、`wake_observation`、`source_relations`。
 当前 Android 客户端 `REQUIRED_HEALTH_CAPABILITIES` 要求 health 为 `ok` 且具备上述完整协议能力
 （含三项因果键）；生产进程（`require_protocol_cutover_release` / `from_env`）只在启动语义校验完成、
@@ -475,38 +474,26 @@ accepted/merged/branched manifest 标记为 `consumed`；commit 后才 no-replac
 `deploy/app-update.json`；**不要**再按 0.3.9 时代的 versionCode 16 示例规划生产切割。
 公网 `8765` 只提供 HTTPS；容器健康检查使用仅绑定 `127.0.0.1:8766` 的明文
 `/health`、`/ready` 路由，该内部 listener 不挂载任何 `/v1/*` 业务接口。
-所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
+`atomic_bundle` 仅承载不可变的 `fulfillment_candidate` 事实；所有可变根均使用
+`causal_versions` commit-first 协议，不存在 metadata-first 或 bundle 回退路径。
 `record_membership_author` 表示服务端接受并回执 membership
 作者字段。
 
 典型发送流程：
 
 1. `POST /v1/bundles` — body
-   `{ "bundle_id", "root": {type: record|care_plan|baby|custom_item|fulfillment_candidate, ...}, "media": [...], "generation"? }`
-   live media 须带正 `byte_size`；响应
+   `{ "bundle_id", "root": {type: fulfillment_candidate, ...}, "media": [], "generation"? }`；响应
    `{bundle_id, status:"staging", missing_media, staged_media}`
-2. 对每个 missing media：`PUT /v1/bundles/{bundle_id}/media/{uuid}`（原始字节）
-3. `POST /v1/bundles/{bundle_id}/commit` — 先把暂存字节原子安装到
-   `media/{family}/{uuid}` 并同步文件、家庭目录与 `media/` 根目录，再以单个 SQLite 事务写入
-   entities + 提升 rev；重复 commit 安全幂等
+2. `POST /v1/bundles/{bundle_id}/commit` — 以单个 SQLite 事务冻结 fulfillment fact
+   并提升 rev；重复 commit 安全幂等
 
 规则：
 
 - commit 前普通 `GET /v1/pull` **看不到**包内任何实体
-- 每次 bundle media 上传同时持久化声明尺寸与 SHA-256；commit 必须同时匹配
-  精确摘要和尺寸
-- 媒体优先进入持久化边界，SQLite 后发布引用；DB 失败或进程中断只会留下
-  不可见字节，不会暴露缺字节的实体。已提交 bundle 在暂存清理后重试时会逐个
-  核对已发布文件的摘要与尺寸，并再次 fsync 文件、家庭目录和 `media/` 根目录
-- 同一数据根优先用 hard link 做 no-replace 发布；NAS 文件系统不支持 hard link
-  时，改用已 fsync 的暂存副本 + no-replace rename，不覆盖冲突字节
-- 编辑新版本：另开 `bundle_id` 暂存；commit 前 pull 仍返回旧完整版本
-- 根 `updated_at` 落后于已发布版本 → commit `409`
-- tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
-- 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
-- `record`/`care_plan` 只允许 `kind=log` 的媒体成员，`baby` 只允许 `kind=avatar`；
-  `custom_item`/`fulfillment_candidate` 必须使用空媒体清单
-- 零照片 Record/CarePlan 仍提交空媒体清单的包；所有根执行当前字段、引用与成员 ACL 校验
+- bundle 必须且只能包含一个 `fulfillment_candidate` 根和空 media 清单；其他根或任意
+  media 均 fail closed
+- 同一 fact 的 `updated_at` replay 不会改写首次冻结的提交 membership、role 与 confirmed_at
+- 每家庭最多 64 个 open staging bundle
 - 活动 `custom_item` 才可用于新建 custom Record/CarePlan；同家庭 tombstone 仅保留历史
   引用完整性，允许既有根的编辑/删除和已完成计划明确关联的履行 Record，不会被任意新根选择
 - CarePlan fulfillment pair 双向不变量：`status=completed` 必须同时带非空

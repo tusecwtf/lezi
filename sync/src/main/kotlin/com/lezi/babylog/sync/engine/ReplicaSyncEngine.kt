@@ -1,4 +1,5 @@
 package com.lezi.babylog.sync.engine
+
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanDao
@@ -19,9 +20,7 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryDao
 import com.lezi.babylog.core.database.causal.SourceRelationReason
 import com.lezi.babylog.core.database.causal.WakeObservationDao
-import com.lezi.babylog.core.database.matchesPublishedRevision
 import com.lezi.babylog.core.model.RecordType
-import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
@@ -31,19 +30,15 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncPlan
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.SyncBackend
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityProofException
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.backend.AuthorityProofException
 import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.AUTHENTICATED_SYNC_PROTOCOL_VERSION
 import com.lezi.babylog.sync.backend.REQUIRED_CAUSAL_WIRE_CAPABILITIES
@@ -65,24 +60,10 @@ import com.lezi.babylog.sync.session.receiptFor
 internal object AtomicBundleId {
     private const val NAMESPACE = "lezi.atomic-bundle.v1"
 
-    fun forRecord(recordClientUuid: String, updatedAt: Long): String =
-        fromRoot("record", recordClientUuid, updatedAt)
-
-    fun forCarePlan(planClientUuid: String, updatedAt: Long): String =
-        fromRoot("care_plan", planClientUuid, updatedAt)
-
-    fun forBaby(babyClientUuid: String, updatedAt: Long): String =
-        fromRoot("baby", babyClientUuid, updatedAt)
-
-    fun forCustomItem(itemClientUuid: String, updatedAt: Long): String =
-        fromRoot("custom_item", itemClientUuid, updatedAt)
-
     fun forFulfillmentCandidate(candidateClientUuid: String, updatedAt: Long): String =
-        fromRoot("fulfillment_candidate", candidateClientUuid, updatedAt)
-
-    private fun fromRoot(rootType: String, clientUuid: String, updatedAt: Long): String =
         UUID.nameUUIDFromBytes(
-            "$NAMESPACE:$rootType:$clientUuid:$updatedAt".toByteArray(Charsets.UTF_8),
+            "$NAMESPACE:fulfillment_candidate:$candidateClientUuid:$updatedAt"
+                .toByteArray(Charsets.UTF_8),
         ).toString()
 }
 
@@ -95,24 +76,6 @@ private data class CapturedLocalChanges(
     val pendingCreatorAcknowledgements: Set<CreatorAcknowledgementRef>,
 )
 
-private data class FrozenAuthorityUnit(
-    val draft: ReconcileUnitDraft,
-    val candidates: List<PublishCandidate>,
-    val syntheticRootExpectedUpdatedAt: Long? = null,
-)
-
-private data class SyntheticAuthorityRoot(
-    val entity: SyncEntity,
-    val expectedLocalUpdatedAt: Long,
-)
-
-private data class AuthoritySettlement(
-    val publishable: List<PublishCandidate>,
-    val retryCount: Int,
-)
-
-private class AuthorityCasMismatchException : IllegalStateException()
-
 /**
  * Owns one complete foreground replica cycle behind a single interface.
  *
@@ -123,9 +86,9 @@ private class AuthorityCasMismatchException : IllegalStateException()
  * [SyncTrigger.LocalWrite] declares [SyncPlan.pull]=false. That no-pull plan is applied only
  * when [SyncBackend.supportsCausalWire] is true: freeze current dirty atomic roots and settle
  * through each root's causal settlement seam without incremental pull or pull-cursor
- * advance. H10 no-media Records commit first; roots awaiting their migration ticket keep
- * the source reconcile path. Without causal wire capability, mutable roots fail closed after
- * the safety pull; only immutable FulfillmentCandidate evidence retains the historical path.
+ * advance. Every mutable root uses commit-first; without causal wire capability, mutable roots
+ * fail closed after the safety pull. Immutable FulfillmentCandidate evidence continues through
+ * its existing atomic bundle because it is a historical fact, not a client-resolved root.
  * Authenticated [SyncBackend.members] + self-membership
  * convergence remains a deliberate LocalWrite precondition (roster, not pull cursor).
  *
@@ -159,18 +122,14 @@ internal class ReplicaSyncEngine(
         com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao? = null,
     private val sourceRelationDao:
         com.lezi.babylog.core.database.causal.SourceRelationDao? = null,
-    /** Historical non-causal contract fixtures only; production callers must use the default. */
-    private val allowHistoricalMutableRootEvidence: Boolean = false,
 ) : FamilySessionReplica {
+    private val resetReceiptJournal = conflictSnapshotCacheDao?.let(::ReplicaResetReceiptJournal)
+
     private val publisher = EphemeralPublishPipeline(
         backend = backend,
-        recordDao = recordDao,
         carePlanDao = carePlanDao,
         babyDao = babyDao,
-        mediaDao = mediaDao,
-        customItemDao = customItemDao,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
-        mediaFiles = mediaFiles,
         requireRemoteAllowed = requireRemoteAllowed,
     )
     private val causalSettlement = CausalSettlement(
@@ -186,7 +145,6 @@ internal class ReplicaSyncEngine(
         immutableMediaSpool = immutableMediaSpool,
         transactionRunner = transactionRunner,
         requireRemoteAllowed = requireRemoteAllowed,
-        protectDirtyCausalRoots = !allowHistoricalMutableRootEvidence,
     )
 
     suspend fun synchronize(
@@ -198,6 +156,7 @@ internal class ReplicaSyncEngine(
         val mediaEditGuard = captureLocalMediaEditGuard()
         val plan = SyncPlan.forTrigger(trigger)
         var current = preferences.session.first()
+        val transitionReceipt = resetReceiptJournal?.load()?.takeIf { it.belongsTo(current) }
         requireRemoteAllowed(current)
         val handshake = backend.authenticatedHandshake(current)
         handshake.requireCompatible(current)
@@ -215,7 +174,7 @@ internal class ReplicaSyncEngine(
         }
         // LocalWrite no-pull plan applies only with the capabilities frozen by this handshake.
         // Spec / ADR-0020: no-pull before causal base/three-way/branch is rejected.
-        val doPull = plan.pull || !backend.supportsCausalWire()
+        val doPull = plan.pull || !backend.supportsCausalWire() || transitionReceipt != null
         var recovered = false
         // When doPull is false (LocalWrite + causal): freeze dirty roots → settle only.
         // Do not incremental-pull and do not advance the pull cursor; full cycles still pull.
@@ -223,6 +182,8 @@ internal class ReplicaSyncEngine(
             try {
                 current = pullAllPages(
                     current,
+                    forceAuthority = transitionReceipt != null,
+                    resetReceipt = transitionReceipt,
                     pullTransport = pullTransport,
                     mediaEditGuard = mediaEditGuard,
                 )
@@ -233,6 +194,7 @@ internal class ReplicaSyncEngine(
                     checkpoint,
                     pullTransport,
                     mediaEditGuard,
+                    transitionReceipt,
                 )
                 recovered = true
             }
@@ -256,6 +218,7 @@ internal class ReplicaSyncEngine(
                     ),
                     pullTransport,
                     mediaEditGuard,
+                    transitionReceipt,
                 )
                 recovered = true
             } catch (error: SyncHttpException) {
@@ -265,6 +228,7 @@ internal class ReplicaSyncEngine(
                     checkpoint,
                     pullTransport,
                     mediaEditGuard,
+                    transitionReceipt,
                 )
                 recovered = true
             }
@@ -286,6 +250,7 @@ internal class ReplicaSyncEngine(
                         checkpoint,
                         pullTransport,
                         mediaEditGuard,
+                        transitionReceipt,
                     )
                     recovered = true
                 }
@@ -295,6 +260,7 @@ internal class ReplicaSyncEngine(
         // Tombstone metadata remains as family deletion evidence; only unowned
         // bytes and their retry marker are reclaimed here.
         mediaFileCleanup.cleanupPendingTombstones()
+        transitionReceipt?.let { resetReceiptJournal?.complete(it) }
         return ReplicaSyncOutcome.Synchronized
     }
 
@@ -321,6 +287,7 @@ internal class ReplicaSyncEngine(
     override suspend fun applyInitialEntities(
         session: SyncSession,
         entities: List<SyncEntity>,
+        resetReceipt: FamilySessionReplica.ResetReceipt?,
     ) {
         session.requireCurrentReplicaSession()
         mediaFileCleanup.cleanupPendingTombstones()
@@ -329,10 +296,21 @@ internal class ReplicaSyncEngine(
             // retained from a previous family/session masquerade as current authority.
             babyDao.clearFamilyAuthority()
         }
-        applyRemote(session, entities)
+        applyRemote(
+            session,
+            entities,
+            forceAuthority = resetReceipt != null,
+            resetReceipt = resetReceipt,
+        )
         if (session.role == FamilyRole.Member) {
             familyBabyAppliedListener.onFamilyBabyAuthorityApplied()
         }
+    }
+
+    override suspend fun completeLocalSyncReset(receipt: FamilySessionReplica.ResetReceipt) {
+        requireNotNull(resetReceiptJournal) {
+            "replica reset completion requires durable Room receipt storage"
+        }.complete(receipt)
     }
 
     private suspend fun pushPending(
@@ -357,19 +335,17 @@ internal class ReplicaSyncEngine(
             val causalSlice = candidates.filter {
                 it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
             }
-            if (causalSlice.isNotEmpty() && !backend.supportsCausalWire()) {
-                check(allowHistoricalMutableRootEvidence) {
+            if (causalSlice.isNotEmpty()) {
+                check(backend.supportsCausalWire()) {
                     "家庭服务器缺少因果同步协议，已保留本机待同步内容"
                 }
-            }
-            if (causalSlice.isNotEmpty() && backend.supportsCausalWire()) {
                 causalSettlement.settle(session, causalSlice)
                 // Concurrent user edits keep dirty Room state for the next cycle.
                 // Co-batched create-create (e.g. Sleep then Wake under LocalWrite) can
                 // leave residual dirty causal roots after a recoverable reject such as
                 // missing_sleep_reference once the prior unit is stable — residual-replan
                 // only when the dirty causal set shrank (progress), same pass budget as
-                // legacy authority replan. Fulfillment still uses the legacy loop below.
+                // commit-first replan. Fulfillment facts use their immutable atomic bundle below.
                 val remaining = captureLocalChanges(session).candidates
                 val remainingCausal = remaining.filter {
                     it.entityType in CAUSAL_ROOT_TYPES || it.entityType == "media"
@@ -392,22 +368,12 @@ internal class ReplicaSyncEngine(
                 }
                 candidates = remainingLegacy
             }
-            // FulfillmentCandidate remains immutable historical evidence. Mutable atomic
-            // roots never enter this branch in production; the wider slice exists solely
-            // for the pre-causal contract fixtures enabled explicitly by tests.
-            val forLegacy = if (allowHistoricalMutableRootEvidence) {
-                candidates
-            } else {
-                candidates.filter { it.entityType == "fulfillment_candidate" }
+            val fulfillmentFacts = candidates.filter {
+                it.entityType == "fulfillment_candidate"
             }
-            if (forLegacy.isEmpty()) return
-            val settlement = reconcileFrozenChanges(session, forLegacy)
-            pushPending(session, settlement.publishable)
-            if (settlement.retryCount == 0) return
-            require(settlement.publishable.isNotEmpty()) {
-                "家庭服务器暂时无法完成权威裁决，请稍后重试"
-            }
-            candidates = captureLocalChanges(session).candidates
+            if (fulfillmentFacts.isEmpty()) return
+            pushPending(session, fulfillmentFacts)
+            return
         }
         error("家庭同步依赖在 $MAX_AUTHORITY_SETTLEMENT_PASSES 轮内未收敛，请稍后重试")
     }
@@ -416,9 +382,8 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         entities: List<SyncEntity>,
         mediaEditGuard: LocalMediaEditGuard? = null,
-        authoritativeKeys: Set<Pair<String, String>> = emptySet(),
-        authorityCandidates: List<PublishCandidate> = emptyList(),
-        authorityDiscardedMediaUuids: Set<String> = emptySet(),
+        forceAuthority: Boolean = false,
+        resetReceipt: FamilySessionReplica.ResetReceipt? = null,
     ) {
         val unsupportedTypes = entities
             .map(SyncEntity::type)
@@ -436,125 +401,139 @@ internal class ReplicaSyncEngine(
         val appliedCarePlanUuids = mutableListOf<String>()
         try {
             transactionRunner.run {
-            if (authorityCandidates.any { !candidateStillCurrent(it) }) {
-                throw AuthorityCasMismatchException()
-            }
-            requireCustomItemCapacityAfterApply(
-                existing = customItemDao.listAllIncludingDeleted(),
-                incoming = entities,
-            )
-            val unresolved = mutableListOf<SyncEntity>()
-            for (entity in entities.filter { it.type == "baby" }) {
-                if (!applyBaby(session, entity, entity.authoritativeIn(authoritativeKeys))) {
-                    unresolved += entity
+                val activeResetReceipt = resetReceipt
+                val receiptRoots = activeResetReceipt?.roots
+                    ?.associateBy { it.entityType to it.clientUuid }
+                    .orEmpty()
+                val preservePendingKeys = entities.mapNotNullTo(mutableSetOf()) { entity ->
+                    val root = receiptRoots[entity.type to entity.clientUuid]
+                        ?: return@mapNotNullTo null
+                    (entity.type to entity.clientUuid).takeIf {
+                        causalSettlement.shouldPreserveRecoveryIntent(
+                            resetRoot = root,
+                            crossingFamilyBoundary =
+                                activeResetReceipt?.crossingFamilyBoundary == true,
+                        )
+                    }
                 }
-            }
-            for (entity in entities.filter { it.type == "custom_item" }) {
-                if (!applyCustomItem(session, entity, entity.authoritativeIn(authoritativeKeys))) {
-                    unresolved += entity
-                }
-            }
-            // Fulfillment full-set: record(+photos) before completed care_plan before
-            // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
-            for (entity in entities.filter { it.type == "record" }) {
-                if (!applyRecord(entity, entity.authoritativeIn(authoritativeKeys))) {
-                    unresolved += entity
-                }
-            }
-            for (entity in entities.filter { it.type == "wake_observation" }) {
-                if (!applyWakeObservation(entity, entity.authoritativeIn(authoritativeKeys))) {
-                    unresolved += entity
-                }
-            }
-            for (entity in entities.filter { it.type == "care_plan" }) {
-                val applied = applyCarePlan(
-                    session,
-                    entity,
-                    discardedLocalMediaPaths,
-                    entity.authoritativeIn(authoritativeKeys),
+                entities.filter { it.type to it.clientUuid in preservePendingKeys }
+                    .forEach { entity ->
+                        causalSettlement.rebaseRecoveryPendingIntent(
+                            entityType = entity.type,
+                            clientUuid = entity.clientUuid,
+                            remoteVersionId = entity.versionId,
+                        )
+                    }
+                fun force(entity: SyncEntity): Boolean =
+                    forceAuthority && entity.type to entity.clientUuid !in preservePendingKeys
+                requireCustomItemCapacityAfterApply(
+                    existing = customItemDao.listAllIncludingDeleted(),
+                    incoming = entities,
                 )
-                if (!applied) {
-                    unresolved += entity
-                } else {
-                    appliedCarePlanUuids += entity.clientUuid
+                val unresolved = mutableListOf<SyncEntity>()
+                for (entity in entities.filter { it.type == "baby" }) {
+                    if (!applyBaby(session, entity, forceAuthority = force(entity))) {
+                        unresolved += entity
+                    }
                 }
-            }
-            for (entity in entities.filter { it.type == "media" }) {
-                if (!applyMedia(
+                for (entity in entities.filter { it.type == "custom_item" }) {
+                    if (!applyCustomItem(session, entity, forceAuthority = force(entity))) {
+                        unresolved += entity
+                    }
+                }
+                // Fulfillment full-set: record(+photos) before completed care_plan before
+                // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
+                for (entity in entities.filter { it.type == "record" }) {
+                    if (!applyRecord(entity, forceAuthority = force(entity))) {
+                        unresolved += entity
+                    }
+                }
+                for (entity in entities.filter { it.type == "wake_observation" }) {
+                    if (!applyWakeObservation(entity, forceAuthority = force(entity))) {
+                        unresolved += entity
+                    }
+                }
+                for (entity in entities.filter { it.type == "care_plan" }) {
+                    val applied = applyCarePlan(
                         session,
                         entity,
-                        deletedMediaClientUuids,
-                        stagedLogMediaBytes,
-                        mediaEditGuard,
-                        entity.authoritativeIn(authoritativeKeys),
+                        discardedLocalMediaPaths,
+                        forceAuthority = force(entity),
                     )
-                ) {
-                    unresolved += entity
+                    if (!applied) {
+                        unresolved += entity
+                    } else {
+                        appliedCarePlanUuids += entity.clientUuid
+                    }
                 }
-            }
-            for (entity in entities.filter { it.type == "fulfillment_candidate" }) {
-                if (!applyFulfillmentCandidate(
-                        entity,
-                        entity.authoritativeIn(authoritativeKeys),
+                for (entity in entities.filter { it.type == "media" }) {
+                    if (!applyMedia(
+                            session,
+                            entity,
+                            deletedMediaClientUuids,
+                            stagedLogMediaBytes,
+                            mediaEditGuard,
+                            forceAuthority = force(entity),
+                        )
+                    ) {
+                        unresolved += entity
+                    }
+                }
+                for (entity in entities.filter { it.type == "fulfillment_candidate" }) {
+                    if (!applyFulfillmentCandidate(
+                            entity,
+                            forceAuthority = force(entity),
+                        )
+                    ) {
+                        unresolved += entity
+                    }
+                }
+                require(unresolved.isEmpty()) {
+                    "同步数据引用尚未就绪，保留 cursor 以便重试"
+                }
+                // Root projection and conflict receipt converge in this same page
+                // transaction. An explicit no-conflict entity removes every stale
+                // summary/snapshot for that root instead of leaving a ghost badge.
+                entities.filter { it.type in CAUSAL_ROOT_TYPES }.forEach { entity ->
+                    causalSettlement.applyPullConflictSummary(
+                        entityType = entity.type,
+                        clientUuid = entity.clientUuid,
+                        summary = entity.conflictSummary,
+                        updatedAt = entity.updatedAt,
                     )
-                ) {
-                    unresolved += entity
                 }
-            }
-            for (mediaUuid in authorityDiscardedMediaUuids) {
-                mediaDao.getByClientUuid(mediaUuid)?.localUri
-                    ?.takeIf(String::isNotBlank)
-                    ?.let(discardedLocalMediaPaths::add)
-            }
-            if (authorityDiscardedMediaUuids.isNotEmpty()) {
-                mediaDao.deleteByClientUuids(authorityDiscardedMediaUuids.toList())
-            }
-            require(unresolved.isEmpty()) {
-                "同步数据引用尚未就绪，保留 cursor 以便重试"
-            }
-            // Root projection and conflict receipt converge in this same page
-            // transaction. An explicit no-conflict entity removes every stale
-            // summary/snapshot for that root instead of leaving a ghost badge.
-            entities.filter { it.type in CAUSAL_ROOT_TYPES }.forEach { entity ->
-                causalSettlement.applyPullConflictSummary(
-                    entityType = entity.type,
-                    clientUuid = entity.clientUuid,
-                    summary = entity.conflictSummary,
-                    updatedAt = entity.updatedAt,
-                )
-            }
-            // Full page applied: re-link each affected plan to the deterministic
-            // authority (independent of care_plan LWW / push arrival order).
-            val planUuidsForResolve = buildSet {
-                entities.filter { it.type == "fulfillment_candidate" }.forEach { entity ->
-                    runCatching {
-                        Json.parseToJsonElement(entity.payloadJson).jsonObject
-                            .string("care_plan_client_uuid")
-                    }.getOrNull()?.let { add(it) }
+                // Full page applied: re-link each affected plan to the deterministic
+                // authority (independent of care_plan LWW / push arrival order).
+                val planUuidsForResolve = buildSet {
+                    entities.filter { it.type == "fulfillment_candidate" }.forEach { entity ->
+                        runCatching {
+                            Json.parseToJsonElement(entity.payloadJson).jsonObject
+                                .string("care_plan_client_uuid")
+                        }.getOrNull()?.let { add(it) }
+                    }
+                    entities.filter { it.type == "care_plan" }.forEach { add(it.clientUuid) }
                 }
-                entities.filter { it.type == "care_plan" }.forEach { add(it.clientUuid) }
-            }
-            for (planUuid in planUuidsForResolve) {
-                fulfillmentAuthoritySettlement.settle(planUuid)
-            }
-            entities.filter { it.type == "care_plan" }
-                .mapNotNull { entity -> carePlanDao.getByClientUuid(entity.clientUuid)?.babyId }
-                .distinct()
-                .forEach { babyId ->
-                    appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
+                for (planUuid in planUuidsForResolve) {
+                    fulfillmentAuthoritySettlement.settle(planUuid)
                 }
-            (
-                entities.filter { it.type == "baby" }
-                    .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
-                    entities.filter { it.type == "media" }
-                        .mapNotNull { entity ->
-                            mediaDao.getByClientUuid(entity.clientUuid)?.babyId
-                        }
-                )
-                .distinct()
-                .forEach {
-                    refreshBabyAvatar(it, mediaEditGuard)
-                }
+                entities.filter { it.type == "care_plan" }
+                    .mapNotNull { entity -> carePlanDao.getByClientUuid(entity.clientUuid)?.babyId }
+                    .distinct()
+                    .forEach { babyId ->
+                        appliedCarePlanUuids += healDuplicateOpenNextFeedPlans(session, babyId)
+                    }
+                (
+                    entities.filter { it.type == "baby" }
+                        .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
+                        entities.filter { it.type == "media" }
+                            .mapNotNull { entity ->
+                                mediaDao.getByClientUuid(entity.clientUuid)?.babyId
+                            }
+                    )
+                    .distinct()
+                    .forEach {
+                        refreshBabyAvatar(it, mediaEditGuard)
+                    }
             }
         } finally {
             cleanupUnownedStagedMedia(stagedLogMediaBytes.values.toSet())
@@ -567,9 +546,6 @@ internal class ReplicaSyncEngine(
         }
         check(session.isJoined)
     }
-
-    private fun SyncEntity.authoritativeIn(keys: Set<Pair<String, String>>): Boolean =
-        type to clientUuid in keys
 
     private suspend fun cleanupUnownedStagedMedia(paths: Set<String>) {
         mediaFileCleanup.cleanupUnreferencedPaths(paths)
@@ -1415,8 +1391,38 @@ internal class ReplicaSyncEngine(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean,
         crossingFamilyBoundary: Boolean,
-    ) {
-        transactionRunner.run {
+        recoveryTarget: FamilySessionReplica.RecoveryTarget?,
+    ): FamilySessionReplica.ResetReceipt {
+        val journal = requireNotNull(resetReceiptJournal) {
+            "replica reset requires durable Room receipt storage"
+        }
+        return transactionRunner.run {
+            val existing = journal.load()
+            if (existing != null && existing.matchesResetRequest(
+                    previous = previous,
+                    crossingFamilyBoundary = crossingFamilyBoundary,
+                    recoveryTarget = recoveryTarget,
+                )
+            ) {
+                return@run existing
+            }
+            val roots = buildList {
+                babyDao.listAllIncludingDeleted().forEach {
+                    add(FamilySessionReplica.ResetRoot("baby", it.clientUuid, it.updatedAt, it.syncDirty))
+                }
+                recordDao.listAllIncludingDeleted().forEach {
+                    add(FamilySessionReplica.ResetRoot("record", it.clientUuid, it.updatedAt, it.syncDirty))
+                }
+                carePlanDao.listAllIncludingDeleted().forEach {
+                    add(FamilySessionReplica.ResetRoot("care_plan", it.clientUuid, it.updatedAt, it.syncDirty))
+                }
+                customItemDao.listAllIncludingDeleted().forEach {
+                    add(FamilySessionReplica.ResetRoot("custom_item", it.clientUuid, it.updatedAt, it.syncDirty))
+                }
+                wakeObservationDao.listPendingSync().forEach {
+                    add(FamilySessionReplica.ResetRoot("wake_observation", it.clientUuid, it.updatedAt, it.syncDirty))
+                }
+            }
             babyDao.markAllPendingSync()
             if (crossingFamilyBoundary || previous.role == FamilyRole.Member) {
                 babyDao.clearFamilyAuthority()
@@ -1480,8 +1486,9 @@ internal class ReplicaSyncEngine(
                 val hasCurrentReceipt = previous.familyId.isNotBlank() &&
                     previous.baseUrl.isNotBlank() &&
                     media.hasReceiptFor(previous)
-                val preserveCurrentReceipt = !invalidateCurrentReceipts ||
-                    (previous.role == FamilyRole.Member && media.kind == "avatar")
+                val preserveCurrentReceipt = !crossingFamilyBoundary &&
+                    (!invalidateCurrentReceipts ||
+                        (previous.role == FamilyRole.Member && media.kind == "avatar"))
                 val nextReceipt = when {
                     !hasCurrentReceipt -> null
                     preserveCurrentReceipt -> media.remoteUri
@@ -1494,6 +1501,16 @@ internal class ReplicaSyncEngine(
                     ),
                 )
             }
+            val receipt = FamilySessionReplica.ResetReceipt(
+                previousFamilyId = previous.familyId,
+                previousMembershipId = previous.membershipId,
+                previousDeviceId = previous.deviceId,
+                crossingFamilyBoundary = crossingFamilyBoundary,
+                recoveryTarget = recoveryTarget,
+                roots = roots,
+            )
+            journal.replace(receipt)
+            receipt
         }
     }
 
@@ -1502,20 +1519,32 @@ internal class ReplicaSyncEngine(
         checkpoint: FullResyncCheckpoint,
         pullTransport: PullTransportContract,
         mediaEditGuard: LocalMediaEditGuard,
+        transitionReceipt: FamilySessionReplica.ResetReceipt? = null,
     ): SyncSession {
-        resetLocalSyncReceipts(
+        val durableReceipt = transitionReceipt
+            ?: resetReceiptJournal?.load()?.takeIf { it.belongsTo(previous) }
+        val resetReceipt = durableReceipt ?: resetLocalSyncReceipts(
             previous = previous,
             invalidateCurrentReceipts = true,
-        )
+        ).also {
+            require(!it.crossingFamilyBoundary && it.belongsTo(previous)) {
+                "full-resync receipt does not belong to the recovering replica"
+            }
+        }
         preferences.updateCursor(checkpoint.resetCursor, generation = checkpoint.serverGeneration)
         var current = preferences.session.first()
         current = pullAllPages(
             initial = current,
             reconcileMemberAvatars = current.role == FamilyRole.Member,
             deferCursorUntilComplete = true,
+            forceAuthority = true,
+            resetReceipt = resetReceipt,
             pullTransport = pullTransport,
             mediaEditGuard = mediaEditGuard,
         )
+        if (current.role == FamilyRole.Member) {
+            settleMemberLocalOnlySubtrees()
+        }
         val captured = captureLocalChanges(current)
         if (captured.pendingCreatorAcknowledgements.isNotEmpty()) {
             preferences.updateCreatorAcknowledgements(
@@ -1525,11 +1554,79 @@ internal class ReplicaSyncEngine(
         }
         settleAndPublish(current, captured.candidates)
         current = preferences.session.first()
-        return pullAllPages(
+        val recovered = pullAllPages(
             initial = current,
             pullTransport = pullTransport,
             mediaEditGuard = mediaEditGuard,
         )
+        requireNotNull(resetReceiptJournal).complete(resetReceipt)
+        return recovered
+    }
+
+    private fun FamilySessionReplica.ResetReceipt.belongsTo(
+        session: SyncSession,
+    ): Boolean {
+        if (!crossingFamilyBoundary) {
+            return previousFamilyId == session.familyId &&
+                previousMembershipId == session.membershipId &&
+                previousDeviceId == session.deviceId
+        }
+        val target = recoveryTarget ?: return false
+        val targetIdentityMatches = if (target.familyId == null) {
+            session.familyId.isNotBlank() && session.familyId != previousFamilyId
+        } else {
+            target.baseUrl == session.baseUrl && target.familyId == session.familyId
+        }
+        return crossingFamilyBoundary && targetIdentityMatches &&
+            (target.membershipId == null || target.membershipId == session.membershipId) &&
+            (target.deviceId == null || target.deviceId == session.deviceId)
+    }
+
+    private fun FamilySessionReplica.ResetReceipt.matchesResetRequest(
+        previous: SyncSession,
+        crossingFamilyBoundary: Boolean,
+        recoveryTarget: FamilySessionReplica.RecoveryTarget?,
+    ): Boolean = previousFamilyId == previous.familyId &&
+        previousMembershipId == previous.membershipId &&
+        previousDeviceId == previous.deviceId &&
+        this.crossingFamilyBoundary == crossingFamilyBoundary &&
+        this.recoveryTarget == recoveryTarget
+
+    /**
+     * A completed member full-resync is the closed authority set for the family. Local-only
+     * subtrees are device history, not publishable family intent; settle their pending flags
+     * before capture so deleting ordinary reconcile cannot turn them into causal commits.
+     */
+    private suspend fun settleMemberLocalOnlySubtrees() {
+        val localBabies = babyDao.listAllIncludingDeleted().filterNot(BabyEntity::familyAuthority)
+        if (localBabies.isEmpty()) return
+        val babyIds = localBabies.mapTo(mutableSetOf(), BabyEntity::id)
+        val records = recordDao.listAllIncludingDeleted().filter { it.babyId in babyIds }
+        val recordIds = records.mapTo(mutableSetOf(), RecordEntity::id)
+        val recordUuids = records.mapTo(mutableSetOf(), RecordEntity::clientUuid)
+        val plans = carePlanDao.listAllIncludingDeleted().filter { it.babyId in babyIds }
+        val planIds = plans.mapTo(mutableSetOf(), CarePlanEntity::id)
+        val planUuids = plans.mapTo(mutableSetOf(), CarePlanEntity::clientUuid)
+        val wakes = records.flatMap { wakeObservationDao.listForSleep(it.clientUuid) }
+            .distinctBy { it.id }
+        val wakeIds = wakes.mapTo(mutableSetOf()) { it.id }
+        val media = mediaDao.listAllIncludingDeleted().filter {
+            it.babyId in babyIds || it.recordId in recordIds || it.carePlanId in planIds ||
+                it.wakeObservationId in wakeIds
+        }
+        val candidates = fulfillmentCandidateDao.listAllIncludingDeleted().filter {
+            it.recordClientUuid in recordUuids || it.carePlanClientUuid in planUuids
+        }
+        transactionRunner.run {
+            localBabies.forEach { babyDao.markSynced(it.clientUuid, it.updatedAt) }
+            records.forEach { recordDao.markSynced(it.clientUuid, it.updatedAt) }
+            plans.forEach { carePlanDao.markSynced(it.clientUuid, it.updatedAt) }
+            wakes.forEach { wakeObservationDao.update(it.copy(syncDirty = false)) }
+            candidates.forEach {
+                fulfillmentCandidateDao.markSynced(it.clientUuid, it.updatedAt)
+            }
+            media.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+        }
     }
 
     /**
@@ -1543,6 +1640,8 @@ internal class ReplicaSyncEngine(
         initial: SyncSession,
         reconcileMemberAvatars: Boolean = false,
         deferCursorUntilComplete: Boolean = false,
+        forceAuthority: Boolean = false,
+        resetReceipt: FamilySessionReplica.ResetReceipt? = null,
         pullTransport: PullTransportContract,
         mediaEditGuard: LocalMediaEditGuard,
     ): SyncSession {
@@ -1601,6 +1700,8 @@ internal class ReplicaSyncEngine(
                 current,
                 pulled.entities,
                 mediaEditGuard = mediaEditGuard,
+                forceAuthority = forceAuthority,
+                resetReceipt = resetReceipt,
             )
             observedEntityKeys += pageKeys
             val acknowledgedCreators = authoritativeCreatorAcknowledgements(
@@ -1631,9 +1732,11 @@ internal class ReplicaSyncEngine(
             }
         } while (pulled.hasMore)
         authoritativeMemberAvatarPointers?.let { pointers ->
+            val discardedPaths = mutableSetOf<String>()
             transactionRunner.run {
-                reconcileMemberAvatarAuthority(pointers, mediaEditGuard)
+                reconcileMemberAvatarAuthority(pointers, mediaEditGuard, discardedPaths)
             }
+            cleanupUnownedStagedMedia(discardedPaths)
         }
         if (deferCursorUntilComplete) {
             preferences.updatePullCheckpoint(
@@ -1652,9 +1755,19 @@ internal class ReplicaSyncEngine(
     private suspend fun reconcileMemberAvatarAuthority(
         serverPointers: Map<String, String?>,
         mediaEditGuard: LocalMediaEditGuard?,
+        discardedPaths: MutableSet<String>,
     ) {
+        val activeAvatarsByBaby = mediaDao.listAllIncludingDeleted()
+            .filter { it.kind == "avatar" && it.deletedAt == null }
+            .groupBy(MediaAssetEntity::babyId)
         babyDao.listAllIncludingDeleted().forEach { baby ->
             val authoritativePointer = serverPointers[baby.clientUuid]
+            activeAvatarsByBaby[baby.id].orEmpty()
+                .filter { it.clientUuid != authoritativePointer }
+                .forEach { stale ->
+                    stale.localUri.takeIf(String::isNotBlank)?.let(discardedPaths::add)
+                    mediaDao.deleteByClientUuids(listOf(stale.clientUuid))
+                }
             if (baby.avatarMediaUuid != authoritativePointer) {
                 babyDao.updateAvatarReplica(
                     clientUuid = baby.clientUuid,
@@ -1663,549 +1776,6 @@ internal class ReplicaSyncEngine(
                 )
                 mediaEditGuard?.babyRefreshed(baby.clientUuid, null)
             }
-        }
-    }
-
-    /**
-     * Freeze one same-cycle Room snapshot into atomic authority units, validate
-     * the complete server result before changing Room, then apply terminal
-     * dispositions. Only `publish` rows reach the existing bundle pipeline.
-     */
-    private suspend fun reconcileFrozenChanges(
-        session: SyncSession,
-        candidates: List<PublishCandidate>,
-    ): AuthoritySettlement {
-        if (candidates.isEmpty()) return AuthoritySettlement(emptyList(), retryCount = 0)
-        val frozen = freezeAuthorityUnits(session, candidates)
-        if (frozen.isEmpty()) return AuthoritySettlement(emptyList(), retryCount = 0)
-        requireRemoteAllowed(session)
-        val responses = frozen.chunked(MAX_AUTHORITY_RECONCILE_UNITS).map { batch ->
-            backend.reconcile(session, batch.map(FrozenAuthorityUnit::draft)).also { response ->
-                require(response.generation == session.pullGeneration) {
-                    "家庭服务器在权威裁决期间变更了同步代际"
-                }
-            }
-        }
-        val authorityCursors = responses.map(ReconcileResult::cursor)
-        if (
-            authorityCursors.any { it < session.pullCursor } ||
-            authorityCursors.distinct().size != 1
-        ) {
-            throw AuthorityProofException(
-                session.pullGeneration,
-                IllegalArgumentException("家庭服务器分批权威裁决游标不一致或倒退"),
-            )
-        }
-        val results = responses.flatMap(ReconcileResult::results)
-        val byKey = results.associateBy { it.type to it.clientUuid }
-        require(byKey.size == frozen.size && byKey.keys == frozen.map {
-            it.draft.root.type to it.draft.root.clientUuid
-        }.toSet()) {
-            "家庭服务器权威裁决响应不完整、重复或包含多余 key"
-        }
-        val resolved = frozen.map { unit -> unit to byKey.getValue(
-            unit.draft.root.type to unit.draft.root.clientUuid,
-        ) }
-        // A newer local edit invalidates only its frozen unit. The old verdict
-        // cannot clear, overwrite, localize, or publish that newer revision.
-        val current = resolved.filter { (unit, result) ->
-            result.requestContentHash == unit.draft.contentHash &&
-                unit.candidates.all { candidateStillCurrent(it) }
-        }
-        val adopted = current.filter { (_, result) ->
-            result.disposition == AuthorityDisposition.AdoptRemote
-        }
-        for ((unit, result) in adopted) {
-            val entities = listOf(requireNotNull(result.remoteRoot)) + result.remoteMedia
-            val remoteMediaUuids = result.remoteMedia.mapTo(mutableSetOf(), SyncEntity::clientUuid)
-            val discardedMediaUuids = unit.candidates
-                .filter { it.entityType == "media" && it.clientUuid !in remoteMediaUuids }
-                .mapTo(mutableSetOf(), PublishCandidate::clientUuid)
-            try {
-                applyRemote(
-                    session = session,
-                    entities = entities,
-                    authoritativeKeys = entities.map { it.type to it.clientUuid }.toSet(),
-                    authorityCandidates = unit.candidates,
-                    authorityDiscardedMediaUuids = discardedMediaUuids,
-                )
-            } catch (_: AuthorityCasMismatchException) {
-                // A newer Room revision won after the first preflight. Keep it
-                // dirty for the next cycle; staged downloads were already
-                // reclaimed by applyRemote's finally block.
-            }
-        }
-        val technicalUnits = current
-            .filter { (_, result) ->
-                result.disposition == AuthorityDisposition.RemoteAbsentRejected &&
-                    result.reason == "redundant_tombstone"
-            }
-        var discardableUnits = technicalUnits.mapNotNull { (unit, _) ->
-            val root = unit.candidates.singleOrNull { candidate ->
-                candidate.entityType == unit.draft.root.type &&
-                    candidate.clientUuid == unit.draft.root.clientUuid
-            }
-            if (root != null && unit.candidates.all { it.deletedAt != null }) {
-                unit
-            } else {
-                null
-            }
-        }
-        while (discardableUnits.isNotEmpty()) {
-            val candidateKeys = discardableUnits
-                .flatMap(FrozenAuthorityUnit::candidates)
-                .mapTo(mutableSetOf()) { it.entityType to it.clientUuid }
-            val next = mutableListOf<FrozenAuthorityUnit>()
-            for (unit in discardableUnits) {
-                val root = unit.candidates.single { candidate ->
-                    candidate.entityType == unit.draft.root.type &&
-                        candidate.clientUuid == unit.draft.root.clientUuid
-                }
-                if (canDiscardTechnicalTombstone(root, candidateKeys)) {
-                    next += unit
-                }
-            }
-            if (next.size == discardableUnits.size) break
-            discardableUnits = next
-        }
-        val discardablePlanIds = discardableUnits
-            .flatMap(FrozenAuthorityUnit::candidates)
-            .mapTo(mutableSetOf(), PublishCandidate::planId)
-        transactionRunner.run {
-            current.forEach { (unit, result) ->
-                when (result.disposition) {
-                    AuthorityDisposition.Confirmed -> {
-                        val expectedRootUpdatedAt = unit.syntheticRootExpectedUpdatedAt
-                        if (expectedRootUpdatedAt != null &&
-                            !acknowledgeSyntheticAuthorityRoot(unit, expectedRootUpdatedAt)
-                        ) {
-                            throw AuthorityCasMismatchException()
-                        }
-                        unit.candidates.forEach {
-                            acknowledgeAuthorityCandidate(it, confirmedByServer = true)
-                        }
-                    }
-                    AuthorityDisposition.RemoteAbsentRejected -> unit.candidates
-                        .filter { candidate ->
-                            result.reason != "redundant_tombstone" ||
-                                candidate.planId !in discardablePlanIds
-                        }
-                        .forEach {
-                            acknowledgeAuthorityCandidate(it, confirmedByServer = false)
-                        }
-                    AuthorityDisposition.Publish,
-                    AuthorityDisposition.AdoptRemote,
-                    AuthorityDisposition.RetryAuthority,
-                    -> Unit
-                }
-            }
-        }
-        if (discardableUnits.isNotEmpty()) {
-            val discardableTechnicalTombstones = discardableUnits
-                .flatMap(FrozenAuthorityUnit::candidates)
-                .distinctBy(PublishCandidate::planId)
-            mediaFileCleanup.cleanupTombstones(
-                discardableTechnicalTombstones
-                    .filter { it.entityType == "media" }
-                    .mapTo(mutableSetOf(), PublishCandidate::clientUuid),
-            )
-            transactionRunner.run {
-                discardableUnits.forEach { unit ->
-                    val rootKey = unit.draft.root.type to unit.draft.root.clientUuid
-                    unit.candidates
-                        .sortedBy { (it.entityType to it.clientUuid) == rootKey }
-                        .forEach { candidate ->
-                            if (discardTechnicalTombstone(candidate) != 1) {
-                                throw AuthorityCasMismatchException()
-                            }
-                        }
-                }
-            }
-        }
-        return AuthoritySettlement(
-            publishable = current
-                .filter { (_, result) -> result.disposition == AuthorityDisposition.Publish }
-                .flatMap { (unit, _) -> unit.candidates }
-                .distinctBy(PublishCandidate::planId),
-            retryCount = current.count { (_, result) ->
-                result.disposition == AuthorityDisposition.RetryAuthority
-            },
-        )
-    }
-
-    private suspend fun freezeAuthorityUnits(
-        session: SyncSession,
-        candidates: List<PublishCandidate>,
-    ): List<FrozenAuthorityUnit> {
-        val remaining = candidates.associateByTo(linkedMapOf(), PublishCandidate::planId)
-        val units = mutableListOf<FrozenAuthorityUnit>()
-
-        // A member's pre-join facts share the local Baby's explicit local-only
-        // boundary. Ask authority about that Baby once; permanent rejection
-        // settles the complete local subtree without sending its care payloads.
-        if (session.role == FamilyRole.Member) {
-            val localBabies = babyDao.listAllIncludingDeleted().filterNot(BabyEntity::familyAuthority)
-            for (baby in localBabies) {
-                val subtree = remaining.values.filter { candidate ->
-                    candidateBelongsToBaby(candidate, baby.id)
-                }
-                if (subtree.isEmpty()) continue
-                val root = SyncWireMapper.baby(baby, avatarMediaUuid = null)
-                units += frozenUnit(root, emptyList(), subtree)
-                subtree.forEach { remaining.remove(it.planId) }
-            }
-        }
-
-        val roots = remaining.values.filter { it.entityType != "media" }
-        for (rootRow in roots) {
-            val mediaRows = remaining.values.filter { mediaRow ->
-                mediaRow.entityType == "media" && mediaBelongsToRoot(mediaRow, rootRow)
-            }
-            units += frozenUnit(
-                root = rootRow.toAuthoritySyncEntity(),
-                media = mediaRows.map { it.toAuthoritySyncEntity() },
-                candidates = listOf(rootRow) + mediaRows,
-            )
-            remaining.remove(rootRow.planId)
-            mediaRows.forEach { remaining.remove(it.planId) }
-        }
-
-        // A photo-only edit still reconciles as its synthetic atomic root, exactly
-        // like the existing publisher elevates the root revision before commit.
-        val leftoverMedia = remaining.values.filter { it.entityType == "media" }
-        val groupedByRoot = leftoverMedia.groupBy { mediaRootKey(it) }
-        val orphanPaths = mutableSetOf<String>()
-        for ((rootKey, mediaRows) in groupedByRoot) {
-            if (rootKey == null) {
-                // No business owner means technical residue. It is terminally
-                // removed only if the exact frozen revision still exists. A
-                // concurrent repair wins the CAS and remains dirty.
-                mediaRows.forEach { row ->
-                    val capturedPath = row.localMediaUri
-                    val deleted = capturedPath != null && transactionRunner.run {
-                        val current = mediaDao.getByClientUuid(row.clientUuid)
-                            ?: return@run false
-                        if (!current.matchesPublishedRevision(
-                                expectedClientUuid = row.clientUuid,
-                                expectedUpdatedAt = row.updatedAt,
-                                expectedLocalUri = capturedPath,
-                                expectedDeletedAt = row.deletedAt,
-                            ) || !current.isOwnerlessTechnicalMedia()
-                        ) {
-                            return@run false
-                        }
-                        mediaDao.deleteExactRevision(
-                            clientUuid = row.clientUuid,
-                            expectedUpdatedAt = row.updatedAt,
-                            expectedLocalUri = capturedPath,
-                            expectedDeletedAt = row.deletedAt,
-                        ) == 1
-                    }
-                    if (deleted) {
-                        remaining.remove(row.planId)
-                        capturedPath.takeIf(String::isNotBlank)?.let(orphanPaths::add)
-                    }
-                }
-                continue
-            }
-            val syntheticRoot = syntheticRootForMedia(rootKey, mediaRows) ?: continue
-            units += frozenUnit(
-                root = syntheticRoot.entity,
-                media = mediaRows.map { it.toAuthoritySyncEntity() },
-                candidates = mediaRows,
-                syntheticRootExpectedUpdatedAt = syntheticRoot.expectedLocalUpdatedAt,
-            )
-            mediaRows.forEach { remaining.remove(it.planId) }
-        }
-        mediaFileCleanup.cleanupUnreferencedPaths(orphanPaths)
-        return units
-    }
-
-    private fun frozenUnit(
-        root: SyncEntity,
-        media: List<SyncEntity>,
-        candidates: List<PublishCandidate>,
-        syntheticRootExpectedUpdatedAt: Long? = null,
-    ): FrozenAuthorityUnit = FrozenAuthorityUnit(
-        draft = ReconcileUnitDraft(
-            contentHash = authorityContentHash(root, media),
-            root = root,
-            media = media.sortedBy(SyncEntity::clientUuid),
-        ),
-        candidates = candidates,
-        syntheticRootExpectedUpdatedAt = syntheticRootExpectedUpdatedAt,
-    )
-
-    private fun PublishCandidate.toAuthoritySyncEntity(): SyncEntity = SyncEntity(
-        type = entityType,
-        clientUuid = clientUuid,
-        payloadJson = payloadJson,
-        updatedAt = updatedAt,
-        deletedAt = deletedAt,
-    )
-
-    private fun authorityContentHash(root: SyncEntity, media: List<SyncEntity>): String {
-        val source = buildString {
-            fun appendEntity(entity: SyncEntity) {
-                append(entity.type).append('\u0000')
-                append(entity.clientUuid).append('\u0000')
-                append(entity.updatedAt).append('\u0000')
-                append(entity.deletedAt ?: "-").append('\u0000')
-                append(Json.parseToJsonElement(entity.payloadJson).toString()).append('\u0000')
-            }
-            appendEntity(root)
-            media.sortedBy(SyncEntity::clientUuid).forEach(::appendEntity)
-        }
-        return MessageDigest.getInstance("SHA-256")
-            .digest(source.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-    }
-
-    private suspend fun candidateBelongsToBaby(candidate: PublishCandidate, babyId: Long): Boolean =
-        when (candidate.entityType) {
-            "baby" -> babyDao.getByClientUuid(candidate.clientUuid)?.id == babyId
-            "record" -> recordDao.getByClientUuid(candidate.clientUuid)?.babyId == babyId
-            "care_plan" -> carePlanDao.getByClientUuid(candidate.clientUuid)?.babyId == babyId
-            "fulfillment_candidate" -> fulfillmentCandidateDao
-                .getByClientUuid(candidate.clientUuid)
-                ?.let { carePlanDao.getByClientUuid(it.carePlanClientUuid)?.babyId } == babyId
-            "media" -> mediaDao.getByClientUuid(candidate.clientUuid)?.let { media ->
-                media.babyId == babyId ||
-                    media.recordId?.let { recordDao.getIncludingDeleted(it)?.babyId } == babyId ||
-                    media.carePlanId?.let { carePlanDao.get(it)?.babyId } == babyId
-            } == true
-            else -> false
-        }
-
-    private fun mediaBelongsToRoot(
-        media: PublishCandidate,
-        root: PublishCandidate,
-    ): Boolean = runCatching {
-        val payload = Json.parseToJsonElement(media.payloadJson).jsonObject
-        when (root.entityType) {
-            "record" -> payload.string("record_client_uuid") == root.clientUuid
-            "care_plan" -> payload.string("care_plan_client_uuid") == root.clientUuid
-            "baby" -> payload.string("baby_client_uuid") == root.clientUuid &&
-                payload.string("kind") == "avatar"
-            else -> false
-        }
-    }.getOrDefault(false)
-
-    private suspend fun mediaRootKey(row: PublishCandidate): Pair<String, Long>? {
-        val media = mediaDao.getByClientUuid(row.clientUuid) ?: return null
-        val recordId = media.recordId
-        val carePlanId = media.carePlanId
-        val babyId = media.babyId
-        return when {
-            recordId != null -> "record" to recordId
-            carePlanId != null -> "care_plan" to carePlanId
-            babyId != null && media.kind == "avatar" -> "baby" to babyId
-            else -> null
-        }
-    }
-
-    private suspend fun syntheticRootForMedia(
-        key: Pair<String, Long>,
-        rows: List<PublishCandidate>,
-    ): SyntheticAuthorityRoot? {
-        val mediaRevision = rows.maxOf(PublishCandidate::updatedAt)
-        return when (key.first) {
-            "record" -> recordDao.getIncludingDeleted(key.second)?.let { record ->
-                val baby = babyDao.getIncludingDeleted(record.babyId) ?: return null
-                SyncWireMapper.record(
-                    record,
-                    baby.clientUuid,
-                    recordCustomItemClientUuid(record),
-                ).copy(
-                    updatedAt = maxOf(nextAuthorityPackageVersion(record.updatedAt), mediaRevision),
-                ).let { SyntheticAuthorityRoot(it, record.updatedAt) }
-            }
-            "care_plan" -> carePlanDao.get(key.second)?.let { plan ->
-                val baby = babyDao.getIncludingDeleted(plan.babyId) ?: return null
-                SyncWireMapper.carePlan(
-                    plan,
-                    baby.clientUuid,
-                    plan.customItemId?.let { customItemDao.getById(it)?.clientUuid },
-                ).copy(
-                    updatedAt = maxOf(nextAuthorityPackageVersion(plan.updatedAt), mediaRevision),
-                ).let { SyntheticAuthorityRoot(it, plan.updatedAt) }
-            }
-            "baby" -> babyDao.getIncludingDeleted(key.second)?.let { baby ->
-                SyncWireMapper.baby(
-                    baby,
-                    avatarMediaUuid = if (baby.deletedAt == null) {
-                        rows.maxByOrNull(PublishCandidate::updatedAt)?.clientUuid
-                    } else {
-                        null
-                    },
-                ).copy(
-                    updatedAt = maxOf(nextAuthorityPackageVersion(baby.updatedAt), mediaRevision),
-                ).let { SyntheticAuthorityRoot(it, baby.updatedAt) }
-            }
-            else -> null
-        }
-    }
-
-    private suspend fun acknowledgeSyntheticAuthorityRoot(
-        unit: FrozenAuthorityUnit,
-        expectedLocalUpdatedAt: Long,
-    ): Boolean = when (unit.draft.root.type) {
-        "baby" -> babyDao.acknowledgeSyntheticRootPublication(
-            clientUuid = unit.draft.root.clientUuid,
-            expectedLocalUpdatedAt = expectedLocalUpdatedAt,
-            publishedUpdatedAt = unit.draft.root.updatedAt,
-        )
-        "record" -> recordDao.acknowledgeSyntheticRootPublication(
-            clientUuid = unit.draft.root.clientUuid,
-            expectedLocalUpdatedAt = expectedLocalUpdatedAt,
-            publishedUpdatedAt = unit.draft.root.updatedAt,
-        )
-        "care_plan" -> carePlanDao.acknowledgeSyntheticRootPublication(
-            clientUuid = unit.draft.root.clientUuid,
-            expectedLocalUpdatedAt = expectedLocalUpdatedAt,
-            publishedUpdatedAt = unit.draft.root.updatedAt,
-        )
-        else -> false
-    }
-
-    private fun nextAuthorityPackageVersion(updatedAt: Long): Long =
-        if (updatedAt == Long.MAX_VALUE) Long.MAX_VALUE else updatedAt + 1L
-
-    private suspend fun candidateStillCurrent(candidate: PublishCandidate): Boolean = when (
-        candidate.entityType
-    ) {
-        "baby" -> babyDao.getByClientUuid(candidate.clientUuid)?.let {
-            it.updatedAt == candidate.updatedAt && it.syncDirty
-        } == true
-        "record" -> recordDao.getByClientUuid(candidate.clientUuid)?.let {
-            it.updatedAt == candidate.updatedAt && it.syncDirty
-        } == true
-        "care_plan" -> carePlanDao.getByClientUuid(candidate.clientUuid)?.let {
-            it.updatedAt == candidate.updatedAt && it.syncDirty
-        } == true
-        "custom_item" -> customItemDao.getByClientUuid(candidate.clientUuid)?.let {
-            it.updatedAt == candidate.updatedAt && it.syncDirty
-        } == true
-        "fulfillment_candidate" -> fulfillmentCandidateDao
-            .getByClientUuid(candidate.clientUuid)?.let {
-                it.updatedAt == candidate.updatedAt && it.syncDirty
-            } == true
-        "media" -> mediaDao.getByClientUuid(candidate.clientUuid)?.let {
-            it.updatedAt == candidate.updatedAt
-        } == true
-        else -> false
-    }
-
-    private suspend fun acknowledgeAuthorityCandidate(
-        candidate: PublishCandidate,
-        confirmedByServer: Boolean,
-    ) {
-        when (candidate.entityType) {
-            "baby" -> babyDao.markSynced(candidate.clientUuid, candidate.updatedAt)
-            "record" -> if (confirmedByServer) {
-                recordDao.acknowledgeFamilyPublishedVersion(candidate.clientUuid, candidate.updatedAt)
-            } else {
-                recordDao.markSynced(candidate.clientUuid, candidate.updatedAt)
-            }
-            "care_plan" -> if (confirmedByServer) {
-                carePlanDao.acknowledgeFamilyPublishedVersion(candidate.clientUuid, candidate.updatedAt)
-            } else {
-                carePlanDao.markSynced(candidate.clientUuid, candidate.updatedAt)
-            }
-            "custom_item" -> customItemDao.markSynced(candidate.clientUuid, candidate.updatedAt)
-            "fulfillment_candidate" ->
-                fulfillmentCandidateDao.markSynced(candidate.clientUuid, candidate.updatedAt)
-            "media" -> mediaDao.markSynced(candidate.clientUuid, candidate.updatedAt)
-        }
-    }
-
-    private suspend fun discardTechnicalTombstone(candidate: PublishCandidate): Int {
-        if (candidate.deletedAt == null) return 0
-        return when (candidate.entityType) {
-            "baby" -> babyDao.deleteTombstoneRevision(candidate.clientUuid, candidate.updatedAt)
-            "record" -> recordDao.deleteTombstoneRevision(candidate.clientUuid, candidate.updatedAt)
-            "care_plan" ->
-                carePlanDao.deleteTombstoneRevision(candidate.clientUuid, candidate.updatedAt)
-            "custom_item" ->
-                customItemDao.deleteTombstoneRevision(candidate.clientUuid, candidate.updatedAt)
-            "fulfillment_candidate" -> fulfillmentCandidateDao.deleteTombstoneRevision(
-                candidate.clientUuid,
-                candidate.updatedAt,
-            )
-            "media" -> mediaDao.deleteTombstoneRevision(candidate.clientUuid, candidate.updatedAt)
-            else -> 0
-        }
-    }
-
-    private fun MediaAssetEntity.isOwnerlessTechnicalMedia(): Boolean = when (kind) {
-        "avatar" -> babyId == null
-        "log" -> (recordId == null) == (carePlanId == null)
-        else -> true
-    }
-
-    private suspend fun canDiscardTechnicalTombstone(
-        candidate: PublishCandidate,
-        technicalKeys: Set<Pair<String, String>>,
-    ): Boolean {
-        fun Iterable<Pair<String, String>>.allCovered(): Boolean = all { it in technicalKeys }
-        return when (candidate.entityType) {
-            "baby" -> babyDao.getByClientUuid(candidate.clientUuid)?.let { baby ->
-                buildList {
-                    addAll(
-                        recordDao.listAllIncludingDeleted()
-                            .filter { it.babyId == baby.id }
-                            .map { "record" to it.clientUuid },
-                    )
-                    addAll(
-                        carePlanDao.listAllIncludingDeleted()
-                            .filter { it.babyId == baby.id }
-                            .map { "care_plan" to it.clientUuid },
-                    )
-                    addAll(
-                        mediaDao.listAllIncludingDeleted()
-                            .filter { it.babyId == baby.id }
-                            .map { "media" to it.clientUuid },
-                    )
-                }.allCovered()
-            } ?: false
-            "record" -> recordDao.getByClientUuid(candidate.clientUuid)?.let { record ->
-                buildList {
-                    addAll(
-                        mediaDao.listForRecord(record.id).map { "media" to it.clientUuid },
-                    )
-                    addAll(
-                        fulfillmentCandidateDao.listForRecord(record.clientUuid)
-                            .map { "fulfillment_candidate" to it.clientUuid },
-                    )
-                    addAll(
-                        carePlanDao.listAllIncludingDeleted()
-                            .filter {
-                                it.sourceRecordClientUuid == record.clientUuid ||
-                                    it.fulfilledRecordClientUuid == record.clientUuid
-                            }
-                            .map { "care_plan" to it.clientUuid },
-                    )
-                }.allCovered()
-            } ?: false
-            "care_plan" -> carePlanDao.getByClientUuid(candidate.clientUuid)?.let { plan ->
-                (
-                    mediaDao.listForCarePlan(plan.id).map { "media" to it.clientUuid } +
-                        fulfillmentCandidateDao.listForCarePlan(plan.clientUuid)
-                            .map { "fulfillment_candidate" to it.clientUuid }
-                    ).allCovered()
-            } ?: false
-            "custom_item" -> customItemDao.getByClientUuid(candidate.clientUuid)?.let { item ->
-                (
-                    recordDao.listAllIncludingDeleted()
-                        .filter { recordCustomItemClientUuid(it) == item.clientUuid }
-                        .map { "record" to it.clientUuid } +
-                        carePlanDao.listAllIncludingDeleted()
-                            .filter { it.customItemId == item.id }
-                            .map { "care_plan" to it.clientUuid }
-                    ).allCovered()
-            } ?: false
-            "fulfillment_candidate", "media" -> true
-            else -> false
         }
     }
 
@@ -2271,10 +1841,34 @@ internal class ReplicaSyncEngine(
                 )
             }
         }
-        val media = requirePortableMediaUuids(
+        val capturedMedia = requirePortableMediaUuids(
             (directlyChangedMedia + referencedMedia).distinctBy(MediaAssetEntity::id),
         )
+        val memberAvatarMedia = if (session.role == FamilyRole.Member) {
+            capturedMedia.filter { asset ->
+                asset.kind == "avatar" && asset.babyId != null
+            }
+        } else {
+            emptyList()
+        }
+        val memberAvatarBabyIds = memberAvatarMedia.mapNotNullTo(
+            mutableSetOf(),
+            MediaAssetEntity::babyId,
+        )
+        if (memberAvatarMedia.isNotEmpty()) {
+            transactionRunner.run {
+                memberAvatarMedia.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+                babies.filter { it.id in memberAvatarBabyIds }.forEach {
+                    babyDao.markSynced(it.clientUuid, it.updatedAt)
+                }
+            }
+        }
+        val memberAvatarUuids = memberAvatarMedia.mapTo(mutableSetOf(), MediaAssetEntity::clientUuid)
+        val media = capturedMedia.filterNot { candidate ->
+            candidate.clientUuid in memberAvatarUuids
+        }
         babies.forEach { baby ->
+            if (baby.id in memberAvatarBabyIds) return@forEach
             // Tombstone packages always publish a null avatar pointer; never repair to live media.
             val avatarMediaUuid = if (baby.deletedAt != null) {
                 null
@@ -2425,7 +2019,7 @@ internal class ReplicaSyncEngine(
 
     /**
      * Converts impossible local media shapes into deterministic technical
-     * dispositions before the authority snapshot is frozen.
+     * dispositions before the causal mutation snapshot is frozen.
      *
      * Missing bytes never delete their Record/CarePlan. A never-published
      * attachment becomes an atomic media tombstone, while a media row with a
@@ -2438,14 +2032,14 @@ internal class ReplicaSyncEngine(
         spooledMedia: Set<String>,
     ) {
         val orphanPaths = mutableSetOf<String>()
-        // Authority settle can include a clean media row when its owning root is pending (and
+        // Causal settlement can include a clean media row when its owning root is pending (and
         // the first settle after disaster recovery can cover an entirely clean restored set).
         // Inspect the complete local media set so historical zero/null probe fields cannot reach
-        // reconcile merely because the row already has a publication receipt.
+        // the commit merely because the row already has a publication receipt.
         for (snapshot in mediaDao.listAllIncludingDeleted()) {
-            // Wake media belongs exclusively to the causal root owner. The legacy
-            // repair path must not inspect, normalize, tombstone, or delete it;
-            // H18/H20 will own its immutable spool and receipt settlement.
+            // Wake media belongs exclusively to the causal root owner. This technical repair
+            // path must not inspect, normalize, tombstone, or delete it; its immutable spool
+            // and receipt settlement are owned by the causal root.
             if (snapshot.kind == "wake") continue
             if (snapshot.clientUuid in spooledMedia) continue
             val inspected = snapshot.localUri
@@ -2479,8 +2073,8 @@ internal class ReplicaSyncEngine(
                     inspected.byteSize <= 0
                 if (!invalidDeletedBabyAvatar && !missingLocalBytes) {
                     // v12 media rows can retain the default zero/null probe fields even though
-                    // their app-owned file is intact. Authority reconcile validates the manifest
-                    // before the atomic publisher gets a chance to prepare the upload, so repair
+                    // their app-owned file is intact. Causal commit validates the manifest before
+                    // the publisher gets a chance to prepare the upload, so repair
                     // those historical fields under the same revision CAS before capture.
                     mediaDao.mergePreparedMetadata(
                         clientUuid = current.clientUuid,
@@ -2762,7 +2356,7 @@ internal fun requireCustomItemCapacityAfterApply(
     }
 }
 
-private data class RecordWire(
+internal data class RecordWire(
     val babyClientUuid: String,
     val createdByMembershipId: String,
     val type: RecordType,
@@ -2796,7 +2390,7 @@ private data class MediaWire(
     val byteSize: Long,
 )
 
-private fun parseRecordWire(payload: JsonObject): RecordWire {
+internal fun parseRecordWire(payload: JsonObject): RecordWire {
     val baseKeys = setOf(
         "baby_client_uuid",
         "created_by_membership_id",
@@ -3014,7 +2608,6 @@ private fun SyncHttpException.fullResyncCheckpointOrNull(): FullResyncCheckpoint
         detail.string("code") !in setOf(
             "cursor_ahead",
             "generation_changed",
-            "authority_response_too_large",
         )
     ) {
         return null
@@ -3075,6 +2668,4 @@ internal val ENTITY_ORDER = listOf(
 private val CURRENT_ENTITY_TYPES = ENTITY_ORDER.toSet()
 internal const val PUSH_ROOT_BATCH_SIZE = 200
 internal const val MAX_PUSH_BATCH_SIZE = 1_000
-/** Normal home libraries are far smaller; reaching this many pages is anomalous. */
-private const val MAX_AUTHORITY_RECONCILE_UNITS = 64
 private const val MAX_AUTHORITY_SETTLEMENT_PASSES = 8

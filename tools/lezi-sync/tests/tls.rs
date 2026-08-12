@@ -39,7 +39,6 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
                     "atomic_bundle",
                     "record_membership_author",
                     "device_disaster_restore_v1",
-                    "authoritative_reconcile_v1",
                     "validated_deferred_fulfillment_v1",
                     "causal_versions",
                     "wake_observation",

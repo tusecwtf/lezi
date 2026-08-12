@@ -10,11 +10,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path as AxumPath, Request, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -32,7 +31,7 @@ use crate::store::{
 };
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, secure_directory, secure_file,
-    sync_directory, write_private_file, ApiError, AppState, MAX_ENTITY_FUTURE_SKEW_MILLIS,
+    sync_directory, ApiError, AppState, MAX_ENTITY_FUTURE_SKEW_MILLIS,
     OPEN_STAGING_BUNDLE_TTL_SECONDS,
 };
 
@@ -476,136 +475,6 @@ pub(crate) async fn get_bundle(
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("Bundle not found"))
-}
-
-pub(crate) async fn put_bundle_media(
-    State(state): State<Arc<AppState>>,
-    AxumPath((bundle_id, client_uuid)): AxumPath<(Uuid, Uuid)>,
-    request: Request,
-) -> Result<Json<crate::store::BundleStageStatus>, ApiError> {
-    let principal = authenticate(&state, request.headers()).await?;
-    require_supported_client(&state, request.headers()).await?;
-    if let Some(length) = request.headers().get(CONTENT_LENGTH) {
-        let length = length
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(|| ApiError::bad_request("Invalid Content-Length"))?;
-        if length > state.max_media_bytes {
-            return Err(ApiError::payload_too_large("Media is too large"));
-        }
-    }
-
-    let max_media_bytes = state.max_media_bytes;
-    let content = tokio::time::timeout(Duration::from_secs(120), async move {
-        let mut content = Vec::new();
-        let mut stream = request.into_body().into_data_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
-            if content.len() + chunk.len() > max_media_bytes {
-                return Err(ApiError::payload_too_large("Media is too large"));
-            }
-            content.extend_from_slice(&chunk);
-        }
-        Ok::<_, ApiError>(content)
-    })
-    .await
-    .map_err(|_| ApiError::request_timeout("Media upload body timed out"))??;
-    if content.is_empty() {
-        return Err(ApiError::unprocessable("Media body must not be empty"));
-    }
-
-    // Never hold the per-family serialization lock while awaiting an
-    // untrusted request body. Once bounded bytes are complete, re-read the
-    // current bundle manifest under the lock before touching disk or SQLite.
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let store = state.store.clone();
-    let family_id = principal.family_id.clone();
-    let bundle_key = bundle_id.to_string();
-    let bundle = run_blocking(move || Ok(store.load_bundle(&family_id, &bundle_key)?))
-        .await?
-        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
-    if bundle.status != "staging" {
-        return Err(ApiError::conflict(
-            "committed bundle does not accept staged media",
-        ));
-    }
-    if bundle.staged_membership_id != principal.membership_id {
-        return Err(ApiError::conflict(
-            "bundle belongs to another family membership",
-        ));
-    }
-    let media_entity = bundle
-        .media
-        .iter()
-        .find(|entity| entity.client_uuid == client_uuid.to_string())
-        .ok_or_else(|| ApiError::unprocessable("media is not listed in the bundle manifest"))?;
-    if media_entity.deleted_at.is_some() {
-        return Err(ApiError::unprocessable(
-            "tombstone media does not accept bytes",
-        ));
-    }
-    if media_entity
-        .payload
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .is_some_and(|kind| kind == "avatar")
-        && principal.role != "owner"
-    {
-        return Err(ApiError::forbidden("Only owner may change avatar"));
-    }
-    if let Some(declared) = media_entity
-        .payload
-        .get("byte_size")
-        .and_then(|value| value.as_u64())
-        .and_then(|size| usize::try_from(size).ok())
-    {
-        if declared != content.len() {
-            return Err(ApiError::unprocessable(
-                "Media body size does not match declared byte_size",
-            ));
-        }
-    }
-
-    let blocking_state = state.clone();
-    let status = run_blocking(move || {
-        let path =
-            blocking_state.bundle_media_path(&principal.family_id, &bundle_id, &client_uuid)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-            secure_directory(parent)?;
-        }
-        write_private_file(&path, &content)?;
-        let staged_sha256 = hex::encode(Sha256::digest(&content));
-
-        match blocking_state.store.mark_bundle_media_staged(
-            &principal,
-            &bundle_id.to_string(),
-            &client_uuid.to_string(),
-            content.len(),
-            &staged_sha256,
-            blocking_state.now(),
-        ) {
-            Ok(value) => Ok(value),
-            Err(StoreError::BundleMediaNotInManifest) => Err(ApiError::unprocessable(
-                "media is not listed in the bundle manifest",
-            )),
-            Err(StoreError::BundleMediaIncomplete) => Err(ApiError::unprocessable(
-                "Media body size does not match declared byte_size",
-            )),
-            Err(StoreError::BundleMediaUploadClosed) => Err(ApiError::conflict(
-                "committed bundle does not accept staged media",
-            )),
-            Err(StoreError::BundleMembershipMismatch) => Err(ApiError::conflict(
-                "bundle belongs to another family membership",
-            )),
-            Err(StoreError::BundleNotFound) => Err(ApiError::not_found("Bundle not found")),
-            Err(error) => Err(error.into()),
-        }
-    })
-    .await?;
-    Ok(Json(status))
 }
 
 pub(crate) async fn commit_bundle(

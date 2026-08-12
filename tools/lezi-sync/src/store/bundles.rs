@@ -1569,106 +1569,9 @@ fn effective_entity(
         })
 }
 
-/// Dry-run the same canonicalization, ACL, immutable-evidence, reference, and
-/// atomic-package rules that commit applies. Reconciliation calls this while
-/// holding its own Store transaction; no staging or entity row is written.
-pub(in crate::store) fn validate_reconcile_package(
-    transaction: &Transaction<'_>,
-    principal: &Principal,
-    mut package: Vec<Entity>,
-    max_updated_at: i64,
-    now: i64,
-) -> Result<(), StoreError> {
-    let Principal {
-        family_id,
-        role,
-        membership_id,
-        ..
-    } = principal;
-    let root = package
-        .iter()
-        .find(|entity| entity.entity_type != "media")
-        .ok_or(StoreError::InvalidStoredPayload)?;
-    if role != "owner" && root.entity_type == "baby" {
-        return Err(StoreError::ForbiddenBaby);
-    }
-    if package
-        .iter()
-        .any(|entity| entity.updated_at > max_updated_at)
-    {
-        return Err(StoreError::TimestampOutOfRange);
-    }
-    let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
-    let mut existing = load_existing_entities(transaction, family_id, &incoming_keys)?;
-    existing.extend(load_family_custom_items(transaction, family_id)?);
-    existing.extend(load_family_media(transaction, family_id)?);
-    stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
-    let noop_care_plan_ids =
-        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
-    discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
-    canonicalize_equal_lww_bundle_root(&mut package, &existing);
-    canonicalize_record_authors(role, membership_id, &mut package, &existing)?;
-    let confirmed_at = package
-        .iter()
-        .find(|entity| entity.entity_type == "fulfillment_candidate")
-        .and_then(|entity| entity.payload.get("confirmed_at"))
-        .and_then(Value::as_i64)
-        .unwrap_or_else(|| confirmed_at_millis(now));
-    stamp_and_authorize_fulfillment_candidates(
-        role,
-        membership_id,
-        confirmed_at,
-        &mut package,
-        &existing,
-    )?;
-    let mut effective = effective_lww_winners(package.clone(), &existing);
-    stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
-    let noop_care_plan_ids =
-        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
-    discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
-    stamp_and_authorize_fulfillment_candidates(
-        role,
-        membership_id,
-        confirmed_at,
-        &mut effective,
-        &existing,
-    )?;
-    let reference_keys = validation_reference_keys(&effective);
-    let missing_references = reference_keys
-        .difference(&incoming_keys)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    existing.extend(load_existing_entities(
-        transaction,
-        family_id,
-        &missing_references,
-    )?);
-    let persisted = existing.clone();
-    let fulfillment_custom_references =
-        load_fulfillment_custom_references(transaction, family_id, &effective)?;
-    for entity in &package {
-        existing
-            .entry(entity_key(entity))
-            .or_insert_with(|| ExistingEntity {
-                updated_at: entity.updated_at,
-                deleted_at: entity.deleted_at,
-                payload: entity.payload.clone(),
-            });
-    }
-    validate_push(
-        role,
-        membership_id,
-        &effective,
-        &existing,
-        &persisted,
-        &fulfillment_custom_references,
-    )
-}
-
 /// Validate one already shape-adapted canonical atomic package against the
-/// current family graph. Both legacy reconciliation and causal ingress route
-/// reference/association invariants through `validate_push`; wire adapters do
-/// not reimplement the graph rules.
+/// current family graph. Causal ingress routes reference and association
+/// invariants through `validate_push`; wire adapters do not reimplement them.
 pub(in crate::store) fn validate_canonical_package_ingress(
     transaction: &Transaction<'_>,
     principal: &Principal,
@@ -1876,6 +1779,16 @@ impl Store {
             membership_id,
             ..
         } = principal;
+        if root.entity_type != "fulfillment_candidate" {
+            return Err(StoreError::LegacyBundleCausalRootUnsupported(
+                root.entity_type.clone(),
+            ));
+        }
+        if !media.is_empty() {
+            return Err(StoreError::UnresolvedReference(
+                "fulfillment_candidate bundle does not accept media".to_owned(),
+            ));
+        }
         if media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
             return Err(StoreError::UnresolvedReference(format!(
                 "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
@@ -2061,7 +1974,6 @@ impl Store {
         let required = required_live_media_uuids(&media);
         let media_integrity = load_bundle_media_integrity(&connection, family_id, bundle_id)?;
         Ok(Some(StoredBundle {
-            media,
             required_media: required,
             media_integrity,
             status: row.status,
@@ -2091,74 +2003,6 @@ impl Store {
             )?);
         }
         Ok(integrity)
-    }
-
-    /// Record that staged bytes for a manifest media UUID are durable.
-    pub fn mark_bundle_media_staged(
-        &self,
-        principal: &Principal,
-        bundle_id: &str,
-        media_uuid: &str,
-        staged_byte_size: usize,
-        staged_sha256: &str,
-        now: i64,
-    ) -> Result<BundleStageStatus, StoreError> {
-        let family_id = &principal.family_id;
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let _row = load_open_staging_bundle_for_membership(
-            &transaction,
-            family_id,
-            bundle_id,
-            &principal.membership_id,
-        )?
-        .ok_or(StoreError::BundleMediaUploadClosed)?;
-        let updated = transaction.execute(
-            "
-        UPDATE sync_bundle_media
-        SET staged_byte_size = ?1, staged_sha256 = ?2, staged_at = ?3
-        WHERE family_id = ?4 AND bundle_id = ?5 AND media_uuid = ?6
-        ",
-            params![
-                staged_byte_size as i64,
-                staged_sha256,
-                now,
-                family_id,
-                bundle_id,
-                media_uuid
-            ],
-        )?;
-        if updated == 0 {
-            return Err(StoreError::BundleMediaNotInManifest);
-        }
-        // Size must match declared byte_size for live media.
-        let declared: Option<i64> = transaction.query_row(
-            "
-        SELECT declared_byte_size FROM sync_bundle_media
-        WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-        ",
-            params![family_id, bundle_id, media_uuid],
-            |r| r.get(0),
-        )?;
-        if let Some(declared) = declared {
-            if declared != staged_byte_size as i64 {
-                // Clear the bad staging mark so commit still sees it missing.
-                transaction.execute(
-                    "
-                UPDATE sync_bundle_media
-                SET staged_byte_size = NULL, staged_sha256 = NULL, staged_at = NULL
-                WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-                ",
-                    params![family_id, bundle_id, media_uuid],
-                )?;
-                transaction.commit()?;
-                return Err(StoreError::BundleMediaIncomplete);
-            }
-        }
-        transaction.commit()?;
-        self.secure_database_files()?;
-        self.bundle_status(family_id, bundle_id)?
-            .ok_or(StoreError::BundleNotFound)
     }
 
     /// Publish a complete package in one transaction. Idempotent after success.
@@ -2245,25 +2089,6 @@ impl Store {
 
         if role != "owner" && root.entity_type == "baby" {
             return Err(StoreError::ForbiddenBaby);
-        }
-
-        // Historical pre-causal Store/API fixtures still exercise the old atomic
-        // bundle contract. Once a stable head exists, however, timestamp LWW can
-        // never advance that root; current Android clients use causal commit for
-        // every mutable root and reserve this path for FulfillmentCandidate.
-        let causal_head_exists = transaction
-            .query_row(
-                "SELECT 1 FROM entity_stable_heads
-                 WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3",
-                params![family_id, root.entity_type, root.client_uuid],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if causal_head_exists {
-            return Err(StoreError::LegacyBundleCausalRootUnsupported(
-                root.entity_type.clone(),
-            ));
         }
 
         if root.updated_at > max_updated_at

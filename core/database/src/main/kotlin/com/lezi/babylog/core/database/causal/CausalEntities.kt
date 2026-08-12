@@ -92,9 +92,11 @@ data class ConflictInboxProjectionRow(
  * Conflict snapshot cache stored in the existing Room 27 table.
  *
  * A canonical complete snapshot uses its wire conflict UUID as [conflictId].
- * H08 resumable page evidence uses a private non-UUID key and is never joined
- * into the inbox projection; this preserves the previous complete row until
- * final promotion without activating the H27 Room 28 schema early.
+ * H08 resumable page evidence, pre-H27 frozen mutation/media envelopes, and the
+ * single in-flight replica-reset receipt use closed private non-UUID keys and
+ * are never joined into the inbox projection. The reset receipt is replaced in
+ * the same Room transaction that requeues roots and is deleted after recovery;
+ * H27 owns moving these transport journals to dedicated Room 28 storage.
  */
 @Entity(tableName = "conflict_detail_cache")
 data class ConflictSnapshotCacheEntity(
@@ -104,7 +106,7 @@ data class ConflictSnapshotCacheEntity(
     val legacyStableRootSentinel: String = "{}",
     @ColumnInfo(name = "baseRootJson")
     val legacyBaseRootSentinel: String? = null,
-    /** Canonical complete snapshot or closed H08 staged-page evidence. */
+    /** Canonical snapshot or one of the closed private transport journals documented above. */
     @ColumnInfo(name = "branchesJson")
     val snapshotJson: String,
     /** Fixed sentinel; paging state never revives this lossy legacy column. */

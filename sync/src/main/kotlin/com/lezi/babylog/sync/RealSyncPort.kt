@@ -100,7 +100,6 @@ import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
-import com.lezi.babylog.sync.session.CAPABILITY_AUTHORITATIVE_RECONCILE
 import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_VERSIONS
 import com.lezi.babylog.sync.session.CAPABILITY_DISASTER_RESTORE
 import com.lezi.babylog.sync.session.CAPABILITY_RECORD_MEMBERSHIP_AUTHOR
@@ -178,9 +177,6 @@ class RealSyncPort @Inject constructor(
     private val conflictSummaryDao: ConflictSummaryDao,
     private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
     private val sourceRelationDao: SourceRelationDao? = null,
-    /** Historical non-causal contract fixtures only; production DI binds this to false. */
-    @Named("allowHistoricalMutableRootEvidence")
-    private val allowHistoricalMutableRootEvidence: Boolean = false,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     private val apkIdentityReader: AppUpdateApkIdentityReader =
@@ -257,7 +253,6 @@ class RealSyncPort @Inject constructor(
         conflictSummaryDao = conflictSummaryDao,
         conflictSnapshotCacheDao = conflictSnapshotCacheDao,
         sourceRelationDao = sourceRelationDao,
-        allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
     private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
         babyDao = babyDao,
@@ -2247,7 +2242,6 @@ private val REQUIRED_HEALTH_CAPABILITIES = setOf(
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
-    CAPABILITY_AUTHORITATIVE_RECONCILE,
     CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
     // 0.3.13 causal generation (wire §1): all three or stop care sync — no dual-read LWW.
     CAPABILITY_CAUSAL_VERSIONS,

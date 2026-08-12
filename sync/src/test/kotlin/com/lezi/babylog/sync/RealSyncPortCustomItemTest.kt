@@ -71,8 +71,7 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityResult
+import com.lezi.babylog.sync.backend.CausalCommitRejectedException
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
@@ -88,8 +87,6 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -99,7 +96,6 @@ import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
-import com.lezi.babylog.sync.engine.AtomicBundleId
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
@@ -125,19 +121,19 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
 class RealSyncPortCustomItemTest {
     @Test
     fun customItemDirtySnapshotPushesAndPullPreservesLocalSortOrder() = runTest {
+        val customUuid = "11111111-1111-3111-8111-111111111111"
         val rig = SyncRig(
             session = joinedSession("family-a").copy(membershipId = "m-owner"),
         )
         rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "custom-1",
+                clientUuid = customUuid,
                 familyId = 1,
                 name = "抚触",
                 iconSlot = 2,
@@ -150,24 +146,28 @@ class RealSyncPortCustomItemTest {
 
         val pushResult = rig.port.sync(SyncTrigger.LocalWrite)
         assertThat(pushResult.exceptionOrNull()).isNull()
-        val pushed = rig.backend.stagedBundles
-            .map(AtomicBundleDraft::root)
-            .filter { it.type == "custom_item" }
+        val pushed = rig.backend.causalCommittedUnits.flatten()
+            .filter { it.entityType == "custom_item" }
         assertThat(pushed).hasSize(1)
-        assertThat(pushed.single().payloadJson).contains("\"name\":\"抚触\"")
-        assertThat(pushed.single().payloadJson).doesNotContain("sort_order")
-        assertThat(pushed.single().payloadJson).doesNotContain("sortOrder")
-        assertThat(pushed.single().payloadJson).doesNotContain("hidden")
-        assertThat(pushed.single().payloadJson).doesNotContain("quick")
-        assertThat(rig.customItems.get("custom-1")!!.syncDirty).isFalse()
-        assertThat(rig.customItems.get("custom-1")!!.sortOrder).isEqualTo(7)
+        assertThat(pushed.single().rootJson).contains("\"name\":\"抚触\"")
+        assertThat(pushed.single().rootJson).doesNotContain("sort_order")
+        assertThat(pushed.single().rootJson).doesNotContain("sortOrder")
+        assertThat(pushed.single().rootJson).doesNotContain("hidden")
+        assertThat(pushed.single().rootJson).doesNotContain("quick")
+        assertThat(rig.customItems.get(customUuid)!!.syncDirty).isFalse()
+        assertThat(rig.customItems.get(customUuid)!!.sortOrder).isEqualTo(7)
 
         // Remote rename from peer should update name but keep local sortOrder.
-        rig.backend.nextPull = PullResult(
+        val pullRig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "m-owner"),
+        )
+        pullRig.backend.enableCausal = false
+        pullRig.customItems.seed(rig.customItems.get(customUuid)!!.copy(baseVersion = null))
+        pullRig.backend.nextPull = PullResult(
             entities = listOf(
                 SyncEntity(
                     type = "custom_item",
-                    clientUuid = "custom-1",
+                    clientUuid = customUuid,
                     payloadJson =
                         """{"name":"新抚触","icon_slot":3,"created_by_membership_id":"m-owner"}""",
                     updatedAt = 100,
@@ -178,9 +178,9 @@ class RealSyncPortCustomItemTest {
             generation = "current-generation",
             hasMore = false,
         )
-        val pullResult = rig.port.sync(SyncTrigger.PullToRefresh)
+        val pullResult = pullRig.port.sync(SyncTrigger.PullToRefresh)
         assertThat(pullResult.exceptionOrNull()).isNull()
-        val applied = rig.customItems.get("custom-1")!!
+        val applied = pullRig.customItems.get(customUuid)!!
         assertThat(applied.name).isEqualTo("新抚触")
         assertThat(applied.iconSlot).isEqualTo(3)
         assertThat(applied.sortOrder).isEqualTo(7)
@@ -250,12 +250,13 @@ class RealSyncPortCustomItemTest {
     @Test
     fun tombstonedCustomDefinitionAllowsHistoricalRecordEditAndDeleteToPublish() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
-        rig.backend.enforceBundleReferences = true
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        rig.backend.remember("baby", "baby-local")
+        val babyUuid = "22222222-2222-3222-8222-222222222222"
+        val customUuid = "33333333-3333-3333-8333-333333333333"
+        val recordUuid = "44444444-4444-3444-8444-444444444444"
+        val babyId = rig.babies.seed(localBaby().copy(clientUuid = babyUuid, syncDirty = false))
         val customItemId = rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "custom-history",
+                clientUuid = customUuid,
                 familyId = 1,
                 name = "抚触",
                 iconSlot = 2,
@@ -264,12 +265,12 @@ class RealSyncPortCustomItemTest {
                 syncDirty = false,
             ),
         )
-        rig.backend.remember("custom_item", "custom-history")
         val recordId = rig.records.seed(
             localRecord(babyId).copy(
-                clientUuid = "custom-history-record",
+                clientUuid = recordUuid,
                 type = "custom",
                 note = "编辑后",
+                createdByMembershipId = "membership-a",
                 payloadJson =
                     """{"title":"抚触","detail":"睡前十分钟","custom_item_id":$customItemId,"icon_slot":2}""",
                 updatedAt = 200,
@@ -277,43 +278,45 @@ class RealSyncPortCustomItemTest {
             ),
         )
 
-        rig.backend.stageBundleFailure = SyncHttpException(503, "temporary")
+        rig.backend.onCausalCommit = { throw SyncHttpException(503, "temporary") }
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
-        assertThat(rig.records.getByClientUuid("custom-history-record")?.syncDirty).isTrue()
-        rig.backend.stageBundleFailure = null
+        assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isTrue()
+        rig.backend.onCausalCommit = null
 
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()).isNull()
 
-        val editedDraft = rig.backend.stagedBundles.last {
-            it.root.clientUuid == "custom-history-record"
+        val editedMutation = rig.backend.causalCommittedUnits.flatten().last {
+            it.clientUuid == recordUuid
         }
-        assertThat(editedDraft.root.payloadJson)
-            .contains("\"custom_item_client_uuid\":\"custom-history\"")
-        assertThat(editedDraft.root.payloadJson).contains("睡前十分钟")
-        assertThat(rig.backend.stagedBundles.map { it.root.type })
+        assertThat(editedMutation.rootJson)
+            .contains("\"custom_item_client_uuid\":\"$customUuid\"")
+        assertThat(editedMutation.rootJson).contains("睡前十分钟")
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
             .doesNotContain("custom_item")
-        assertThat(rig.records.getByClientUuid("custom-history-record")?.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
 
         rig.records.softDelete(recordId, deletedAt = 300)
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val deleteResult = rig.port.sync(SyncTrigger.LocalWrite)
+        assertThat(deleteResult.exceptionOrNull()).isNull()
 
-        val deletedDraft = rig.backend.stagedBundles.last {
-            it.root.clientUuid == "custom-history-record"
+        val deletedMutation = rig.backend.causalCommittedUnits.flatten().last {
+            it.clientUuid == recordUuid
         }
-        assertThat(deletedDraft.root.deletedAt).isEqualTo(300)
-        assertThat(rig.records.getByClientUuid("custom-history-record")?.syncDirty).isFalse()
-        assertThat(rig.customItems.get("custom-history")?.deletedAt).isEqualTo(150)
+        assertThat(deletedMutation.deleted).isTrue()
+        assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
+        assertThat(rig.customItems.get(customUuid)?.deletedAt).isEqualTo(150)
     }
 
     @Test
     fun terminalCustomHistoryRejectionKeepsLocalFactDirtyForVisibleRecovery() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
-        rig.backend.enforceBundleReferences = true
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        rig.backend.remember("baby", "baby-local")
+        val babyUuid = "55555555-5555-3555-8555-555555555555"
+        val customUuid = "66666666-6666-3666-8666-666666666666"
+        val recordUuid = "77777777-7777-3777-8777-777777777777"
+        val babyId = rig.babies.seed(localBaby().copy(clientUuid = babyUuid, syncDirty = false))
         val customItemId = rig.customItems.seed(
             CustomItemEntity(
-                clientUuid = "custom-terminal",
+                clientUuid = customUuid,
                 familyId = 1,
                 name = "抚触",
                 iconSlot = 2,
@@ -322,25 +325,28 @@ class RealSyncPortCustomItemTest {
                 syncDirty = false,
             ),
         )
-        rig.backend.remember("custom_item", "custom-terminal")
         rig.records.seed(
             localRecord(babyId).copy(
-                clientUuid = "custom-terminal-record",
+                clientUuid = recordUuid,
                 type = "custom",
+                createdByMembershipId = "membership-a",
                 payloadJson =
                     """{"title":"抚触","custom_item_id":$customItemId,"icon_slot":2}""",
                 updatedAt = 200,
                 syncDirty = true,
             ),
         )
-        rig.backend.stageBundleFailure = SyncHttpException(422, "invalid historical snapshot")
+        rig.backend.nextCausalCommitFailure = CausalCommitRejectedException(
+            mutationId = null,
+            code = "invalid_reference",
+        )
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
         assertThat(result.isFailure).isTrue()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
-        assertThat(rig.records.getByClientUuid("custom-terminal-record")?.syncDirty).isTrue()
-        assertThat(rig.customItems.get("custom-terminal")?.deletedAt).isEqualTo(150)
+        assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isTrue()
+        assertThat(rig.customItems.get(customUuid)?.deletedAt).isEqualTo(150)
     }
 
 }

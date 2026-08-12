@@ -60,21 +60,33 @@ internal class RecordingFamilySessionReplica(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean,
         crossingFamilyBoundary: Boolean,
-    ) {
+        recoveryTarget: FamilySessionReplica.RecoveryTarget?,
+    ): FamilySessionReplica.ResetReceipt {
         resetCalls += ReceiptResetCall(
             previous = previous,
             invalidateCurrentReceipts = invalidateCurrentReceipts,
             crossingFamilyBoundary = crossingFamilyBoundary,
         )
         onReset(previous)
+        return FamilySessionReplica.ResetReceipt(
+            previousFamilyId = previous.familyId,
+            previousMembershipId = previous.membershipId,
+            previousDeviceId = previous.deviceId,
+            crossingFamilyBoundary = crossingFamilyBoundary,
+            recoveryTarget = recoveryTarget,
+            roots = emptyList(),
+        )
     }
 
     override suspend fun applyInitialEntities(
         session: SyncSession,
         entities: List<SyncEntity>,
+        resetReceipt: FamilySessionReplica.ResetReceipt?,
     ) {
         onApply(session, entities)
     }
+
+    override suspend fun completeLocalSyncReset(receipt: FamilySessionReplica.ResetReceipt) = Unit
 
     override suspend fun convergeAuthenticatedSelfMembership(
         session: SyncSession,

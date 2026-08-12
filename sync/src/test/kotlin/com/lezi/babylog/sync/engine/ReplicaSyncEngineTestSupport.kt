@@ -19,10 +19,7 @@ import org.junit.Test
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.AuthorityDisposition
 import com.lezi.babylog.sync.backend.AuthorityProofException
-import com.lezi.babylog.sync.backend.AuthorityResult
-import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.MemoryMediaReferenceDao
@@ -51,9 +48,9 @@ import com.lezi.babylog.sync.TestImmutableMediaSpool
 
 internal class ReplicaEngineRig(
     session: SyncSession,
-    private val allowHistoricalMutableRootEvidence: Boolean = true,
 ) {
     val backend = RecordingSyncBackend()
+        .also { it.enableCausal = false }
     val preferences = MemorySyncPreferences(session)
     val records = MemoryRecordDao()
     val carePlans = MemoryCarePlanDao()
@@ -119,7 +116,6 @@ internal class ReplicaEngineRig(
         conflictSummaryDao = conflictSummaries,
         conflictSnapshotCacheDao = conflictDetails,
         sourceRelationDao = sourceRelations,
-        allowHistoricalMutableRootEvidence = allowHistoricalMutableRootEvidence,
     )
 }
 

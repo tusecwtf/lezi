@@ -71,13 +71,12 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
 import com.lezi.babylog.sync.backend.CanonicalRecordAuthor
+import com.lezi.babylog.sync.backend.CausalMutationUnit
 import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
 import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.backend.DisasterRestoreBatch
@@ -88,8 +87,6 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -99,7 +96,6 @@ import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
-import com.lezi.babylog.sync.engine.AtomicBundleId
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
@@ -125,7 +121,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
@@ -164,7 +159,7 @@ class RealSyncPortPushPullTest {
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
         assertThat(result.isSuccess).isTrue()
-        assertThat(rig.backend.stagedBundles.map { it.root.type })
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
             .containsExactly("baby", "record")
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
@@ -194,7 +189,7 @@ class RealSyncPortPushPullTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(localBaby())
         rig.records.seed(localRecord(babyId))
-        rig.backend.stageBundleFailure = java.io.IOException("endpoint unreachable")
+        rig.backend.onCausalCommit = { throw java.io.IOException("endpoint unreachable") }
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
@@ -206,25 +201,6 @@ class RealSyncPortPushPullTest {
         assertThat(rig.records.listPendingSync().map(RecordEntity::clientUuid))
             .containsExactly("record-local")
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
-    }
-
-    @Test
-    fun successfulPushUsesPortableWireAcksOnlyCurrentFamily() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        val babyId = rig.babies.seed(localBaby())
-        rig.records.seed(localRecord(babyId))
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
-        assertThat(result.exceptionOrNull()).isNull()
-
-        assertThat(rig.backend.pushes).isEmpty()
-        assertThat(rig.backend.committedBundles).hasSize(2)
-        val draft = rig.backend.stagedBundles.single { it.root.type == "record" }
-        val recordPayload = Json.parseToJsonElement(draft.root.payloadJson).jsonObject
-        assertThat(recordPayload["baby_client_uuid"].toString()).isEqualTo("\"baby-local\"")
-        assertThat(recordPayload["baby_id"]).isNull()
-        assertThat(recordPayload["payload_json"]).isInstanceOf(
-            kotlinx.serialization.json.JsonObject::class.java,
-        )
     }
 
     @Test
@@ -242,8 +218,8 @@ class RealSyncPortPushPullTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        assertThat(rig.backend.stagedBundles).hasSize(205)
-        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+        assertThat(rig.backend.causalCommittedUnits.flatten()).hasSize(205)
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
             .containsExactlyElementsIn((0 until 205).map { "baby-$it" })
     }
 
@@ -263,8 +239,8 @@ class RealSyncPortPushPullTest {
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
         assertThat(result.isFailure).isTrue()
-        assertThat(rig.backend.committedBundles).hasSize(1)
-        assertThat(rig.babies.listPendingSync()).hasSize(204)
+        assertThat(rig.backend.causalCommittedUnits).hasSize(1)
+        assertThat(rig.babies.listPendingSync()).hasSize(141)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
@@ -294,7 +270,7 @@ class RealSyncPortPushPullTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
             .containsExactly("changed-baby")
     }
 
@@ -319,7 +295,7 @@ class RealSyncPortPushPullTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
             .containsExactly("written-after-clock-rollback")
     }
 
@@ -360,11 +336,12 @@ class RealSyncPortPushPullTest {
             val result = rig.port.sync(SyncTrigger.LocalWrite)
 
             assertThat(result.isSuccess).isTrue()
-            assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+            assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
                 .containsAtLeast(recordUuid, "custom-after-parent-tombstone")
             val recordPayload = Json.parseToJsonElement(
-                rig.backend.stagedBundles.single { it.root.clientUuid == recordUuid }
-                    .root.payloadJson,
+                rig.backend.causalCommittedUnits.flatten()
+                    .single { it.clientUuid == recordUuid }
+                    .rootJson,
             ).jsonObject
             assertThat(recordPayload["baby_client_uuid"]?.jsonPrimitive?.content)
                 .isEqualTo("baby-soft-deleted-history")
@@ -395,26 +372,28 @@ class RealSyncPortPushPullTest {
             pullGeneration = ownerJoin.generation,
         )
         val owner = SyncRig(ownerSession, syncBackend = sharedBackend)
-        sharedBackend.push(
-            ownerJoin.familyId,
-            "upgrade-owner",
+        sharedBackend.causalCommit(
+            ownerSession,
             listOf(
-                SyncEntity(
-                    type = "baby",
+                CausalMutationUnit(
+                    mutationId = "mutation-upgrade-baby",
+                    baseVersion = null,
+                    entityType = "baby",
                     clientUuid = "baby-local",
-                    payloadJson = """
+                    rootJson = """
                         {
                           "nickname":"本地宝宝",
                           "sex":null,
                           "birthday":"2024-10-04",
                           "birth_weight_grams":null,
-                          "avatar_media_uuid":null
+                          "avatar_media_uuid":null,
+                          "updated_at":100,
+                          "deleted_at":null
                         }
                     """.trimIndent(),
-                    updatedAt = 100,
                 ),
             ),
-        ).getOrThrow()
+        )
         val babyId = owner.babies.seed(localBaby().copy(syncDirty = false))
         owner.records.seed(
             localRecord(babyId).copy(
@@ -757,11 +736,11 @@ class RealSyncPortPushPullTest {
                 syncDirty = true,
             ),
         )
-        rig.backend.stageBundleFailure = IllegalStateException("hold local package")
+        rig.backend.onCausalCommit = { throw IllegalStateException("hold local package") }
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
         assertThat(rig.records.getByClientUuid("record-hold")?.syncDirty).isTrue()
 
-        rig.backend.stageBundleFailure = null
+        rig.backend.onCausalCommit = null
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 SyncEntity(
@@ -779,7 +758,7 @@ class RealSyncPortPushPullTest {
         // PullToRefresh capture re-queues dirty → push succeeds → dirty cleared →
         // remote applies. To keep dirty across capture we would need to not
         // snapshot; so re-assert after failing stage again on the full cycle:
-        rig.backend.stageBundleFailure = IllegalStateException("still holding")
+        rig.backend.onCausalCommit = { throw IllegalStateException("still holding") }
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
         val held = rig.records.getByClientUuid("record-hold")!!
         assertThat(held.note).isEqualTo("本机未发布修改")

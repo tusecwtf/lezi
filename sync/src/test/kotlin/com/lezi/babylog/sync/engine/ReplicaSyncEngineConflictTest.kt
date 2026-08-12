@@ -1,49 +1,19 @@
 package com.lezi.babylog.sync.engine
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanEntity
-import com.lezi.babylog.core.database.CustomItemEntity
-import com.lezi.babylog.core.database.FamilyEntity
-import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.MediaLocalPathGate
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheEntity
 import com.lezi.babylog.core.database.causal.ConflictSummaryEntity
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
-import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityProofException
-import com.lezi.babylog.sync.backend.AuthorityResult
-import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
-import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.session.PolicyClock
-import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.FamilySessionReplica
 import com.lezi.babylog.sync.session.receiptFor
-import com.lezi.babylog.sync.MemoryBabyDao
-import com.lezi.babylog.sync.MemoryCarePlanDao
-import com.lezi.babylog.sync.MemoryCustomItemDao
-import com.lezi.babylog.sync.MemoryFamilyDao
-import com.lezi.babylog.sync.MemoryFulfillmentCandidateDao
-import com.lezi.babylog.sync.MemoryMediaDao
-import com.lezi.babylog.sync.MemoryRecordDao
-import com.lezi.babylog.sync.MemorySyncPreferences
-import com.lezi.babylog.sync.RecordingSyncBackend
-import com.lezi.babylog.sync.RecordingTransactionRunner
-import com.lezi.babylog.sync.TestMediaFileStore
 
 class ReplicaSyncEngineConflictTest {
     @Test
@@ -155,239 +125,6 @@ class ReplicaSyncEngineConflictTest {
     }
 
     @Test
-    fun dirtyRecordAdoptsStrictlyNewerRemoteTombstone() = runTest {
-        val session = joinedReplicaSession()
-        val rig = ReplicaEngineRig(session)
-        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
-        rig.records.seed(
-            RecordEntity(
-                clientUuid = "dirty-record-newer-remote",
-                babyId = babyId,
-                type = "formula",
-                timestamp = 100,
-                note = "本机旧修改",
-                payloadJson = "{\"amount_ml\":90}",
-                updatedAt = 100,
-                syncDirty = true,
-            ),
-        )
-        val remote = remoteReplicaRecord("dirty-record-newer-remote").copy(
-            updatedAt = 200,
-            deletedAt = 200,
-        )
-
-        rig.engine.applyInitialEntities(session, listOf(remote))
-
-        val applied = rig.records.getByClientUuid("dirty-record-newer-remote")!!
-        assertThat(applied.updatedAt).isEqualTo(200)
-        assertThat(applied.deletedAt).isEqualTo(200)
-        assertThat(applied.syncDirty).isFalse()
-    }
-
-    @Test
-    fun ownerDirtyBabyFailsClosedInsteadOfClearingConcurrentProfileEdit() = runTest {
-        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
-        val rig = ReplicaEngineRig(session)
-        rig.babies.seed(
-            localReplicaBaby().copy(
-                nickname = "本机编辑中",
-                updatedAt = 100,
-                syncDirty = true,
-            ),
-        )
-        val remote = remoteReplicaBaby().copy(
-            clientUuid = "baby-local",
-            updatedAt = 200,
-        )
-
-        val failure = runCatching {
-            rig.engine.applyInitialEntities(session, listOf(remote))
-        }.exceptionOrNull()
-
-        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
-        assertThat(failure).hasMessageThat().contains("引用尚未就绪")
-        val kept = rig.babies.getByClientUuid("baby-local")!!
-        assertThat(kept.nickname).isEqualTo("本机编辑中")
-        assertThat(kept.updatedAt).isEqualTo(100)
-        assertThat(kept.syncDirty).isTrue()
-    }
-
-    @Test
-    fun equalRevisionRemoteTombstonesAreAdoptedForCustomItemAndMedia() = runTest {
-        val session = joinedReplicaSession()
-        val rig = ReplicaEngineRig(session)
-        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
-        val recordId = rig.records.seed(
-            RecordEntity(
-                clientUuid = "record-for-equal-media-tombstone",
-                babyId = babyId,
-                type = "formula",
-                timestamp = 100,
-                payloadJson = "{\"amount_ml\":90}",
-                updatedAt = 100,
-                syncDirty = false,
-            ),
-        )
-        val mediaUuid = "78787878-7878-4787-8787-787878787878"
-        rig.media.seed(
-            MediaAssetEntity(
-                recordId = recordId,
-                clientUuid = mediaUuid,
-                kind = "log",
-                localUri = "photos/equal-tombstone.jpg",
-                createdAt = 100,
-                updatedAt = 100,
-                syncDirty = true,
-            ),
-        )
-        rig.customItems.seed(
-            CustomItemEntity(
-                clientUuid = "equal-custom-tombstone",
-                familyId = 1,
-                name = "本机定义",
-                iconSlot = 1,
-                createdByMembershipId = "membership-a",
-                updatedAt = 100,
-                syncDirty = true,
-            ),
-        )
-
-        rig.engine.applyInitialEntities(
-            session,
-            listOf(
-                SyncEntity(
-                    type = "custom_item",
-                    clientUuid = "equal-custom-tombstone",
-                    payloadJson =
-                        """{"name":"远端定义","icon_slot":2,"created_by_membership_id":"membership-a"}""",
-                    updatedAt = 100,
-                    deletedAt = 100,
-                ),
-                SyncEntity(
-                    type = "media",
-                    clientUuid = mediaUuid,
-                    payloadJson =
-                        """{"kind":"log","record_client_uuid":"record-for-equal-media-tombstone","care_plan_client_uuid":null,"baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":4}""",
-                    updatedAt = 100,
-                    deletedAt = 100,
-                ),
-            ),
-        )
-
-        val custom = rig.customItems.getByClientUuid("equal-custom-tombstone")!!
-        assertThat(custom.deletedAt).isEqualTo(100)
-        assertThat(custom.syncDirty).isFalse()
-        val media = rig.media.getByClientUuid(mediaUuid)!!
-        assertThat(media.deletedAt).isEqualTo(100)
-        assertThat(media.syncDirty).isFalse()
-    }
-
-    @Test
-    fun concurrentNextFeedCreateAcceptsNasWinnerWithoutAQueuedSecondTruth() = runTest {
-        val session = joinedReplicaSession().copy(
-            role = FamilyRole.Member,
-            membershipId = "member-local",
-        )
-        val rig = ReplicaEngineRig(session)
-        val babyId = rig.babies.seed(
-            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
-        )
-        val planUuid = "11111111-1111-3111-8111-111111111111"
-        rig.carePlans.seed(
-            localReplicaCarePlan(planUuid, "member-local", updatedAt = 300).copy(
-                babyId = babyId,
-                note = "[[lezi:next-feed:v1]]",
-                payloadJson = """{"amount_ml":0}""",
-                syncDirty = true,
-            ),
-        )
-        val remote = SyncEntity(
-            type = "care_plan",
-            clientUuid = planUuid,
-            payloadJson =
-                """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000001000,"scheduled_zone_id":"Asia/Shanghai","note":"[[lezi:next-feed:v1]]","status":"pending","payload_json":{"amount_ml":0},"schema_version":2,"created_by_membership_id":"member-remote","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
-            updatedAt = 250,
-        )
-
-        rig.engine.applyInitialEntities(session, listOf(remote))
-
-        val winner = rig.carePlans.getByClientUuid(planUuid)!!
-        assertThat(winner.createdByMembershipId).isEqualTo("member-remote")
-        assertThat(winner.scheduledAt).isEqualTo(9_000_000_001_000)
-        assertThat(winner.syncDirty).isFalse()
-    }
-
-    @Test
-    fun memberNextFeedFullCyclePullsNasWinnerAgainAfterConcurrentNoOpPush() = runTest {
-        val session = joinedReplicaSession().copy(
-            role = FamilyRole.Member,
-            membershipId = "member-local",
-        )
-        val rig = ReplicaEngineRig(session)
-        val babyId = rig.babies.seed(
-            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
-        )
-        val planUuid = "22222222-2222-3222-8222-222222222222"
-        val localPlanId = rig.carePlans.seed(
-            localReplicaCarePlan(planUuid, "member-local", updatedAt = 300).copy(
-                babyId = babyId,
-                note = "[[lezi:next-feed:v1]]",
-                payloadJson = """{"amount_ml":0}""",
-                syncDirty = true,
-            ),
-        )
-        val losingMediaUuid = "33333333-3333-3333-8333-333333333333"
-        rig.media.seed(
-            MediaAssetEntity(
-                carePlanId = localPlanId,
-                clientUuid = losingMediaUuid,
-                kind = "log",
-                localUri = "photos/losing-next-feed.jpg",
-                createdAt = 300,
-                updatedAt = 300,
-                syncDirty = true,
-            ),
-        )
-        val nasWinner = SyncEntity(
-            type = "care_plan",
-            clientUuid = planUuid,
-            payloadJson =
-                """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000001000,"scheduled_zone_id":"Asia/Shanghai","note":"[[lezi:next-feed:v1]]","status":"pending","payload_json":{"amount_ml":0},"schema_version":2,"created_by_membership_id":"member-remote","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
-            updatedAt = 250,
-        )
-        rig.backend.pullResults += PullResult(
-            entities = emptyList(),
-            cursor = 0,
-            generation = "generation-a",
-            hasMore = false,
-        )
-        rig.backend.pullResults += PullResult(
-            entities = listOf(nasWinner),
-            cursor = 1,
-            generation = "generation-a",
-            hasMore = false,
-        )
-
-        // NAS winner convergence after concurrent create is a full-cycle (pull) concern.
-        val outcome = rig.engine.synchronize(session, SyncTrigger.Foreground)
-
-        val winner = rig.carePlans.getByClientUuid(planUuid)!!
-        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
-        assertThat(rig.backend.pullCount).isEqualTo(2)
-        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
-            .containsExactly(planUuid)
-        assertThat(rig.backend.stagedBundles.single().media.map(SyncEntity::clientUuid))
-            .containsExactly(losingMediaUuid)
-        assertThat(winner.createdByMembershipId).isEqualTo("member-remote")
-        assertThat(winner.scheduledAt).isEqualTo(9_000_000_001_000)
-        assertThat(winner.updatedAt).isEqualTo(250)
-        assertThat(winner.syncDirty).isFalse()
-        assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
-        assertThat(rig.media.getByClientUuid(losingMediaUuid)).isNull()
-        assertThat(rig.mediaFiles.deleted).containsExactly("photos/losing-next-feed.jpg")
-    }
-
-    @Test
     fun fullResyncAppliesPeerNewerRecordInsteadOfRepublishingDirtyOldBody() = runTest {
         val session = joinedReplicaSession().copy(
             pullCursor = 9,
@@ -424,6 +161,9 @@ class ReplicaSyncEngineConflictTest {
         )
         rig.backend.pullResults += PullResult(
             entities = listOf(
+                remoteReplicaBaby().copy(
+                    clientUuid = "baby-local",
+                ),
                 remoteReplicaRecord(recordUuid).copy(
                     updatedAt = 300,
                     deletedAt = 300,
@@ -451,5 +191,347 @@ class ReplicaSyncEngineConflictTest {
             .doesNotContain(recordUuid)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
+    }
+
+    @Test
+    fun fullResyncRebasesPreexistingDirtyRecordWithoutReplacingItsEdit() = runTest {
+        val (session, rig, recordUuid) = dirtyRecordRecoveryRig(deletedAt = null)
+        rig.backend.onCausalCommit = { units ->
+            val pending = requireNotNull(rig.records.getByClientUuid(recordUuid))
+            assertThat(pending.syncDirty).isTrue()
+            assertThat(pending.note).isEqualTo("离线编辑")
+            assertThat(pending.baseVersion).isEqualTo("v-remote-record")
+            val mutation = units.single { it.clientUuid == recordUuid }
+            assertThat(mutation.baseVersion).isEqualTo("v-remote-record")
+            assertThat(mutation.rootJson).contains("离线编辑")
+        }
+
+        assertThat(rig.engine.synchronize(session, SyncTrigger.PullToRefresh))
+            .isEqualTo(ReplicaSyncOutcome.Synchronized)
+
+        assertThat(rig.backend.causalCommittedUnits.flatten().single().clientUuid)
+            .isEqualTo(recordUuid)
+    }
+
+    @Test
+    fun fullResyncRebasesPreexistingDirtyRecordTombstoneWithoutRevivingIt() = runTest {
+        val deletedAt = 500L
+        val (session, rig, recordUuid) = dirtyRecordRecoveryRig(deletedAt = deletedAt)
+        rig.backend.onCausalCommit = { units ->
+            val pending = requireNotNull(rig.records.getByClientUuid(recordUuid))
+            assertThat(pending.syncDirty).isTrue()
+            assertThat(pending.deletedAt).isEqualTo(deletedAt)
+            assertThat(pending.baseVersion).isEqualTo("v-remote-record")
+            val mutation = units.single { it.clientUuid == recordUuid }
+            assertThat(mutation.baseVersion).isEqualTo("v-remote-record")
+            assertThat(mutation.deleted).isTrue()
+        }
+
+        assertThat(rig.engine.synchronize(session, SyncTrigger.PullToRefresh))
+            .isEqualTo(ReplicaSyncOutcome.Synchronized)
+
+        assertThat(rig.backend.causalCommittedUnits.flatten().single().deleted).isTrue()
+    }
+
+    @Test
+    fun fullResyncPreservesRecordEditedAfterAtomicReset() = runTest {
+        val (session, rig, recordUuid) = dirtyRecordRecoveryRig(deletedAt = null)
+        rig.records.update(
+            requireNotNull(rig.records.getByClientUuid(recordUuid)).copy(
+                note = "重置后的并发编辑",
+                updatedAt = 700,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.beforePullReturn = {
+            rig.records.update(
+                requireNotNull(rig.records.getByClientUuid(recordUuid)).copy(
+                    note = "重置后的并发编辑",
+                    updatedAt = 701,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.onCausalCommit = { units ->
+            val pending = requireNotNull(rig.records.getByClientUuid(recordUuid))
+            assertThat(pending.note).isEqualTo("重置后的并发编辑")
+            assertThat(pending.baseVersion).isEqualTo("v-remote-record")
+            assertThat(units.single { it.clientUuid == recordUuid }.rootJson)
+                .contains("重置后的并发编辑")
+        }
+
+        assertThat(rig.engine.synchronize(session, SyncTrigger.PullToRefresh))
+            .isEqualTo(ReplicaSyncOutcome.Synchronized)
+    }
+
+    @Test
+    fun failedResetLeavesNoCrossFamilyRecoveryMode() = runTest {
+        val session = recoverySession()
+        val rig = ReplicaEngineRig(session)
+        rig.transactions.failBeforeNextBlock = IllegalStateException("reset failed")
+
+        val failure = runCatching {
+            rig.engine.resetLocalSyncReceipts(
+                previous = session,
+                invalidateCurrentReceipts = true,
+                crossingFamilyBoundary = true,
+                recoveryTarget = FamilySessionReplica.RecoveryTarget(
+                    baseUrl = session.baseUrl,
+                    familyId = session.familyId,
+                    membershipId = session.membershipId,
+                    deviceId = session.deviceId,
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().isEqualTo("reset failed")
+        val recordUuid = configureDirtyRecordRecovery(rig, deletedAt = null)
+        rig.backend.onCausalCommit = { units ->
+            assertThat(units.single { it.clientUuid == recordUuid }.rootJson)
+                .contains("离线编辑")
+        }
+        assertThat(rig.engine.synchronize(
+            rig.preferences.current(),
+            SyncTrigger.PullToRefresh,
+        )).isEqualTo(ReplicaSyncOutcome.Synchronized)
+    }
+
+    @Test
+    fun completedCrossFamilyResetDoesNotChangeLaterRecoveryPolicy() = runTest {
+        val session = recoverySession()
+        val rig = ReplicaEngineRig(session)
+        rig.engine.resetLocalSyncReceipts(
+            previous = session,
+            invalidateCurrentReceipts = true,
+            crossingFamilyBoundary = true,
+            recoveryTarget = FamilySessionReplica.RecoveryTarget(
+                baseUrl = "https://192.168.1.99:8787",
+                familyId = "family-other",
+                membershipId = "membership-other",
+                deviceId = "device-other",
+            ),
+        )
+
+        val recordUuid = configureDirtyRecordRecovery(rig, deletedAt = null)
+        rig.backend.onCausalCommit = { units ->
+            assertThat(units.single { it.clientUuid == recordUuid }.rootJson)
+                .contains("离线编辑")
+        }
+        assertThat(rig.engine.synchronize(
+            rig.preferences.current(),
+            SyncTrigger.PullToRefresh,
+        )).isEqualTo(ReplicaSyncOutcome.Synchronized)
+    }
+
+    @Test
+    fun crossFamilyRecoveryNeverPublishesOldFamilyIntentForSameRecordUuid() = runTest {
+        val previous = recoverySession()
+        val current = previous.copy(
+            familyId = "family-b",
+            membershipId = "membership-b",
+            deviceId = "device-b",
+        )
+        val rig = ReplicaEngineRig(previous)
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordUuid = "record-shared-across-families"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "旧家庭离线编辑",
+                payloadJson = "{\"amount_ml\":120}",
+                updatedAt = 500,
+                syncDirty = true,
+                baseVersion = "v-old-family",
+                mutationId = "mutation-old-family",
+            ),
+        )
+        rig.engine.resetLocalSyncReceipts(
+            previous = previous,
+            crossingFamilyBoundary = true,
+            recoveryTarget = FamilySessionReplica.RecoveryTarget(
+                baseUrl = current.baseUrl,
+                familyId = current.familyId,
+                membershipId = current.membershipId,
+                deviceId = current.deviceId,
+            ),
+        )
+        rig.preferences.saveSession(current)
+        configureRemoteFullResync(rig, recordUuid, note = "新家庭事实")
+
+        assertThat(rig.engine.synchronize(current, SyncTrigger.PullToRefresh))
+            .isEqualTo(ReplicaSyncOutcome.Synchronized)
+
+        val settled = requireNotNull(rig.records.getByClientUuid(recordUuid))
+        assertThat(settled.note).isEqualTo("新家庭事实")
+        assertThat(settled.syncDirty).isFalse()
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
+            .doesNotContain(recordUuid)
+    }
+
+    @Test
+    fun crossFamilyResetInvalidatesPreviousFamilyMediaReceipt() = runTest {
+        val previous = recoverySession()
+        val rig = ReplicaEngineRig(previous)
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val mediaUuid = "00000000-0000-4000-8000-000000000026"
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = mediaUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "avatars/old-family.jpg",
+                remoteUri = previous.receiptFor(mediaUuid),
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+
+        rig.engine.resetLocalSyncReceipts(
+            previous = previous,
+            crossingFamilyBoundary = true,
+            recoveryTarget = FamilySessionReplica.RecoveryTarget(
+                baseUrl = previous.baseUrl,
+                familyId = "family-b",
+                membershipId = "membership-b",
+                deviceId = "device-b",
+            ),
+        )
+
+        val reset = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+        assertThat(reset.remoteUri).isNull()
+        assertThat(reset.syncDirty).isTrue()
+    }
+
+    @Test
+    fun processRestartAfterResetKeepsCleanRowAuthoritativeDuringRecovery() = runTest {
+        val session = recoverySession()
+        val rig = ReplicaEngineRig(session)
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordUuid = "record-clean-before-reset"
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "重置前稳定副本",
+                payloadJson = "{\"amount_ml\":60}",
+                updatedAt = 100,
+                syncDirty = false,
+                baseVersion = "v-old-stable",
+            ),
+        )
+        rig.engine.resetLocalSyncReceipts(
+            previous = session,
+            invalidateCurrentReceipts = true,
+        )
+        configureRemoteFullResync(rig, recordUuid, note = "服务端权威事实")
+
+        assertThat(rig.newEngine().synchronize(session, SyncTrigger.PullToRefresh))
+            .isEqualTo(ReplicaSyncOutcome.Synchronized)
+
+        val settled = requireNotNull(rig.records.getByClientUuid(recordUuid))
+        assertThat(settled.note).isEqualTo("服务端权威事实")
+        assertThat(settled.syncDirty).isFalse()
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
+            .doesNotContain(recordUuid)
+    }
+
+    private suspend fun dirtyRecordRecoveryRig(
+        deletedAt: Long?,
+    ): Triple<com.lezi.babylog.sync.session.SyncSession, ReplicaEngineRig, String> {
+        val session = recoverySession()
+        val rig = ReplicaEngineRig(session)
+        return Triple(session, rig, configureDirtyRecordRecovery(rig, deletedAt))
+    }
+
+    private fun recoverySession() = joinedReplicaSession().copy(
+        pullCursor = 9,
+        pullGeneration = "old-generation",
+    )
+
+    private suspend fun configureDirtyRecordRecovery(
+        rig: ReplicaEngineRig,
+        deletedAt: Long?,
+    ): String {
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordUuid = if (deletedAt == null) {
+            "record-dirty-edit-full-resync"
+        } else {
+            "record-dirty-delete-full-resync"
+        }
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                note = "离线编辑",
+                payloadJson = "{\"amount_ml\":120}",
+                updatedAt = 500,
+                deletedAt = deletedAt,
+                syncDirty = true,
+                baseVersion = "v-old-record",
+                mutationId = "mutation-before-recovery",
+            ),
+        )
+        rig.backend.pullFailures += SyncHttpException(
+            statusCode = 409,
+            responseBody =
+                """{"detail":{"code":"cursor_ahead","action":"full_resync","reset_cursor":0,"server_cursor":1,"server_generation":"new-generation"}}""",
+        )
+        rig.backend.pullResults += PullResult(
+            entities = listOf(
+                remoteReplicaBaby().copy(clientUuid = "baby-local", versionId = "v-baby"),
+                remoteReplicaRecord(recordUuid).copy(versionId = "v-remote-record"),
+            ),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = false,
+        )
+        return recordUuid
+    }
+
+    private fun configureRemoteFullResync(
+        rig: ReplicaEngineRig,
+        recordUuid: String,
+        note: String,
+    ) {
+        rig.backend.pullFailures += SyncHttpException(
+            statusCode = 409,
+            responseBody =
+                """{"detail":{"code":"cursor_ahead","action":"full_resync","reset_cursor":0,"server_cursor":1,"server_generation":"new-generation"}}""",
+        )
+        rig.backend.pullResults += PullResult(
+            entities = listOf(
+                remoteReplicaBaby().copy(clientUuid = "baby-local", versionId = "v-baby"),
+                remoteReplicaRecord(recordUuid).copy(
+                    payloadJson = remoteReplicaRecord(recordUuid).payloadJson.replace(
+                        "\"note\":null",
+                        "\"note\":\"$note\"",
+                    ),
+                    versionId = "v-remote-record",
+                ),
+            ),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = false,
+        )
     }
 }

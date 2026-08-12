@@ -1,51 +1,21 @@
 package com.lezi.babylog.sync.engine
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.BabyEntity
-import com.lezi.babylog.core.database.CarePlanEntity
-import com.lezi.babylog.core.database.CustomItemEntity
-import com.lezi.babylog.core.database.FamilyEntity
-import com.lezi.babylog.core.database.FulfillmentCandidateEntity
-import com.lezi.babylog.core.database.MediaAssetEntity
-import com.lezi.babylog.core.database.MediaLocalPathGate
-import com.lezi.babylog.core.database.RecordEntity
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityProofException
-import com.lezi.babylog.sync.backend.AuthorityResult
-import com.lezi.babylog.sync.backend.ReconcileResult
 import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
-import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.session.CreatorAcknowledgementRef
 import com.lezi.babylog.sync.session.FamilyRole
-import com.lezi.babylog.sync.session.PolicyClock
-import com.lezi.babylog.sync.session.SyncSession
-import com.lezi.babylog.sync.session.receiptFor
-import com.lezi.babylog.sync.MemoryBabyDao
-import com.lezi.babylog.sync.MemoryCarePlanDao
-import com.lezi.babylog.sync.MemoryCustomItemDao
-import com.lezi.babylog.sync.MemoryFamilyDao
-import com.lezi.babylog.sync.MemoryFulfillmentCandidateDao
-import com.lezi.babylog.sync.MemoryMediaDao
-import com.lezi.babylog.sync.MemoryRecordDao
-import com.lezi.babylog.sync.MemorySyncPreferences
-import com.lezi.babylog.sync.RecordingSyncBackend
-import com.lezi.babylog.sync.RecordingTransactionRunner
-import com.lezi.babylog.sync.TestMediaFileStore
 
 class ReplicaSyncEngineCreatorAckTest {
     @Test
     fun canonicalSessionPullsAcknowledgementsForPendingBlankCreators() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000201"
+        val planUuid = "00000000-0000-0000-0000-000000000202"
+        val itemUuid = "00000000-0000-0000-0000-000000000203"
         val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
         val rig = ReplicaEngineRig(
             session = session,
@@ -58,29 +28,43 @@ class ReplicaSyncEngineCreatorAckTest {
                 membershipId = "canonical-membership",
             ),
         )
-        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.backend.enableCausal = true
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = babyUuid,
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
         rig.carePlans.seed(
-            localReplicaCarePlan("plan-recovered-blank", "", updatedAt = 710)
+            localReplicaCarePlan(planUuid, "", updatedAt = 710)
                 .copy(syncDirty = true),
         )
         rig.customItems.seed(
-            localReplicaCustomItem("item-recovered-blank", "", updatedAt = 720)
+            localReplicaCustomItem(itemUuid, "", updatedAt = 720)
                 .copy(syncDirty = true),
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 0,
+            generation = "generation-a",
+            hasMore = false,
         )
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 SyncEntity(
                     type = "custom_item",
-                    clientUuid = "item-recovered-blank",
+                    clientUuid = itemUuid,
                     payloadJson =
                         """{"name":"item-recovered-blank","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
                     updatedAt = 720,
                 ),
                 SyncEntity(
                     type = "care_plan",
-                    clientUuid = "plan-recovered-blank",
+                    clientUuid = planUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"canonical-membership","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"canonical-membership","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 710,
                 ),
             ),
@@ -97,17 +81,23 @@ class ReplicaSyncEngineCreatorAckTest {
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.backend.stagedBundles).isEmpty()
-        assertThat(rig.backend.pullCount).isEqualTo(1)
-        assertThat(rig.carePlans.getByClientUuid("plan-recovered-blank")?.let {
+        assertThat(rig.backend.pullCount).isEqualTo(2)
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
+            .containsExactly("custom_item", "care_plan")
+            .inOrder()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.let {
             Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
         }).isEqualTo(Triple("canonical-membership", 710L, false))
-        assertThat(rig.customItems.get("item-recovered-blank")?.let {
+        assertThat(rig.customItems.get(itemUuid)?.let {
             Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
         }).isEqualTo(Triple("canonical-membership", 720L, false))
     }
 
     @Test
     fun failedCreatorAcknowledgementPullRetriesOnTheNextFullCycle() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000211"
+        val planUuid = "00000000-0000-0000-0000-000000000212"
+        val itemUuid = "00000000-0000-0000-0000-000000000213"
         val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
         val rig = ReplicaEngineRig(
             session = session,
@@ -120,13 +110,21 @@ class ReplicaSyncEngineCreatorAckTest {
                 membershipId = "canonical-membership",
             ),
         )
-        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.backend.enableCausal = true
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = babyUuid,
+                syncDirty = false,
+                familyAuthority = true,
+                baseVersion = "v-baby",
+            ),
+        )
         rig.carePlans.seed(
-            localReplicaCarePlan("plan-retry-ack", "", updatedAt = 810)
+            localReplicaCarePlan(planUuid, "", updatedAt = 810)
                 .copy(syncDirty = true),
         )
         rig.customItems.seed(
-            localReplicaCustomItem("item-retry-ack", "", updatedAt = 820)
+            localReplicaCustomItem(itemUuid, "", updatedAt = 820)
                 .copy(syncDirty = true),
         )
         rig.backend.pullFailures += SyncHttpException(statusCode = 503)
@@ -140,20 +138,26 @@ class ReplicaSyncEngineCreatorAckTest {
 
         assertThat(firstFailure).isInstanceOf(SyncHttpException::class.java)
         assertThat(rig.backend.pullCount).isEqualTo(1)
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 0,
+            generation = "generation-a",
+            hasMore = false,
+        )
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 SyncEntity(
                     type = "custom_item",
-                    clientUuid = "item-retry-ack",
+                    clientUuid = itemUuid,
                     payloadJson =
                         """{"name":"item-retry-ack","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
                     updatedAt = 820,
                 ),
                 SyncEntity(
                     type = "care_plan",
-                    clientUuid = "plan-retry-ack",
+                    clientUuid = planUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"canonical-membership","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"canonical-membership","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 810,
                 ),
             ),
@@ -168,15 +172,21 @@ class ReplicaSyncEngineCreatorAckTest {
         )
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
-        assertThat(rig.backend.pullCount).isEqualTo(2)
-        assertThat(rig.carePlans.getByClientUuid("plan-retry-ack")?.createdByMembershipId)
+        assertThat(rig.backend.pullCount).isEqualTo(3)
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
+            .containsExactly("custom_item", "care_plan")
+            .inOrder()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.createdByMembershipId)
             .isEqualTo("canonical-membership")
-        assertThat(rig.customItems.get("item-retry-ack")?.createdByMembershipId)
+        assertThat(rig.customItems.get(itemUuid)?.createdByMembershipId)
             .isEqualTo("canonical-membership")
     }
 
     @Test
     fun commitFailureKeepsExactLocalCreatorProvenanceUntilAuthoritativePull() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000221"
+        val planUuid = "00000000-0000-0000-0000-000000000222"
+        val itemUuid = "00000000-0000-0000-0000-000000000223"
         val session = joinedReplicaSession().copy(
             role = FamilyRole.Member,
             membershipId = "canonical-membership",
@@ -184,6 +194,7 @@ class ReplicaSyncEngineCreatorAckTest {
         val rig = ReplicaEngineRig(
             session = session,
         )
+        rig.backend.enableCausal = true
         rig.backend.nextMembers = listOf(
             FamilyMember(
                 displayName = "爸爸",
@@ -194,19 +205,24 @@ class ReplicaSyncEngineCreatorAckTest {
         )
         rig.babies.seed(
             localReplicaBaby().copy(
+                clientUuid = babyUuid,
                 syncDirty = false,
                 familyAuthority = true,
+                baseVersion = "v-baby",
             ),
         )
         rig.carePlans.seed(
-            localReplicaCarePlan("plan-commit-retry", "", updatedAt = 830)
+            localReplicaCarePlan(planUuid, "", updatedAt = 830)
                 .copy(syncDirty = true),
         )
         rig.customItems.seed(
-            localReplicaCustomItem("item-commit-retry", "", updatedAt = 840)
+            localReplicaCustomItem(itemUuid, "", updatedAt = 840)
                 .copy(syncDirty = true),
         )
-        rig.backend.commitBundleFailure = IllegalStateException("commit interrupted")
+        rig.backend.onCausalCommit = {
+            rig.backend.onCausalCommit = null
+            error("commit interrupted")
+        }
 
         val firstFailure = runCatching {
             rig.engine.synchronize(
@@ -218,25 +234,24 @@ class ReplicaSyncEngineCreatorAckTest {
         assertThat(firstFailure).hasMessageThat().contains("commit interrupted")
         assertThat(rig.preferences.current().membershipId).isEqualTo("canonical-membership")
         assertThat(rig.preferences.current().pendingCreatorAcknowledgements).containsExactly(
-            CreatorAcknowledgementRef("care_plan", "plan-commit-retry"),
-            CreatorAcknowledgementRef("custom_item", "item-commit-retry"),
+            CreatorAcknowledgementRef("care_plan", planUuid),
+            CreatorAcknowledgementRef("custom_item", itemUuid),
         )
 
-        rig.backend.commitBundleFailure = null
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 SyncEntity(
                     type = "custom_item",
-                    clientUuid = "item-commit-retry",
+                    clientUuid = itemUuid,
                     payloadJson =
                         """{"name":"item-commit-retry","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
                     updatedAt = 840,
                 ),
                 SyncEntity(
                     type = "care_plan",
-                    clientUuid = "plan-commit-retry",
+                    clientUuid = planUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"canonical-membership","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"canonical-membership","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 830,
                 ),
             ),
@@ -253,28 +268,32 @@ class ReplicaSyncEngineCreatorAckTest {
 
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
-        assertThat(rig.carePlans.getByClientUuid("plan-commit-retry")?.createdByMembershipId)
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.createdByMembershipId)
             .isEqualTo("canonical-membership")
-        assertThat(rig.customItems.get("item-commit-retry")?.createdByMembershipId)
+        assertThat(rig.customItems.get(itemUuid)?.createdByMembershipId)
             .isEqualTo("canonical-membership")
     }
 
     @Test
     fun memberPostPushCreatorPullRecoversGenerationChange() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000231"
+        val itemUuid = "00000000-0000-0000-0000-000000000232"
         val session = joinedReplicaSession().copy(
             role = FamilyRole.Member,
             membershipId = "member-local",
             pullGeneration = "old-generation",
         )
         val rig = ReplicaEngineRig(session)
+        rig.backend.enableCausal = true
         rig.babies.seed(
             localReplicaBaby().copy(
+                clientUuid = babyUuid,
                 syncDirty = false,
                 familyAuthority = true,
             ),
         )
         rig.customItems.seed(
-            localReplicaCustomItem("item-post-push-resync", "", updatedAt = 840)
+            localReplicaCustomItem(itemUuid, "", updatedAt = 840)
                 .copy(syncDirty = true),
         )
         rig.backend.pullResults += PullResult(
@@ -300,10 +319,10 @@ class ReplicaSyncEngineCreatorAckTest {
         }
         rig.backend.pullResults += PullResult(
             entities = listOf(
-                remoteReplicaBaby().copy(clientUuid = "baby-local"),
+                remoteReplicaBaby().copy(clientUuid = babyUuid),
                 SyncEntity(
                     type = "custom_item",
-                    clientUuid = "item-post-push-resync",
+                    clientUuid = itemUuid,
                     payloadJson =
                         """{"name":"item-post-push-resync","icon_slot":0,"created_by_membership_id":"member-local"}""",
                     updatedAt = 840,
@@ -331,7 +350,7 @@ class ReplicaSyncEngineCreatorAckTest {
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
         assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
         assertThat(
-            rig.customItems.get("item-post-push-resync")?.createdByMembershipId,
+            rig.customItems.get(itemUuid)?.createdByMembershipId,
         ).isEqualTo("member-local")
     }
 

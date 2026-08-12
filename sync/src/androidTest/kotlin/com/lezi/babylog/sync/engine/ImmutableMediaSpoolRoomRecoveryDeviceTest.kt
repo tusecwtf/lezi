@@ -19,7 +19,6 @@ import com.lezi.babylog.sync.backend.AtomicBundleDraft
 import com.lezi.babylog.sync.backend.AuthenticatedSyncHandshake
 import com.lezi.babylog.sync.backend.BundleCommitResult
 import com.lezi.babylog.sync.backend.BundleStageStatus
-import com.lezi.babylog.sync.backend.CausalBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitBatchResult
 import com.lezi.babylog.sync.backend.CausalCommitStatus
 import com.lezi.babylog.sync.backend.CausalCommitUnitResult
@@ -468,11 +467,6 @@ private class DeviceCausalBackend : SyncBackend {
 
     override fun supportsCausalWire() = true
 
-    override suspend fun causalReconcile(
-        session: SyncSession,
-        units: List<CausalMutationUnit>,
-    ): CausalBatchResult = error("Migrated media roots must not use source reconcile")
-
     override suspend fun putCausalMediaPreimage(
         session: SyncSession,
         mediaUuid: String,
@@ -545,13 +539,6 @@ private class DeviceCausalBackend : SyncBackend {
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,
-    ): BundleStageStatus = unsupported()
-
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
     ): BundleStageStatus = unsupported()
 
     override suspend fun commitBundle(

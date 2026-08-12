@@ -71,8 +71,6 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
@@ -88,8 +86,6 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -125,7 +121,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
@@ -206,33 +201,22 @@ class RealSyncPortSessionLifecycleTest {
     }
 
     @Test
-    fun atomicBundleIdIsStableUuidAndIncludesRootTypeEntityAndVersion() {
+    fun fulfillmentBundleIdIsStableUuidAndIncludesEntityAndVersion() {
         val entityUuid = "11111111-2222-3333-8444-555555555555"
 
-        val recordBundle = AtomicBundleId.forRecord(entityUuid, 1_725_123_456_789)
+        val bundle = AtomicBundleId.forFulfillmentCandidate(entityUuid, 1_725_123_456_789)
 
-        assertThat(recordBundle).isEqualTo("f9a0d4c8-1f6d-3c9b-af41-bc497b33b79e")
-        assertThat(UUID.fromString(recordBundle).toString()).isEqualTo(recordBundle)
-        assertThat(AtomicBundleId.forRecord(entityUuid, 1_725_123_456_789))
-            .isEqualTo(recordBundle)
-        assertThat(AtomicBundleId.forRecord(entityUuid, 1_725_123_456_790))
-            .isEqualTo("b8e35751-20fb-3a89-ba93-ac2f906b75eb")
+        assertThat(UUID.fromString(bundle).toString()).isEqualTo(bundle)
+        assertThat(AtomicBundleId.forFulfillmentCandidate(entityUuid, 1_725_123_456_789))
+            .isEqualTo(bundle)
+        assertThat(AtomicBundleId.forFulfillmentCandidate(entityUuid, 1_725_123_456_790))
+            .isNotEqualTo(bundle)
         assertThat(
-            AtomicBundleId.forRecord(
+            AtomicBundleId.forFulfillmentCandidate(
                 "11111111-2222-3333-8444-555555555556",
                 1_725_123_456_789,
             ),
-        ).isEqualTo("d9d61874-0056-38c0-8540-8c6d1961ea92")
-        assertThat(AtomicBundleId.forCarePlan(entityUuid, 1_725_123_456_789))
-            .isEqualTo("48dc1a40-05dc-357f-b5c9-00ed00de6f57")
-        assertThat(AtomicBundleId.forBaby(entityUuid, 1_725_123_456_789))
-            .isNotEqualTo(recordBundle)
-        assertThat(AtomicBundleId.forCustomItem(entityUuid, 1_725_123_456_789))
-            .isNotEqualTo(recordBundle)
-        assertThat(AtomicBundleId.forFulfillmentCandidate(entityUuid, 1_725_123_456_789))
-            .isNotEqualTo(recordBundle)
-        assertThat(AtomicBundleId.forRecord(entityUuid, 2))
-            .isEqualTo("e4c2d0cf-4967-347c-b3bd-af9dae2b34f4")
+        ).isNotEqualTo(bundle)
     }
 
     @Test
@@ -241,7 +225,7 @@ class RealSyncPortSessionLifecycleTest {
 
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
 
-        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Disabled)
     }
@@ -331,7 +315,7 @@ class RealSyncPortSessionLifecycleTest {
         assertThat(rig.pendingReplicaCleanup.pending).isNull()
         assertThat(rig.media.getByClientUuid("stale-media")).isNull()
         assertThat(rig.mediaFiles.deleted).containsExactly("photos/stale.jpg")
-        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(0)
         assertThat(rig.pendingDomainRecovery.calls).isEqualTo(1)
     }
@@ -347,7 +331,7 @@ class RealSyncPortSessionLifecycleTest {
 
         assertThat(failure).hasMessageThat().isEqualTo("provider unavailable")
         assertThat(rig.pendingReplicaCleanup.pending).isNotNull()
-        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(0)
     }
 
@@ -392,7 +376,7 @@ class RealSyncPortSessionLifecycleTest {
 
         assertThat(first.exceptionOrNull()).isInstanceOf(LocalClearCommittedException::class.java)
         assertThat(rig.pendingReplicaCleanup.pending).isNotNull()
-        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.backend.pullCount).isEqualTo(0)
 
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
@@ -462,7 +446,7 @@ class RealSyncPortSessionLifecycleTest {
         assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.backend.pullCursors).containsExactly(0L)
         assertThat(rig.backend.syncOrder)
-            .containsExactly("handshake", "pull:0", "reconcile:1", "stage:baby")
+            .containsExactly("handshake", "pull:0", "causal_commit:1")
             .inOrder()
         assertThat(rig.port.session().first().pullCursor).isEqualTo(7L)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)

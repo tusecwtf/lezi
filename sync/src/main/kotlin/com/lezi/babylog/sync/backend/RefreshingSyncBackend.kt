@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SyncPreferences
@@ -42,11 +41,6 @@ internal class RefreshingSyncBackend(
 
     override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake =
         authenticated(session, delegate::authenticatedHandshake)
-
-    override suspend fun reconcile(
-        session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult = authenticated(session) { delegate.reconcile(it, units) }
 
     override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot =
         authenticated(session, delegate::memberDirectory)
@@ -148,26 +142,12 @@ internal class RefreshingSyncBackend(
         draft: AtomicBundleDraft,
     ): BundleStageStatus = authenticated(session) { delegate.stageBundle(it, draft) }
 
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus = authenticated(session) {
-        delegate.putBundleMedia(it, bundleId, clientUuid, source)
-    }
-
     override suspend fun commitBundle(
         session: SyncSession,
         bundleId: String,
     ): BundleCommitResult = authenticated(session) { delegate.commitBundle(it, bundleId) }
 
     override fun supportsCausalWire(): Boolean = delegate.supportsCausalWire()
-
-    override suspend fun causalReconcile(
-        session: SyncSession,
-        units: List<com.lezi.babylog.sync.backend.CausalMutationUnit>,
-    ) = authenticated(session) { delegate.causalReconcile(it, units) }
 
     override suspend fun causalCommit(
         session: SyncSession,

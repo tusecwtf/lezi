@@ -71,8 +71,6 @@ import com.lezi.babylog.sync.appupdate.forceShellNeedsSessionRecovery
 import com.lezi.babylog.sync.appupdate.lanInviteApkDownloadUrl
 import com.lezi.babylog.sync.appupdate.sha256Hex
 import com.lezi.babylog.sync.backend.AtomicBundleDraft
-import com.lezi.babylog.sync.backend.AuthorityDisposition
-import com.lezi.babylog.sync.backend.AuthorityResult
 import com.lezi.babylog.sync.backend.AnonymousHealth
 import com.lezi.babylog.sync.backend.AnonymousReadiness
 import com.lezi.babylog.sync.backend.BundleCommitResult
@@ -88,8 +86,6 @@ import com.lezi.babylog.sync.backend.MemberLoginReceipt
 import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
 import com.lezi.babylog.sync.backend.PullResult
-import com.lezi.babylog.sync.backend.ReconcileResult
-import com.lezi.babylog.sync.backend.ReconcileUnitDraft
 import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
 import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
 import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
@@ -99,7 +95,6 @@ import com.lezi.babylog.sync.backend.SyncEntity
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.appupdate.NoOpAppUpdateInstaller
 import com.lezi.babylog.sync.clear.LocalClearCommittedException
-import com.lezi.babylog.sync.engine.AtomicBundleId
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
@@ -125,7 +120,6 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.familySyncError
 import com.lezi.babylog.sync.backend.FakeSyncBackend
-import com.lezi.babylog.sync.backend.LegacyPushResult
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
@@ -268,7 +262,7 @@ class RealSyncPortClearResyncTest {
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(rig.backend.pullCursors).containsExactly(0L, 0L, 1L).inOrder()
-        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
             .doesNotContain("baby")
         assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isNull()
         assertThat(rig.babies.getByClientUuid("baby-local")?.familyAuthority).isTrue()
@@ -310,7 +304,7 @@ class RealSyncPortClearResyncTest {
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(rig.backend.pullCursors).containsExactly(1L, 0L, 1L).inOrder()
-        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.clientUuid })
             .contains("baby-local")
     }
 
@@ -447,7 +441,7 @@ class RealSyncPortClearResyncTest {
 
         assertThat(result.isFailure).isTrue()
         assertThat(rig.backend.pullCursors).isEmpty()
-        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.causalCommittedUnits).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(7)
         assertThat(rig.preferences.current().pullGeneration).isEmpty()
     }
@@ -526,11 +520,11 @@ class RealSyncPortClearResyncTest {
         assertThat(result.exceptionOrNull()).isNull()
 
         assertThat(rig.backend.pullCursors).containsExactly(1L, 0L, 1L).inOrder()
-        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
+        assertThat(rig.backend.causalCommittedUnits.flatten().map { it.entityType })
             .doesNotContain("baby")
         assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isNull()
         assertThat(rig.babies.getByClientUuid("baby-local")?.familyAuthority).isTrue()
-        assertThat(rig.backend.mediaUploads).isEmpty()
+        assertThat(rig.backend.causalMediaPreimageBytes).isEmpty()
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
     }
 

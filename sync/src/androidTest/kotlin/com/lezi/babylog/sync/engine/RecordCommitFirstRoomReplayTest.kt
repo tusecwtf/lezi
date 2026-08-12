@@ -26,7 +26,6 @@ import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.media.LocalMediaInfo
 import com.lezi.babylog.sync.media.PreparedMedia
 import com.lezi.babylog.sync.media.SyncMediaFileStore
-import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncSession
 import java.io.IOException
@@ -229,13 +228,6 @@ class RecordCommitFirstRoomReplayTest {
         override suspend fun stageBundle(
             session: SyncSession,
             draft: AtomicBundleDraft,
-        ): BundleStageStatus = unsupported()
-
-        override suspend fun putBundleMedia(
-            session: SyncSession,
-            bundleId: String,
-            clientUuid: String,
-            source: SyncMediaUploadSource,
         ): BundleStageStatus = unsupported()
 
         override suspend fun commitBundle(
