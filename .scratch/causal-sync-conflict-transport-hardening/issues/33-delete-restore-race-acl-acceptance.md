@@ -34,8 +34,7 @@ Cases：delete/edit 两到达顺序；delete/delete；complete direct-base resto
 不覆盖通用 N 方字段或媒体 upload faults。
 
 ## Evidence
-
-- **HEAD:** *(pinned after commit)*
+- **HEAD:** `10855c39ea21a281f5f6ca5a80e0ed89872f40ef`
 - **Schema / release pins:** server schema `13`; Android `0.4.0` / versionCode `21`; Room `28`; local-data contract `5`; protocol floor `21`
 - **Fixture path:**
   - `domain/src/test/kotlin/com/lezi/babylog/domain/CareLogRealServerSeamDeleteRestoreAclTest.kt`
