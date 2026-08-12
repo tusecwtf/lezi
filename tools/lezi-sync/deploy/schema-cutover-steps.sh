@@ -304,6 +304,7 @@ REMOTE
 
 rollback_backup() {
   local config_root backup_dir recipients output temporary frozen after old_image inspect_output
+  require_attested_rollback_identity
   config_root="${XDG_CONFIG_HOME:-${HOME:?}/.config}"
   backup_dir="${LEZI_SCHEMA_CUTOVER_ROLLBACK_DIR:-${config_root}/lezi/schema-cutover-backups}"
   recipients="${LEZI_AGE_RECIPIENTS_FILE:-${config_root}/lezi/age-recipients.txt}"
@@ -528,6 +529,7 @@ final_check() {
 
 rollback_preopen() {
   local stage token previous staging old_image
+  require_attested_rollback_identity
   stage="$(remote_stage)"
   old_image="$(manifest_value "${state_dir}/rollback-package-manifest.json" image_id)"
   if [[ -f "${state_dir}/lease-token" ]]; then

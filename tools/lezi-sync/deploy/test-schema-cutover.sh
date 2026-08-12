@@ -349,4 +349,52 @@ env PATH="${production_root}/bin:${PATH}" \
 [[ -s "${production_root}/backups/lezi-schema12-data-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.tar.age" ]] \
   || fail "schema-12 attested source did not derive schema-12 backup names"
 
+# Executed fail-closed identity: unattested tuples and image-tag drift never
+# create a rollback ciphertext. Schema-11 success already ran above.
+reject_identity() {
+  local name="$1"
+  local state="${production_root}/${name}-state"
+  mkdir -m 700 "${state}"
+  printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' >"${state}/operation-id"
+  printf 'schema=11\nabc  ./lezi.db\n' >"${state}/frozen-source-inventory.txt"
+  cat >"${state}/rollback-package-manifest.json"
+  if env PATH="${production_root}/bin:${PATH}" \
+      LEZI_SCHEMA_CUTOVER_STATE_DIR="${state}" \
+      LEZI_SCHEMA_CUTOVER_ROLLBACK_DIR="${production_root}/backups" \
+      LEZI_AGE_RECIPIENTS_FILE="${production_root}/config/recipients.txt" \
+      LEZI_DATA_HOST_PATH=/tmp/lezi-schema-cutover-test/data \
+      "${runner_source}" rollback_backup >/dev/null 2>&1; then
+    fail "${name} identity must fail closed"
+  fi
+  [[ ! -e "${production_root}/backups/lezi-schema11-data-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.tar.age" ]] \
+    || fail "${name} identity promoted ciphertext"
+  [[ ! -e "${production_root}/backups/lezi-schema10-data-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.tar.age" ]] \
+    || fail "${name} identity promoted ciphertext under a drifted schema name"
+}
+
+reject_identity unattested-version <<'EOF'
+{
+  "version": "0.3.11",
+  "server_schema": "10",
+  "image": "lezi-sync:0.3.11",
+  "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+EOF
+reject_identity crossed-tuple <<'EOF'
+{
+  "version": "0.3.12",
+  "server_schema": "12",
+  "image": "lezi-sync:0.3.12",
+  "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+EOF
+reject_identity image-tag-drift <<'EOF'
+{
+  "version": "0.3.12",
+  "server_schema": "11",
+  "image": "lezi-sync:0.3.13",
+  "image_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+EOF
+
 echo "schema-cutover state-machine smoke passed"
