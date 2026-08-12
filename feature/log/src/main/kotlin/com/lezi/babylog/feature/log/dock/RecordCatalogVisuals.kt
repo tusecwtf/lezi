@@ -9,9 +9,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -98,6 +98,13 @@ internal object LayoutEditPresentation {
     const val showsPrimaryNavigation: Boolean = false
     const val showsCommonSupplement: Boolean = false
     const val showsLocalDeletedHeading: Boolean = true
+    const val localDeletedHelper: String = "使用操作或拖出恢复"
+    const val localDeletedHoverHelper: String = "松开后收起，并清空常用槽"
+    const val localDeletedEmpty: String = "暂无收起项目"
+    const val localDeletedIdleState: String = "可拖出恢复"
+    const val hideAction: String = "收起"
+    const val hideSlotAction: String = "收起该项目"
+    const val undoMovedToDeleted: String = "已收起"
 
     val catalogSections: List<LayoutEditCatalogSection> = RecordSection.entries.map { section ->
         LayoutEditCatalogSection(section.name, section.title)
@@ -105,6 +112,12 @@ internal object LayoutEditPresentation {
     val dockCells: List<LayoutEditDockCell> =
         List(QuickDockVisualSpec.configurableSlotCount) { LayoutEditDockCell.Configurable(it) } +
             LayoutEditDockCell.LockedMore
+
+    fun localDeletedHeading(count: Int): String = "已收起 · $count 项"
+
+    fun localDeletedDescription(count: Int): String =
+        "已收起，$count 项。这里只收起本机入口，不删除历史记录或自定义项目。" +
+            "可对项目使用操作或拖出恢复，回到所属类别末尾；不会自动回填常用槽。"
 }
 
 @Composable
@@ -131,6 +144,8 @@ internal fun RecordCatalogCard(
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     isAdd: Boolean = false,
+    /** Layout editor: drop the white card shell so only the tinted disc + label remain. */
+    transparentContainer: Boolean = false,
 ) {
     val color = leziRecordColor(colorRole)
     val interactionModifier = if (onClick != null || onLongClick != null) {
@@ -141,13 +156,7 @@ internal fun RecordCatalogCard(
     } else {
         Modifier
     }
-    LeziCard(
-        modifier = modifier
-            .heightIn(min = RecordCatalogVisualSpec.cardMinHeight)
-            .then(interactionModifier),
-        onClick = null,
-        contentPadding = RecordCatalogVisualSpec.contentPadding,
-    ) {
+    val body: @Composable () -> Unit = {
         Column(
             Modifier
                 .fillMaxWidth()
@@ -187,6 +196,25 @@ internal fun RecordCatalogCard(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+    val sizedModifier = modifier
+        .heightIn(min = RecordCatalogVisualSpec.cardMinHeight)
+        .then(interactionModifier)
+    if (transparentContainer) {
+        Box(
+            sizedModifier.padding(RecordCatalogVisualSpec.contentPadding),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            body()
+        }
+    } else {
+        LeziCard(
+            modifier = sizedModifier,
+            onClick = null,
+            contentPadding = RecordCatalogVisualSpec.contentPadding,
+        ) {
+            body()
         }
     }
 }

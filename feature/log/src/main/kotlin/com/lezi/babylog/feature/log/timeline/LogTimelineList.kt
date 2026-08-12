@@ -60,8 +60,6 @@ import com.lezi.babylog.designsystem.TimelinePanGesture
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.carelog.DayChartCategory
 import com.lezi.babylog.domain.carelog.DuplicateGroupAction
-import com.lezi.babylog.domain.carelog.SuspectedDuplicatePresentation
-import com.lezi.babylog.domain.carelog.formatRange
 import com.lezi.babylog.domain.carelog.formatClock
 import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import com.lezi.babylog.sync.localCarePlanPublishDetail
@@ -88,16 +86,6 @@ internal class LogTimelineListState {
 @Composable
 internal fun rememberLogTimelineListState(): LogTimelineListState =
     remember { LogTimelineListState() }
-
-/** Data-driven spec for the warm-mode summary metric cards (one per record type). */
-private data class SummaryMetricSpec(
-    val type: RecordType,
-    val tone: LeziTone,
-    val label: String,
-    val value: String,
-    /** Spoken form used by the selection accessibility label. */
-    val spokenValue: String,
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -204,118 +192,42 @@ internal fun LogTimelineList(
                         isUserRefreshing = state.refreshing,
                         contentTestTag = "log_shallow_sync_status",
                     )
+                    val daySummaryColumns = logDaySummaryColumns(
+                        state.summary,
+                        state.summaryBounds,
+                    )
                     if (journal) {
                         RecordSummaryStrip(
-                            values = listOf(
+                            values = daySummaryColumns.map { column ->
                                 RecordSummaryValue(
-                                    RecordType.FORMULA,
-                                    state.summaryBounds?.feedMl?.formatRange()
-                                        ?: "${state.summary.feedMl}",
-                                    "奶ml",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.NURSING,
-                                    state.summaryBounds?.nursingMinutes?.let(::formatDurationBound)
-                                        ?: logDaySummaryDuration(state.summary.nursingMinutes),
-                                    "母乳",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.SLEEP,
-                                    state.summaryBounds?.sleepMinutes?.let(::formatDurationBound)
-                                        ?: logDaySummaryDuration(state.summary.sleepMinutes),
-                                    "睡眠",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.PEE,
-                                    state.summaryBounds?.peeCount?.formatRange()
-                                        ?: "${state.summary.peeCount}",
-                                    "尿",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.POOP,
-                                    state.summaryBounds?.poopCount?.formatRange()
-                                        ?: "${state.summary.poopCount}",
-                                    "便",
-                                ),
-                            ),
+                                    column.type,
+                                    column.compactValue,
+                                    column.compactLabel,
+                                )
+                            },
                             selectedType = selectedSummaryType,
                             selectableTypes = selectableSummaryTypes,
                             onSelect = onSelectSummary,
                         )
                     } else {
-                        val summaryMetrics = listOf(
-                            SummaryMetricSpec(
-                                type = RecordType.FORMULA,
-                                tone = LeziTone.Blue,
-                                label = "奶量",
-                                value = state.summaryBounds?.feedMl?.let {
-                                    SuspectedDuplicatePresentation.formatMetricBound(it, "ml")
-                                } ?: "${state.summary.feedMl}ml",
-                                spokenValue = state.summaryBounds?.feedMl?.let {
-                                    "奶量 ${SuspectedDuplicatePresentation.formatMetricBound(it, "毫升")}"
-                                } ?: "奶量 ${state.summary.feedMl}毫升",
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.NURSING,
-                                tone = LeziTone.Blue,
-                                label = "母乳",
-                                value = state.summaryBounds?.nursingMinutes?.let(::formatDurationBound)
-                                    ?: logDaySummaryDuration(state.summary.nursingMinutes),
-                                spokenValue = state.summaryBounds?.nursingMinutes?.let {
-                                    "母乳 ${formatDurationBound(it)}"
-                                } ?: logDaySummaryNursingSpoken(state.summary.nursingMinutes),
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.SLEEP,
-                                tone = LeziTone.Yellow,
-                                label = "睡眠",
-                                value = state.summaryBounds?.sleepMinutes?.let(::formatDurationBound)
-                                    ?: logDaySummaryDuration(state.summary.sleepMinutes),
-                                spokenValue = state.summaryBounds?.sleepMinutes?.let {
-                                    "睡眠 ${formatDurationBound(it)}"
-                                } ?: logDaySummarySleepSpoken(state.summary.sleepMinutes),
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.PEE,
-                                tone = LeziTone.Cream,
-                                label = "尿尿",
-                                value = state.summaryBounds?.peeCount?.let {
-                                    SuspectedDuplicatePresentation.formatMetricBound(it, "次")
-                                } ?: "${state.summary.peeCount}次",
-                                spokenValue = state.summaryBounds?.peeCount?.let {
-                                    "尿尿 ${SuspectedDuplicatePresentation.formatMetricBound(it, "次")}"
-                                } ?: "尿尿 ${state.summary.peeCount}次",
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.POOP,
-                                tone = LeziTone.Neutral,
-                                label = "便便",
-                                value = state.summaryBounds?.poopCount?.let {
-                                    SuspectedDuplicatePresentation.formatMetricBound(it, "次")
-                                } ?: "${state.summary.poopCount}次",
-                                spokenValue = state.summaryBounds?.poopCount?.let {
-                                    "便便 ${SuspectedDuplicatePresentation.formatMetricBound(it, "次")}"
-                                } ?: "便便 ${state.summary.poopCount}次",
-                            ),
-                        )
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                         ) {
-                            summaryMetrics.forEach { spec ->
-                                val selected = selectedSummaryType == spec.type
+                            daySummaryColumns.forEach { column ->
+                                val selected = selectedSummaryType == column.type
                                 SummaryMetric(
-                                    value = spec.value,
-                                    label = spec.label,
-                                    tone = spec.tone,
+                                    value = column.value,
+                                    label = column.label,
+                                    tone = column.tone,
                                     modifier = Modifier.weight(1f),
-                                    icon = { RecordTypeIcon(spec.type) },
+                                    icon = { RecordTypeIcon(column.type) },
                                     selected = selected,
-                                    selectionLabel = "${spec.spokenValue}，${
+                                    selectionLabel = "${column.spokenValue}，${
                                         if (selected) "已筛选" else "点按筛选"
                                     }",
-                                    onClick = if (spec.type in selectableSummaryTypes) {
-                                        { onSelectSummary(spec.type) }
+                                    onClick = if (column.type in selectableSummaryTypes) {
+                                        { onSelectSummary(column.type) }
                                     } else {
                                         null
                                     },
@@ -721,10 +633,3 @@ internal fun LogTimelineList(
 }
 
 internal fun recordSummaryLine(record: Record): String = record.presentationSummary()
-
-private fun formatDurationBound(bound: com.lezi.babylog.domain.carelog.LongBound): String =
-    if (bound.min == bound.max) {
-        logDaySummaryDuration(bound.min)
-    } else {
-        "${logDaySummaryDuration(bound.min)}–${logDaySummaryDuration(bound.max)}"
-    }

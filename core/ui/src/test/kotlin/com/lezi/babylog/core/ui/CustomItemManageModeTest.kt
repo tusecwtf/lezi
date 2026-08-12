@@ -33,7 +33,7 @@ class CustomItemManageModeTest {
         assertTrue(settings.title.contains("抚触"))
         assertTrue(layout.message.contains("抚触"))
         assertTrue(settings.message.contains("本机显示"))
-        assertTrue(layout.message.contains("本机已删除"))
+        assertTrue(layout.message.contains("收起区"))
         assertFalse(settings.message == layout.message)
     }
 
@@ -43,7 +43,7 @@ class CustomItemManageModeTest {
             customItemDialogScopeGuidance(CustomItemManageMode.Settings).contains("本机显示"),
         )
         assertTrue(
-            customItemDialogScopeGuidance(CustomItemManageMode.LayoutEdit).contains("本机已删除"),
+            customItemDialogScopeGuidance(CustomItemManageMode.LayoutEdit).contains("收起区"),
         )
     }
 }

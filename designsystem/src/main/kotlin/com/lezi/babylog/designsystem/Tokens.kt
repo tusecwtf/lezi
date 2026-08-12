@@ -541,14 +541,14 @@ object LeziTypography {
     /** Journal KPI numerals — same mono face as [Metric] at Title size. */
     val MetricSm = Metric.copy(fontSize = 20.sp, lineHeight = 26.sp)
     /**
-     * Five-column chip numerals (e.g. `12h20m`). 11sp is the largest mono that
-     * still fits a 1/5-width phone cell; do not replace with [Mono] 14sp.
+     * Four-column glance numerals (e.g. `12h20m`). 13sp is the largest mono
+     * that still fits a 1/4-width phone cell; do not replace with [Mono] 14sp.
      */
     val ChipMetric = TextStyle(
         fontFamily = MonoFamily,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 11.sp,
-        lineHeight = 14.sp,
+        fontSize = 13.sp,
+        lineHeight = 16.sp,
     )
     val Mono = TextStyle(
         fontFamily = MonoFamily,

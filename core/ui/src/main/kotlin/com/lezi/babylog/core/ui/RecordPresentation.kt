@@ -243,12 +243,13 @@ data class RecordSummaryValue(
 )
 
 /**
- * Five-column summary strip with the same semantic icons used by record rows.
+ * Equal-width summary strip with the same semantic icons used by record rows.
  *
- * Division of labor vs `SummaryMetric` (designsystem): this is the flat **strip**
- * language (cells split by dividers, record-type glyphs, optional filter selection)
- * for record panels; `SummaryMetric` is the standalone warm **card** language with
- * tinted tone backgrounds. Keep both — see the note on `SummaryMetric`.
+ * Record home uses four glance cells (奶量 / 睡眠 / 尿 / 便). Division of labor
+ * vs `SummaryMetric` (designsystem): this is the flat **strip** language
+ * (cells split by dividers, record-type glyphs, optional filter selection)
+ * for record panels; `SummaryMetric` is the standalone warm **card** language
+ * with tinted tone backgrounds. Keep both — see the note on `SummaryMetric`.
  */
 @Composable
 fun RecordSummaryStrip(
@@ -261,8 +262,7 @@ fun RecordSummaryStrip(
     val journal = LeziThemeExt.isJournal
     val body: @Composable () -> Unit = {
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-            val visibleValues = values.take(5)
-            visibleValues.forEachIndexed { index, item ->
+            values.forEachIndexed { index, item ->
                 val color = leziRecordColor(item.type.presentation.colorRole)
                 val selected = item.type == selectedType
                 val selectable = onSelect != null && item.type in selectableTypes
@@ -299,7 +299,7 @@ fun RecordSummaryStrip(
                                 Modifier
                             },
                         )
-                        .padding(horizontal = 3.dp, vertical = 7.dp),
+                        .padding(horizontal = 6.dp, vertical = 7.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
@@ -312,14 +312,19 @@ fun RecordSummaryStrip(
                     ) {
                         RecordTypeIcon(item.type, size = LeziIconSize.Glyph, tint = color)
                     }
-                    Text(
-                        item.value,
-                        // Match warm SummaryMetric: full-day sleep totals (12h20m)
-                        // must fit five equal cells without clipping.
-                        style = LeziTypography.ChipMetric,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
+                    Box(
+                        Modifier.height(18.dp),
+                        contentAlignment = Alignment.BottomCenter,
+                    ) {
+                        Text(
+                            item.value,
+                            // Match warm SummaryMetric: four equal cells, ChipMetric
+                            // sized so full-day sleep totals (12h20m) stay unclipped.
+                            style = LeziTypography.ChipMetric,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
                     Text(
                         item.label,
                         style = LeziTypography.Meta,
@@ -327,7 +332,7 @@ fun RecordSummaryStrip(
                         maxLines = 1,
                     )
                 }
-                if (index < visibleValues.lastIndex) {
+                if (index < values.lastIndex) {
                     Spacer(
                         Modifier
                             .width(1.dp)

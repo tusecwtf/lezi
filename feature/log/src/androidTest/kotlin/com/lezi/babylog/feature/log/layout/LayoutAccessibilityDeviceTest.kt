@@ -132,7 +132,7 @@ class LayoutAccessibilityDeviceTest {
         val bath = composeRule.onNodeWithTag("layout_edit_item_bath").performScrollTo()
 
         invokeAction(bath.fetchSemanticsNode().config, "设为常用槽1")
-        invokeAction(bath.fetchSemanticsNode().config, "仅在本机隐藏")
+        invokeAction(bath.fetchSemanticsNode().config, LayoutEditPresentation.hideAction)
         bath.performSemanticsAction(SemanticsActions.RequestFocus)
         bath.performKeyInput {
             keyDown(Key.CtrlLeft)
@@ -162,7 +162,7 @@ class LayoutAccessibilityDeviceTest {
         val slot = composeRule.onNodeWithTag("layout_edit_slot_0")
 
         invokeAction(slot.fetchSemanticsNode().config, "向右移动")
-        invokeAction(slot.fetchSemanticsNode().config, "仅在本机隐藏该项目")
+        invokeAction(slot.fetchSemanticsNode().config, LayoutEditPresentation.hideSlotAction)
         slot.performSemanticsAction(SemanticsActions.RequestFocus)
         slot.performKeyInput {
             keyDown(Key.CtrlLeft)

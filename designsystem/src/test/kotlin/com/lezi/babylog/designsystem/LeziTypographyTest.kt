@@ -17,8 +17,8 @@ class LeziTypographyTest {
 
     @Test
     fun namedChipAndCatalogStylesStayOnTheDeclaredRamp() {
-        assertEquals(11.sp, LeziTypography.ChipMetric.fontSize)
-        assertEquals(14.sp, LeziTypography.ChipMetric.lineHeight)
+        assertEquals(13.sp, LeziTypography.ChipMetric.fontSize)
+        assertEquals(16.sp, LeziTypography.ChipMetric.lineHeight)
         assertEquals(14.sp, LeziTypography.LabelLg.fontSize)
         assertEquals(18.sp, LeziTypography.LabelLg.lineHeight)
         assertEquals(20.sp, LeziTypography.MetricSm.fontSize)

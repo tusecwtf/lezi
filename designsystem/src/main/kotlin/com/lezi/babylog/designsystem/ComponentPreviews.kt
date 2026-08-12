@@ -107,9 +107,6 @@ fun PreviewSummaryMetrics() {
     PreviewFrame {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SummaryMetric("180ml", "奶量", LeziTone.Blue, Modifier.weight(1f))
-            SummaryMetric("20min", "母乳", LeziTone.Blue, Modifier.weight(1f))
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SummaryMetric("12h20m", "睡眠", LeziTone.Yellow, Modifier.weight(1f))
             SummaryMetric("1次", "尿尿", LeziTone.Cream, Modifier.weight(1f))
             SummaryMetric("1次", "便便", LeziTone.Neutral, Modifier.weight(1f))
@@ -316,7 +313,9 @@ fun PreviewDarkMetrics() {
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 SummaryMetric("180ml", "奶量", LeziTone.Blue, Modifier.weight(1f))
-                SummaryMetric("20min", "母乳", LeziTone.Blue, Modifier.weight(1f))
+                SummaryMetric("12h20m", "睡眠", LeziTone.Yellow, Modifier.weight(1f))
+                SummaryMetric("1次", "尿尿", LeziTone.Cream, Modifier.weight(1f))
+                SummaryMetric("1次", "便便", LeziTone.Neutral, Modifier.weight(1f))
             }
         }
     }

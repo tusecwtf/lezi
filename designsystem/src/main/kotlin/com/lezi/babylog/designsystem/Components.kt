@@ -176,7 +176,7 @@ fun LeziSurfacePanel(
  *
  * Division of labor vs `RecordSummaryStrip` (core/ui): this is the warm/log-home
  * **card** language (tinted background, per-cell border, 82dp min height) used as
- * standalone summary cards; `RecordSummaryStrip` is the flat five-cell **strip**
+ * standalone summary cards; `RecordSummaryStrip` is the flat four-cell **strip**
  * language (dividers between cells, record-type icons, filter semantics) embedded
  * in record panels. Keep both; new record-type filter strips belong to the strip.
  */
@@ -228,9 +228,7 @@ fun SummaryMetric(
         Column(
             Modifier
                 .fillMaxWidth()
-                // Tight horizontal padding: five equal-width chips must fit compact
-                // durations like "12h20m" without ellipsis on common phone widths.
-                .padding(horizontal = 4.dp, vertical = 9.dp),
+                .padding(horizontal = 8.dp, vertical = 9.dp),
             horizontalAlignment = Alignment.Start,
             verticalArrangement = Arrangement.Top,
         ) {
@@ -244,13 +242,18 @@ fun SummaryMetric(
                 if (icon != null) icon() else LeziPlaceholderDot()
             }
             Spacer(Modifier.height(LeziSpacing.Xxs))
-            Text(
-                value,
-                style = LeziTypography.ChipMetric,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                softWrap = false,
-            )
+            Box(
+                Modifier.height(18.dp),
+                contentAlignment = Alignment.BottomStart,
+            ) {
+                Text(
+                    value,
+                    style = LeziTypography.ChipMetric,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    softWrap = false,
+                )
+            }
             Text(
                 label,
                 style = LeziTypography.Micro,

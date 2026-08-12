@@ -81,7 +81,7 @@ internal fun catalogActions(
     }
     add(
         LayoutAlternativeAction(
-            "仅在本机隐藏",
+            LayoutEditPresentation.hideAction,
             LayoutEditIntent.MoveToLocalDeleted(catalogKey),
         ),
     )
@@ -159,7 +159,7 @@ internal fun slotActions(index: Int, key: String): List<LayoutAlternativeAction>
     add(LayoutAlternativeAction("清空常用槽", LayoutEditIntent.ClearSlot(index)))
     add(
         LayoutAlternativeAction(
-            "仅在本机隐藏该项目",
+            LayoutEditPresentation.hideSlotAction,
             LayoutEditIntent.MoveToLocalDeleted(key),
         ),
     )

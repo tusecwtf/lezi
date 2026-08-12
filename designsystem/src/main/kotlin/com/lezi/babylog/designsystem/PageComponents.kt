@@ -80,13 +80,14 @@ fun LeziDetailTopBar(
     title: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    applyStatusBarsPadding: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     Column(
         modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
-            .statusBarsPadding(),
+            .then(if (applyStatusBarsPadding) Modifier.statusBarsPadding() else Modifier),
     ) {
         Row(
             modifier = Modifier

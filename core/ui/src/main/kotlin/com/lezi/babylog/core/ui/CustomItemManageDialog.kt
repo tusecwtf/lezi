@@ -60,7 +60,7 @@ enum class CustomItemManageMode {
     /** 记录设置：本机显示开关、排序、家庭 ACL. */
     Settings,
 
-    /** 布局编辑态：轻量新增/改名/删除家庭定义（隐藏走本机已删除）. */
+    /** 布局编辑态：轻量新增/改名/删除家庭定义（隐藏走布局编辑收起区）. */
     LayoutEdit,
 }
 
@@ -68,7 +68,7 @@ fun customItemDialogScopeGuidance(mode: CustomItemManageMode): String = when (mo
     CustomItemManageMode.Settings ->
         "「本机显示」只影响本机目录与快捷坞；关闭不等于删除家庭共享定义。"
     CustomItemManageMode.LayoutEdit ->
-        "此处新增/改名/删除为家庭共享定义；本机隐藏请在布局编辑态拖入「本机已删除」。"
+        "此处新增/改名/删除为家庭共享定义；本机不显示请在布局编辑中拖入收起区。"
 }
 
 fun customItemLocalHideHint(manageable: Boolean, locallyHidden: Boolean): String =
@@ -153,7 +153,7 @@ fun customItemDeleteConfirmation(
         CustomItemManageMode.LayoutEdit -> CustomItemDeleteConfirmation(
             title = "删除自定义项目？",
             message = "确认后将从家庭共享项目中移除「$name」，家人不能再用它新建；" +
-                "已有记录仍保留名称快照。若只想本机不显示，请用布局编辑的本机已删除。",
+                "已有记录仍保留名称快照。若只想本机不显示，请拖入布局编辑的收起区。",
         )
     }
 }
