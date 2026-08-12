@@ -34,8 +34,7 @@ Cases：identity/gzip happy path、truncated JSON、corrupt gzip、decoded bomb�
 
 ## Evidence
 
-- **HEAD:** _(pinned after commit)_
-- **Schema / release pins:** server schema `13`; Android `0.4.0` / versionCode `21`; Room `28`; local-data contract `5`; protocol floor `21`
+- **HEAD:** `186dd762b224494eb37bf31c6203ca037b2e0bd9`
 - **Deterministic seed:** `H35_FAULT_SEED = 0x351631` (`0x35_16_31L`)
 - **Frozen budgets (H16):** entities `200`; encoded `9 MiB`; decoded `8 MiB`; pages `500`
 - **Fixture path:**
