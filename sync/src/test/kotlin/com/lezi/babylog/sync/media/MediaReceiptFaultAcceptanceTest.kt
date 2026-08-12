@@ -103,6 +103,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertThat(
             rig.backend.causalMediaPreimageBytes.all { it.second.contentEquals(frozenBytes) },
         ).isTrue()
+        assertDurableBytes(rig, MEDIA_PREPARE to frozenBytes)
         assertThat(rig.backend.causalCommittedUnits.single().single().mutationId)
             .isEqualTo(mutationId)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
@@ -149,6 +150,7 @@ class MediaReceiptFaultAcceptanceTest {
         assertThat(journal.phase).isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
         assertThat(journal.receipts.map { it.mediaUuid }).containsExactly(mediaUuid)
         assertThat(rig.backend.causalMediaPreimageBytes).hasSize(1)
+        assertDurableBytes(rig, MEDIA_COMMIT to frozenBytes)
         assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
         assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
@@ -252,6 +254,11 @@ class MediaReceiptFaultAcceptanceTest {
             .inOrder()
         assertThat(rig.backend.causalMediaPreimageBytes[0].second).isEqualTo(frozenBytes)
         assertThat(rig.backend.causalMediaPreimageBytes[1].second).isEqualTo(secondBytes)
+        assertDurableBytes(
+            rig,
+            MEDIA_DUP to frozenBytes,
+            secondMedia to secondBytes,
+        )
         assertThat(rig.backend.causalCommittedUnits.single().single().mutationId)
             .isEqualTo(mutationId)
         assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
@@ -430,6 +437,47 @@ class MediaReceiptFaultAcceptanceTest {
     }
 
     @Test
+    fun c6b_wrongFamilyCommitRejection_failClosedRetainsCommitUnknown() = runTest {
+        val fixture = seedRecordMedia(
+            recordUuid = "record-h38-wrong-family",
+            mediaUuid = "00000000-0000-4000-8000-00000000038c",
+            localUri = "content://h38-wrong-family",
+            bytes = byteArrayOf(0x38.toByte(), 0x06, 0x46, 0x4D),
+        )
+        val (session, rig, mediaUuid, localUri, frozenBytes) = fixture
+        var rejectedMutation: CausalMutationUnit? = null
+        rig.backend.onCausalCommit = { units ->
+            rejectedMutation = units.single()
+            rig.backend.nextCausalCommitFailure = CausalCommitRejectedException(
+                mutationId = units.single().mutationId,
+                code = "media_family_mismatch",
+            )
+        }
+
+        val failure = runCatching {
+            rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(CausalCommitRejectedException::class.java)
+        assertThat((failure as CausalCommitRejectedException).code)
+            .isEqualTo("media_family_mismatch")
+        val mutationId = requireNotNull(rejectedMutation).mutationId
+        val journal = requireNotNull(
+            decodeCausalMediaSettlementOrNull(
+                requireNotNull(rig.conflictDetails.getFrozenMediaSpoolManifest(mutationId))
+                    .payloadJson,
+            ),
+        )
+        assertThat(journal.phase).isEqualTo(CausalMediaSettlementPhase.CommitUnknown)
+        assertThat(journal.receipts.map { it.mediaUuid }).containsExactly(mediaUuid)
+        assertDurableBytes(rig, mediaUuid to frozenBytes)
+        assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
+        assertThat(rig.immutableMediaSpool.discardedMutationIds).isEmpty()
+        assertThat(rig.records.getByClientUuid("record-h38-wrong-family")?.syncDirty)
+            .isTrue()
+    }
+
+    @Test
     fun c7_restartBeforeSettlement_retainsUnknownPendingAndSourceOnce() = runTest {
         // Pending after partial prepare + CommitUnknown after lost commit, both
         // cold-restarted via newEngine() without URI re-read.
@@ -462,6 +510,7 @@ class MediaReceiptFaultAcceptanceTest {
             assertThat(
                 rig.backend.causalMediaPreimageBytes.all { it.second.contentEquals(frozenBytes) },
             ).isTrue()
+            assertDurableBytes(rig, mediaUuid to frozenBytes)
             assertThat(rig.backend.causalCommittedUnits.single().single().media.single().mediaUuid)
                 .isEqualTo(mediaUuid)
             assertThat(rig.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
@@ -502,6 +551,7 @@ class MediaReceiptFaultAcceptanceTest {
             rig.newEngine().synchronize(session, SyncTrigger.LocalWrite)
             assertThat(attempts).isEqualTo(2)
             assertThat(rig.backend.causalMediaPreimageBytes).hasSize(1)
+            assertDurableBytes(rig, mediaUuid to frozenBytes)
             assertThat(rig.backend.causalMediaPreimageBytes.single().second).isEqualTo(frozenBytes)
             assertThat(rig.mediaFiles.prepareUploadCounts[localUri]).isEqualTo(1)
             assertThat(rig.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
@@ -753,6 +803,18 @@ class MediaReceiptFaultAcceptanceTest {
             ),
         )
         return MediaFixture(session, rig, mediaUuid, localUri, bytes)
+    }
+
+    private fun assertDurableBytes(
+        rig: ReplicaEngineRig,
+        vararg expected: Pair<String, ByteArray>,
+    ) {
+        val durable = rig.backend.causalMediaPreimageDurableBytes
+        assertThat(durable.keys).containsExactlyElementsIn(expected.map { it.first })
+        expected.forEach { (mediaUuid, bytes) ->
+            assertThat(durable.getValue(mediaUuid).toList())
+                .containsExactlyElementsIn(bytes.toList())
+        }
     }
 
     private companion object {

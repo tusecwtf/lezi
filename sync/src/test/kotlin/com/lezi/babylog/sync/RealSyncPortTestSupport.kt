@@ -249,6 +249,8 @@ internal class RecordingSyncBackend : SyncBackend {
     val pullCursors = mutableListOf<Long>()
     val causalCommittedUnits = mutableListOf<List<CausalMutationUnit>>()
     val causalMediaPreimageBytes = mutableListOf<Pair<String, ByteArray>>()
+    /** Durable staging rows keyed by media UUID; repeated same-byte prepare is one upload. */
+    val causalMediaPreimageDurableBytes = linkedMapOf<String, ByteArray>()
     var onCausalMediaPreimage: (suspend (String) -> Unit)? = null
     /** Optional one-shot throw after bytes are recorded (lost prepare response). */
     var failAfterCausalMediaPreimageUpload: Throwable? = null
@@ -705,12 +707,20 @@ internal class RecordingSyncBackend : SyncBackend {
                 remaining -= n
             }
         }
-        causalMediaPreimageBytes += mediaUuid to uploaded.toByteArray()
+        val uploadedBytes = uploaded.toByteArray()
+        causalMediaPreimageBytes += mediaUuid to uploadedBytes
+        causalMediaPreimageDurableBytes[mediaUuid]?.let { existing ->
+            require(existing.contentEquals(uploadedBytes)) {
+                "duplicate causal media prepare changed durable bytes"
+            }
+        } ?: run {
+            causalMediaPreimageDurableBytes[mediaUuid] = uploadedBytes.copyOf()
+        }
         failAfterCausalMediaPreimageUpload?.let { failure ->
             failAfterCausalMediaPreimageUpload = null
             throw failure
         }
-        return causalMediaReceiptFactory?.invoke(mediaUuid, uploaded.toByteArray(), sha256)
+        return causalMediaReceiptFactory?.invoke(mediaUuid, uploadedBytes, sha256)
             ?: com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt(
                 mediaUuid = mediaUuid,
                 status = "staged",
