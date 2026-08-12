@@ -2881,7 +2881,13 @@ impl Store {
                         | "wrong_type"
                         | "non_canonical_value"
                         | "invalid_domain"
-                        | "content_drift"),
+                        | "content_drift"
+                        | "media_preimage_expired"
+                        | "media_membership_mismatch"
+                        | "media_sha256_mismatch"
+                        | "media_byte_size_mismatch"
+                        | "missing_media_bytes"
+                        | "media_uuid_conflict"),
                     ) => code,
                     Some(code) if code.starts_with("forbidden") => "forbidden",
                     _ => "invalid_domain",

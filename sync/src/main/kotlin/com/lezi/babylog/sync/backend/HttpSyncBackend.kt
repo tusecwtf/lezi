@@ -2013,6 +2013,12 @@ private val CAUSAL_COMMIT_TERMINAL_CODES = setOf(
     "incomplete_restore_base",
     "missing_restore_media",
     "cas_mismatch",
+    "media_preimage_expired",
+    "media_membership_mismatch",
+    "media_sha256_mismatch",
+    "media_byte_size_mismatch",
+    "missing_media_bytes",
+    "media_uuid_conflict",
 )
 
 private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = CausalMediaItem(
@@ -2021,8 +2027,8 @@ private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = Cau
     sha256 = requiredNonBlankString("sha256", context),
     byteSize = requiredLong("byte_size", context),
     mime = requiredNonBlankString("mime", context),
-    width = requiredNullableLong("width", context),
-    height = requiredNullableLong("height", context),
+    width = optionalNullableLong("width", context),
+    height = optionalNullableLong("height", context),
 )
 
 private fun JsonObject.toCausalMediaPreimageReceipt(

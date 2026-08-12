@@ -6095,7 +6095,7 @@ fn causal_missing_media_bytes_rejected() {
     // No stage_media_bytes — fail closed.
     assert_commit_rejected(
         fx.store.causal_commit(&fx.owner, vec![unit], 1_700_000_000),
-        "invalid_domain",
+        "missing_media_bytes",
     );
 }
 
@@ -6132,7 +6132,7 @@ fn causal_media_manifest_claim_is_all_or_none_on_a_wrong_receipt() {
     unit.media = vec![first.clone(), wrong_second];
     assert_commit_rejected(
         fx.store.causal_commit(&fx.owner, vec![unit], 1_700_000_000),
-        "invalid_domain",
+        "media_sha256_mismatch",
     );
 
     let bytes = vec![0_u8; first.byte_size as usize];
@@ -6228,10 +6228,15 @@ fn causal_media_receipt_length_and_expiry_equality_reject_before_any_store_write
         let mut mutation = fx.record_mutation(record_id, None, case);
         mutation.mutation_id = mutation_id.clone();
         mutation.media = vec![declared];
+        let expected_code = match case {
+            "wrong_byte_size" => "media_byte_size_mismatch",
+            "expiry_equality" => "media_preimage_expired",
+            _ => unreachable!(),
+        };
         assert_commit_rejected(
             fx.store
                 .causal_commit(&fx.owner, vec![mutation.clone()], now),
-            "invalid_domain",
+            expected_code,
         );
 
         let connection = fx.store.connect().unwrap();
