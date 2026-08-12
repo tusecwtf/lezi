@@ -35,7 +35,7 @@
 
 ## Evidence
 
-- **HEAD:** _(pinned after commit)_
+- **HEAD:** `d7ede603117500443c4f6a2235c3e53fbbd41f1f`
 - **Schema / release pins:** server schema `13`; Android `0.4.0` / versionCode `21`; Room `28`; local-data contract `5`; protocol floor `21`
 - **Deterministic seed:** `H34_FAULT_SEED = 0x341531` (`0x34_15_31L`)
 - **Fixture path:**
