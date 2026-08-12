@@ -34,6 +34,7 @@
 
 ## Evidence
 
+- **HEAD:** `b55a93b00d237dd3ee3818bfb94fb9d70430ad6d`
 - **External exact-HEAD receipts (implementation landings):**
   - R12 admission/branch cap `c1e05d6b3996f93549c3562961ddda356c40b605`
     (`fix(sync-server): bound causal conflict admission`)
