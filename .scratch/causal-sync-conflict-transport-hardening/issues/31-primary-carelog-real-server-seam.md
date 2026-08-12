@@ -34,7 +34,7 @@
 
 ## Evidence
 
-- **HEAD:** `f7aa8d841f31a04fc67388d6e85dace879edb38a`
+- **HEAD:** `1b3270d47ec4ff7173959413b3ef2859d10dab5a`
 - **Schema / release pins:** server schema `13`; Android `0.4.0` / versionCode `21`; Room `28`; local-data contract `5`; protocol floor `21`
 - **Fixture path:** `domain/src/test/kotlin/com/lezi/babylog/domain/CareLogRealServerSeamTest.kt` +
   `CareLogRealServerSeamSupport.kt` + `IsolatedLeziSyncServer.kt`
