@@ -38,6 +38,8 @@ internal fun decodeBabyWire(
     payload: JsonObject,
     updatedAtLocation: RootUpdatedAtLocation = RootUpdatedAtLocation.SeparateEnvelope,
 ): BabyWire {
+    // Server stamp_root always writes created_by_membership_id onto baby roots for both
+    // causal stable proofs and ordinary pull projections. Treat it as a non-domain stamp.
     payload.requireProviderKeys(
         "nickname",
         "sex",
@@ -46,6 +48,7 @@ internal fun decodeBabyWire(
         "avatar_media_uuid",
         context = "baby",
         updatedAtLocation = updatedAtLocation,
+        extraAllowedKeys = setOf("created_by_membership_id"),
     )
     val nickname = payload.requireProviderNonBlankString("nickname", "baby").trim()
     require(limitBabyNicknameInput(nickname) == nickname) { "baby nickname 超出 current 限制" }
@@ -98,12 +101,14 @@ private fun JsonObject.requireProviderKeys(
     vararg payloadKeys: String,
     context: String,
     updatedAtLocation: RootUpdatedAtLocation,
+    extraAllowedKeys: Set<String> = emptySet(),
 ) {
     val expected = payloadKeys.toSet() + when (updatedAtLocation) {
         RootUpdatedAtLocation.SeparateEnvelope -> emptySet()
         RootUpdatedAtLocation.InlineStableRoot -> setOf("updated_at")
     }
-    require(keys == expected) {
+    val allowed = expected + extraAllowedKeys
+    require(keys.containsAll(expected) && keys.all(allowed::contains)) {
         "$context current wire 字段不完整或包含未知字段: ${keys.sorted()}"
     }
 }

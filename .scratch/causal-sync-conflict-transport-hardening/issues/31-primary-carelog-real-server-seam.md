@@ -4,7 +4,7 @@
 
 **Blocked by:** 30
 
-**Status:** ready-for-agent
+**Status:** implemented
 
 ## Contract slice
 
@@ -19,15 +19,39 @@
 
 ## Acceptance
 
-- [ ] 主缝无 reconcile、LocalWrite 不 pull、publish 不移动 cursor
-- [ ] A settled，B Room/domain 与 canonical fact 一致
-- [ ] A 后续 pull 保持同一 stable version 且无 duplicate
+- [x] 主缝无 reconcile、LocalWrite 不 pull、publish 不移动 cursor
+- [x] A settled，B Room/domain 与 canonical fact 一致
+- [x] A 后续 pull 保持同一 stable version 且无 duplicate
 
 ## Validation
 
-- [ ] 可重复 E2E fixture/smoke 通过并记录 exact HEAD/schema
-- [ ] 不接触家庭 NAS/证书
+- [x] 可重复 E2E fixture/smoke 通过并记录 exact HEAD/schema
+- [x] 不接触家庭 NAS/证书
 
 ## Out of scope
 
 不覆盖冲突或媒体故障矩阵。
+
+## Evidence
+
+- **HEAD:** `f7aa8d841f31a04fc67388d6e85dace879edb38a`
+- **Schema / release pins:** server schema `13`; Android `0.4.0` / versionCode `21`; Room `28`; local-data contract `5`; protocol floor `21`
+- **Fixture path:** `domain/src/test/kotlin/com/lezi/babylog/domain/CareLogRealServerSeamTest.kt` +
+  `CareLogRealServerSeamSupport.kt` + `IsolatedLeziSyncServer.kt`
+- **Production fix:** `sync/.../ProviderRootWire.kt` — baby pull/stable_root decode tolerates server
+  `created_by_membership_id` stamp from `stamp_root` (was fail-closed as unknown field)
+- **How to run:**
+  ```bash
+  # ensure a current lezi-sync binary (shared cargo target-dir or LEZI_SYNC_BIN)
+  (cd tools/lezi-sync && cargo build -p lezi-sync)
+  ./gradlew :domain:testDebugUnitTest \
+    --tests com.lezi.babylog.domain.CareLogRealServerSeamTest
+  ```
+- **Related green suites:**
+  - `:domain:testDebugUnitTest --tests CareLogRealServerSeamTest --tests CareLogRecordWriteTest`
+  - `:sync:testDebugUnitTest --tests RealSyncPortLocalWriteNoPullTest --tests RealSyncPortPushPullTest --tests 'ReplicaSyncEngineCausal*'`
+- **Isolation:** mktemp data root under process temp; openssl localhost cert; free `127.0.0.1` ports;
+  bootstrap secret fixture-only; rejects NAS env vars; never touches family NAS paths/certs
+- **Seam exercised:** CareLog.addRecord/updateRecord → requestLocalSync/LocalWrite → RealSyncPort →
+  ReplicaSyncEngine → HttpSyncBackend (pinned TOFU SPKI) → isolated lezi-sync → peer Foreground pull →
+  Room/domain fact match; owner republish cursor stable; no duplicate clientUuid rows
