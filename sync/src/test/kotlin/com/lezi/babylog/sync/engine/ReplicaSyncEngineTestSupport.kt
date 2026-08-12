@@ -48,9 +48,9 @@ import com.lezi.babylog.sync.TestImmutableMediaSpool
 
 internal class ReplicaEngineRig(
     session: SyncSession,
+    backend: RecordingSyncBackend = RecordingSyncBackend(),
 ) {
-    val backend = RecordingSyncBackend()
-        .also { it.enableCausal = false }
+    val backend = backend.also { it.enableCausal = false }
     val preferences = MemorySyncPreferences(session)
     val records = MemoryRecordDao()
     val carePlans = MemoryCarePlanDao()

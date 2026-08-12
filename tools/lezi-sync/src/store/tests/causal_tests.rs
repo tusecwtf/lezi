@@ -2571,6 +2571,264 @@ fn choice_only_resolution_rebuilds_media_and_concurrent_tombstone_authoritativel
 }
 
 #[test]
+fn h39_media_branch_matrix_preserves_exact_bytes_for_record_baby_and_care_plan() {
+    for (entity_type, role) in [("record", "log"), ("baby", "avatar"), ("care_plan", "plan")] {
+        let fx = CausalFx::new();
+        let root_id = Uuid::new_v4();
+
+        // Independent add/add: Record and CarePlan merge disjoint media UUIDs;
+        // Baby's one-avatar cap deliberately remains a choice-only branch.
+        let base_root = h39_root(entity_type, fx.baby_id, "base", 100, None);
+        let base = fx
+            .commit(
+                &fx.owner,
+                mut_unit(entity_type, root_id, None, base_root, false),
+                1_700_000_000,
+            )
+            .unwrap()
+            .results[0]
+            .stable_version_id
+            .clone()
+            .unwrap();
+        let mut added_a = h39_media(role, 11);
+        let mut added_b = h39_media(role, 12);
+        fx.stage_media_bytes(&mut added_a);
+        fx.stage_media_bytes(&mut added_b);
+        let stable_add = h39_root(entity_type, fx.baby_id, "same", 101, Some(&added_a));
+        let mut stable = mut_unit(entity_type, root_id, Some(&base), stable_add, false);
+        stable.media = vec![added_a.clone()];
+        assert_eq!(
+            fx.commit(&fx.owner, stable, 1_700_000_001).unwrap().results[0].status,
+            "accepted"
+        );
+        let mut incoming = mut_unit(
+            entity_type,
+            root_id,
+            Some(&base),
+            h39_root(entity_type, fx.baby_id, "same", 102, Some(&added_b)),
+            false,
+        );
+        incoming.media = vec![added_b.clone()];
+        let add_result = fx.commit(&fx.owner, incoming, 1_700_000_002).unwrap();
+        if entity_type == "baby" {
+            assert_eq!(add_result.results[0].status, "branched");
+            let conflict_id = add_result.results[0].conflict_id.clone().unwrap();
+            let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+            let branch_version = add_result.results[0].branch_version_id.clone().unwrap();
+            let choices = detail
+                .conflicting
+                .iter()
+                .map(|path| {
+                    let candidate = path
+                        .candidates
+                        .iter()
+                        .find(|candidate| {
+                            candidate
+                                .sources
+                                .iter()
+                                .any(|source| source.version_id == branch_version)
+                        })
+                        .unwrap();
+                    ConflictResolutionChoice {
+                        path: path.path.clone(),
+                        choice_id: candidate.choice_id.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let resolved = fx
+                .store
+                .resolve_conflict(
+                    &fx.owner,
+                    &conflict_id,
+                    ResolveConflictInput {
+                        snapshot_token: detail.snapshot_token,
+                        resolution_mutation_id: Uuid::new_v4().to_string(),
+                        choices,
+                    },
+                    1_700_000_003,
+                )
+                .unwrap();
+            assert_eq!(resolved.status, "accepted", "resolution={resolved:?}");
+            assert_eq!(resolved.stable_media, vec![added_b.clone()]);
+            assert_eq!(
+                fs::read(
+                    fx._dir
+                        .path()
+                        .join("media")
+                        .join(&fx.family_id)
+                        .join(&added_b.media_uuid)
+                )
+                .unwrap(),
+                vec![0; added_b.byte_size as usize]
+            );
+        } else {
+            assert_eq!(add_result.results[0].status, "merged");
+            let mut expected_media = vec![added_a.clone(), added_b.clone()];
+            expected_media.sort_by(|left, right| left.media_uuid.cmp(&right.media_uuid));
+            assert_eq!(add_result.results[0].stable_media, expected_media);
+            for item in [&added_a, &added_b] {
+                assert_eq!(
+                    fs::read(
+                        fx._dir
+                            .path()
+                            .join("media")
+                            .join(&fx.family_id)
+                            .join(&item.media_uuid)
+                    )
+                    .unwrap(),
+                    vec![0; item.byte_size as usize]
+                );
+            }
+        }
+
+        // Same-media delete/edit: both sides changed the shared media path in
+        // different ways. Choice-only resolution must be able to retain the
+        // exact base bytes instead of silently dropping the attachment.
+        let mut same_media = h39_media(role, 13);
+        fx.stage_media_bytes(&mut same_media);
+        let mut edited_media = same_media.clone();
+        edited_media.width = Some(8);
+        let same_root_id = Uuid::new_v4();
+        let mut create = mut_unit(
+            entity_type,
+            same_root_id,
+            None,
+            h39_root(entity_type, fx.baby_id, "same-base", 110, Some(&same_media)),
+            false,
+        );
+        create.media = vec![same_media.clone()];
+        let same_base = fx.commit(&fx.owner, create, 1_700_000_010).unwrap().results[0]
+            .stable_version_id
+            .clone()
+            .unwrap();
+        let delete = mut_unit(
+            entity_type,
+            same_root_id,
+            Some(&same_base),
+            h39_root(entity_type, fx.baby_id, "stable-edit", 111, None),
+            false,
+        );
+        let _stable_delete = fx.commit(&fx.owner, delete, 1_700_000_011).unwrap();
+        let mut edit = mut_unit(
+            entity_type,
+            same_root_id,
+            Some(&same_base),
+            h39_root(
+                entity_type,
+                fx.baby_id,
+                "incoming-edit",
+                112,
+                Some(&edited_media),
+            ),
+            false,
+        );
+        edit.media = vec![edited_media.clone()];
+        let branch = fx.commit(&fx.owner, edit, 1_700_000_012).unwrap();
+        assert_eq!(branch.results[0].status, "branched");
+        let conflict_id = branch.results[0].conflict_id.clone().unwrap();
+        let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();
+        let branch_version = branch.results[0].branch_version_id.clone().unwrap();
+        let choices = detail
+            .conflicting
+            .iter()
+            .map(|path| {
+                let candidate = path
+                    .candidates
+                    .iter()
+                    .filter(|candidate| {
+                        candidate
+                            .sources
+                            .iter()
+                            .any(|source| source.version_id == branch_version)
+                    })
+                    .next()
+                    .unwrap();
+                ConflictResolutionChoice {
+                    path: path.path.clone(),
+                    choice_id: candidate.choice_id.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let resolved = fx
+            .store
+            .resolve_conflict(
+                &fx.owner,
+                &conflict_id,
+                ResolveConflictInput {
+                    snapshot_token: detail.snapshot_token,
+                    resolution_mutation_id: Uuid::new_v4().to_string(),
+                    choices,
+                },
+                1_700_000_013,
+            )
+            .unwrap();
+        assert_eq!(resolved.status, "accepted");
+        assert_eq!(resolved.stable_media, vec![edited_media.clone()]);
+        if entity_type != "baby" {
+            assert_eq!(resolved.stable_root["note"], json!("incoming-edit"));
+        }
+        assert_eq!(
+            fs::read(
+                fx._dir
+                    .path()
+                    .join("media")
+                    .join(&fx.family_id)
+                    .join(&same_media.media_uuid)
+            )
+            .unwrap(),
+            vec![0; same_media.byte_size as usize]
+        );
+    }
+}
+
+fn h39_media(role: &str, fill: u8) -> CausalMediaItem {
+    CausalMediaItem {
+        media_uuid: Uuid::new_v4().to_string(),
+        role: role.to_owned(),
+        sha256: String::new(),
+        byte_size: i64::from(fill) + 8,
+        mime: "image/jpeg".to_owned(),
+        width: Some(4),
+        height: Some(4),
+    }
+}
+
+fn h39_root(
+    entity_type: &str,
+    baby_id: Uuid,
+    note: &str,
+    updated_at: i64,
+    media: Option<&CausalMediaItem>,
+) -> Map<String, Value> {
+    match entity_type {
+        "record" => record_root(baby_id, note, 100, updated_at),
+        "baby" => map(json!({
+            "nickname": "H39宝宝",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "avatar_media_uuid": media.map(|item| item.media_uuid.clone()),
+            "updated_at": updated_at,
+        })),
+        "care_plan" => map(json!({
+            "baby_client_uuid": baby_id,
+            "type": "bath",
+            "custom_item_client_uuid": null,
+            "scheduled_at": 1_700_000_000_000i64,
+            "scheduled_zone_id": "Asia/Shanghai",
+            "note": note,
+            "status": "pending",
+            "payload_json": {},
+            "schema_version": 2,
+            "created_by_membership_id": "m-owner",
+            "fulfilled_record_client_uuid": null,
+            "fulfilled_at": null,
+            "updated_at": updated_at,
+        })),
+        _ => panic!("unsupported H39 root: {entity_type}"),
+    }
+}
+
+#[test]
 fn choice_only_resolution_can_authoritatively_select_concurrent_tombstone() {
     let (fx, conflict_id, _, branch_version) = seed_media_conflict(true);
     let detail = first_conflict_detail(&fx.store, &fx.owner, &conflict_id).unwrap();

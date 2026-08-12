@@ -639,6 +639,37 @@ pub(super) fn build_conflict_snapshot(
         None
     };
 
+    // A Baby has a single avatar slot. Two different concurrent media adds
+    // cannot be auto-merged as independent set members: retaining both media
+    // manifests would violate the avatar cardinality even when the root path
+    // choice selects only one UUID. Materialize the complete media union as
+    // competing choices so the resolver can select one coherent branch.
+    if projection.entity_type == "baby" {
+        let media_uuids = heads
+            .iter()
+            .flat_map(|head| head.media.iter().map(|item| item.media_uuid.clone()))
+            .collect::<BTreeSet<_>>();
+        if media_uuids.len() > 1 {
+            for media_uuid in media_uuids {
+                let path = format!("/media/{media_uuid}");
+                for head in &heads {
+                    let outcome = head
+                        .media
+                        .iter()
+                        .find(|item| item.media_uuid == media_uuid)
+                        .map(|item| ConflictOutcome::Set {
+                            value: item.to_value(),
+                        })
+                        .unwrap_or(ConflictOutcome::Remove);
+                    changes
+                        .get_mut(&head.version_id)
+                        .ok_or(StoreError::InvalidStoredPayload)?
+                        .insert(path.clone(), outcome);
+                }
+            }
+        }
+    }
+
     let all_paths = changes
         .values()
         .flat_map(BTreeMap::keys)

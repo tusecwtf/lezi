@@ -694,6 +694,7 @@ internal class RecordingSyncBackend : SyncBackend {
         sha256: String,
     ): com.lezi.babylog.sync.backend.CausalMediaPreimageReceipt {
         // Recording backend accepts preimages as no-ops; production Http stages bytes.
+        syncOrder += "causal_media_preimage_started:$mediaUuid"
         onCausalMediaPreimage?.invoke(mediaUuid)
         syncOrder += "causal_media_preimage:$mediaUuid"
         val uploaded = java.io.ByteArrayOutputStream()
