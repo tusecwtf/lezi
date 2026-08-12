@@ -10,6 +10,7 @@ import java.security.cert.Certificate
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLHandshakeException
@@ -145,6 +146,61 @@ class HttpSyncBackendCommitAtomicTest {
             assertThat(result.generation).isEqualTo("generation-a")
             assertThat(result.results.single().stableVersionId).isEqualTo("v1")
             assertThat(result.results.single().replay).isFalse()
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun causalCommitRequiresExplicitNullableMediaWidthAndHeight() = runTest {
+        val media = """{
+            "media_uuid":"00000000-0000-4000-8000-0000000000aa",
+            "role":"log",
+            "sha256":"${"a".repeat(64)}",
+            "byte_size":4,
+            "mime":"image/jpeg",
+            "width":null,
+            "height":null
+        }"""
+        val omitted = """{
+            "media_uuid":"00000000-0000-4000-8000-0000000000aa",
+            "role":"log",
+            "sha256":"${"a".repeat(64)}",
+            "byte_size":4,
+            "mime":"image/jpeg"
+        }"""
+        val server = ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
+        val bodies = ArrayDeque(
+            listOf(
+                """{"generation":"generation-a","results":[{"status":"accepted","mutation_id":"m1","request_hash":"${"a".repeat(64)}","replay":false,"stable":{"version_id":"v1","root":{},"media":[$media],"deleted":false,"deleted_at":null}}]}""",
+                """{"generation":"generation-a","results":[{"status":"accepted","mutation_id":"m1","request_hash":"${"a".repeat(64)}","replay":false,"stable":{"version_id":"v1","root":{},"media":[$omitted],"deleted":false,"deleted_at":null}}]}""",
+            ),
+        )
+        val responder = thread(name = "lezi-causal-commit-media-shape-test-server") {
+            repeat(2) {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    val body = bodies.removeFirst().toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray(Charsets.US_ASCII))
+                        output.write(body)
+                    }
+                }
+            }
+        }
+        try {
+            val backend = loopbackBackend()
+            val session = testSession(server)
+            val accepted = backend.causalCommit(session, listOf(causalMutation("m1")))
+            assertThat(accepted.results.single().stableMedia.single().width).isNull()
+            assertThat(accepted.results.single().stableMedia.single().height).isNull()
+            val failure = runCatching {
+                backend.causalCommit(session, listOf(causalMutation("m1")))
+            }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(AuthorityProofException::class.java)
+            assertThat(failure?.cause).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(failure?.cause).hasMessageThat().contains("width")
         } finally {
             server.close()
             responder.join(2_000)

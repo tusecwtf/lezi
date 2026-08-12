@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
 /// Paths never treated as business conflicts (wire §4.0 / §9.4).
@@ -18,18 +20,42 @@ const NON_CONFLICT_ROOT_KEYS: &[&str] = &[
 ];
 
 /// One media manifest member (wire §4.6).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CausalMediaItem {
     pub media_uuid: String,
     pub role: String,
     pub sha256: String,
     pub byte_size: i64,
     pub mime: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for CausalMediaItem {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| DeError::custom("media item must be an object"))?;
+        const REQUIRED: [&str; 7] = [
+            "media_uuid",
+            "role",
+            "sha256",
+            "byte_size",
+            "mime",
+            "width",
+            "height",
+        ];
+        for key in REQUIRED {
+            if !object.contains_key(key) {
+                return Err(DeError::missing_field(key));
+            }
+        }
+        if let Some(unknown) = object.keys().find(|key| !REQUIRED.contains(&key.as_str())) {
+            return Err(DeError::unknown_field(unknown, &REQUIRED));
+        }
+        Self::from_value(&value).ok_or_else(|| DeError::custom("invalid media item"))
+    }
 }
 
 impl CausalMediaItem {
@@ -674,5 +700,29 @@ mod tests {
             }
             other => panic!("expected Conflict, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn media_item_wire_emits_required_null_width_height() {
+        let item = CausalMediaItem {
+            media_uuid: "00000000-0000-4000-8000-000000000001".into(),
+            role: "log".into(),
+            sha256: "a".repeat(64),
+            byte_size: 1,
+            mime: "image/jpeg".into(),
+            width: None,
+            height: None,
+        };
+        let value = serde_json::to_value(&item).unwrap();
+        assert_eq!(value.get("width"), Some(&Value::Null));
+        assert_eq!(value.get("height"), Some(&Value::Null));
+        serde_json::from_value::<CausalMediaItem>(json!({
+            "media_uuid": item.media_uuid,
+            "role": "log",
+            "sha256": item.sha256,
+            "byte_size": 1,
+            "mime": "image/jpeg",
+        }))
+        .expect_err("omitted width/height must fail closed");
     }
 }

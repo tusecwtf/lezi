@@ -2027,8 +2027,8 @@ private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = Cau
     sha256 = requiredNonBlankString("sha256", context),
     byteSize = requiredLong("byte_size", context),
     mime = requiredNonBlankString("mime", context),
-    width = optionalNullableLong("width", context),
-    height = optionalNullableLong("height", context),
+    width = requiredNullableLong("width", context),
+    height = requiredNullableLong("height", context),
 )
 
 private fun JsonObject.toCausalMediaPreimageReceipt(

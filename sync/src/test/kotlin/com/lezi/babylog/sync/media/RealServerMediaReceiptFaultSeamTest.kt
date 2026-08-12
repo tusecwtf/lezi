@@ -46,7 +46,7 @@ class RealServerMediaReceiptFaultSeamTest {
             fixture.mediaFiles.prepareUploadFailures += seeded.localUri
 
             assertThat(fixture.proxy.droppedResponses.get()).isAtLeast(1)
-            assertThat(fixture.stagingCount("staged")).isAtLeast(1)
+            assertThat(fixture.stagingCount("staged")).isEqualTo(1)
             assertThat(fixture.stagingSha256(MEDIA_PREPARE)).isEqualTo(digest(seeded.frozenBytes))
             assertThat(fixture.recordVersionCount()).isEqualTo(0)
             assertThat(fixture.mediaFiles.prepareUploadCounts[seeded.localUri]).isEqualTo(1)
@@ -67,10 +67,12 @@ class RealServerMediaReceiptFaultSeamTest {
             assertThat(fixture.commitForwards()).isAtLeast(1)
             assertThat(fixture.commitForwards()).isAtMost(4)
             assertThat(fixture.stagingCount("staged")).isEqualTo(0)
-            assertThat(fixture.recordVersionCount()).isAtLeast(1)
-            assertThat(fixture.recordVersionCount()).isAtMost(2)
+            check(fixture.recordVersionCount() == 1) {
+                "c1 versions=${fixture.recordVersionCount()} dump=${fixture.recordVersionDump()} " +
+                    "receipts=${fixture.recordReceiptDump()} commits=${fixture.commitForwards()}"
+            }
             assertThat(fixture.recordReceiptCount()).isAtLeast(1)
-            assertThat(fixture.recordReceiptCount()).isAtMost(2)
+            assertThat(fixture.recordReceiptDump()).contains(seeded.recordUuid)
             assertThat(fixture.mediaFiles.prepareUploadCounts[seeded.localUri]).isEqualTo(1)
             assertThat(fixture.immutableMediaSpool.openCounts[mutationId]).isAtLeast(2)
             assertThat(fixture.immutableMediaSpool.discardedMutationIds).containsExactly(mutationId)
@@ -105,9 +107,9 @@ class RealServerMediaReceiptFaultSeamTest {
             assertThat(fixture.commitForwards()).isAtLeast(1)
             assertThat(fixture.commitForwards()).isAtMost(4)
             assertThat(fixture.stagingCount("staged")).isEqualTo(0)
-            assertThat(fixture.recordVersionCount()).isAtLeast(1)
-            assertThat(fixture.recordVersionCount()).isAtMost(2)
+            assertThat(fixture.recordVersionCount()).isEqualTo(1)
             assertThat(fixture.recordReceiptCount()).isAtLeast(1)
+            assertThat(fixture.recordReceiptDump()).contains(RECORD_COMMIT)
             val mutationId = requireNotNull(
                 fixture.records.getByClientUuid(seeded.recordUuid)?.mutationId,
             )
@@ -128,8 +130,7 @@ class RealServerMediaReceiptFaultSeamTest {
             assertThat(fixture.prepareForwards()).isEqualTo(1)
             assertThat(fixture.commitForwards()).isAtLeast(2)
             assertThat(fixture.commitForwards()).isAtMost(4)
-            assertThat(fixture.recordVersionCount()).isAtLeast(1)
-            assertThat(fixture.recordVersionCount()).isAtMost(2)
+            assertThat(fixture.recordVersionCount()).isEqualTo(1)
             assertThat(fixture.recordReceiptCount()).isAtLeast(1)
             assertThat(fixture.mediaFiles.prepareUploadCounts[seeded.localUri]).isEqualTo(1)
             assertThat(fixture.immutableMediaSpool.openCounts[mutationId]).isEqualTo(1)
@@ -172,6 +173,8 @@ class RealServerMediaReceiptFaultSeamTest {
                         "WHERE media_uuid = '$mediaUuid';",
                 )
             }, "media_membership_mismatch"),
+            // Staging is family-keyed. A foreign family_id is a lookup miss,
+            // not H38's synthetic media_family_mismatch hook.
             Case("wrong-family", "e5", { fixture, mediaUuid ->
                 fixture.sqlite(
                     "INSERT OR IGNORE INTO families(id, created_at, name) " +

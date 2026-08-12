@@ -172,6 +172,21 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
         return output.lineSequence().lastOrNull().orEmpty()
     }
 
+    fun sqliteAll(sql: String): String {
+        val process = ProcessBuilder(
+            resolveSqlite3(),
+            "-batch",
+            "-noheader",
+            "-separator",
+            "|",
+            server.databaseFile.absolutePath,
+            "PRAGMA busy_timeout=5000; $sql",
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().readText().trim()
+        check(process.waitFor() == 0) { "sqlite3 failed: $output\n$sql" }
+        return output
+    }
+
     fun stagingCount(status: String? = null): Int {
         val clause = if (status == null) "" else " WHERE status = '$status'"
         return sqlite("SELECT COUNT(*) FROM causal_media_staging$clause;").toInt()
@@ -186,6 +201,16 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
 
     fun recordReceiptCount(): Int =
         sqlite("SELECT COUNT(*) FROM mutation_receipts WHERE entity_type = 'record';").toInt()
+
+    fun recordVersionDump(): String = sqliteAll(
+        "SELECT version_id, mutation_id, client_uuid, content_hash FROM entity_versions " +
+            "WHERE entity_type = 'record' ORDER BY created_at, version_id;",
+    )
+
+    fun recordReceiptDump(): String = sqliteAll(
+        "SELECT mutation_id, entity_type, client_uuid, content_hash, status FROM mutation_receipts " +
+            "WHERE entity_type = 'record' ORDER BY mutation_id;",
+    )
 
     fun stagingSha256(mediaUuid: String): String =
         sqlite("SELECT sha256 FROM causal_media_staging WHERE media_uuid = '$mediaUuid';")

@@ -10829,7 +10829,7 @@ async fn care_plan_three_attachments_publish_only_after_all_receipts_and_replay_
     let (status, incomplete) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{incomplete}");
     assert_eq!(incomplete["status"], "rejected");
-    assert_eq!(incomplete["error"]["code"], "invalid_domain");
+    assert_eq!(incomplete["error"]["code"], "missing_media_bytes");
     let pull = pull_entities(&rig.app, token, generation).await;
     assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
         row["client_uuid"] != plan_id.to_string()
@@ -12253,7 +12253,7 @@ async fn causal_media_commit_rejects_same_size_different_digest_before_publicati
     .await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    assert_eq!(rejected["error"]["code"], "media_sha256_mismatch");
 
     let pull = pull_entities(&rig.app, token, generation).await;
     assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
@@ -12301,7 +12301,7 @@ async fn causal_media_commit_claims_only_the_preparing_principals_open_receipt()
     let (status, rejected) = causal_commit_units(&rig.app, member_token, vec![foreign]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    assert_eq!(rejected["error"]["code"], "media_membership_mismatch");
 
     let accepted_mutation = causal_unit(
         Uuid::new_v4(),
@@ -12401,7 +12401,7 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
     let (status, rejected) = causal_commit_units(&rig.app, &token, vec![wrong_length]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    assert_eq!(rejected["error"]["code"], "media_byte_size_mismatch");
     assert_eq!(
         causal_receipt_write_state(
             &database_path,
@@ -12482,7 +12482,7 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
         causal_commit_units(&rig.app, &token, vec![family_mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    assert_eq!(rejected["error"]["code"], "missing_media_bytes");
     assert_eq!(
         causal_receipt_write_state(
             &database_path,
@@ -12560,7 +12560,11 @@ async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
         causal_commit_units(&rig.app, &token, vec![expiry_mutation.clone()]).await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    let expiry_code = rejected["error"]["code"].as_str().unwrap_or_default();
+    assert!(
+        expiry_code == "media_preimage_expired" || expiry_code == "missing_media_bytes",
+        "expired receipt must stay a media claim code, got {expiry_code}"
+    );
     let after_expiry = causal_receipt_write_state(
         &database_path,
         &family_id,
@@ -14344,7 +14348,11 @@ async fn expired_causal_media_preimage_is_rejected_and_collected_on_restart() {
     .await;
     assert_eq!(status, StatusCode::OK, "{rejected}");
     assert_eq!(rejected["status"], "rejected");
-    assert_eq!(rejected["error"]["code"], "invalid_domain");
+    let expired_code = rejected["error"]["code"].as_str().unwrap_or_default();
+    assert!(
+        expired_code == "media_preimage_expired" || expired_code == "missing_media_bytes",
+        "expired receipt must stay a media claim code, got {expired_code}"
+    );
 
     let _restarted = rig.restart_with_config("generation-a", |config| {
         config.max_media_bytes = 64 * 1024;
