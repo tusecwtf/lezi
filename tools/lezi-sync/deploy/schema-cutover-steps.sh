@@ -173,12 +173,12 @@ docker cp "${container}:/data/app-release.apk" "${stage}/rollback-app-update/app
 docker cp "${container}:/data/app-update.json" "${stage}/rollback-app-update/app-update.json"
 install_pair() {
   local src="$1"
-  docker run --rm --user 10001:10001 \
+  docker run --rm --user 0 \
     -v "${data_path}:/data" \
     -v "${src}:/src:ro" \
     --entrypoint /bin/sh \
     "${image}" \
-    -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && chmod 644 /data/app-release.apk /data/app-update.json && test ! -e /data/app-release.apk.lezi-staging && test ! -e /data/app-update.json.lezi-staging'
+    -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && test ! -e /data/app-release.apk.lezi-staging && test ! -e /data/app-update.json.lezi-staging'
 }
 restore_pair() {
   install_pair "${stage}/rollback-app-update"
@@ -548,23 +548,23 @@ rollback_preopen() {
       "${SCRIPT_DIR}/push-and-deploy.sh"
   fi
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s -- \
-    "${CONTAINER_NAME}" "${stage}" <<'REMOTE'
+    "${CONTAINER_NAME}" "${stage}" "${DATA_PATH}" <<'REMOTE'
 set -euo pipefail
 container="$1"
 stage="$2"
+data_path="$3"
+image="$(docker inspect "${container}" --format '{{.Config.Image}}')"
 running="$(docker inspect "${container}" --format '{{.State.Running}}')"
 test "${running}" = false || test "${running}" = true
-docker cp "${stage}/rollback-app-update/app-release.apk" "${container}:/data/app-release.apk.lezi-staging"
-docker cp "${stage}/rollback-app-update/app-update.json" "${container}:/data/app-update.json.lezi-staging"
-if test "${running}" = false; then
-  docker start "${container}" >/dev/null
+if [[ ! -d "${stage}/rollback-app-update" ]]; then
+  exit 0
 fi
-docker exec "${container}" /bin/sh -ec '
-  chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging
-  chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging
-  mv -f /data/app-release.apk.lezi-staging /data/app-release.apk
-  mv -f /data/app-update.json.lezi-staging /data/app-update.json
-'
+docker run --rm --user 0 \
+  -v "${data_path}:/data" \
+  -v "${stage}/rollback-app-update:/src:ro" \
+  --entrypoint /bin/sh \
+  "${image}" \
+  -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && test ! -e /data/app-release.apk.lezi-staging && test ! -e /data/app-update.json.lezi-staging'
 REMOTE
   printf '%s\n' complete >"${state_dir}/app-update-restore-complete"
 }
