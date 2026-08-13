@@ -1,6 +1,6 @@
 # 因果同步冲突与传输硬化 — issues
 
-Status: local-partial — H01–H44 local review is green; release 09 still needs a maintenance-window confirmation
+Status: local-complete — H01–H44 local review is green; 0.4.0/schema 13 is live with TLS continuity; client APK upgrade remains
 
 Spec: [`spec.md`](./spec.md)
 
@@ -83,8 +83,10 @@ H40–H42 are closed on the API 35 device/emulator receipts recorded in their ti
 server critical-section evidence is also green. H44 closed the Android→real-server media receipt
 fault seam on an isolated loopback instance. Guarded 0.4.0 cutover now accepts exactly one attested
 source tuple: `0.3.12`/schema 11 or `0.3.13`/schema 12. H43 local Standards/Spec re-review on that
-HEAD found no remaining P0/P1. Production CD still requires a fresh maintenance-window
-confirmation; no stop/rm/replace was performed.
+HEAD found no remaining P0/P1. The dedicated 0.4.0 schema-cutover is live: health/ready
+report 0.4.0/schema 13/`causal_sync_v2`, certificate SHA-256 and SPKI match the
+pre-cutover pins, and the official data bind is schema 13. Joined-client APK
+upgrade/smoke remains.
 
 ## Program invariants
 

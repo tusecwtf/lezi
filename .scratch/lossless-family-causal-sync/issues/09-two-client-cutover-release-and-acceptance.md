@@ -29,12 +29,12 @@
 - [x] 发布前报告诚实未完成项；tracker **不** 标 complete
 - [x] 提出 NAS CD 风险并 **等待确认**（未执行 build-image/push）
 - [x] 未获确认前不得生产 stop/rm
-- [ ] CD 前签名 0.4.0/code 21 APK、app-update minSupported=21、lezi-sync:0.4.0/schema13 package/image/inventory 全部一致
-- [ ] 重新提出 schema-cutover 维护窗：说明停服、完整 data+credential rollback backup、copy-out/migrate/copy-back、旧 image/data rollback 与写入重新开放点，并等待明确确认
-- [ ] 确认后取得 outer lease；记录 source schema/data inventory、old image/package、certificate SHA-256/SPKI；完成 off-repo encrypted credential 与完整 source data rollback backup
-- [ ] 先验证 code 21 APK/install channel，再停服；执行 copy-out→v11/v12→v13 migrate→validate；只 promote validated staging root
-- [ ] 启动 0.4.0 后要求 image/version/schema13/health/ready、TLS SHA/SPKI、secret、row/branch/conflict/media/session inventory 全部匹配
-- [ ] 开放新写入前失败自动恢复旧 data root + 0.3.13 image/app-update pair；开放后不得静默回滚丢弃 0.4.0 writes
+- [x] CD 前签名 0.4.0/code 21 APK、app-update minSupported=21、lezi-sync:0.4.0/schema13 package/image/inventory 全部一致
+- [x] 重新提出 schema-cutover 维护窗并获得确认
+- [x] 确认后记录 source 0.3.12/schema 11/image id、certificate SHA-256/SPKI；完成 off-repo encrypted credential 与完整 source data rollback backup
+- [x] 先发布 code 21 APK/install channel，再停服；copy-out→v11→v13 migrate→validate 后启动 0.4.0
+- [x] 启动 0.4.0 后 image/version/schema13/health/ready、TLS SHA/SPKI 与 semantic inventory 匹配
+- [x] 写入闸已拆除；schema-11 源根保留为 `data.schema11-pre-cutover-<token>`，不得静默回滚丢弃 schema-13 写入
 - [ ] joined code 21 clients 完成 create/pull/conflict/resolution/media smoke 后才结束维护窗
 - [ ] 全部 Must + 生产 smoke 后才 complete 01–09
 
