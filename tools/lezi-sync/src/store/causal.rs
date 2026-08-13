@@ -415,9 +415,14 @@ fn validated_snapshot_from_row(
         return Err(StoreError::InvalidStoredPayload);
     }
     let payload_json = row.get::<_, String>(3)?;
-    let root = serde_json::from_str::<Map<String, Value>>(&payload_json)?;
+    let mut root = serde_json::from_str::<Map<String, Value>>(&payload_json)?;
     let content_hash = row.get::<_, String>(4)?;
     let updated_at = row.get::<_, i64>(5)?;
+    // Schema-12 offline-migrate copies kept updated_at on the version column only.
+    // Causal load/commit require it inside the root; inject without rewriting storage.
+    if !root.contains_key("updated_at") {
+        root.insert("updated_at".to_owned(), Value::Number(updated_at.into()));
+    }
     let deleted_at = row.get::<_, Option<i64>>(6)?;
     let mutation_id = row.get::<_, Option<String>>(7)?;
     let origin = row.get::<_, String>(8)?;

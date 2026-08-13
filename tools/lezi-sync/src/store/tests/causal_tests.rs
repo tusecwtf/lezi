@@ -4434,6 +4434,76 @@ fn mark_migration_base(fx: &CausalFx, version_id: &str) {
         .unwrap();
 }
 
+/// Schema-12 → 13 offline migrate copied LWW payload_json without embedding
+/// `updated_at` (that stays the version column). Family NAS production rows
+/// look like this; load_stable must still accept them.
+fn strip_root_updated_at_and_rehash_migration_base(fx: &CausalFx, version_id: &str) {
+    let connection = fx.store.connect().unwrap();
+    let payload: String = connection
+        .query_row(
+            "SELECT payload_json FROM entity_versions
+             WHERE family_id = ?1 AND version_id = ?2",
+            params![fx.family_id, version_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut root: Map<String, Value> = serde_json::from_str(&payload).unwrap();
+    assert!(
+        root.remove("updated_at").is_some(),
+        "fixture root must start with updated_at so the strip is meaningful"
+    );
+    connection
+        .execute(
+            "UPDATE entity_versions SET payload_json = ?1
+             WHERE family_id = ?2 AND version_id = ?3",
+            params![
+                serde_json::to_string(&root).unwrap(),
+                fx.family_id,
+                version_id
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    mark_migration_base(fx, version_id);
+}
+
+#[test]
+fn causal_commit_edits_migration_base_that_omits_updated_at_in_payload() {
+    let fx = CausalFx::new();
+    let record_id = Uuid::new_v4();
+    let created = fx
+        .store
+        .causal_commit(
+            &fx.owner,
+            vec![mut_unit(
+                "record",
+                record_id,
+                None,
+                record_root(fx.baby_id, "base", 100, 20),
+                false,
+            )],
+            1_700_000_000,
+        )
+        .unwrap();
+    assert_eq!(created.results[0].status, "accepted");
+    let base = created.results[0].stable_version_id.clone().unwrap();
+    strip_root_updated_at_and_rehash_migration_base(&fx, &base);
+
+    let edit = mut_unit(
+        "record",
+        record_id,
+        Some(&base),
+        record_root(fx.baby_id, "adapted", 100, 30),
+        false,
+    );
+    let committed = fx
+        .store
+        .causal_commit(&fx.owner, vec![edit], 1_700_000_001)
+        .expect("migration_base without root updated_at must still load for commit");
+    assert_eq!(committed.results[0].status, "accepted");
+    assert!(!committed.results[0].replay);
+}
+
 #[test]
 fn conflict_detail_exposes_typed_candidates_with_complete_provenance() {
     let (fx, conflict_id, _, branch_id) = seed_media_conflict(true);
