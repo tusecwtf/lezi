@@ -260,7 +260,7 @@ stage="$4"
 test "$(docker inspect "${container}" --format '{{.State.Running}}')" = true
 test "$(docker inspect "${container}" --format '{{.Image}}')" = "${expected_image}"
 test "$(docker inspect "${container}" --format '{{.Config.Image}}')" = "${expected_tag}"
-docker exec "${container}" /bin/sh -ec '
+docker exec --user 10001:10001 "${container}" /bin/sh -ec '
   test -s /data/lezi.db
   test -s /data/server.secret
   test -s /data/tls/server.crt
@@ -268,11 +268,12 @@ docker exec "${container}" /bin/sh -ec '
   openssl x509 -in /data/tls/server.crt -checkend 86400 -noout >/dev/null
   openssl pkey -in /data/tls/server.key -check -noout >/dev/null 2>&1
   printf "certificate_sha256="
-  openssl dgst -sha256 -r /data/tls/server.crt | awk "{print \\$1}"
-  printf "spki_sha256="
+  sha256sum /data/tls/server.crt | cut -c1-64
+  printf "\nspki_sha256="
   openssl x509 -in /data/tls/server.crt -pubkey -noout \
     | openssl pkey -pubin -outform DER \
-    | openssl dgst -sha256 -r | awk "{print \\$1}"
+    | openssl dgst -sha256 | sed "s/.*= //"
+  printf "\n"
   find /data -type f -print0 | sort -z | xargs -0 -r sha256sum
 '
 docker save -o "${stage}/rollback-image.tar" "${expected_image}"

@@ -248,6 +248,8 @@ grep -Fq 'LEZI_SYNC_VERSION="$(rollback_source_version)"' "${runner_source}" \
   || fail "automatic pre-open rollback must recreate the attested source service"
 grep -Fq 'docker run --rm --user 0' "${runner_source}" \
   || fail "app-update prepublish must install the pair through a root helper on the data bind"
+grep -Fq 'sha256sum /data/tls/server.crt | cut -c1-64' "${runner_source}" \
+  || fail "source preflight must hash the certificate without nested-awk escaping"
 grep -Fq '0.3.12:11|0.3.13:12' "${runner_source}" \
   || fail "cutover must accept exactly the attested 0.3.12/11 or 0.3.13/12 source tuples"
 grep -Fq 'lezi-sync:${rollback_version}' "${runner_source}" \
