@@ -229,6 +229,10 @@ validate_and_stage_app_update() {
     echo "error: unable to read release APK manifest" >&2
     exit 1
   fi
+  # Current-ledger local-data contract is a 0.4.0 target invariant. Attested
+  # rollback APKs (0.3.12/0.3.13) predate that metadata and must still pack
+  # with current helpers; they keep signer, identity, and metadata-hash gates.
+  if [[ "${version}" == "0.4.0" ]]; then
   if ! contract_values="$(
     python3 - "${local_data_contract_json}" "${manifest_file}" <<'PY'
 import json, re, sys
@@ -289,6 +293,17 @@ PY
   )"; then
     rm -f -- "${manifest_file}"
     exit 1
+  fi
+  else
+    case "${version}" in
+      0.3.12|0.3.13) ;;
+      *)
+        echo "error: local-data contract skip is only for attested 0.3.12/0.3.13 rollback APKs" >&2
+        rm -f -- "${manifest_file}"
+        exit 1
+        ;;
+    esac
+    contract_values=$'rollback\nsource'
   fi
   if ! apk_identity="$(
     python3 - "${manifest_file}" <<'PY'
@@ -400,6 +415,11 @@ PY
     echo "error: APK versionName does not match app-update.json" >&2
     echo "  metadata: ${version_name}" >&2
     echo "  apk:      ${apk_version_name}" >&2
+    exit 1
+  fi
+  if [[ "${version_name}" != "${version}" ]]; then
+    echo "error: app-update version_name must match the package version ${version}" >&2
+    echo "  metadata: ${version_name}" >&2
     exit 1
   fi
   if [[ "${meta_sha}" != "${apk_sha}" ]]; then

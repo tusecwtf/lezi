@@ -203,6 +203,9 @@ grep -Fq '0.3.12:11|0.3.13:12' "${validator}" \
   || fail "validator must accept attested 0.3.12/11 or 0.3.13/12 rollback sources"
 grep -Fq '0.3.12 rollback packages must declare server schema 11' "${validator}" \
   || fail "validator must pin 0.3.12 packages to schema 11"
+grep -Fq 'local-data contract skip is only for attested 0.3.12/0.3.13 rollback APKs' \
+  "${package_script}" \
+  || fail "0.3.12/0.3.13 rollback packages must not require the current local-data ledger"
 for fixed in \
   'package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"' \
   'rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.3.13}"' \
