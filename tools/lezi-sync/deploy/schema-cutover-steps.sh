@@ -83,15 +83,27 @@ require_attested_rollback_identity() {
 }
 
 resolve_sync_bin() {
+  local candidate=""
+  local cargo_target="${CARGO_TARGET_DIR:-${HOME:?}/.cache/cargo-target}"
   if [[ -n "${LEZI_SYNC_BIN:-}" && -x "${LEZI_SYNC_BIN}" ]]; then
-    printf '%s' "${LEZI_SYNC_BIN}"
-  elif [[ -x "${SYNC_ROOT}/target/debug/lezi-sync" ]]; then
-    printf '%s' "${SYNC_ROOT}/target/debug/lezi-sync"
-  elif command -v lezi-sync >/dev/null 2>&1; then
-    command -v lezi-sync
+    candidate="${LEZI_SYNC_BIN}"
   else
-    die "set LEZI_SYNC_BIN to the current 0.4.0 lezi-sync binary"
+    for path in \
+      "${cargo_target}/debug/lezi-sync" \
+      "${cargo_target}/release/lezi-sync" \
+      "${SYNC_ROOT}/target/debug/lezi-sync" \
+      "${SYNC_ROOT}/target/release/lezi-sync"
+    do
+      if [[ -x "${path}" ]]; then
+        candidate="${path}"
+        break
+      fi
+    done
   fi
+  [[ -n "${candidate}" ]] || die "set LEZI_SYNC_BIN to the current 0.4.0 lezi-sync binary"
+  "${candidate}" offline-migrate help 2>/dev/null | grep -Fq 'dry-run   --in <backup_data_dir>' \
+    || die "${candidate} is not the current schema-13 offline-migrate (passwordless dry-run)"
+  printf '%s' "${candidate}"
 }
 
 operation_id_file="${state_dir}/operation-id"
