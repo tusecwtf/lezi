@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 tree 0.4.0**：ADR-0022 commit-first + ConflictSnapshot v2，只协商 `causal_sync_v2`，mixed generation 在 mutation 前 fail closed；本文不表示家庭 NAS 已切换 |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 tree 0.4.1**（协议代 0.4.0）：ADR-0022 commit-first + ConflictSnapshot v2，只协商 `causal_sync_v2`，mixed generation 在 mutation 前 fail closed |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,11 +32,11 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.4.0 / versionCode **21**）；家庭 NAS 是否已切到该代以 live health 为准 |
+| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.4.1 / versionCode **22**）；家庭 NAS 是否已切到该代以 live health 为准 |
 | versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
 | 本地数据契约 | 当前 tree `v5` / Room **v28**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | **0.3.13 已发布 source 基线** | versionName `0.3.13`、versionCode **20**、Room **27**、历史 server schema **12**；作为非破坏升级源保留 |
-| **0.4.0 当前 tree（生产切割待维护窗）** | versionName `0.4.0`、versionCode **21**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；H27 已原子激活版本/capability，H28 已完成离线迁移，H29–H30 仍负责 guarded CD/rollback；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
+| **0.4.1 当前 tree** | versionName `0.4.1`、versionCode **22**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；协议代仍是 0.4.0 conflict-v2。0.4.0 / versionCode **21** 已发布为升级源 |
 | 应用名 | 乐记 |
 
 ---
@@ -329,8 +329,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 21,
-  "version_name": "0.4.0",
+  "version_code": 22,
+  "version_name": "0.4.1",
   "min_supported_version_code": 21,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
@@ -339,7 +339,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 
 **当前 floor** 以 `config/android-release-compatibility.json` 的
 `minimum_sync_version_code` 与部署 `app-update.json` 的 `min_supported_version_code`
-为唯一真值（tree 目标 **21** / 0.4.0）。发版与 CD 前必须重核 catalog、`app-update.json`、
+为唯一真值（floor **21**；当前升级目标 **22** / 0.4.1）。发版与 CD 前必须重核 catalog、`app-update.json`、
 Cargo/Gradle 与签名 APK sha256 一致；不得沿用历史 16/0.3.9 或 16/0.3.12 示例当生产 floor。
 
 触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查；② 菜单关于区点击检查。

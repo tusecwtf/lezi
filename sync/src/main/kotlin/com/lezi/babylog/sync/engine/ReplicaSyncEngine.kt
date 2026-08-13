@@ -151,10 +151,12 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         trigger: SyncTrigger,
     ): ReplicaSyncOutcome {
-        session.requireCurrentReplicaSession()
+        val plan = SyncPlan.forTrigger(trigger)
+        // Full cycles recover a missing generation via pull 409 → full resync.
+        // LocalWrite still fail-closes: it must not invent a replica epoch.
+        session.requireCurrentReplicaSession(requireGeneration = !plan.pull)
         mediaFileCleanup.cleanupPendingTombstones()
         val mediaEditGuard = captureLocalMediaEditGuard()
-        val plan = SyncPlan.forTrigger(trigger)
         var current = preferences.session.first()
         val transitionReceipt = resetReceiptJournal?.load()?.takeIf { it.belongsTo(current) }
         requireRemoteAllowed(current)
@@ -200,6 +202,12 @@ internal class ReplicaSyncEngine(
             }
         }
         if (plan.push && !recovered) {
+            if (current.role == FamilyRole.Member) {
+                // Incremental cycles do not go through recoverFullResync. Local-only
+                // orphan subtrees are not family intent; settle them before capture
+                // so a leftover dirty Baby is not committed and rejected as forbidden.
+                settleMemberLocalOnlySubtrees()
+            }
             val captured = captureLocalChanges(current)
             if (captured.pendingCreatorAcknowledgements.isNotEmpty()) {
                 preferences.updateCreatorAcknowledgements(
@@ -914,7 +922,7 @@ internal class ReplicaSyncEngine(
                 clientUuid = entity.clientUuid,
                 sleepRecordClientUuid = wire.sleepRecordClientUuid,
                 wakeTimestamp = wire.wakeTimestamp,
-                observerMembershipId = requireNotNull(wire.observerMembershipId),
+                observerMembershipId = wire.observerMembershipId.orEmpty(),
                 note = wire.note,
                 withdrawn = wire.withdrawn,
                 updatedAt = entity.updatedAt,
@@ -2406,18 +2414,20 @@ internal fun parseRecordWire(payload: JsonObject): RecordWire {
         payload.requireNonBlankString("type", "record"),
         "record type",
     )
-    val allowedKeys = if (type == RecordType.SLEEP) {
-        baseKeys + "effective_wake_observation_client_uuid"
+    val sleepCausalKeys = (baseKeys - "end_timestamp") +
+        "effective_wake_observation_client_uuid"
+    val sleepLegacyKeys = baseKeys + "effective_wake_observation_client_uuid"
+    val allowed = if (type == RecordType.SLEEP) {
+        payload.keys == sleepCausalKeys ||
+            payload.keys == sleepLegacyKeys ||
+            payload.keys == baseKeys
     } else {
-        baseKeys
+        payload.keys == baseKeys
     }
-    require(payload.keys == allowedKeys || payload.keys == baseKeys) {
+    require(allowed) {
         "record current wire 字段不完整或包含未知字段: ${payload.keys.sorted()}"
     }
-    if (type == RecordType.SLEEP) {
-        // Causal sleep: end_timestamp must not appear as a business end (wire §4.2).
-        // Legacy closed sleeps may still carry end_timestamp until WakeObservation lands.
-    } else {
+    if (type != RecordType.SLEEP) {
         require("effective_wake_observation_client_uuid" !in payload) {
             "record effective_wake_observation_client_uuid 仅允许 sleep"
         }
@@ -2432,7 +2442,11 @@ internal fun parseRecordWire(payload: JsonObject): RecordWire {
     }
     val timestamp = payload.requireLong("timestamp", "record")
     require(timestamp >= 0) { "record timestamp 无效" }
-    val endTimestamp = payload.requireNullableLong("end_timestamp", "record")
+    val endTimestamp = if ("end_timestamp" in payload) {
+        payload.requireNullableLong("end_timestamp", "record")
+    } else {
+        null
+    }
     require(endTimestamp == null || endTimestamp >= timestamp) { "record end_timestamp 无效" }
     val nested = payload.requireObject("payload_json", "record")
     require("photos" !in nested && "custom_item_id" !in nested) {
@@ -2621,10 +2635,12 @@ private fun SyncHttpException.fullResyncCheckpointOrNull(): FullResyncCheckpoint
     return FullResyncCheckpoint(resetCursor, generation)
 }
 
-private fun SyncSession.requireCurrentReplicaSession() {
+private fun SyncSession.requireCurrentReplicaSession(requireGeneration: Boolean = true) {
     require(isJoined) { "当前同步会话尚未加入家庭" }
     require(deviceId.isNotBlank()) { "当前同步会话缺少 device_id" }
-    require(pullGeneration.isNotBlank()) { "当前同步会话缺少 generation" }
+    if (requireGeneration) {
+        require(pullGeneration.isNotBlank()) { "当前同步会话缺少 generation" }
+    }
     require(membershipId.isNotBlank()) { "当前同步会话缺少 membership_id" }
 }
 

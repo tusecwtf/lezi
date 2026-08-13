@@ -643,7 +643,9 @@ class HttpSyncBackend internal constructor(
     ).toMemberClaimResult()
 
     override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
-        session.requireCurrentReplicaTransport()
+        // Blank generation is a recoverable pre-0.4.0 / cleared-checkpoint state:
+        // the server answers generation_changed and the engine full-resyncs.
+        session.requireCurrentReplicaTransport(allowBlankGeneration = true)
         require(page.pageIndex in 0 until page.budget.maxPages) {
             "普通 pull page_index 超出协商上限"
         }
@@ -1761,10 +1763,14 @@ private class UploadWriteWatchdog(
         }
 }
 
-private fun SyncSession.requireCurrentReplicaTransport() {
+private fun SyncSession.requireCurrentReplicaTransport(
+    allowBlankGeneration: Boolean = false,
+) {
     require(isJoined) { "当前同步会话尚未加入家庭" }
     require(deviceId.isNotBlank()) { "当前同步会话缺少 device_id" }
-    require(pullGeneration.isNotBlank()) { "当前同步会话缺少 generation" }
+    if (!allowBlankGeneration) {
+        require(pullGeneration.isNotBlank()) { "当前同步会话缺少 generation" }
+    }
 }
 
 private fun InputStream.readBytesUpTo(

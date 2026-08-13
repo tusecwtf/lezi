@@ -22,7 +22,7 @@ internal data class WakeRootWire(
     val wakeTimestamp: Long,
     val note: String?,
     val withdrawn: Boolean,
-    /** Null only for a client-authored mutation; pull/proof require the server stamp. */
+    /** Null for client-authored mutation and unstamped Pull; StableRoot requires the stamp. */
     val observerMembershipId: String?,
     /** Pull carries updated_at in its envelope; mutation/proof carry it in the root. */
     val inlineUpdatedAt: Long?,
@@ -47,9 +47,13 @@ internal fun decodeWakeRootWire(
     require(wakeTimestamp >= 0) { "wake_observation.wake_timestamp 必须是非负整数" }
     val observer = when (shape) {
         WakeRootWireShape.LocalMutation -> null
-        WakeRootWireShape.Pull,
-        WakeRootWireShape.StableRoot,
-        -> root.requireWakeNonBlankString("observer_membership_id")
+        WakeRootWireShape.Pull ->
+            if ("observer_membership_id" in root) {
+                root.requireWakeNonBlankString("observer_membership_id")
+            } else {
+                null
+            }
+        WakeRootWireShape.StableRoot -> root.requireWakeNonBlankString("observer_membership_id")
     }
     val updatedAt = when (shape) {
         WakeRootWireShape.Pull -> null
@@ -94,10 +98,15 @@ private fun JsonObject.requireWakeKeys(shape: WakeRootWireShape) {
         "withdrawn",
     ) + when (shape) {
         WakeRootWireShape.LocalMutation -> setOf("updated_at")
-        WakeRootWireShape.Pull -> setOf("observer_membership_id")
+        WakeRootWireShape.Pull -> emptySet()
         WakeRootWireShape.StableRoot -> setOf("updated_at", "observer_membership_id")
     }
-    require(keys == expected) {
+    val allowed = if (shape == WakeRootWireShape.Pull) {
+        keys == expected || keys == expected + "observer_membership_id"
+    } else {
+        keys == expected
+    }
+    require(allowed) {
         "wake_observation current wire 字段不完整或包含未知字段: ${keys.sorted()}"
     }
 }

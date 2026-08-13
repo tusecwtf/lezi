@@ -98,6 +98,55 @@ class ReplicaSyncEnginePullCheckpointTest {
     }
 
     @Test
+    fun memberIncrementalPullSettlesLeftoverLocalOnlyBabyWithoutPublishing() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "member-a",
+            pullCursor = 4,
+        )
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val orphanBabyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = true, familyAuthority = false),
+        )
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-remote",
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-local-orphan",
+                babyId = orphanBabyId,
+                type = "pee",
+                timestamp = 500,
+                payloadJson = "{\"pee_amount\":2}",
+                updatedAt = 500,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 4,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        assertThat(rig.backend.causalCommittedUnits.flatten().none { it.entityType == "baby" })
+            .isTrue()
+        assertThat(
+            rig.backend.causalCommittedUnits.flatten().none {
+                it.clientUuid == "record-local-orphan"
+            },
+        ).isTrue()
+        assertThat(rig.babies.getByClientUuid("baby-local")!!.syncDirty).isFalse()
+        assertThat(rig.records.getByClientUuid("record-local-orphan")!!.syncDirty).isFalse()
+    }
+
+    @Test
     fun memberWithMultipleAuthorityBabies_settlesLocalOnlySubtreeWithoutPublishing() = runTest {
         val session = joinedReplicaSession().copy(
             role = FamilyRole.Member,
@@ -505,6 +554,58 @@ class ReplicaSyncEnginePullCheckpointTest {
             .contains(babyUuid)
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
+    }
+
+    @Test
+    fun blankLocalGenerationPullToRefreshRecoversViaGenerationChanged() = runTest {
+        val babyUuid = "00000000-0000-0000-0000-000000000401"
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            pullCursor = 0,
+            pullGeneration = "",
+        )
+        val rig = ReplicaEngineRig(session)
+        rig.backend.enableCausal = true
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = babyUuid,
+                familyAuthority = false,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.pullFailures += SyncHttpException(
+            statusCode = 409,
+            responseBody = """
+                {
+                  "detail":{
+                    "code":"generation_changed",
+                    "action":"full_resync",
+                    "reset_cursor":0,
+                    "server_cursor":1,
+                    "server_generation":"post-upgrade-generation"
+                  }
+                }
+            """.trimIndent(),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(remoteReplicaBaby()),
+            cursor = 3,
+            generation = "post-upgrade-generation",
+            hasMore = false,
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = session,
+            trigger = SyncTrigger.PullToRefresh,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.handshakeCalls).isEqualTo(1)
+        assertThat(rig.backend.pullCursors.first()).isEqualTo(0)
+        assertThat(rig.preferences.current().pullGeneration)
+            .isEqualTo("post-upgrade-generation")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(3)
+        assertThat(rig.babies.getByClientUuid("baby-remote")?.familyAuthority).isTrue()
     }
 }
 

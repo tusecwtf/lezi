@@ -24,6 +24,25 @@ PY
 current_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '1p')"
 minimum_local_data_contract="$(printf '%s\n' "${ledger_values}" | sed -n '2p')"
 expected_signer_sha256="$(tr -d '\r\n' <"${REPO_ROOT}/config/release-apk-signer-sha256.txt")"
+package_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${REPO_ROOT}/tools/lezi-sync/Cargo.toml" | head -1)"
+catalog_identity="$(python3 - "${REPO_ROOT}/config/android-release-compatibility.json" <<'PY'
+import json
+import sys
+
+catalog = json.load(open(sys.argv[1], encoding="utf-8"))
+target = catalog["upgrade_target"]
+print(target["version_code"])
+print(target["version_name"])
+print(catalog["minimum_sync_version_code"])
+PY
+)"
+target_version_code="$(printf '%s\n' "${catalog_identity}" | sed -n '1p')"
+target_version_name="$(printf '%s\n' "${catalog_identity}" | sed -n '2p')"
+target_min_supported="$(printf '%s\n' "${catalog_identity}" | sed -n '3p')"
+if [[ "${target_version_name}" != "${package_version}" ]]; then
+  echo "error: catalog upgrade_target version_name must match Cargo.toml ${package_version}" >&2
+  exit 1
+fi
 
 apk_path="${test_root}/app-release.apk"
 printf 'lezi-fake-release-apk-bytes-for-gate-test\n' >"${apk_path}"
@@ -36,8 +55,8 @@ cat >"${apk_analyzer}" <<'EOF'
 cat <<MANIFEST
 <manifest
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="${LEZI_FAKE_VERSION_CODE:-8}"
-    android:versionName="${LEZI_FAKE_VERSION_NAME:-0.3.1}"
+    android:versionCode="${LEZI_FAKE_VERSION_CODE:-${LEZI_TEST_TARGET_VERSION_CODE:?}}"
+    android:versionName="${LEZI_FAKE_VERSION_NAME:-${LEZI_TEST_TARGET_VERSION_NAME:?}}"
     package="${LEZI_FAKE_PACKAGE_NAME:-com.lezi.babylog}">
   <application>
     <meta-data android:name="com.lezi.babylog.LOCAL_DATA_CONTRACT_VERSION" android:value="${LEZI_FAKE_LOCAL_DATA_CONTRACT:-${LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT:?}}" />
@@ -73,9 +92,9 @@ write_meta() {
   cat >"${dest}" <<EOF
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 8,
-  "version_name": "0.3.1",
-  "min_supported_version_code": 6,
+  "version_code": ${target_version_code},
+  "version_name": "${target_version_name}",
+  "min_supported_version_code": ${target_min_supported},
   "sha256": "${sha}",
   "release_notes": "${notes}"
 }
@@ -91,6 +110,8 @@ run_check() {
   LEZI_TEST_CURRENT_LOCAL_DATA_CONTRACT="${current_local_data_contract}" \
     LEZI_TEST_MINIMUM_LOCAL_DATA_CONTRACT="${minimum_local_data_contract}" \
     LEZI_TEST_EXPECTED_SIGNER_SHA256="${expected_signer_sha256}" \
+    LEZI_TEST_TARGET_VERSION_CODE="${target_version_code}" \
+    LEZI_TEST_TARGET_VERSION_NAME="${target_version_name}" \
   LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
     LEZI_APK_ANALYZER="${apk_analyzer}" \
     LEZI_APK_SIGNER="${LEZI_TEST_APK_SIGNER:-${apk_signer}}" \

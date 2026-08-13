@@ -12,8 +12,9 @@
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
 > membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 >
-> **当前 tree：** 0.4.0 / Room 28，commit-first、完整 ConflictSnapshot、choice-only
-> resolution，只协商 `causal_sync_v2`。0.3.13 / Room 27 保留为非破坏升级源；生产 NAS 切割未执行。
+> **当前 tree：** 0.4.1 / Room 28，commit-first、完整 ConflictSnapshot、choice-only
+> resolution，只协商 `causal_sync_v2`。协议代仍是 0.4.0；0.4.0 / Room 28 与 0.3.13 / Room 27
+> 保留为非破坏升级源。
 
 ---
 
@@ -847,14 +848,14 @@ snapshot 再执行 1 次计划读取和 1 次活跃日志媒体读取，共 5 �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前交付使用契约 v5（0.4.0 / versionCode 21）与 Room **v28**
+相邻升级；当前交付使用契约 v5（0.4.1 / versionCode 22；契约自 0.4.0 / versionCode 21 引入）与 Room **v28**
 （tree 以 `config/android-release-compatibility.json` 与 `LeziDatabase` 为准；文档数字若
 漂移以清单重核）。`OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含
 LocalUser、Family、Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、
 CustomItemDef、CarePlan 与 FulfillmentCandidate，并使用真实 `SyncPort` 和 Record/计划媒体
 原子包。
 
-**0.4.0 tree 目标（NAS 切割前重核）：** versionName `0.4.0` / versionCode **21** /
+**0.4.1 tree 目标：** versionName `0.4.1` / versionCode **22** /
 Room **28** / local-data contract **5** / server schema **13**。Room 27→28 须原地
 迁移保留全部业务行、dirty、媒体、会话与 endpoint 信任，并容纳 `baseVersion`、冻结
 `mutation_id`、WakeObservation、冲突摘要/详情、疑似重复与来源关系。后续本地数据契约必须

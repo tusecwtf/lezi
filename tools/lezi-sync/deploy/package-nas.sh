@@ -229,10 +229,10 @@ validate_and_stage_app_update() {
     echo "error: unable to read release APK manifest" >&2
     exit 1
   fi
-  # Current-ledger local-data contract is a 0.4.0 target invariant. Attested
-  # rollback APKs (0.3.12/0.3.13) predate that metadata and must still pack
-  # with current helpers; they keep signer, identity, and metadata-hash gates.
-  if [[ "${version}" == "0.4.0" ]]; then
+  # Current-ledger local-data contract is a current-generation target invariant.
+  # Attested rollback APKs (0.3.12/0.3.13) predate that metadata and must still
+  # pack with current helpers; they keep signer, identity, and metadata-hash gates.
+  if [[ "${version}" != "0.3.12" && "${version}" != "0.3.13" ]]; then
   if ! contract_values="$(
     python3 - "${local_data_contract_json}" "${manifest_file}" <<'PY'
 import json, re, sys
@@ -540,6 +540,16 @@ attested_cutover_source() {
 }
 
 case "${version}" in
+  0.4.1)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
+    rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.4.0}"
+    rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-13}"
+    if [[ "${rollback_source_version}" != "0.4.0" \
+        || "${rollback_source_server_schema}" != "13" ]]; then
+      echo "error: 0.4.1 rollback source must be 0.4.0/schema 13" >&2
+      exit 1
+    fi
+    ;;
   0.4.0)
     package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
     rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.3.13}"

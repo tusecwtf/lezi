@@ -447,6 +447,49 @@ class RealSyncPortClearResyncTest {
     }
 
     @Test
+    fun blankGenerationPullToRefreshRecoversViaGenerationChanged() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                role = FamilyRole.Member,
+                pullCursor = 0,
+                pullGeneration = "",
+            ),
+        )
+        rig.babies.seed(localBaby().copy(familyAuthority = false, syncDirty = true))
+        rig.backend.enableCausal = true
+        rig.backend.pullFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0,
+                        "server_cursor":1,
+                        "server_generation":"post-upgrade-generation"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 2,
+            generation = "post-upgrade-generation",
+            hasMore = false,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.backend.handshakeCalls).isEqualTo(1)
+        assertThat(rig.backend.pullCursors.first()).isEqualTo(0)
+        assertThat(rig.preferences.current().pullGeneration)
+            .isEqualTo("post-upgrade-generation")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
     fun memberFullResyncPullsOwnerAvatarAuthorityWithoutRequeueingLocalBaby() = runTest {
         val session = joinedSession("family-a").copy(
             role = FamilyRole.Member,

@@ -1472,6 +1472,112 @@ class ReplicaSyncEngineCausalSettlementTest {
     }
 
     @Test
+    fun pullAppliesCausalSleepThatOmitsEndTimestamp() = runTest {
+        val session = joinedReplicaSession()
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-remote",
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "sleep-causal-current",
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-remote",
+                          "created_by_membership_id":"membership-a",
+                          "custom_item_client_uuid":null,
+                          "effective_wake_observation_client_uuid":null,
+                          "note":null,
+                          "payload_json":{"is_nap":false,"anomaly_flag":false},
+                          "schema_version":2,
+                          "timestamp":1000,
+                          "type":"sleep"
+                        }
+                    """.trimIndent(),
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 1,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        val applied = requireNotNull(rig.records.getByClientUuid("sleep-causal-current"))
+        assertThat(applied.type).isEqualTo("sleep")
+        assertThat(applied.endTimestamp).isNull()
+        assertThat(applied.effectiveWakeObservationClientUuid).isNull()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+    }
+
+    @Test
+    fun pullAppliesWakeObservationThatOmitsObserverMembershipId() = runTest {
+        val session = joinedReplicaSession()
+        val rig = ReplicaEngineRig(session).also { it.backend.enableCausal = true }
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-remote",
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "sleep-for-unstamped-wake",
+                babyId = babyId,
+                type = "sleep",
+                timestamp = 1000,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                schemaVersion = 2,
+                updatedAt = 200,
+                syncDirty = false,
+                familyPublishedUpdatedAt = 200,
+            ),
+        )
+        // Live 0.4.0 NAS projection: wake root without observer stamp.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "wake_observation",
+                    clientUuid = "wake-unstamped-projection",
+                    payloadJson = """
+                        {
+                          "note":null,
+                          "sleep_record_client_uuid":"sleep-for-unstamped-wake",
+                          "wake_timestamp":1500,
+                          "withdrawn":false
+                        }
+                    """.trimIndent(),
+                    updatedAt = 300,
+                ),
+            ),
+            cursor = 1,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        val applied = requireNotNull(
+            rig.wakeObservations.getByClientUuid("wake-unstamped-projection"),
+        )
+        assertThat(applied.sleepRecordClientUuid).isEqualTo("sleep-for-unstamped-wake")
+        assertThat(applied.wakeTimestamp).isEqualTo(1500)
+        assertThat(applied.note).isNull()
+        assertThat(applied.withdrawn).isFalse()
+        assertThat(applied.observerMembershipId).isEmpty()
+        assertThat(applied.syncDirty).isFalse()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+    }
+
+    @Test
     fun missingCausalCapabilityPullsThenFailsClosedWithoutFallback() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(

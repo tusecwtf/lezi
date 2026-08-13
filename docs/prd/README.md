@@ -2,9 +2,9 @@
 
 > **个人/家庭使用** · Android · 无商业化
 > 决策日：2026-07-25 · **tree 发布线**以 `config/android-release-compatibility.json` 为准
-> 当前 tree 已激活 **0.4.0** / code **21** / Room **28** / local-data contract **5** /
-> server schema **13** / floor **21** / `causal_sync_v2`。0.3.13/code 20/Room 27 仍是升级源；
-> 本地激活不表示家庭 NAS 已完成生产切割。
+> 当前 tree 已激活 **0.4.1** / code **22** / Room **28** / local-data contract **5** /
+> server schema **13** / floor **21** / `causal_sync_v2`。0.4.0/code 21 与 0.3.13/code 20
+> 仍是升级源；协议代仍是 0.4.0 conflict-v2。
 > Wire 权威：[`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 | 项 | 内容 |
