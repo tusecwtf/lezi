@@ -12,6 +12,7 @@ x-lezi-sync-common: &lezi-sync-common
     dockerfile: Dockerfile
     args:
       LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.3.13}
+      CARGO_INDEX_URL: ${LEZI_CARGO_INDEX_URL:-sparse+https://rsproxy.cn/index/}
   restart: unless-stopped
   stop_grace_period: 30s
   init: true

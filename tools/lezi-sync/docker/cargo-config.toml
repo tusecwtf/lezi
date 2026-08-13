@@ -1,0 +1,16 @@
+# Default crates.io replacement for Docker image builds.
+# Cargo.lock checksums still apply; this only changes where sources are fetched.
+# Override at build time with --build-arg / LEZI_CARGO_INDEX_URL, or disable
+# replacement with LEZI_CARGO_INDEX_URL=crates-io.
+#
+# rsproxy (ByteDance) sparse index is the mainland-China default.
+
+[source.crates-io]
+replace-with = "mirror"
+
+[source.mirror]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+retry = 10
+git-fetch-with-cli = true

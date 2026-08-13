@@ -164,8 +164,17 @@ docker save "lezi-sync:${release_id}" | gzip > "lezi-sync-${release_id}.tar.gz"
 gzip -dc "lezi-sync-${release_id}.tar.gz" | docker load
 ```
 
-构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
-不会读取宿主机上可能由容器 uid 拥有的 `data-*` 目录。
+构建脚本只把 Cargo 清单、锁文件、Dockerfile、`src/` 与 `docker/` 辅助文件放进临时
+构建上下文，不会读取宿主机上可能由容器 uid 拥有的 `data-*` 目录。默认先用本机
+`~/.cargo` 缓存 `cargo vendor`（缺的 crate 走 `rsproxy.cn` sparse 镜像并重试），再让
+Docker 离线编译；BuildKit cache mount 会保留已下载的 crate，超时失败后重跑不会从零开始。
+
+| 构建环境变量 | 默认 | 说明 |
+|---|---|---|
+| `LEZI_CARGO_VENDOR` | `1` | `0` 时跳过宿主机 vendor，改由镜像内按下面的 index 拉取 |
+| `LEZI_CARGO_INDEX_URL` | `sparse+https://rsproxy.cn/index/` | crates.io 替换源；`crates-io` / `off` 关闭替换、直连官方 |
+| `LEZI_CARGO_MIRROR` | 未设置 | `off` / `crates-io` 与上面的官方直连等价 |
+| `LEZI_CARGO_FETCH_ATTEMPTS` | `5` | 宿主机 `cargo fetch` 与镜像内 fetch 的重试次数 |
 
 ## 非生产多架构实验
 

@@ -29,7 +29,7 @@ operator entrypoint that may replace the production container is `push-and-deplo
 
 | Component | Runs on | Invocation | Responsibility |
 |---|---|---|---|
-| `../build-image.sh` | Developer machine | Operator | Build and verify the release image as `linux/amd64`; the release identifier comes from `Cargo.toml`. |
+| `../build-image.sh` | Developer machine | Operator | Build and verify the release image as `linux/amd64`; the release identifier comes from `Cargo.toml`. Vendors crates from the host cargo cache by default (rsproxy sparse + retries if the cache is incomplete) so the Docker builder does not hit crates.io. |
 | `package-nas.sh` | Developer machine | Operator or push wrapper | Verify image/APK identity, render Compose, create one closed-inventory package, and write manifest/checksums. It does not contact the NAS. |
 | `push-and-deploy.sh` | Developer machine | **Production operator entrypoint** | Re-attest the package, acquire the NAS lease, upload to fresh staging, create the encrypted credential backup, invoke remote replacement, and promote the package. |
 | `backup-nas-credentials.sh` / `restore-nas-credentials.sh` | Developer machine | Push wrapper or authorized recovery | Stream live credentials into off-repository `age` ciphertext, or decrypt and validate them into a new local recovery staging directory. Restore never modifies the NAS. |
@@ -78,6 +78,8 @@ Environment overrides:
 | `LEZI_SKIP_PACKAGE=1` | Explicitly reuse the local package instead of default fresh packaging. The corresponding local Docker image must still match id/OS/architecture; requested data/TLS/origin inputs, current helpers, closed inventory/SHA, and the APK's signer, application id, version, metadata hash, and local-data-contract ledger are all re-attested. |
 | `LEZI_NAS_PACKAGE_DIR` | Local package output/input. `package-nas.sh` canonicalizes it, rejects symlinks/broad targets, and requires basename `lezi-sync-<ver>-nas` before its replace-in-place build. |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
+| `LEZI_CARGO_VENDOR` | `1` for `build-image.sh`. Host-vendors crates into the isolated build context so Docker compiles `--offline`. Set `0` to fetch inside the builder. |
+| `LEZI_CARGO_INDEX_URL` | Default `sparse+https://rsproxy.cn/index/`. crates.io replacement used when the host cache is incomplete or vendor is skipped. `crates-io` / `off` disable replacement. |
 | `LEZI_BOOTSTRAP_SECRET` | only with `LEZI_FORWARD_BOOTSTRAP_SECRET=1` (cutover / no live container to inherit). Ordinary CD leaves this unset so remote-deploy inherits from the live container. |
 | `LEZI_FORWARD_BOOTSTRAP_SECRET=1` | opt-in: SSH-forward local `LEZI_BOOTSTRAP_SECRET` into remote-deploy. Required for a verified fresh deployment and for offline-migrate cutover after stop/rm. Do **not** set for ordinary CD — a leftover local secret would otherwise rotate `owner_root_fingerprint` and revoke owner devices. After a fresh deployment unset it plus the secret/TLS-bootstrap flag; after cutover unset all four maintenance variables documented in the cutover runbook. |
 | `LEZI_AGE_RECIPIENTS_FILE` | Public age recipients file; default `~/.config/lezi/age-recipients.txt`. Required by `push-and-deploy.sh`; it is not a decrypt key. |

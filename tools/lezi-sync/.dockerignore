@@ -5,3 +5,4 @@ data
 data-*
 *.db
 tests
+vendor

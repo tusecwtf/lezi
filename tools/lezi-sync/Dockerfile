@@ -1,9 +1,51 @@
+# syntax=docker/dockerfile:1.7
+
 FROM rust:1.95-bookworm AS builder
 
 WORKDIR /build
+
+# Mainland-China-friendly default. Cargo.lock checksums still apply.
+# Override: --build-arg CARGO_INDEX_URL=sparse+https://index.crates.io/
+# or CARGO_INDEX_URL=crates-io to use crates.io with no source replacement.
+ARG CARGO_INDEX_URL=sparse+https://rsproxy.cn/index/
+ARG PROJECT_CARGO_CONFIG=docker/project-cargo-config.toml
+ARG VENDOR_SRC=docker/empty-vendor
+ARG LEZI_CARGO_OFFLINE=0
+
+ENV CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=120 \
+    CARGO_HTTP_MULTIPLEXING=false \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    LEZI_CARGO_OFFLINE=${LEZI_CARGO_OFFLINE}
+
+RUN set -eu; \
+    if [ "${CARGO_INDEX_URL}" = "crates-io" ] || [ "${CARGO_INDEX_URL}" = "off" ] || [ -z "${CARGO_INDEX_URL}" ]; then \
+      printf '%s\n' '[net]' 'retry = 10' 'git-fetch-with-cli = true' \
+        >/usr/local/cargo/config.toml; \
+    else \
+      printf '%s\n' \
+        '[source.crates-io]' \
+        'replace-with = "mirror"' \
+        '[source.mirror]' \
+        "registry = \"${CARGO_INDEX_URL}\"" \
+        '[net]' \
+        'retry = 10' \
+        'git-fetch-with-cli = true' \
+        >/usr/local/cargo/config.toml; \
+    fi
+
+COPY ${PROJECT_CARGO_CONFIG} /build/.cargo/config.toml
+COPY ${VENDOR_SRC}/ /build/vendor/
+COPY docker/fetch-and-build.sh /tmp/fetch-and-build.sh
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --locked --release
+
+# Cache mounts keep crates/objects after a timed-out RUN so the next attempt
+# does not start from an empty registry. Vendored builds skip the network.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    /bin/sh /tmp/fetch-and-build.sh
 
 FROM debian:bookworm-slim
 
@@ -32,7 +74,7 @@ RUN apt-get update \
     && useradd --system --uid 10001 --gid 10001 --home-dir /data --shell /usr/sbin/nologin lezi \
     && install -d -o lezi -g lezi -m 0700 /data /data/media
 
-COPY --from=builder /build/target/release/lezi-sync /usr/local/bin/lezi-sync
+COPY --from=builder /build/lezi-sync /usr/local/bin/lezi-sync
 
 USER 10001:10001
 

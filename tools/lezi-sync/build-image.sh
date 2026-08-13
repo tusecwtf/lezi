@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+CDPATH= cd -- "${SCRIPT_DIR}"
+
 version="${LEZI_SYNC_VERSION:-}"
 if [ -z "${version}" ]; then
   version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
@@ -20,14 +23,20 @@ trap cleanup EXIT HUP INT TERM
 # Compose bind mounts may be owned by the container uid and unreadable to the
 # host user. Stage only the immutable image inputs so restricted Docker
 # builders never traverse runtime data directories.
-mkdir "${build_context}/src"
-cp Cargo.toml Cargo.lock Dockerfile "${build_context}/"
-cp -R src/. "${build_context}/src/"
+/bin/sh "${SCRIPT_DIR}/docker/prepare-build-context.sh" "${build_context}"
+# shellcheck disable=SC1091
+. "${build_context}/docker/build-mode.sh"
 
-docker build \
+echo "==> docker build mode=${LEZI_CARGO_BUILD_MODE} offline=${LEZI_CARGO_OFFLINE} index=${CARGO_INDEX_URL}"
+
+DOCKER_BUILDKIT=1 docker build \
   --platform linux/amd64 \
   --provenance=false \
   --build-arg "LEZI_SYNC_VERSION=${version}" \
+  --build-arg "CARGO_INDEX_URL=${CARGO_INDEX_URL}" \
+  --build-arg "PROJECT_CARGO_CONFIG=${PROJECT_CARGO_CONFIG}" \
+  --build-arg "VENDOR_SRC=${VENDOR_SRC}" \
+  --build-arg "LEZI_CARGO_OFFLINE=${LEZI_CARGO_OFFLINE}" \
   --tag "${image}" \
   --tag lezi-sync:latest \
   "${build_context}"

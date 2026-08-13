@@ -4,5 +4,6 @@ lezi.db
 lezi.db-shm
 lezi.db-wal
 data-*/
+vendor/
 
 .cargo/

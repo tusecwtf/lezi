@@ -7,3 +7,15 @@
 # caches; project app/build/ remains per-worktree.
 [build]
 target-dir = "/home/YOU/.cache/cargo-target"
+
+# Optional: crates.io replacement for host `cargo test` / `cargo vendor`
+# when index.crates.io times out. Docker image builds default to rsproxy
+# independently via tools/lezi-sync/docker/cargo-config.toml.
+#
+# [source.crates-io]
+# replace-with = "mirror"
+# [source.mirror]
+# registry = "sparse+https://rsproxy.cn/index/"
+# [net]
+# retry = 10
+# git-fetch-with-cli = true
