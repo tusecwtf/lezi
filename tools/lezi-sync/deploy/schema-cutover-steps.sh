@@ -160,36 +160,33 @@ app_update_prepublish() {
     "cd '${stage}' && chmod +x validate-nas-package.sh credential-deploy-lock.sh export-nas-credentials.sh && ./validate-nas-package.sh . 0.4.0 >/dev/null"
   set +e
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s -- \
-    "${CONTAINER_NAME}" "${stage}" "${expected_sha}" <<'REMOTE'
+    "${CONTAINER_NAME}" "${stage}" "${expected_sha}" "${DATA_PATH}" <<'REMOTE'
 set -euo pipefail
 container="$1"
 stage="$2"
 expected_sha="$3"
+data_path="$4"
+image="$(docker inspect "${container}" --format '{{.Config.Image}}')"
 test "$(docker inspect "${container}" --format '{{.State.Running}}')" = true
 mkdir -m 700 "${stage}/rollback-app-update"
 docker cp "${container}:/data/app-release.apk" "${stage}/rollback-app-update/app-release.apk"
 docker cp "${container}:/data/app-update.json" "${stage}/rollback-app-update/app-update.json"
+install_pair() {
+  local src="$1"
+  docker run --rm --user 10001:10001 \
+    -v "${data_path}:/data" \
+    -v "${src}:/src:ro" \
+    --entrypoint /bin/sh \
+    "${image}" \
+    -ec 'cp /src/app-release.apk /data/app-release.apk.lezi-staging && cp /src/app-update.json /data/app-update.json.lezi-staging && mv -f /data/app-release.apk.lezi-staging /data/app-release.apk && mv -f /data/app-update.json.lezi-staging /data/app-update.json && chmod 644 /data/app-release.apk /data/app-update.json && test ! -e /data/app-release.apk.lezi-staging && test ! -e /data/app-update.json.lezi-staging'
+}
 restore_pair() {
-  docker cp "${stage}/rollback-app-update/app-release.apk" "${container}:/data/app-release.apk.lezi-staging"
-  docker cp "${stage}/rollback-app-update/app-update.json" "${container}:/data/app-update.json.lezi-staging"
-  docker exec "${container}" /bin/sh -ec '
-    chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging
-    chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging
-    mv -f /data/app-release.apk.lezi-staging /data/app-release.apk
-    mv -f /data/app-update.json.lezi-staging /data/app-update.json
-  '
+  install_pair "${stage}/rollback-app-update"
   printf '%s\n' complete >"${stage}/app-update-restore-complete"
 }
 trap restore_pair ERR
 printf '%s\n' ready >"${stage}/app-update-mutation-started"
-docker cp "${stage}/app-update/app-release.apk" "${container}:/data/app-release.apk.lezi-staging"
-docker cp "${stage}/app-update/app-update.json" "${container}:/data/app-update.json.lezi-staging"
-docker exec "${container}" /bin/sh -ec '
-  chown 10001:10001 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging
-  chmod 644 /data/app-release.apk.lezi-staging /data/app-update.json.lezi-staging
-  mv -f /data/app-release.apk.lezi-staging /data/app-release.apk
-  mv -f /data/app-update.json.lezi-staging /data/app-update.json
-'
+install_pair "${stage}/app-update"
 served_sha="$(curl -fsS --max-time 30 http://127.0.0.1:8767/download/lezi.apk | sha256sum | awk '{print $1}')"
 test "${served_sha}" = "${expected_sha}"
 trap - ERR

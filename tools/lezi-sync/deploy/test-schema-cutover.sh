@@ -246,6 +246,8 @@ grep -Fq '"${PACKAGE_DIR}/app-update/app-update.json"' "${runner_source}" \
   || fail "validated schema-13 root must contain the attested target metadata"
 grep -Fq 'LEZI_SYNC_VERSION="$(rollback_source_version)"' "${runner_source}" \
   || fail "automatic pre-open rollback must recreate the attested source service"
+grep -Fq 'docker run --rm --user 10001:10001' "${runner_source}" \
+  || fail "app-update prepublish must install the pair as uid 10001 on the data bind"
 grep -Fq '0.3.12:11|0.3.13:12' "${runner_source}" \
   || fail "cutover must accept exactly the attested 0.3.12/11 or 0.3.13/12 source tuples"
 grep -Fq 'lezi-sync:${rollback_version}' "${runner_source}" \
