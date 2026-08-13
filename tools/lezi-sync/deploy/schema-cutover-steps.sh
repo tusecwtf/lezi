@@ -489,10 +489,24 @@ PY
   expected_image="$(manifest_value "${PACKAGE_DIR}/MANIFEST.json" image_id)"
   [[ "$(ssh "${SSH_OPTS[@]}" "${NAS_SSH}" "docker inspect '${CONTAINER_NAME}' --format '{{.Image}}'")" == "${expected_image}" ]] \
     || die "running image differs from target manifest"
-  cert_before="$(sed -n 's/^certificate_sha256=//p' "${state_dir}/source-preflight.txt")"
-  spki_before="$(sed -n 's/^spki_sha256=//p' "${state_dir}/source-preflight.txt")"
-  ssh "${SSH_OPTS[@]}" "${NAS_SSH}" "docker exec '${CONTAINER_NAME}' /bin/sh -ec 'test \"\$(openssl dgst -sha256 -r /data/tls/server.crt | awk '\''{print \\$1}'\'')\" = \"${cert_before}\"; test \"\$(openssl x509 -in /data/tls/server.crt -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -r | awk '\''{print \\$1}'\'')\" = \"${spki_before}\"; sha256sum -c - >/dev/null'" \
-    < <(grep -E '  /data/(media/|server.secret$)' "${state_dir}/source-preflight.txt")
+  cert_before="$(sed -n 's/^certificate_sha256=//p' "${state_dir}/source-preflight.txt" | tr '[:upper:]' '[:lower:]' | tr -d '\r')"
+  spki_before="$(sed -n 's/^spki_sha256=//p' "${state_dir}/source-preflight.txt" | tr '[:upper:]' '[:lower:]' | tr -d '\r')"
+  [[ "${cert_before}" =~ ^[0-9a-f]{64}$ && "${spki_before}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "source preflight TLS pins are missing"
+  ssh "${SSH_OPTS[@]}" "${NAS_SSH}" bash -s -- \
+    "${CONTAINER_NAME}" "${cert_before}" "${spki_before}" <<'REMOTE'
+set -euo pipefail
+container="$1"
+cert_before="$2"
+spki_before="$3"
+docker exec --user 10001:10001 "${container}" /bin/sh -ec '
+  test "$(sha256sum /data/tls/server.crt | cut -c1-64)" = "'"${cert_before}"'"
+  test "$(openssl x509 -in /data/tls/server.crt -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 | sed "s/.*= //")" = "'"${spki_before}"'"
+'
+REMOTE
+  grep -E '  /data/(media/|server.secret$)' "${state_dir}/source-preflight.txt" \
+    | ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
+      "docker exec -i --user 10001:10001 '${CONTAINER_NAME}' sha256sum -c - >/dev/null"
   sync_bin="$(resolve_sync_bin)"
   rm -rf -- "${WORK_DIR}/postcheck"
   mkdir -p "${WORK_DIR}/postcheck"
@@ -504,6 +518,8 @@ PY
   (cd "${WORK_DIR}/postcheck" \
     && find . -type f ! -name lezi.db -print0 | sort -z | xargs -0 -r sha256sum) \
     >"${state_dir}/postcheck-file-inventory.txt"
+  LC_ALL=C sort -o "${state_dir}/postcheck-file-inventory.txt" \
+    "${state_dir}/postcheck-file-inventory.txt"
   cmp -s "${state_dir}/validated-target-inventory.txt" \
     "${state_dir}/postcheck-file-inventory.txt" \
     || die "post-start complete file inventory differs from validated migration output"
