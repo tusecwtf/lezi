@@ -252,6 +252,8 @@ grep -Fq 'sha256sum /data/tls/server.crt | cut -c1-64' "${runner_source}" \
   || fail "source preflight must hash the certificate without nested-awk escaping"
 grep -Fq 'passwordless dry-run' "${runner_source}" \
   || fail "cutover must refuse a stale offline-migrate that still requires a new root password"
+grep -Fq 'lezi-sync-0.4.0-nas.incoming-' "${runner_source}" \
+  || fail "cutover staging must be a push-shaped incoming directory for credential backup"
 grep -Fq '0.3.12:11|0.3.13:12' "${runner_source}" \
   || fail "cutover must accept exactly the attested 0.3.12/11 or 0.3.13/12 source tuples"
 grep -Fq 'lezi-sync:${rollback_version}' "${runner_source}" \

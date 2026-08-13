@@ -116,7 +116,11 @@ operation_id() {
 }
 
 remote_stage() {
-  printf '/tmp/lezi-schema-cutover-%s' "$(operation_id)"
+  local oid
+  oid="$(operation_id)"
+  # backup-nas-credentials requires lezi-sync-<ver>-nas or
+  # lezi-sync-<ver>-nas.incoming-<64 hex>.
+  printf '/tmp/lezi-sync-releases/lezi-sync-0.4.0-nas.incoming-%s%s' "${oid}" "${oid}"
 }
 
 data_parent="$(dirname -- "${DATA_PATH}")"
@@ -165,7 +169,7 @@ app_update_prepublish() {
   stage="$(remote_stage)"
   expected_sha="$(sha256sum "${PACKAGE_DIR}/app-update/app-release.apk" | awk '{print $1}')"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
-    "umask 077; test ! -e '${stage}' && mkdir -m 700 '${stage}'"
+    "umask 077; test ! -e '${stage}' && mkdir -p -m 700 '$(dirname -- "${stage}")' && mkdir -m 700 '${stage}'"
   scp -P "${NAS_SSH_PORT}" -o BatchMode=yes -o ConnectTimeout=15 -r \
     "${PACKAGE_DIR}/." "${NAS_SSH}:${stage}/"
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
