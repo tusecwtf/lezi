@@ -25,7 +25,7 @@ internal suspend fun runComposerPhotoImport(
     import: suspend (onPathCommitted: (String) -> Unit) -> List<String>,
     delete: suspend (Collection<String>) -> Unit,
     attach: (List<String>) -> Boolean,
-) {
+): Boolean {
     val produced = mutableListOf<String>()
     val imported = try {
         import { path -> produced += path }
@@ -54,7 +54,7 @@ internal suspend fun runComposerPhotoImport(
                 val reclaim = importSave.reclaimEpoch(epoch).ifEmpty { paths }
                 if (reclaim.isNotEmpty()) delete(reclaim)
             }
-            return
+            return false
         }
         val attached = attach(paths)
         if (!attached) {
@@ -62,13 +62,14 @@ internal suspend fun runComposerPhotoImport(
                 val reclaim = importSave.reclaimEpoch(epoch).ifEmpty { paths }
                 if (reclaim.isNotEmpty()) delete(reclaim)
             }
-            return
+            return false
         }
         // Attach may have markAttached; any leftover is still an orphan.
         val leftover = importSave.reclaimEpoch(epoch)
         if (leftover.isNotEmpty()) {
             withContext(NonCancellable) { delete(leftover) }
         }
+        return true
     } catch (cancelled: CancellationException) {
         // Reclaim only map-tracked unattached paths. Do not fall back to [paths]:
         // empty map means already attached or already reclaimed (avoid deleting draft).

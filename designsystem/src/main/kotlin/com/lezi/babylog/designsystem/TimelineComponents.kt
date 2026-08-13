@@ -55,7 +55,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 
 /**
@@ -93,6 +92,12 @@ data class TimelineLegendEntry(
     val colorRole: LeziRecordColorRole,
     /** Sleep uses a short bar swatch; feed/care use dots. */
     val isBar: Boolean = false,
+)
+
+/** One direct-manipulation sample measured against the rail width at drag time. */
+data class TimelinePanGesture(
+    val cumulativeDeltaPx: Float,
+    val axisLengthPx: Float,
 )
 
 private const val EVENT_CLUSTER_WINDOW_MINUTES = 12
@@ -135,9 +140,11 @@ fun TimelineLane(
      * (px, positive = right) and axis width from the drag origin; caller owns
      * one viewport for all lanes. Null disables pan (tap-only).
      */
-    onHorizontalPan: ((totalDeltaPx: Float, axisLengthPx: Float) -> Unit)? = null,
-    /** Clears shared pan-origin when the pointer lifts (after pan or tap). */
+    onHorizontalPan: ((TimelinePanGesture) -> Unit)? = null,
+    /** Commits shared preview state only when the pointer lifts normally. */
     onPanEnd: (() -> Unit)? = null,
+    /** Restores shared preview state when input is cancelled or the lane leaves composition. */
+    onPanCancel: (() -> Unit)? = null,
 ) {
     val track = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
     val grid = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
@@ -158,6 +165,7 @@ fun TimelineLane(
     val onSelectState by rememberUpdatedState(onCategorySelect)
     val onPanState by rememberUpdatedState(onHorizontalPan)
     val onPanEndState by rememberUpdatedState(onPanEnd)
+    val onPanCancelState by rememberUpdatedState(onPanCancel)
     // Animated selection highlight: per-category 0→1 progress so dot radius,
     // alpha, and the focus ring ease instead of jumping on tap.
     val highlightAnims = remember { mutableStateMapOf<String, Animatable<Float, AnimationVector1D>>() }
@@ -194,7 +202,7 @@ fun TimelineLane(
                 .testTag("timeline_lane_$label")
                 .semantics {
                     contentDescription = if (onHorizontalPan != null) {
-                        "$label 轨道，点按可按类型筛选明细，横向拖动可窥视邻日"
+                        "$label 轨道，点按可按类型筛选明细，横向拖动可连续浏览日期"
                     } else {
                         "$label 轨道，点按可按类型筛选明细"
                     }
@@ -242,9 +250,12 @@ fun TimelineLane(
                             )
                         },
                         onHorizontalPan = onPanState?.let { pan ->
-                            { totalDeltaPx -> pan(totalDeltaPx, axisWidth()) }
+                            { totalDeltaPx ->
+                                pan(TimelinePanGesture(totalDeltaPx, axisWidth()))
+                            }
                         },
                         onGestureEnd = { onPanEndState?.invoke() },
+                        onGestureCancel = { onPanCancelState?.invoke() },
                     )
                 },
         ) {
@@ -496,9 +507,9 @@ internal data class SleepPaintSlice(val startMin: Int, val endMin: Int)
  * and [viewportDurationMinutes] select the visible slice. Selection is owned by the
  * caller (page state): all marks that share [selectedCategoryKey] highlight together.
  *
- * When [onViewportStartChange] is non-null, horizontal drag pans a **single shared
- * viewport** for all lanes (clamped to content); tap still filters; pan never
- * changes selected day D.
+ * When [onHorizontalPan] is non-null, every lane reports one shared cumulative
+ * direct-manipulation gesture. The feature state machine owns the absolute viewport,
+ * date effect and future clamp; tap still filters.
  */
 @Composable
 fun TimelineRailCard(
@@ -514,11 +525,9 @@ fun TimelineRailCard(
     viewportStartMinutes: Int = 0,
     viewportDurationMinutes: Int = TimelineAxis.MINUTES_PER_DAY,
     windowGeometry: TimelineWindowGeometry = TimelineWindowGeometry.SingleDay,
-    /**
-     * When non-null, enables horizontal pan across [windowGeometry]. Caller owns day-keyed viewport
-     * state and must clamp via [TimelineAxis.clampViewportStart] / pan helper.
-     */
-    onViewportStartChange: ((Int) -> Unit)? = null,
+    onHorizontalPan: ((TimelinePanGesture) -> Unit)? = null,
+    onPanEnd: (() -> Unit)? = null,
+    onPanCancel: (() -> Unit)? = null,
     /**
      * Hour labels drawn relative to the content axis. Defaults to a single-day
      * 00/06/12/18/24 fill when the viewport is the classic 24h window.
@@ -547,34 +556,6 @@ fun TimelineRailCard(
     val primaryTitle = titlePrimary?.takeIf { it.isNotBlank() }
     val secondaryTitle = titleSecondary?.takeIf { it.isNotBlank() }
     val showTitleBlock = primaryTitle != null || secondaryTitle != null
-    // One shared viewport for all lanes: origin fixed for the life of a pan gesture.
-    val viewportStartState by rememberUpdatedState(viewportStartMinutes)
-    val onViewportChangeState by rememberUpdatedState(onViewportStartChange)
-    val panSession = remember { TimelinePanSession() }
-    val onHorizontalPan: ((Float, Float) -> Unit)? =
-        if (onViewportStartChange != null) {
-            { totalDeltaPx, axisLengthPx ->
-                val origin = panSession.originStartMinutes
-                    ?: viewportStartState.also { panSession.originStartMinutes = it }
-                val next = TimelineAxis.panViewportStart(
-                    currentStartMinutes = origin,
-                    deltaPx = totalDeltaPx,
-                    axisLengthPx = axisLengthPx,
-                    viewportDurationMinutes = safeViewportDuration,
-                    contentDurationMinutes = windowGeometry.contentDurationMinutes,
-                )
-                onViewportChangeState?.invoke(next)
-            }
-        } else {
-            null
-        }
-    val onPanEnd: (() -> Unit)? =
-        if (onViewportStartChange != null) {
-            { panSession.originStartMinutes = null }
-        } else {
-            null
-        }
-
     val panel: @Composable (@Composable ColumnScope.() -> Unit) -> Unit = { body ->
         if (journal) {
             LeziSurfacePanel(
@@ -633,6 +614,7 @@ fun TimelineRailCard(
             viewportDurationMinutes = safeViewportDuration,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
+            onPanCancel = onPanCancel,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(start = hourLabelStart),
@@ -650,6 +632,7 @@ fun TimelineRailCard(
             windowGeometry = windowGeometry,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
+            onPanCancel = onPanCancel,
         )
         Spacer(Modifier.height(laneGap))
         TimelineLane(
@@ -664,6 +647,7 @@ fun TimelineRailCard(
             windowGeometry = windowGeometry,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
+            onPanCancel = onPanCancel,
         )
         Spacer(Modifier.height(laneGap))
         TimelineLane(
@@ -678,6 +662,7 @@ fun TimelineRailCard(
             windowGeometry = windowGeometry,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
+            onPanCancel = onPanCancel,
         )
         if (legend.isNotEmpty()) {
             Spacer(Modifier.height(sectionGap))
@@ -691,22 +676,19 @@ fun TimelineRailCard(
     }
 }
 
-/** Holds the viewport start at the beginning of a multi-lane pan gesture. */
-private class TimelinePanSession {
-    var originStartMinutes: Int? = null
-}
-
 @Composable
 private fun TimelineHourLabels(
     labels: List<Pair<Int, String>>,
     viewportStartMinutes: Int,
     viewportDurationMinutes: Int,
     modifier: Modifier = Modifier,
-    onHorizontalPan: ((totalDeltaPx: Float, axisLengthPx: Float) -> Unit)? = null,
+    onHorizontalPan: ((TimelinePanGesture) -> Unit)? = null,
     onPanEnd: (() -> Unit)? = null,
+    onPanCancel: (() -> Unit)? = null,
 ) {
     val onPanState by rememberUpdatedState(onHorizontalPan)
     val onPanEndState by rememberUpdatedState(onPanEnd)
+    val onPanCancelState by rememberUpdatedState(onPanCancel)
     androidx.compose.foundation.layout.BoxWithConstraints(
         modifier
             .height(14.dp)
@@ -717,9 +699,12 @@ private fun TimelineHourLabels(
                         detectTimelineRailGestures(
                             onTap = {},
                             onHorizontalPan = { totalDeltaPx ->
-                                onPanState?.invoke(totalDeltaPx, size.width.toFloat())
+                                onPanState?.invoke(
+                                    TimelinePanGesture(totalDeltaPx, size.width.toFloat()),
+                                )
                             },
                             onGestureEnd = { onPanEndState?.invoke() },
+                            onGestureCancel = { onPanCancelState?.invoke() },
                         )
                     }
                 } else {
@@ -767,6 +752,7 @@ internal suspend fun PointerInputScope.detectTimelineRailGestures(
     onTap: (Offset) -> Unit,
     onHorizontalPan: ((totalDeltaPx: Float) -> Unit)?,
     onGestureEnd: (() -> Unit)? = null,
+    onGestureCancel: (() -> Unit)? = null,
 ) {
     if (onHorizontalPan == null) {
         detectTapGestures(onTap = onTap)
@@ -775,7 +761,12 @@ internal suspend fun PointerInputScope.detectTimelineRailGestures(
     trackSlopHorizontalGesture(
         onTap = onTap,
         onHorizontalDrag = { totalDeltaPx -> onHorizontalPan(totalDeltaPx) },
-        onGestureEnd = { onGestureEnd?.invoke() },
+        onGestureEnd = { wasHorizontal ->
+            if (wasHorizontal) onGestureEnd?.invoke()
+        },
+        onGestureCancel = { wasHorizontal ->
+            if (wasHorizontal) onGestureCancel?.invoke()
+        },
     )
 }
 
@@ -890,7 +881,7 @@ private fun TimelineLegendRow(
                 Spacer(Modifier.width(5.dp))
                 Text(
                     item.label,
-                    style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                    style = LeziTypography.Micro,
                     color = if (selected) {
                         MaterialTheme.colorScheme.onPrimaryContainer
                     } else {

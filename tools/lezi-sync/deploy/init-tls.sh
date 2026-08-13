@@ -18,6 +18,7 @@ private_key="${tls_directory}/server.key"
 host_openssl="${LEZI_TLS_USE_HOST_OPENSSL:-0}"
 allow_tls_bootstrap="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
 inspect_only="${LEZI_TLS_INSPECT_ONLY:-0}"
+write_enabled=0
 
 if [[ "${allow_tls_bootstrap}" != "0" && "${allow_tls_bootstrap}" != "1" ]]; then
   echo "error: LEZI_ALLOW_TLS_BOOTSTRAP must be 0 or 1" >&2
@@ -27,10 +28,13 @@ if [[ "${inspect_only}" != "0" && "${inspect_only}" != "1" ]]; then
   echo "error: LEZI_TLS_INSPECT_ONLY must be 0 or 1" >&2
   exit 1
 fi
+if [[ "${inspect_only}" == "1" && "${allow_tls_bootstrap}" == "1" ]]; then
+  echo "error: TLS inspection and TLS bootstrap are separate capabilities" >&2
+  exit 1
+fi
 
 if [[ "${host_openssl}" == "1" ]]; then
   command -v openssl >/dev/null
-  mkdir -p "${tls_directory}"
   certificate_arg="${certificate}"
   private_key_arg="${private_key}"
 else
@@ -40,12 +44,15 @@ else
   }
   certificate_arg="/data/tls/server.crt"
   private_key_arg="/data/tls/server.key"
-  docker run --rm \
-    --user 10001:10001 \
-    -v "${data_root}:/data" \
-    --entrypoint /bin/mkdir \
-    "${image}" -p /data/tls
 fi
+
+container_mount() {
+  local mount="type=bind,source=${data_root},target=/data"
+  if [[ "${write_enabled}" != "1" ]]; then
+    mount="${mount},readonly"
+  fi
+  printf '%s\n' "${mount}"
+}
 
 run_openssl() {
   if [[ "${host_openssl}" == "1" ]]; then
@@ -53,7 +60,7 @@ run_openssl() {
   else
     docker run --rm -i \
       --user 10001:10001 \
-      -v "${data_root}:/data" \
+      --mount "$(container_mount)" \
       --entrypoint /usr/bin/openssl \
       "${image}" "$@"
   fi
@@ -67,40 +74,91 @@ run_file_tool() {
   else
     docker run --rm \
       --user 10001:10001 \
-      -v "${data_root}:/data" \
+      --mount "$(container_mount)" \
       --entrypoint "/bin/${tool}" \
       "${image}" "$@"
   fi
 }
 
-file_state() {
-  local host_path="$1"
-  local container_path="$2"
+# One classifier program is the production seam for both host and uid-10001
+# adapters. Tests exercise these exact branches through the host adapter; the
+# container adapter only supplies the same program with /data paths.
+identity_classifier='# LEZI_TLS_IDENTITY_CLASSIFIER_V1
+data_root="$1"
+tls_directory="$2"
+certificate="$3"
+private_key="$4"
+if [ -L "${data_root}" ] || [ ! -d "${data_root}" ]; then
+  echo "error: TLS data root must be an existing non-symlink directory" >&2
+  exit 1
+fi
+if [ ! -r "${data_root}" ] || [ ! -x "${data_root}" ]; then
+  echo "error: TLS data root is not inspectable" >&2
+  exit 1
+fi
+if [ -L "${tls_directory}" ]; then
+  echo "error: TLS directory must be a regular non-symlink directory" >&2
+  exit 1
+fi
+if [ ! -e "${tls_directory}" ]; then
+  printf "absent\n"
+  exit 0
+fi
+if [ ! -d "${tls_directory}" ]; then
+  echo "error: TLS directory must be a regular non-symlink directory" >&2
+  exit 1
+fi
+if [ ! -r "${tls_directory}" ] || [ ! -x "${tls_directory}" ]; then
+  echo "error: TLS directory is not inspectable" >&2
+  exit 1
+fi
+certificate_state=absent
+private_key_state=absent
+if [ -L "${certificate}" ] || { [ -e "${certificate}" ] && [ ! -f "${certificate}" ]; }; then
+  echo "error: TLS identity paths must be regular non-symlink files" >&2
+  exit 1
+elif [ -f "${certificate}" ]; then
+  if [ ! -r "${certificate}" ]; then
+    echo "error: TLS certificate is not readable" >&2
+    exit 1
+  fi
+  certificate_state=present
+fi
+if [ -L "${private_key}" ] || { [ -e "${private_key}" ] && [ ! -f "${private_key}" ]; }; then
+  echo "error: TLS identity paths must be regular non-symlink files" >&2
+  exit 1
+elif [ -f "${private_key}" ]; then
+  if [ ! -r "${private_key}" ]; then
+    echo "error: TLS private key is not readable" >&2
+    exit 1
+  fi
+  private_key_state=present
+fi
+if [ "${certificate_state}" != "${private_key_state}" ]; then
+  echo "error: partial TLS identity found; refusing automatic replacement" >&2
+  exit 1
+fi
+printf "%s\n" "${certificate_state}"'
+
+inspect_identity() {
+  if [[ ! -e "${data_root}" && ! -L "${data_root}" \
+      && "${host_openssl}" == "1" \
+      && "${allow_tls_bootstrap}" == "1" \
+      && "${inspect_only}" == "0" ]]; then
+    printf 'absent\n'
+    return
+  fi
   if [[ "${host_openssl}" == "1" ]]; then
-    if [[ -L "${host_path}" ]]; then
-      printf 'unsafe\n'
-    elif [[ -f "${host_path}" ]]; then
-      printf 'present\n'
-    elif [[ -e "${host_path}" ]]; then
-      printf 'unsafe\n'
-    else
-      printf 'absent\n'
-    fi
+    /bin/sh -ec "${identity_classifier}" sh \
+      "${data_root}" "${tls_directory}" "${certificate}" "${private_key}"
   else
     docker run --rm \
       --user 10001:10001 \
-      -v "${data_root}:/data" \
+      --mount "$(container_mount)" \
       --entrypoint /bin/sh \
       "${image}" \
-      -c 'if [ -L "$1" ]; then
-  printf "unsafe\n"
-elif [ -f "$1" ]; then
-  printf "present\n"
-elif [ -e "$1" ]; then
-  printf "unsafe\n"
-else
-  printf "absent\n"
-fi' sh "${container_path}"
+      -ec "${identity_classifier}" sh \
+      /data /data/tls /data/tls/server.crt /data/tls/server.key
   fi
 }
 
@@ -133,24 +191,14 @@ print_spki_fingerprint() {
   echo "==> TLS SPKI SHA-256: ${fingerprint}"
 }
 
-certificate_state="$(file_state "${certificate}" "${certificate_arg}")"
-private_key_state="$(file_state "${private_key}" "${private_key_arg}")"
-if [[ "${certificate_state}" == "unsafe" \
-    || "${private_key_state}" == "unsafe" ]]; then
-  echo "error: TLS identity paths must be regular non-symlink files" >&2
-  exit 1
-fi
-if [[ "${certificate_state}" != "${private_key_state}" ]]; then
-  echo "error: partial TLS identity found under ${tls_directory}; refusing automatic replacement" >&2
-  exit 1
-fi
+identity_state="$(inspect_identity)"
 
 if [[ "${inspect_only}" == "1" ]]; then
-  printf '%s\n' "${certificate_state}"
+  printf '%s\n' "${identity_state}"
   exit 0
 fi
 
-if [[ "${certificate_state}" == "present" ]]; then
+if [[ "${identity_state}" == "present" ]]; then
   validate_identity
   echo "==> reusing persistent TLS identity"
   print_spki_fingerprint
@@ -161,6 +209,19 @@ if [[ "${allow_tls_bootstrap}" != "1" ]]; then
   echo "error: TLS identity is absent; ordinary CD refuses to generate a replacement" >&2
   echo "  set LEZI_ALLOW_TLS_BOOTSTRAP=1 only for a verified fresh data root" >&2
   exit 1
+fi
+
+# Bootstrap starts only after read-only inspection proved both files absent and
+# the operator explicitly authorized a separately verified fresh data root.
+write_enabled=1
+if [[ "${host_openssl}" == "1" ]]; then
+  mkdir -p "${tls_directory}"
+else
+  docker run --rm \
+    --user 10001:10001 \
+    --mount "$(container_mount)" \
+    --entrypoint /bin/mkdir \
+    "${image}" -p /data/tls
 fi
 
 if [[ "${tls_host}" == *:* ]] || [[ "${tls_host}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then

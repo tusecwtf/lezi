@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.feature.family.members.formatFamilyDeviceLastUsed
+import com.lezi.babylog.feature.family.members.formatMemberLastSync
 
 import com.lezi.babylog.feature.family.components.*
 
@@ -302,6 +303,8 @@ class FamilyErrorCopyTest {
         assertEquals("昨天", formatFamilyDeviceLastUsed(now - 90_000, now))
         assertEquals("3 天前", formatFamilyDeviceLastUsed(now - 259_200, now))
         assertTrue(formatFamilyDeviceLastUsed(now - 700_000, now).matches(Regex("\\d{2}-\\d{2}")))
+        assertEquals("尚未同步", formatMemberLastSync(null, now))
+        assertEquals("上次同步 · 刚刚", formatMemberLastSync(now, now))
     }
 
     @Test

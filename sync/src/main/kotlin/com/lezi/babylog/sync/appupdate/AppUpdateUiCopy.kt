@@ -178,7 +178,8 @@ fun forcedUpdateSessionRecoveryLabel(): String = "重新登录家庭"
  */
 fun forcedUpdateLanInviteGuidance(downloadUrl: String): String =
     "若无法通过已登录会话下载，可在同一家庭局域网用浏览器打开：\n$downloadUrl\n" +
-        "（端口 8767 邀请安装页，无家庭 API；装好后须重新登录家庭。）"
+        "（端口 8767 只提供同一安装包，无家庭 API；原地升级会保留本机数据与家庭配置。" +
+        "若原会话仍需恢复，装好后再重新登录。）"
 
 /** Secondary CTA label for opening the LAN invite-install download URL. */
 fun forcedUpdateLanInviteOpenLabel(): String = "打开局域网安装页"

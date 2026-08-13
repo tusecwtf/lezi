@@ -25,7 +25,6 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -70,6 +69,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,7 +77,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -108,10 +107,13 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziMotionMillis
+import com.lezi.babylog.designsystem.readableContentColor
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.carelog.babyAgeLabel
 import com.lezi.babylog.feature.export.ExportRoute
+import com.lezi.babylog.feature.family.conflict.ConflictInboxRoute
+import com.lezi.babylog.feature.family.conflict.ConflictResolverRoute
 import com.lezi.babylog.feature.family.FamilyRoute
 import com.lezi.babylog.feature.growth.GrowthRoute
 import com.lezi.babylog.feature.log.composer.ComposerCreateIntent
@@ -289,6 +291,34 @@ data class RootUi(
     val composerRequest: RecordComposerRequest? = null,
 )
 
+/** Root-owned selected-day state shared by timeline effects and external date controls. */
+internal class RootSelectedDateOwner(
+    initialSelectedDate: LocalDate,
+    initialToday: LocalDate,
+    private val persist: (LocalDate) -> Unit = {},
+) {
+    private val mutableSelectedDate = MutableStateFlow(
+        clampSelectedDate(initialSelectedDate, initialToday),
+    )
+    val selectedDate: StateFlow<LocalDate> = mutableSelectedDate.asStateFlow()
+
+    init {
+        persist(mutableSelectedDate.value)
+    }
+
+    /** Returns false for a repeated value, preventing the Root → Log feedback path from looping. */
+    fun select(requested: LocalDate, today: LocalDate): Boolean {
+        val selected = clampSelectedDate(requested, today)
+        if (selected == mutableSelectedDate.value) return false
+        mutableSelectedDate.value = selected
+        persist(selected)
+        return true
+    }
+
+    fun shift(deltaDays: Long, today: LocalDate): Boolean =
+        select(mutableSelectedDate.value.plusDays(deltaDays), today)
+}
+
 @HiltViewModel
 class RootViewModel @Inject constructor(
     private val careLog: CareLog,
@@ -298,23 +328,21 @@ class RootViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     private val widgetRefreshController: CareWidgetRefreshController,
 ) : ViewModel() {
-    private val dayFlow = MutableStateFlow(
-        clampSelectedDate(
-            savedStateHandle.get<Long>(SELECTED_DATE_KEY)?.let(LocalDate::ofEpochDay)
-                ?: LocalDate.now(),
-        ),
-    )
-    private val calendarMonthFlow = MutableStateFlow(YearMonth.from(dayFlow.value))
     private val zone = ZoneId.systemDefault()
     private val todayFlow = MutableStateFlow(LocalDate.now(zone))
+    private val selectedDateOwner = RootSelectedDateOwner(
+        initialSelectedDate = savedStateHandle.get<Long>(SELECTED_DATE_KEY)
+            ?.let(LocalDate::ofEpochDay)
+            ?: todayFlow.value,
+        initialToday = todayFlow.value,
+        persist = { selected -> savedStateHandle[SELECTED_DATE_KEY] = selected.toEpochDay() },
+    )
+    private val dayFlow = selectedDateOwner.selectedDate
+    private val calendarMonthFlow = MutableStateFlow(YearMonth.from(dayFlow.value))
     private val composerRequestFlow = savedStateHandle.getStateFlow<RecordComposerRequest?>(
         COMPOSER_REQUEST_KEY,
         null,
     )
-
-    init {
-        savedStateHandle[SELECTED_DATE_KEY] = dayFlow.value.toEpochDay()
-    }
 
     private val localBaseUi = combine(
         careLog.observeHasBaby(),
@@ -373,6 +401,16 @@ class RootViewModel @Inject constructor(
             }
         }
     }
+
+    val shallowSyncLine = syncPort.shallowStatus()
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5_000),
+            com.lezi.babylog.sync.session.ShallowSyncLine(
+                state = com.lezi.babylog.sync.session.ShallowSyncState.Unjoined,
+                text = "",
+            ),
+        )
 
     val ui = combine(
         baseUi,
@@ -614,7 +652,7 @@ class RootViewModel @Inject constructor(
     }
 
     fun shiftDay(delta: Long) {
-        updateSelectedDate(dayFlow.value.plusDays(delta))
+        selectedDateOwner.shift(delta, todayFlow.value)
     }
 
     fun setDay(day: LocalDate) {
@@ -673,9 +711,7 @@ class RootViewModel @Inject constructor(
     }
 
     private fun updateSelectedDate(day: LocalDate) {
-        val selected = clampSelectedDate(day, todayFlow.value)
-        dayFlow.value = selected
-        savedStateHandle[SELECTED_DATE_KEY] = selected.toEpochDay()
+        selectedDateOwner.select(day, todayFlow.value)
     }
 
     private companion object {
@@ -732,6 +768,32 @@ private enum class TopDest(
     Family("family", "账户", Icons.Filled.Person, Icons.Outlined.Person),
     Settings("settings", "菜单", Icons.Filled.MoreHoriz, Icons.Outlined.MoreHoriz),
 }
+
+internal data class ConflictOverlayState(
+    val inboxVisible: Boolean = false,
+    val resolverConflictId: String? = null,
+) {
+    fun openInbox() = ConflictOverlayState(inboxVisible = true)
+
+    fun openResolver(conflictId: String): ConflictOverlayState {
+        require(conflictId.isNotBlank())
+        return ConflictOverlayState(resolverConflictId = conflictId)
+    }
+
+    fun dismissInbox() = copy(inboxVisible = false)
+
+    fun dismissResolver() = copy(resolverConflictId = null)
+}
+
+private val ConflictOverlayStateSaver = listSaver<ConflictOverlayState, String>(
+    save = { listOf(if (it.inboxVisible) "1" else "0", it.resolverConflictId.orEmpty()) },
+    restore = { values ->
+        ConflictOverlayState(
+            inboxVisible = values.firstOrNull() == "1",
+            resolverConflictId = values.getOrNull(1)?.ifEmpty { null },
+        )
+    },
+)
 
 internal data class RootChromeVisibility(
     val showTopBar: Boolean,
@@ -886,6 +948,7 @@ private fun LeziMainScaffold(
     val today = ui.today
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    val shallowSyncLine by vm.shallowSyncLine.collectAsStateWithLifecycle()
     val composerRequest = ui.composerRequest
     val systemCalendarId by vm.systemCalendarId.collectAsStateWithLifecycle()
     val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()
@@ -893,6 +956,9 @@ private fun LeziMainScaffold(
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     var logLayoutEditActive by remember { mutableStateOf(false) }
+    var conflictOverlay by rememberSaveable(stateSaver = ConflictOverlayStateSaver) {
+        mutableStateOf(ConflictOverlayState())
+    }
     // Shell chrome / nav transitions — capture outside non-@Composable transitionSpec.
     val shellBaseMs = leziMotionMillis(LeziMotion.Base)
     val shellFastMs = leziMotionMillis(LeziMotion.Fast)
@@ -955,6 +1021,30 @@ private fun LeziMainScaffold(
         )
     }
     val chrome = rootChromeVisibility(current, logLayoutEditActive)
+    // Full-screen routes hide the root header; their own LeziDetailTopBar sits on
+    // surface, so status-bar icons must follow that fill — not babyAccent.
+    val statusBarFill = if (chrome.showTopBar) {
+        leziTopBarBackground(dark)
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val statusBarNeedsLightIcons = readableContentColor(statusBarFill) == Color.White
+    val navigationScrim = MaterialTheme.colorScheme.surface.toArgb()
+    val activity = LocalContext.current as ComponentActivity
+    SideEffect {
+        activity.enableEdgeToEdge(
+            statusBarStyle = if (statusBarNeedsLightIcons) {
+                SystemBarStyle.dark(Color.Transparent.toArgb())
+            } else {
+                SystemBarStyle.light(Color.Transparent.toArgb(), Color.Transparent.toArgb())
+            },
+            navigationBarStyle = if (dark) {
+                SystemBarStyle.dark(navigationScrim)
+            } else {
+                SystemBarStyle.light(navigationScrim, navigationScrim)
+            },
+        )
+    }
     val showContextHeader = current in setOf(
         TopDest.Log.route,
         TopDest.Summary.route,
@@ -1028,6 +1118,21 @@ private fun LeziMainScaffold(
                                     showHeaderCalendar = true
                                 },
                                 onSearch = { nav.navigate("search") },
+                                collapsedSyncText = if (
+                                    current in setOf(
+                                        TopDest.Log.route,
+                                        TopDest.Summary.route,
+                                        TopDest.Growth.route,
+                                    ) && shallowSyncLine.text.isNotBlank()
+                                ) {
+                                    shallowSyncLine.text
+                                } else {
+                                    null
+                                },
+                                collapsedSyncIsError = shallowSyncLine.state in setOf(
+                                    com.lezi.babylog.sync.session.ShallowSyncState.Error,
+                                    com.lezi.babylog.sync.session.ShallowSyncState.ReauthRequired,
+                                ),
                             )
                         }
                     }
@@ -1088,17 +1193,11 @@ private fun LeziMainScaffold(
                         }
                         NavigationBarItem(
                             selected = selected,
-                            // Single navigation owner: Material onClick. Long-press
-                            // baby cycle is layered via pointerInput with onLongPress
-                            // only — never onTap — so a short press cannot fire twice.
+                            // Short-press navigation owner: Material onClick only.
+                            // Long-press baby cycle: [bottomNavLongPressOnly] (onLongPress,
+                            // never onTap) so short press cannot double-fire.
                             onClick = { navigateToDestination() },
-                            modifier = if (onLongClick != null) {
-                                Modifier.pointerInput(onLongClick) {
-                                    detectTapGestures(onLongPress = { onLongClick() })
-                                }
-                            } else {
-                                Modifier
-                            },
+                            modifier = Modifier.bottomNavLongPressOnly(onLongClick),
                             icon = {
                                 Icon(
                                     if (selected) dest.selectedIcon else dest.unselectedIcon,
@@ -1169,18 +1268,20 @@ private fun LeziMainScaffold(
                     externalDay = ui.selectedDate,
                     onOpenComposer = vm::openComposer,
                     onGoToday = { vm.setDay(today) },
+                    onSelectedDayChange = vm::setDay,
                     onLayoutEditModeChanged = { active ->
                         logLayoutEditActive = active
                     },
                     onMessage = { message ->
                         scope.launch { snackbar.showSnackbar(message) }
                     },
+                    onOpenConflictResolver = { conflictOverlay = conflictOverlay.openResolver(it) },
                 )
             }
             composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
             composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
             composable(TopDest.Family.route) {
-                FamilyRoute()
+                FamilyRoute(onOpenConflictInbox = { conflictOverlay = conflictOverlay.openInbox() })
             }
             composable(TopDest.Settings.route) {
                 SettingsRoute(
@@ -1352,6 +1453,26 @@ private fun LeziMainScaffold(
                 showHeaderCalendar = false
             },
             onDismiss = { showHeaderCalendar = false },
+        )
+    }
+
+    if (conflictOverlay.inboxVisible) {
+        ConflictInboxRoute(
+            onDismiss = { conflictOverlay = conflictOverlay.dismissInbox() },
+            onOpenConflict = { conflictId ->
+                conflictOverlay = conflictOverlay.openResolver(conflictId)
+            },
+        )
+    }
+
+    conflictOverlay.resolverConflictId?.let { conflictId ->
+        ConflictResolverRoute(
+            conflictId = conflictId,
+            onDismiss = { conflictOverlay = conflictOverlay.dismissResolver() },
+            onResolved = {
+                conflictOverlay = conflictOverlay.dismissResolver()
+                scope.launch { snackbar.showSnackbar("冲突已解决") }
+            },
         )
     }
 }

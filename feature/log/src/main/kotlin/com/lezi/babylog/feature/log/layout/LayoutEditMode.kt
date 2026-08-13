@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -464,7 +465,7 @@ internal fun LayoutEditCanvas(
         }
         val message = when (candidate.kind) {
             LayoutUndoKind.ClearSlot -> "已清空常用槽"
-            LayoutUndoKind.MoveToLocalDeleted -> "已移入本机已删除"
+            LayoutUndoKind.MoveToLocalDeleted -> LayoutEditPresentation.undoMovedToDeleted
         }
         // Indefinite + deadline dismiss keeps a stable wall-clock expiry across
         // configuration recreation instead of re-filling SnackbarDuration.Short.
@@ -511,40 +512,48 @@ internal fun LayoutEditCanvas(
             .semantics { contentDescription = "编辑布局，可拖动或使用操作重新排列" },
     ) {
         Column(Modifier.fillMaxSize()) {
-            // Editor-owned chrome. Root date chrome and primary tabs are hidden.
-            Row(
+            // Editor-owned chrome. Root date chrome and primary tabs are hidden,
+            // so this bar must own status-bar inset — same as LeziDetailTopBar.
+            Column(
                 Modifier
                     .fillMaxWidth()
-                    .heightIn(min = LeziSpacing.Touch)
-                    .padding(horizontal = LeziSpacing.Page, vertical = LeziSpacing.Xs),
-                verticalAlignment = Alignment.CenterVertically,
+                    .background(MaterialTheme.colorScheme.surface)
+                    .statusBarsPadding(),
             ) {
-                Text(
-                    text = LayoutEditPresentation.title,
-                    style = LeziTypography.Title,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("layout_edit_title"),
-                )
-                LeziTextButton(label = "帮助", onClick = onDragGuidanceHelp, modifier = Modifier
-                        .heightIn(min = LeziSpacing.Touch)
-                        .testTag("layout_edit_guidance_help")
-                        .semantics {
-                            onClick(label = "查看布局拖放帮助") {
-                                onDragGuidanceHelp()
-                                true
-                            }
-                        })
-                LeziTextButton(label = "完成", onClick = onDone, modifier = Modifier
-                        .heightIn(min = LeziSpacing.Touch)
-                        .testTag("layout_edit_done")
-                        .focusRequester(doneFocusRequester)
-                        .semantics {
-                            onClick(label = "完成并保存布局") {
-                                onDone()
-                                true
-                            }
-                        }, tone = LeziTextButtonTone.Primary)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(LeziSpacing.TopBarHeight)
+                        .padding(horizontal = LeziSpacing.Page),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = LayoutEditPresentation.title,
+                        style = LeziTypography.TitleSm,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("layout_edit_title"),
+                    )
+                    LeziTextButton(label = "帮助", onClick = onDragGuidanceHelp, modifier = Modifier
+                            .heightIn(min = LeziSpacing.Touch)
+                            .testTag("layout_edit_guidance_help")
+                            .semantics {
+                                onClick(label = "查看布局拖放帮助") {
+                                    onDragGuidanceHelp()
+                                    true
+                                }
+                            })
+                    LeziTextButton(label = "完成", onClick = onDone, modifier = Modifier
+                            .heightIn(min = LeziSpacing.Touch)
+                            .testTag("layout_edit_done")
+                            .focusRequester(doneFocusRequester)
+                            .semantics {
+                                onClick(label = "完成并保存布局") {
+                                    onDone()
+                                    true
+                                }
+                            }, tone = LeziTextButtonTone.Primary)
+                }
             }
             layoutWriteAnnouncement(prefs, writeState, hasSubmittedIntent)?.let { announcement ->
                 Text(
@@ -739,6 +748,7 @@ internal fun LayoutEditCanvas(
                     colorRole = d.colorRole ?: LeziRecordColorRole.Care,
                     contentDescription = "正在拖动${d.label}",
                     modifier = avatarModifier,
+                    transparentContainer = true,
                 )
             }
         }

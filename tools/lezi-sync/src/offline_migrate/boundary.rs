@@ -20,7 +20,7 @@
 #[cfg(test)]
 mod tests {
     use crate::offline_migrate::cli::{run, CliCommand};
-    use crate::offline_migrate::cutover::{cutover_maintenance_steps, COPY_BACK_RUNBOOK};
+    use crate::offline_migrate::cutover::COPY_BACK_RUNBOOK;
 
     const ADR_0013: &str =
         include_str!("../../../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md");
@@ -37,8 +37,8 @@ mod tests {
     #[test]
     fn adr_0013_states_maintenance_window_exception_not_startup_migration() {
         assert!(
-            ADR_0013.contains("维护窗") && ADR_0013.contains("maintenance-window"),
-            "must name maintenance window (zh + en term)"
+            ADR_0013.contains("维护窗") && ADR_0013.contains("H29"),
+            "must keep maintenance window behind H29"
         );
         assert!(
             ADR_0013.contains("offline-migrate"),
@@ -47,26 +47,23 @@ mod tests {
         assert!(
             ADR_0013.contains("不是")
                 && ADR_0013.contains("startup")
-                && ADR_0013.contains("自动 schema 迁移"),
+                && ADR_0013.contains("自动迁移"),
             "must deny server startup migration with distinctive phrasing"
         );
         assert!(
             ADR_0013.contains("fail closed") || ADR_0013.contains("fail-closed"),
             "must keep fail-closed language"
         );
-        assert!(
-            ADR_0013.contains("fresh-current"),
-            "must keep fresh-current language"
-        );
+        assert!(ADR_0013.contains("schema 13"), "must name current schema");
         // Architecture invariants (not a single ordered stop-then-migrate list)
         for needle in [
-            "显式 CLI",
-            "独立临时目标",
-            "验证后再切换",
-            "user_version=3",
-            "DATABASE_SCHEMA_VERSION",
-            "进程只开 current",
-            "停服仅属切割",
+            "源只读",
+            "user_version=11",
+            "`12`",
+            "原子 rename",
+            "server.secret",
+            "TLS",
+            "普通 CD",
         ] {
             assert!(
                 ADR_0013.contains(needle),
@@ -79,8 +76,8 @@ mod tests {
             "must forbid auto-migrate on startup"
         );
         assert!(
-            ADR_0013.contains("部分原地改写"),
-            "must forbid partial in-place rewrite"
+            ADR_0013.contains("ALTER"),
+            "must forbid source in-place rewrite"
         );
         // Require both "not startup" framing and ordinary-CD prohibition.
         assert!(
@@ -94,25 +91,26 @@ mod tests {
             "ordinary CD must not run offline-migrate"
         );
         assert!(
-            ADR_0013.contains("滚动") && ADR_0013.contains("兼容"),
-            "must deny rolling schema compatibility framing"
+            ADR_0013.contains("ordinary CD"),
+            "must deny ordinary deployment migration"
         );
     }
 
     #[test]
     fn adr_0013_prep_before_window_cutover_after_validate() {
-        // Phase split: offline prep vs maintenance-window cutover.
         assert!(
-            ADR_0013.contains("阶段 A")
-                && ADR_0013.contains("离线准备")
-                && ADR_0013.contains("维护窗前"),
-            "ADR-0013 must label offline prep as pre-window phase A"
+            ADR_0013.contains("dry-run")
+                && ADR_0013.contains("migrate")
+                && ADR_0013.contains("validate"),
+            "ADR-0013 must describe local preparation commands"
         );
         assert!(
-            ADR_0013.contains("阶段 B")
-                && ADR_0013.contains("维护窗切割")
-                && ADR_0013.contains("固定顺序，不得重排"),
-            "ADR-0013 must label cutover as phase B with fixed order only there"
+            ADR_0013.contains("H28")
+                && ADR_0013.contains("H29")
+                && ADR_0013.contains("只实现")
+                && ADR_0013.contains("schema-cutover.sh")
+                && ADR_0013.contains("copy-back"),
+            "ADR-0013 must separate local migration from cutover orchestration"
         );
         // migrate/dry-run/validate do not stop the live container (preconditions).
         assert!(
@@ -121,33 +119,8 @@ mod tests {
                 && ADR_0013.contains("validate")
                 && ADR_0013.contains("不")
                 && ADR_0013.contains("stop")
-                && ADR_0013.contains("现网容器"),
-            "must state migrate/dry-run/validate do not stop the live container"
-        );
-        // Fixed cutover steps begin at stop — machine labels from cutover module.
-        let steps = cutover_maintenance_steps();
-        assert_eq!(steps.len(), 5, "cutover fixed order is five steps");
-        assert!(
-            ADR_0013.contains("stop live container")
-                && ADR_0013.contains("confirm dual backup")
-                && ADR_0013.contains("copy-back upgraded")
-                && ADR_0013.contains("start current TLS deploy")
-                && ADR_0013.contains("health/ready by actual protocol"),
-            "ADR-0013 cutover phase must list runbook/cutover step labels"
-        );
-        // Must not claim a single fixed order that puts 停服 before migrate.
-        assert!(
-            !ADR_0013.contains("允许的唯一流水线（固定顺序，不得重排语义）"),
-            "must not use the old single fixed-order pipeline title that put stop before migrate"
-        );
-        // Opening: cutover in window; prep is before window.
-        assert!(
-            ADR_0013.contains("切割切换")
-                && ADR_0013.contains("已授权维护窗")
-                && ADR_0013.contains("离线准备")
-                && ADR_0013.contains("不")
-                && ADR_0013.contains("要求此时停服"),
-            "opening must confine stop/window to cutover, not whole CLI family"
+                && ADR_0013.contains("stop/rm"),
+            "local commands must not stop the live service"
         );
         // Runbook: preconditions before maintenance window; fixed order starts at stop.
         assert!(
@@ -159,45 +132,24 @@ mod tests {
     }
 
     #[test]
-    fn adr_0013_covers_secret_bind_backup_validate_and_departed_membership() {
+    fn adr_0013_covers_identity_media_backup_and_validation() {
         assert!(
-            ADR_0013.contains("LEZI_BOOTSTRAP_SECRET")
-                && ADR_0013.contains("LEZI_MIGRATE_NEW_ROOT_PASSWORD"),
-            "secret contract"
+            ADR_0013.contains("LEZI_MIGRATE_NEW_ROOT_PASSWORD") && ADR_0013.contains("不读取"),
+            "legacy password must not rotate identity"
         );
         assert!(
-            ADR_0013.contains("不得")
-                && ADR_0013.contains("打印")
-                && ADR_0013.contains("bootstrap")
-                && ADR_0013.contains("secret"),
-            "must forbid printing bootstrap/root secrets"
-        );
-        assert!(
-            ADR_0013.contains("Data bind") || ADR_0013.contains("data bind"),
-            "data bind"
-        );
-        assert!(ADR_0013.contains("10001"), "container uid on data bind");
-        assert!(
-            ADR_0013.contains("回滚") || ADR_0013.contains("rollback"),
-            "backup/rollback"
+            ADR_0013.contains("不得") && ADR_0013.contains("轮换身份"),
+            "must forbid identity rotation"
         );
         assert!(
             ADR_0013.contains("validate") && ADR_0013.contains("server.secret"),
             "target validation"
         );
         assert!(
-            ADR_0013.contains("Departed") || ADR_0013.contains("departed"),
-            "departed membership"
-        );
-        assert!(ADR_0013.contains("hard-delete"), "hard-delete disposition");
-        assert!(
-            ADR_0013.contains("anonymized_membership_refs") || ADR_0013.contains("匿名事实"),
-            "anonymized fact refs"
-        );
-        assert!(
-            ADR_0013.contains(COPY_BACK_RUNBOOK)
-                || ADR_0013.contains("copy-back-tls-cutover-runbook.md"),
-            "must link authoritative runbook (reuse cutover::COPY_BACK_RUNBOOK path)"
+            ADR_0013.contains("row count")
+                && ADR_0013.contains("integrity")
+                && ADR_0013.contains("media"),
+            "target validation must cover rows, database, and media"
         );
     }
 
@@ -280,8 +232,12 @@ mod tests {
             );
         }
         assert!(
-            text.contains("LEZI_MIGRATE_NEW_ROOT_PASSWORD"),
-            "password env documented"
+            text.contains("schema 11/12→13"),
+            "current source/target documented"
+        );
+        assert!(
+            text.contains("server.secret") && text.contains("TLS"),
+            "identity preservation documented"
         );
         assert!(
             text.contains(COPY_BACK_RUNBOOK) || text.contains("copy-back-tls-cutover-runbook.md"),
@@ -361,11 +317,10 @@ mod tests {
             "data-dir contract must use fresh-current (not only fresh-only)"
         );
         assert!(
-            LEZI_SYNC_README.contains("阶段 A")
-                && LEZI_SYNC_README.contains("阶段 B")
-                && LEZI_SYNC_README.contains("维护窗前")
-                && LEZI_SYNC_README.contains("维护窗切割"),
-            "README must mirror prep vs cutover phase split"
+            LEZI_SYNC_README.contains("11/12→13")
+                && LEZI_SYNC_README.contains("H29")
+                && LEZI_SYNC_README.contains("不 stop/copy-back/CD"),
+            "README must separate H28 local prep from H29 cutover"
         );
         assert!(
             LEZI_SYNC_README.contains("不是")
@@ -383,10 +338,8 @@ mod tests {
             "must link authoritative runbook"
         );
         assert!(
-            LEZI_SYNC_README.contains("departed")
-                || LEZI_SYNC_README.contains("Departed")
-                || LEZI_SYNC_README.contains("left_at"),
-            "ticket 14 disposition in README"
+            LEZI_SYNC_README.contains("server.secret") && LEZI_SYNC_README.contains("TLS pair"),
+            "README must state identity preservation"
         );
         assert!(
             LEZI_SYNC_README.contains("普通 CD")

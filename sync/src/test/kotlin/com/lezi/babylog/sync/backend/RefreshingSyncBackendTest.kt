@@ -25,7 +25,7 @@ class RefreshingSyncBackendTest {
 
         val download = async { backend.downloadAppUpdateApk(preferences.current()) }
         delegate.downloadStarted?.await()
-        val pull = async { backend.pull(preferences.current()) }
+        val pull = async { backend.pull(preferences.current(), testPullPage()) }
         runCurrent()
 
         assertThat(pull.isCompleted).isTrue()
@@ -40,7 +40,7 @@ class RefreshingSyncBackendTest {
         val delegate = RefreshRecordingBackend()
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val result = backend.pull(preferences.current())
+        val result = backend.pull(preferences.current(), testPullPage())
 
         assertThat(result.cursor).isEqualTo(7)
         assertThat(delegate.refreshTokens).containsExactly("refresh-old")
@@ -59,12 +59,12 @@ class RefreshingSyncBackendTest {
         assertThat(
             runCatching {
                 RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
-                    .pull(preferences.current())
+                    .pull(preferences.current(), testPullPage())
             }.isFailure,
         ).isTrue()
 
         RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
-            .pull(preferences.current())
+            .pull(preferences.current(), testPullPage())
 
         assertThat(delegate.refreshTokens).containsExactly("refresh-old", "refresh-old").inOrder()
         assertThat(delegate.refreshRequestIds).hasSize(2)
@@ -79,7 +79,7 @@ class RefreshingSyncBackendTest {
         val delegate = RefreshRecordingBackend().apply { failFirstPullWith401 = true }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        backend.pull(preferences.current())
+        backend.pull(preferences.current(), testPullPage())
 
         assertThat(delegate.refreshTokens).containsExactly("refresh-old")
         assertThat(delegate.pullTokens).containsExactly("access-old", "access-new").inOrder()
@@ -140,7 +140,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(ReauthRequiredException::class.java)
         val retained = preferences.current()
@@ -166,7 +166,7 @@ class RefreshingSyncBackendTest {
         val delegate = RefreshRecordingBackend()
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(ReauthRequiredException::class.java)
         assertThat(delegate.refreshTokens).isEmpty()
@@ -184,7 +184,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(SyncHttpException::class.java)
         assertThat(preferences.current().reauthRequired).isFalse()
@@ -204,7 +204,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(RemoteDeviceRemovedException::class.java)
         assertThat(preferences.current()).isEqualTo(original)
@@ -223,7 +223,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(RemoteDeviceRemovedException::class.java)
         assertThat(delegate.refreshTokens).isEmpty()
@@ -242,7 +242,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(RemoteMembershipDeletedException::class.java)
         assertThat(preferences.current()).isEqualTo(original)
@@ -261,7 +261,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(RemoteMembershipDeletedException::class.java)
         assertThat(delegate.refreshTokens).isEmpty()
@@ -280,7 +280,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(RemoteFamilyDeletedException::class.java)
         assertThat(preferences.current()).isEqualTo(original)
@@ -299,7 +299,7 @@ class RefreshingSyncBackendTest {
         }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(original) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(original, testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(RemoteFamilyDeletedException::class.java)
         assertThat(delegate.refreshTokens).isEmpty()
@@ -312,7 +312,7 @@ class RefreshingSyncBackendTest {
         val delegate = RefreshRecordingBackend().apply { alwaysFailPullWith401 = true }
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
-        val failure = runCatching { backend.pull(preferences.current()) }.exceptionOrNull()
+        val failure = runCatching { backend.pull(preferences.current(), testPullPage()) }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(ReauthRequiredException::class.java)
         assertThat(delegate.refreshTokens).containsExactly("refresh-old")
@@ -416,7 +416,7 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
         return refresh(endpoint.origin, refreshToken)
     }
 
-    override suspend fun pull(session: SyncSession): PullResult {
+    override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
         pullTokens += session.accessToken
         pullFailure?.let { throw it }
         if (alwaysFailPullWith401 || (failFirstPullWith401 && pullTokens.size == 1)) {

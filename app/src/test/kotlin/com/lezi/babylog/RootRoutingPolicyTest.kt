@@ -7,8 +7,26 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
 
 class RootRoutingPolicyTest {
+    @Test
+    fun timelineCommitAndExternalSelectionShareOneDeduplicatedRootOwner() {
+        val today = LocalDate.of(2026, 8, 8)
+        val persisted = mutableListOf<LocalDate>()
+        val owner = RootSelectedDateOwner(today, today, persisted::add)
+
+        val timelineDay = today.minusDays(2)
+        assertTrue(owner.select(timelineDay, today))
+        assertEquals(timelineDay, owner.selectedDate.value)
+        assertFalse(owner.select(timelineDay, today))
+
+        val topBarDay = today.minusDays(1)
+        assertTrue(owner.select(topBarDay, today))
+        assertEquals(topBarDay, owner.selectedDate.value)
+        assertEquals(listOf(today, timelineDay, topBarDay), persisted)
+    }
+
     @Test
     fun joinedMemberWithoutAuthorityBabyUsesFamilyShellInsteadOfOnboarding() {
         assertFalse(shouldShowOnboarding(hasBaby = false, familyRole = FamilyRole.Member))

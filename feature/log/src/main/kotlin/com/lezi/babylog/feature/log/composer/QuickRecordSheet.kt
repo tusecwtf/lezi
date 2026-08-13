@@ -41,7 +41,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -50,7 +49,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.ui.CameraCapture
+import com.lezi.babylog.core.ui.CameraCaptureLauncher
+import com.lezi.babylog.core.ui.CameraCaptureOutcome
+import com.lezi.babylog.core.ui.rememberCameraCaptureLauncher
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.model.RecordTime
@@ -110,7 +111,14 @@ internal fun QuickRecordSheet(
     onConfirm: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
     onImportPhotos: (List<android.net.Uri>) -> Unit,
+    onImportCapturedPhoto: (android.net.Uri, (Boolean) -> Unit) -> Unit,
     onRemovePhoto: (String) -> Unit,
+    cameraCaptureLauncherFactory: @Composable (
+        ownershipKey: Any?,
+        onOutcome: (CameraCaptureOutcome) -> Unit,
+    ) -> CameraCaptureLauncher = { key, onOutcome ->
+        rememberCameraCaptureLauncher(key, onOutcome)
+    },
 ) {
     val zone = ZoneId.systemDefault()
     val typeColor = leziRecordColor(draft.type.presentation.colorRole)
@@ -138,59 +146,33 @@ internal fun QuickRecordSheet(
         mutableStateOf(ComposerConfirmChromeState())
     }
     val fieldFocusRequester = remember(interactionKey) { FocusRequester() }
-    val context = LocalContext.current
     var photoActionError by remember(interactionKey) { mutableStateOf<String?>(null) }
-    var pendingCameraUri by remember(interactionKey) { mutableStateOf<Uri?>(null) }
     var previewPhotoIndex by remember(interactionKey) { mutableStateOf<Int?>(null) }
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(MAX_RECORD_PHOTOS),
         onImportPhotos,
     )
-    val takePicture = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicture(),
-    ) { success ->
-        val uri = pendingCameraUri
-        pendingCameraUri = null
-        if (success && uri != null) {
-            onImportPhotos(listOf(uri))
-        }
-    }
-    val cameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (!granted) {
-            photoActionError = "需要相机权限才能拍照，请在系统设置中开启"
-            return@rememberLauncherForActivityResult
-        }
-        if (!CameraCapture.hasCameraHardware(context)) {
-            photoActionError = "此设备没有可用相机"
-            return@rememberLauncherForActivityResult
-        }
-        runCatching {
-            val uri = CameraCapture.createOutputUri(context)
-            pendingCameraUri = uri
-            takePicture.launch(uri)
-        }.onFailure {
-            photoActionError = "无法打开相机，请稍后重试"
+    lateinit var cameraCapture: CameraCaptureLauncher
+    cameraCapture = cameraCaptureLauncherFactory(interactionKey) { outcome ->
+        when (outcome) {
+            is CameraCaptureOutcome.Captured -> {
+                val capture = outcome.capture
+                onImportCapturedPhoto(capture.uri) { imported ->
+                    capture.release()
+                    if (!imported) photoActionError = "图片导入失败，请重新拍照或从相册选择"
+                }
+            }
+            CameraCaptureOutcome.Cancelled -> Unit
+            CameraCaptureOutcome.PermissionDenied -> {
+                photoActionError = "需要相机权限才能拍照，请在系统设置中开启"
+            }
+            CameraCaptureOutcome.NoCamera -> photoActionError = "此设备没有可用相机"
+            CameraCaptureOutcome.LaunchFailed -> photoActionError = "无法打开相机，请稍后重试"
         }
     }
     fun launchCameraCapture() {
         photoActionError = null
-        if (!CameraCapture.hasCameraHardware(context)) {
-            photoActionError = "此设备没有可用相机"
-            return
-        }
-        if (CameraCapture.hasPermission(context)) {
-            runCatching {
-                val uri = CameraCapture.createOutputUri(context)
-                pendingCameraUri = uri
-                takePicture.launch(uri)
-            }.onFailure {
-                photoActionError = "无法打开相机，请稍后重试"
-            }
-        } else {
-            cameraPermission.launch(CameraCapture.PERMISSION)
-        }
+        cameraCapture.launch()
     }
     val isIntervalMode = draft.mode == QuickRecordMode.Sleep
     val visibleIntervalPreview = draft.visibleIntervalDurationPreview(

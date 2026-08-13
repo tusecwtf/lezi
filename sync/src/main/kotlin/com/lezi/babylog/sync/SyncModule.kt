@@ -18,7 +18,11 @@ import com.lezi.babylog.sync.appupdate.LOCAL_DATA_CONTRACT_VERSION_METADATA
 import com.lezi.babylog.sync.backend.HttpSyncBackend
 import com.lezi.babylog.sync.backend.RefreshingSyncBackend
 import com.lezi.babylog.sync.backend.SyncBackend
+import com.lezi.babylog.sync.backend.retry.withForegroundRetryPolicy
 import com.lezi.babylog.sync.media.AndroidSyncMediaFileStore
+import com.lezi.babylog.sync.media.CausalMediaPolicy
+import com.lezi.babylog.sync.media.FileImmutableMediaSpool
+import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.media.SyncMediaFileStore
 import com.lezi.babylog.sync.session.DataStoreSyncPreferences
 import com.lezi.babylog.sync.session.EncryptedSecureRefreshTokenStore
@@ -58,11 +62,40 @@ abstract class SyncModule {
             preferences: SyncPreferences,
             clock: PolicyClock,
         ): SyncBackend = RefreshingSyncBackend(http, preferences, clock)
+            .withForegroundRetryPolicy()
 
         @Provides
         @Singleton
         @Named("appUpdateCacheDir")
         fun appUpdateCacheDir(@ApplicationContext context: Context): File = context.cacheDir
+
+        @Provides
+        @Singleton
+        @Named("causalMediaSpoolDir")
+        fun causalMediaSpoolDir(@ApplicationContext context: Context): File =
+            File(context.filesDir, "causal-media-spool")
+
+        @Provides
+        @Singleton
+        fun immutableMediaSpool(
+            mediaFiles: SyncMediaFileStore,
+            @Named("causalMediaSpoolDir") root: File,
+            @Named("causalMediaSpoolCapacityBytes") capacityBytes: Long,
+            @Named("causalMediaSpoolSlotReservationBytes") slotReservationBytes: Long,
+        ): ImmutableMediaSpool = FileImmutableMediaSpool(
+            mediaFiles = mediaFiles,
+            root = root,
+            capacityBytes = capacityBytes,
+            slotReservationBytes = slotReservationBytes,
+        )
+
+        @Provides
+        @Named("causalMediaSpoolCapacityBytes")
+        fun causalMediaSpoolCapacityBytes(): Long = 512L * 1024L * 1024L
+
+        @Provides
+        @Named("causalMediaSpoolSlotReservationBytes")
+        fun causalMediaSpoolSlotReservationBytes(): Long = CausalMediaPolicy.maxSpoolSlotBytes
 
         @Provides
         @Singleton

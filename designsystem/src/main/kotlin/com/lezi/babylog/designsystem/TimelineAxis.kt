@@ -73,7 +73,7 @@ object TimelineAxis {
 
     /**
      * Minutes of each neighbor day shown beside primary day D in the default
-     * (non-gesture) viewport. Shared so dimming, now-centering, and pan clamps
+     * (non-gesture) viewport. Shared so dimming and generic preview clamps
      * do not invent divergent peeks.
      */
     const val NEIGHBOR_PEEK_MINUTES: Int = 90
@@ -88,11 +88,7 @@ object TimelineAxis {
     /** Content-minute where primary day D ends / D+1 starts. */
     const val PRIMARY_DAY_END_MINUTES: Int = PRIMARY_DAY_START_MINUTES + MINUTES_PER_DAY
 
-    /**
-     * Default viewport left edge for non-today days: slightly before D 00:00
-     * so both neighbors peek. Today re-centers on wall-clock now via
-     * [todayCenteredViewportStartMinutes].
-     */
+    /** Generic preview left edge: slightly before D 00:00 so both neighbors peek. */
     fun defaultViewportStartMinutes(
         peekMinutes: Int = NEIGHBOR_PEEK_MINUTES,
     ): Int = (PRIMARY_DAY_START_MINUTES - peekMinutes).coerceAtLeast(0)
@@ -146,23 +142,6 @@ object TimelineAxis {
     ): Int? {
         if (nowMs < windowStartMs || nowMs >= windowEndMs) return null
         return ((nowMs - windowStartMs) / 60_000L).toInt()
-    }
-
-    /**
-     * Viewport start that centers [nowContentMinute] in the visible span,
-     * clamped so the full viewport stays inside content (no blank outside).
-     */
-    fun todayCenteredViewportStartMinutes(
-        nowContentMinute: Int,
-        viewportDurationMinutes: Int = DEFAULT_VIEWPORT_MINUTES,
-        contentDurationMinutes: Int = THREE_DAY_CONTENT_MINUTES,
-    ): Int {
-        val idealStart = nowContentMinute - viewportDurationMinutes / 2
-        return clampViewportStart(
-            startMinutes = idealStart,
-            viewportDurationMinutes = viewportDurationMinutes,
-            contentDurationMinutes = contentDurationMinutes,
-        )
     }
 
     /**

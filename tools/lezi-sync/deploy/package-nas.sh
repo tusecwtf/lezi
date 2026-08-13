@@ -229,6 +229,10 @@ validate_and_stage_app_update() {
     echo "error: unable to read release APK manifest" >&2
     exit 1
   fi
+  # Current-ledger local-data contract is a 0.4.0 target invariant. Attested
+  # rollback APKs (0.3.12/0.3.13) predate that metadata and must still pack
+  # with current helpers; they keep signer, identity, and metadata-hash gates.
+  if [[ "${version}" == "0.4.0" ]]; then
   if ! contract_values="$(
     python3 - "${local_data_contract_json}" "${manifest_file}" <<'PY'
 import json, re, sys
@@ -289,6 +293,17 @@ PY
   )"; then
     rm -f -- "${manifest_file}"
     exit 1
+  fi
+  else
+    case "${version}" in
+      0.3.12|0.3.13) ;;
+      *)
+        echo "error: local-data contract skip is only for attested 0.3.12/0.3.13 rollback APKs" >&2
+        rm -f -- "${manifest_file}"
+        exit 1
+        ;;
+    esac
+    contract_values=$'rollback\nsource'
   fi
   if ! apk_identity="$(
     python3 - "${manifest_file}" <<'PY'
@@ -402,6 +417,11 @@ PY
     echo "  apk:      ${apk_version_name}" >&2
     exit 1
   fi
+  if [[ "${version_name}" != "${version}" ]]; then
+    echo "error: app-update version_name must match the package version ${version}" >&2
+    echo "  metadata: ${version_name}" >&2
+    exit 1
+  fi
   if [[ "${meta_sha}" != "${apk_sha}" ]]; then
     echo "error: app-update.json sha256 does not match release APK" >&2
     echo "  metadata: ${meta_sha}" >&2
@@ -459,14 +479,7 @@ if ! docker image inspect "${image}" >/dev/null 2>&1; then
   fi
 fi
 
-image_id="$(
-  docker image inspect "${image}" \
-    --format '{{index .Descriptor.Annotations "config.digest"}}'
-)"
-if [[ ! "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "error: docker returned an invalid or incomplete config digest for ${image}" >&2
-  exit 1
-fi
+image_id="$("${SCRIPT_DIR}/image-config-digest.sh" "${image}")"
 image_os="$(docker image inspect "${image}" --format '{{.Os}}')"
 image_architecture="$(docker image inspect "${image}" --format '{{.Architecture}}')"
 if [[ "${image_os}" != "linux" || "${image_architecture}" != "amd64" ]]; then
@@ -495,6 +508,8 @@ cp -a "${SCRIPT_DIR}/.env.example" "${out_root}/.env.example"
 cp -a "${SCRIPT_DIR}/credential-deploy-lock.sh" "${out_root}/credential-deploy-lock.sh"
 cp -a "${SCRIPT_DIR}/docker-compose.nas.yml.tpl" "${out_root}/docker-compose.nas.yml.tpl"
 cp -a "${SCRIPT_DIR}/remote-deploy.sh" "${out_root}/remote-deploy.sh"
+cp -a "${SCRIPT_DIR}/schema-cutover.sh" "${out_root}/schema-cutover.sh"
+cp -a "${SCRIPT_DIR}/schema-cutover-steps.sh" "${out_root}/schema-cutover-steps.sh"
 cp -a "${SCRIPT_DIR}/export-nas-credentials.sh" "${out_root}/export-nas-credentials.sh"
 cp -a "${SCRIPT_DIR}/init-tls.sh" "${out_root}/init-tls.sh"
 cp -a "${SCRIPT_DIR}/promote-nas-package.sh" "${out_root}/promote-nas-package.sh"
@@ -503,6 +518,8 @@ cp -a "${SCRIPT_DIR}/tls-spki.sh" "${out_root}/tls-spki.sh"
 cp -a "${SCRIPT_DIR}/validate-nas-package.sh" "${out_root}/validate-nas-package.sh"
 cp -a "${SCRIPT_DIR}/DEPLOY.md" "${out_root}/DEPLOY.md"
 chmod +x "${out_root}/remote-deploy.sh"
+chmod +x "${out_root}/schema-cutover.sh"
+chmod +x "${out_root}/schema-cutover-steps.sh"
 chmod +x "${out_root}/credential-deploy-lock.sh"
 chmod +x "${out_root}/export-nas-credentials.sh"
 chmod +x "${out_root}/init-tls.sh"
@@ -513,6 +530,48 @@ chmod +x "${out_root}/validate-nas-package.sh"
 git_sha="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 apk_sha="$(sha256sum "${out_root}/app-update/app-release.apk" | awk '{print $1}')"
+package_android_version_code="$({ sed -nE 's/^[[:space:]]*"version_code"[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*,?[[:space:]]*$/\1/p' "${out_root}/app-update/app-update.json"; } | head -1)"
+package_min_supported_version_code="$({ sed -nE 's/^[[:space:]]*"min_supported_version_code"[[:space:]]*:[[:space:]]*([0-9]+)[[:space:]]*,?[[:space:]]*$/\1/p' "${out_root}/app-update/app-update.json"; } | head -1)"
+attested_cutover_source() {
+  case "$1:$2" in
+    0.3.12:11|0.3.13:12) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+case "${version}" in
+  0.4.0)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-13}"
+    rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-0.3.13}"
+    rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-12}"
+    attested_cutover_source "${rollback_source_version}" "${rollback_source_server_schema}" \
+      || {
+        echo "error: 0.4.0 rollback source must be 0.3.12/schema 11 or 0.3.13/schema 12" >&2
+        exit 1
+      }
+    ;;
+  0.3.13)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-12}"
+    rollback_source_version="0.3.13"
+    rollback_source_server_schema="12"
+    ;;
+  0.3.12)
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA:-11}"
+    rollback_source_version="0.3.12"
+    rollback_source_server_schema="11"
+    ;;
+  *)
+    [[ -n "${LEZI_PACKAGE_SERVER_SCHEMA:-}" \
+        && -n "${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION:-}" \
+        && -n "${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA:-}" ]] || {
+      echo "error: unknown releases must explicitly declare server schema and rollback source identity" >&2
+      exit 1
+    }
+    package_server_schema="${LEZI_PACKAGE_SERVER_SCHEMA}"
+    rollback_source_version="${LEZI_PACKAGE_ROLLBACK_SOURCE_VERSION}"
+    rollback_source_server_schema="${LEZI_PACKAGE_ROLLBACK_SOURCE_SERVER_SCHEMA}"
+    ;;
+esac
 
 cat > "${out_root}/MANIFEST.json" <<EOF
 {
@@ -523,6 +582,11 @@ cat > "${out_root}/MANIFEST.json" <<EOF
   "platform": "${platform}",
   "os": "${image_os}",
   "architecture": "${image_architecture}",
+  "server_schema": "${package_server_schema}",
+  "android_version_code": "${package_android_version_code}",
+  "minimum_supported_version_code": "${package_min_supported_version_code}",
+  "rollback_source_version": "${rollback_source_version}",
+  "rollback_source_server_schema": "${rollback_source_server_schema}",
   "apk_signer_certificate_sha256": "${expected_signer_sha256}",
   "tar": "${tar_name}",
   "data_host_path": "${data_host_path}",
@@ -546,6 +610,7 @@ EOF
     credential-deploy-lock.sh docker-compose.nas.yml.tpl docker-compose.yml \
     export-nas-credentials.sh init-tls.sh \
     "${tar_name}" promote-nas-package.sh remote-deploy.sh \
+    schema-cutover.sh schema-cutover-steps.sh \
     tls-certificate-sha256.sh tls-spki.sh \
     validate-nas-package.sh \
     > SHA256SUMS

@@ -1,4 +1,6 @@
 package com.lezi.babylog.domain.localdata
+
+import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
@@ -10,6 +12,12 @@ import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.MediaReferenceDao
+import com.lezi.babylog.core.database.causal.SourceRelationDao
+import com.lezi.babylog.core.database.causal.SuspectedDuplicateGroupDao
+import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.LocalClearWorkflow
@@ -82,6 +90,12 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
     private val familyDao: FamilyDao,
     private val membershipDao: MembershipDao,
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val wakeObservationDao: WakeObservationDao,
+    private val conflictSummaryDao: ConflictSummaryDao,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
+    private val suspectedDuplicateGroupDao: SuspectedDuplicateGroupDao,
+    private val sourceRelationDao: SourceRelationDao,
+    private val mediaReferenceDao: MediaReferenceDao,
     private val pendingReminderCleanupStore: PendingReminderCleanupStore,
     private val transactionRunner: DatabaseTransactionRunner,
 ) : LocalDataClearPersistence {
@@ -106,12 +120,23 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         recordDao.deleteAll()
         fulfillmentCandidateDao.deleteAll()
         carePlanDao.deleteAll()
+        // Room 27 causal care graph: always leave with records/plans.
+        wakeObservationDao.deleteAll()
+        conflictSummaryDao.deleteAll()
+        conflictSnapshotCacheDao.deleteAll()
+        conflictSnapshotCacheDao.deleteAllTransportJournals()
+        suspectedDuplicateGroupDao.deleteAll()
+        sourceRelationDao.deleteAllMembers()
+        sourceRelationDao.deleteAllDeclarations()
+        sourceRelationDao.deleteAll()
+        mediaReferenceDao.deleteForLogAndWakeMedia()
         if (scope == LocalDataClearScope.AllLocalData) {
             customItemDao.deleteAll()
             babyDao.deleteAll()
             membershipDao.deleteAll()
             familyDao.deleteAll()
             localUserDao.deleteAll()
+            mediaReferenceDao.deleteAll()
         }
         pendingReminderCleanupStore.upsert(
             PendingReminderCleanup(
@@ -345,14 +370,6 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
         throw failure
     }
 
-    private fun Throwable.cancellationCauseOrNull(): CancellationException? {
-        var current: Throwable? = this
-        while (current != null) {
-            if (current is CancellationException) return current
-            current = current.cause
-        }
-        return null
-    }
 }
 
 private data class PendingLocalClearFinish(

@@ -1,7 +1,7 @@
 # 乐记（lezi）
 
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.8`
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.9`
 
 产品规格：[`docs/prd/`](docs/prd/) · 领域术语：[`CONTEXT.md`](CONTEXT.md) · 文档索引：[`docs/README.md`](docs/README.md) · 安全：[`SECURITY.md`](SECURITY.md)
 许可：[MIT](LICENSE) · 贡献 / PR：[`CONTRIBUTING.md`](CONTRIBUTING.md)
@@ -165,7 +165,8 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)。
 
 **邀请首装**：启用 `LEZI_LAN_APK_DOWNLOAD_ORIGIN` 后，同一成员登录 QR 可被系统相机打开到
-独立 8767 安装页；页面匿名提供同一个已校验 Release APK，安装后仍须回到乐记重扫二维码。
+独立 8767 安装页；页面匿名提供同一个已校验 Release APK。首次安装后须回到乐记重扫二维码；
+历史正式版本原地升级会保留本机数据与家庭配置，不因同步最低版本门禁失去下载出口。
 8767 不提供家庭 API，并且只允许可信家庭 LAN；明文链路的页面/APK 替换与 grant 盗用风险见
 [ADR-0015](docs/adr/0015-isolate-lan-invite-install-distribution.md)。
 
@@ -189,11 +190,14 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 在替换前强制生成新的凭据密文备份。pre-TLS/schema 切割回滚是例外，不能用当前 TLS harness；
 其权威 runbook 当前明确把尚未提供的可执行 exact-recreation helper 作为开窗 blocker。
 
-**离线 v3→current 切割（`offline-migrate`）**：仅已授权**维护窗**使用的离线切割 CLI，
+**离线 schema 11/12→13 准备（`offline-migrate`）**：开发机上的显式只读 copy-out CLI，
 **不是**服务启动自动迁移，也**不**构成一般滚动 schema 兼容。日常 NAS 仍
 fresh-current / fail-closed（[ADR-0008](docs/adr/0008-support-only-fresh-current-product-contracts.md)）；
 边界见 [ADR-0013](docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)。
-**普通 CD 不执行**该子命令。权威步骤：
+**普通 CD 不执行**该子命令；schema 13 只由 H29 的独立、显式授权
+`tools/lezi-sync/deploy/schema-cutover.sh` 编排。H30 已在回环 Docker 与临时数据根完成 schema
+11/12 的成功和八阶段 rollback rehearsal；该证据不构成生产授权。release ticket 09 的重新
+确认仍是生产维护窗前置门。权威边界：
 [`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)；
 摘要：[`tools/lezi-sync/README.md`](tools/lezi-sync/README.md) § 离线切割、
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md) § offline-migrate。

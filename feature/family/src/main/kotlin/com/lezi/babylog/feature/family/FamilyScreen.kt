@@ -1,7 +1,5 @@
 package com.lezi.babylog.feature.family
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -22,10 +20,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
-import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardState
@@ -72,8 +68,8 @@ import com.lezi.babylog.feature.family.wizard.FamilyEndpointConnectionDialog
 import com.lezi.babylog.feature.family.wizard.FamilyJoinRoleDialog
 import com.lezi.babylog.feature.family.wizard.FamilyVerifiedEndpointDialog
 import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
-import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
 import com.lezi.babylog.feature.family.wizard.MemberLoginRequestDialog
+import com.lezi.babylog.feature.family.wizard.rememberFamilyMemberLoginQrScanAction
 import com.lezi.babylog.feature.family.wizard.memberApprovalRequestForDisplay
 import com.lezi.babylog.feature.family.wizard.OwnerLoginDialog
 import com.lezi.babylog.feature.family.wizard.OwnerTakeoverConfirmationDialog
@@ -85,7 +81,6 @@ import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
-import com.lezi.babylog.sync.qr.MemberLoginQrContentCodec
 import com.lezi.babylog.sync.session.defaultAndroidDeviceName
 import com.lezi.babylog.sync.session.requireDeviceName
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
@@ -107,6 +102,7 @@ private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
  */
 @Composable
 fun FamilyRoute(
+    onOpenConflictInbox: () -> Unit = {},
     overviewHost: AccountOverviewHost = hiltViewModel(),
     membersHost: MembersDevicesHost = hiltViewModel(),
     wizardHost: AccountFamilyWizardHost = hiltViewModel(),
@@ -265,49 +261,14 @@ fun FamilyRoute(
         dialog = FamilyDialog.ConnectEndpoint
     }
 
-    fun applyScannedMemberLogin(raw: String) {
-        val payload = raw.trim()
-        if (payload.isEmpty()) return
-        val memberLogin = runCatching { MemberLoginQrContentCodec.decode(payload).payload }.getOrNull()
-        if (memberLogin != null) {
-            if (System.currentTimeMillis() / 1_000 >= memberLogin.expiresAtEpochSeconds) {
-                showMessage("这个二维码已失效，请让管理员重新生成")
-                return
-            }
+    val launchMemberLoginQrScan = rememberFamilyMemberLoginQrScanAction(
+        onReady = { memberLogin ->
             memberQrDeviceName = defaultAndroidDeviceName(context)
             dialog = null
             wizardHost.verifyMemberLoginQr(memberLogin)
-            return
-        }
-        showMessage("这不是可用的成员登录二维码")
-    }
-    val scanMemberLogin = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let(::applyScannedMemberLogin)
-    }
-    fun launchMemberLoginScan() {
-        if (!CameraCapture.hasCameraHardware(context)) {
-            showMessage("此设备没有可用相机，请使用家庭服务器地址手动申请加入", dialog)
-            return
-        }
-        scanMemberLogin.launch(
-            ScanOptions()
-                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("扫描成员登录二维码")
-                .setBeepEnabled(false)
-                .setOrientationLocked(false)
-                .setBarcodeImageEnabled(false),
-        )
-    }
-    val scanCameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) launchMemberLoginScan()
-        else showMessage("需要相机权限才能扫码，请在系统设置中开启", dialog)
-    }
-    fun scanWithPermission() {
-        if (CameraCapture.hasPermission(context)) launchMemberLoginScan()
-        else scanCameraPermission.launch(CameraCapture.PERMISSION)
-    }
+        },
+        onMessage = { showMessage(it, dialog) },
+    )
 
     val endpointConfigured = remember(endpointSeed.serverHost, endpointSeed.baseUrl) {
         isEndpointConfigured(endpointSeed.serverHost, endpointSeed.baseUrl)
@@ -456,6 +417,7 @@ fun FamilyRoute(
                         connect = ::openEndpointConnection,
                         openOptionalAppUpdate = overviewHost::openOptionalAppUpdate,
                         dismissOptionalAppUpdate = overviewHost::dismissOptionalAppUpdate,
+                        openConflictInbox = onOpenConflictInbox,
                     ),
                     bottomActions = AccountBottomActions(
                         openNetworkSettings = { showNetworkSettings = true },
@@ -734,7 +696,7 @@ fun FamilyRoute(
                     joinRoleName = FamilyWizardJoinRole.Member.name
                     showWizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
                 },
-                onScanMemberLoginQr = ::scanWithPermission,
+                onScanMemberLoginQr = launchMemberLoginQrScan,
                 onBackToEndpoint = {
                     showWizard(FamilyWizardMode.Join, FamilyWizardStep.Endpoint)
                 },
@@ -1307,7 +1269,7 @@ fun FamilyRoute(
     val memberLoginQrModel = projectMemberLoginQrDialog(familyWizardState)
     if (!showNetworkSettings && memberLoginQrModel != null) {
         val payload = memberLoginQrModel.payload
-        MemberLoginQrConfirmDialog(
+        MemberLoginQrConfirmSurface(
             familyName = memberLoginQrModel.display.familyName,
             memberDisplayName = memberLoginQrModel.display.memberDisplayName,
             deviceName = memberQrDeviceName,

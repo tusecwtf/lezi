@@ -116,7 +116,7 @@ ol{{padding-left:1.4rem;line-height:1.8}}.hint{{font-size:.92rem;color:#74645b}}
 {notes}
 <a class="download" href="/download/lezi.apk" download>下载 APK</a>
 <h2>安装步骤</h2>
-<ol><li>下载完成后打开 APK，并按系统提示允许本次安装。</li><li>安装完成后打开乐记。</li><li>请用乐记重新扫描同一个邀请二维码完成加入。</li></ol>
+<ol><li>下载完成后打开 APK，并按系统提示允许本次安装。</li><li>安装完成后打开乐记。</li><li>原地升级会保留本机记录和家庭配置；仅首次安装的设备需要回到乐记重新扫描邀请二维码。</li></ol>
 <p class="hint">邀请二维码有效期为 10 分钟；若已超时，请管理员重新生成。</p>
 </main></body>
 </html>"#,

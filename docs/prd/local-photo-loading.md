@@ -37,6 +37,22 @@
   Composer 只有拿到完整成功结果后才更新草稿，因此旧草稿保持不变并可重试。
 - 超限、不支持、伪装或损坏输入统一转成可理解的导入错误，不让异常终止 Composer 进程。
 
+### 相机捕获源 ownership
+
+App 内拍照不把 `TakePicture` 输出当作普通外部 Uri。`core:ui` 为每次拍照以 exclusive create
+在 `cache/camera/` 建立 `capture_<UUID>.jpg`，并向 feature shell 返回带 opaque token、Uri 与
+幂等 `release` 的 owned lease。Create/Edit 宝宝头像与 Record Composer 只消费 typed outcome，
+不得复制 permission、硬件检查、文件创建或取消清理状态机。
+
+- `TakePicture=false`、launcher error、照片替换、dialog dismiss 与非配置变更的 composition dispose
+  都释放当前 owned source；删除失败不得让 UI 崩溃，失去活动 lease 的文件交给后续有界 GC 重试。
+- Record Composer 仅在导入文件已经持久写入并成功挂到当前草稿后回调成功，再释放 capture source；
+  导入失败或被 supersede 时回调失败并显式回收 source。头像在裁剪产出 JPEG bytes 后释放原图。
+- pending token 使用 saveable state；配置变更先放弃进程内 lease，新 composition 必须先 recover token
+  再执行 orphan collection。无 consumer 且超过 24 小时的文件才可 GC。
+- release/GC 只接受 Module 生成的规范 UUID 文件名，并要求目标仍是 camera cache canonical root 下的
+  ordinary file；路径逃逸、symlink、目录与 Photo Picker/content-provider Uri 永不删除。
+
 ## 调度、取消与生命周期
 
 - inspect、sampled decode 和方向变换都在最多两路并行的 `Dispatchers.IO` 视图执行，不占主线程。

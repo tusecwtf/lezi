@@ -10,6 +10,9 @@ import org.junit.Test
  * wrong primitives inside wrapper hosts fail the suite.
  *
  * Tests observe the scanner API and shipped sources — not private Compose trees.
+ *
+ * Restored as REWRITE after test-redundancy Wave 1 (intentional chrome policy gate,
+ * not a product-less StructureTest). Pair: [DesignsystemSourceFixtures].
  */
 class BareMaterialWhitelistContractTest {
 

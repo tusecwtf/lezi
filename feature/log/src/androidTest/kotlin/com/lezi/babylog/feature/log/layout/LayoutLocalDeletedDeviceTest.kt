@@ -50,13 +50,10 @@ class LayoutLocalDeletedDeviceTest {
     fun emptyPartitionExplainsLocalOnlyRecoveryMeaning() {
         showEditor(basePrefs)
 
-        composeRule.onNodeWithText("本机已删除 · 0 项").assertIsDisplayed()
-        composeRule.onNodeWithText("暂无已隐藏项目").assertIsDisplayed()
+        composeRule.onNodeWithText(LayoutEditPresentation.localDeletedHeading(0)).assertIsDisplayed()
+        composeRule.onNodeWithText(LayoutEditPresentation.localDeletedEmpty).assertIsDisplayed()
         composeRule.onNodeWithTag("layout_edit_local_deleted")
-            .assertContentDescriptionEquals(
-                "本机已删除，0 项。这里只隐藏本机入口，不删除历史记录或自定义项目。" +
-                    "可对项目使用恢复操作或长按拖出，恢复到所属类别末尾；不会自动回填常用槽。",
-            )
+            .assertContentDescriptionEquals(LayoutEditPresentation.localDeletedDescription(0))
     }
 
     @Test
@@ -91,8 +88,9 @@ class LayoutLocalDeletedDeviceTest {
             fontScale = 1.5f,
         )
 
-        composeRule.onNodeWithText("本机已删除 · ${known.size} 项").assertIsDisplayed()
-        composeRule.onNodeWithText("仅在本机隐藏 · 使用操作或拖出恢复").assertIsDisplayed()
+        composeRule.onNodeWithText(LayoutEditPresentation.localDeletedHeading(known.size))
+            .assertIsDisplayed()
+        composeRule.onNodeWithText(LayoutEditPresentation.localDeletedHelper).assertIsDisplayed()
         composeRule.onNodeWithTag("layout_edit_deleted_${known.last()}")
             .performScrollTo()
             .assertIsDisplayed()
@@ -116,7 +114,7 @@ class LayoutLocalDeletedDeviceTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("松开后仅在本机隐藏，并清空常用槽引用")
+        composeRule.onNodeWithText(LayoutEditPresentation.localDeletedHoverHelper)
             .assertIsDisplayed()
         composeRule.onNodeWithTag("layout_edit_drag_avatar").assertIsDisplayed()
 

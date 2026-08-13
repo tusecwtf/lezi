@@ -4,8 +4,6 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -41,9 +39,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
-import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.core.ui.formatBabyBirthday
 import com.lezi.babylog.designsystem.LeziDatePicker
@@ -62,8 +57,7 @@ import com.lezi.babylog.domain.family.FamilyWizardStep
 import com.lezi.babylog.domain.family.isBusy
 import com.lezi.babylog.domain.family.projectMemberLoginQrDialog
 import com.lezi.babylog.feature.onboarding.qr.OnboardingMemberLoginQrConfirm
-import com.lezi.babylog.feature.onboarding.qr.OnboardingMemberLoginScanOutcome
-import com.lezi.babylog.feature.onboarding.qr.parseOnboardingMemberLoginQrScan
+import com.lezi.babylog.feature.onboarding.qr.rememberOnboardingMemberLoginQrScanAction
 import com.lezi.babylog.feature.onboarding.steps.ConnectServerPrimary
 import com.lezi.babylog.feature.onboarding.steps.OnboardingChooseFamilyStep
 import com.lezi.babylog.feature.onboarding.steps.OnboardingConnectServerStep
@@ -163,56 +157,14 @@ fun OnboardingRoute(
         // Do not overwrite a non-blank draft the user is editing with a prior trusted origin.
         if (endpointDraft.isBlank()) endpointDraft = verifiedEndpoint?.origin.orEmpty()
     }
-    fun applyScannedMemberLogin(raw: String) {
-        when (
-            val outcome = parseOnboardingMemberLoginQrScan(
-                raw = raw,
-                nowEpochSeconds = System.currentTimeMillis() / 1_000,
-            )
-        ) {
-            OnboardingMemberLoginScanOutcome.Empty -> Unit
-            is OnboardingMemberLoginScanOutcome.Rejected -> formError = outcome.message
-            is OnboardingMemberLoginScanOutcome.Ready -> {
-                memberQrDeviceName = defaultAndroidDeviceName(context)
-                formError = null
-                vm.verifyMemberLoginQr(outcome.payload)
-            }
-        }
-    }
-    val scanMemberLogin = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let(::applyScannedMemberLogin)
-    }
-    fun launchMemberLoginScan() {
-        if (!CameraCapture.hasCameraHardware(context)) {
-            formError = "此设备没有可用相机，请使用家庭服务器地址手动申请加入"
-            return
-        }
-        scanMemberLogin.launch(
-            ScanOptions()
-                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("扫描成员登录二维码")
-                .setBeepEnabled(false)
-                .setOrientationLocked(false)
-                .setBarcodeImageEnabled(false),
-        )
-    }
-    val scanCameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            launchMemberLoginScan()
-        } else {
-            formError = "需要相机权限才能扫码，请在系统设置中开启"
-        }
-    }
-    fun requestOrLaunchMemberLoginScan() {
-        formError = null
-        if (CameraCapture.hasPermission(context)) {
-            launchMemberLoginScan()
-        } else {
-            scanCameraPermission.launch(CameraCapture.PERMISSION)
-        }
-    }
+    val launchMemberLoginQrScan = rememberOnboardingMemberLoginQrScanAction(
+        onReady = { payload ->
+            memberQrDeviceName = defaultAndroidDeviceName(context)
+            formError = null
+            vm.verifyMemberLoginQr(payload)
+        },
+        onMessage = { formError = it },
+    )
     LaunchedEffect(showJoin) {
         if (!showJoin) return@LaunchedEffect
         if (joinDraft.host.isBlank() || joinDraft.portText.isBlank()) {
@@ -309,7 +261,7 @@ fun OnboardingRoute(
                             if (endpointDraft.isNotBlank()) vm.connectEndpoint(endpointDraft)
                         }
                     },
-                    onScanMemberLogin = ::requestOrLaunchMemberLoginScan,
+                    onScanMemberLogin = launchMemberLoginQrScan,
                     onForgetEndpoint = {
                         vm.forgetEndpoint()
                         endpointDraft = ""

@@ -83,7 +83,7 @@ fun LeziRecordGlyphIcon(
     glyph: LeziRecordGlyph,
     modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.onSurface,
-    size: Dp = 18.dp,
+    size: Dp = LeziIconSize.Glyph,
 ) {
     val shape = remember(glyph) { glyphShape(glyph) }
     Canvas(modifier.size(size)) {

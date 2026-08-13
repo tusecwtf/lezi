@@ -3,6 +3,9 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.ProjectedRecordEntity
+import com.lezi.babylog.core.database.RecordWakeProjectionDao
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.MilkPayload
@@ -13,6 +16,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.transform
 import com.lezi.babylog.domain.toModel
 
 /**
@@ -27,6 +31,7 @@ internal class CareLogQueries(
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
     fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val recordWakeProjectionDao: RecordWakeProjectionDao,
 ) {
     private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
 
@@ -42,8 +47,12 @@ internal class CareLogQueries(
         val start = startDayInclusive.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = endDayExclusive.atStartOfDay(zone).toInstant().toEpochMilli()
         // DAO ordinary queries already exclude conflict-not-adopted fulfillment records.
-        return recordDao.observeRange(babyId, start, end).map { rows ->
-            rows.map { it.toModel() }
+        // transform (not mapLatest) so rapid StateFlow updates do not drop emissions.
+        return recordWakeProjectionDao.observeInvalidations().transform {
+            emit(
+                recordWakeProjectionDao.loadRecordProjection(babyId, start, end)
+                    .map(ProjectedRecordEntity::toDomainRecord),
+            )
         }
     }
 
@@ -54,7 +63,12 @@ internal class CareLogQueries(
     ): Flow<List<Record>> = observeRecords(babyId, day, day.plusDays(1), zone)
 
     fun observeOpenSleep(babyId: Long): Flow<Record?> =
-        recordDao.observeOpenSleep(babyId).map { it?.toModel() }
+        recordWakeProjectionDao.observeInvalidations().transform {
+            emit(
+                recordWakeProjectionDao.loadWakeShortcutTarget(babyId)
+                    ?.toDomainRecord(),
+            )
+        }
 
     fun observeCarePlansInRange(
         babyId: Long,
@@ -75,7 +89,8 @@ internal class CareLogQueries(
     ): List<Record> {
         val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return recordDao.listDay(babyId, start, end).map { it.toModel() }
+        return recordWakeProjectionDao.loadRecordProjection(babyId, start, end)
+            .map(ProjectedRecordEntity::toDomainRecord)
     }
 
     suspend fun daySummary(
@@ -90,7 +105,13 @@ internal class CareLogQueries(
         now = now,
     ).toDailySummary()
 
-    suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.toModel()
+    suspend fun getRecord(id: Long): Record? {
+        val root = recordDao.get(id) ?: return null
+        if (root.type != RecordType.SLEEP.key) return root.toModel()
+        return recordWakeProjectionDao.loadRecordProjectionForRoots(listOf(root.clientUuid))
+            .singleOrNull()
+            ?.toDomainRecord()
+    }
 
     suspend fun getCarePlan(id: Long): CarePlan? = carePlanDao.get(id)?.toModel()
 
@@ -144,7 +165,8 @@ internal class CareLogQueries(
     ): WeekSummary {
         val start = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = weekStart.plusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
-        val records = recordDao.listRange(babyId, start, end).map { it.toModel() }
+        val records = recordWakeProjectionDao.loadRecordProjection(babyId, start, end)
+            .map(ProjectedRecordEntity::toDomainRecord)
         return CareAggregation.week(records, weekStart, zone, now)
     }
 
@@ -230,3 +252,7 @@ internal class CareLogQueries(
         .take(limit)
         .toList()
 }
+
+private fun ProjectedRecordEntity.toDomainRecord(): Record = sleepInterval?.let {
+    root.toProjectedSleepRecord(it)
+} ?: root.toModel()

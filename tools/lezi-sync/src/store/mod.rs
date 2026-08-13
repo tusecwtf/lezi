@@ -10,22 +10,32 @@
 //! - [`identity`] — family/membership/device/session (submodules) and anonymization
 //! - [`pull`] — revision pull pages and dependency co-grouping
 //! - [`media`] — published media metadata and committed-pending cleanup
+//! - [`causal_media_staging`] — bounded preimages, manifest consume, promotion, and GC
 //! - [`bundles`] — atomic bundle stage/commit, LWW loaders, and bundle-row helpers
 //! - package root — façade types/errors, `Store::{connect,secure_*,health_check,family_ids}`,
 //!   shared `parse_payload` / `EntityKey`, and crate re-exports
 //!
 //! `offline_migrate/` is **not** part of this package.
 
+mod authority_graph;
 mod bundles;
+mod causal;
+mod causal_admission;
+mod causal_media_staging;
+mod causal_merge;
+mod conflict_retention;
+mod conflict_snapshots;
 mod identity;
 mod media;
 mod pull;
-mod reconciliation;
 mod restore;
 mod schema;
+mod source_relations;
+mod suspected_duplicates;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::Connection;
@@ -33,10 +43,34 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use crate::model::Entity;
+#[allow(unused_imports)]
+use self::SourceRelationReceipt as _;
+pub(crate) use bundles::{bundle_content_hash, migration_content_hash};
+pub use causal::{
+    CausalCommitResult, CausalMutation, CausalUnitResult, ConflictResolutionChoice,
+    ConflictSummary, ResolveConflictInput, ResolveConflictResult,
+};
+pub(crate) use causal::{DurableCausalCommit, MAX_CAUSAL_UNITS};
+pub(crate) use causal_admission::CausalAdmissionConfig;
+pub use causal_admission::CausalCommitSaturation;
+pub use causal_media_staging::{
+    CausalMediaStageStatus, CausalMediaStagingLimits, VerifiedCausalMediaPreimage,
+    DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+};
+pub use causal_merge::CausalMediaItem;
+pub use conflict_snapshots::{ConflictDetailPage, ConflictDetailPageRequest};
+pub(crate) use media::media_association_owner;
+pub(crate) use source_relations::rebuild_record_eligibility;
+pub use source_relations::{
+    DeclareSourceRelationInput, ResolveSourceRelationGroupInput, SourceRelationReceipt,
+    SourceRelationSummary,
+};
 
-pub(crate) use bundles::bundle_content_hash;
+// Re-exported types are the public Store/HTTP causal seams (ticket 03).
+#[allow(unused_imports)]
+use self::{CausalCommitResult as _, ConflictDetailPage as _, ResolveConflictResult as _};
 pub(crate) use identity::anonymize_membership_authorship_fields;
+pub(crate) use schema::VERSIONED_ENTITY_TYPES;
 pub(crate) use schema::{CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
 
 /// Shared chunk size for IN-list entity/media queries (media + bundle LWW loaders).
@@ -135,6 +169,14 @@ pub struct ActiveDevice {
     pub last_used_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct FamilyDirectorySnapshot {
+    pub generation: String,
+    pub memberships: Vec<ActiveMembership>,
+    pub visible_devices: Vec<ActiveDevice>,
+    pub last_sync_by_membership: HashMap<String, i64>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PendingMemberRenameRequest {
     pub request_id: String,
@@ -154,6 +196,17 @@ pub struct PulledEntity {
     pub deleted_at: Option<i64>,
     pub payload: Map<String, Value>,
     pub rev: i64,
+    /// Opaque stable version for causal roots (wire §7). Omitted for media /
+    /// fulfillment_candidate and for pre-causal projections without a head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    /// Bounded open-conflict summary; discoverable even when stable version_id
+    /// is unchanged after a branch-only write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict_summary: Option<ConflictSummary>,
+    /// Optional source-relation summary (wire §12.3); omitted when no relation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_relation_summary: Option<SourceRelationSummary>,
 }
 
 #[derive(Debug)]
@@ -162,42 +215,6 @@ pub struct PullPage {
     pub cursor: i64,
     pub has_more: bool,
     pub family_name: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReconcileUnit {
-    pub root: Entity,
-    pub media: Vec<Entity>,
-    /// Opaque client-computed identity for the frozen local package.
-    pub content_hash: String,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReconcileDisposition {
-    Confirmed,
-    Publish,
-    AdoptRemote,
-    RemoteAbsentRejected,
-    RetryAuthority,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ReconcileResult {
-    pub entity_type: String,
-    pub client_uuid: String,
-    pub request_content_hash: String,
-    pub disposition: ReconcileDisposition,
-    pub reason: String,
-    pub remote_content_hash: Option<String>,
-    pub remote_root: Option<Entity>,
-    pub remote_media: Vec<Entity>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct ReconcileBatch {
-    pub cursor: i64,
-    pub results: Vec<ReconcileResult>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -288,6 +305,8 @@ pub enum StoreError {
     CustomItemTombstoneResurrection,
     #[error("deleted care plan cannot be resurrected")]
     CarePlanTombstoneResurrection,
+    #[error("deleted care record cannot be resurrected")]
+    RecordTombstoneResurrection,
     #[error("completed care plan fulfillment binding is immutable")]
     ImmutableCarePlanFulfillmentBinding,
     #[error("fulfillment candidate evidence is immutable")]
@@ -308,6 +327,10 @@ pub enum StoreError {
     UnresolvedReference(String),
     #[error("stored entity payload is invalid")]
     InvalidStoredPayload,
+    #[error("tombstone restore base is missing")]
+    MissingRestoreBase,
+    #[error("tombstone restore base is incomplete")]
+    IncompleteRestoreBase,
     #[error("atomic bundle not found")]
     BundleNotFound,
     #[error("atomic bundle already committed with different content")]
@@ -324,8 +347,46 @@ pub enum StoreError {
     BundleMediaIncomplete,
     #[error("bundle root is not newer than the published version")]
     BundleRootNotNewer,
-    #[error("authoritative reconcile batch is invalid")]
-    InvalidReconcileBatch,
+    #[error("causal media preimage conflicts with durable bytes")]
+    CausalMediaPreimageConflict,
+    #[error("causal media preimage belongs to a different membership")]
+    CausalMediaMembershipMismatch,
+    #[error("causal media staging quota exceeded: {0}")]
+    CausalMediaStagingQuota(&'static str),
+    #[error("causal media staging metadata is invalid")]
+    InvalidCausalMediaStaging,
+    /// Atomic bundles are retained only for immutable fulfillment facts.
+    #[error("atomic bundle does not accept mutable root type {0}")]
+    LegacyBundleCausalRootUnsupported(String),
+    #[error("causal commit batch is invalid")]
+    InvalidCausalBatch,
+    #[error("causal commit rejected for mutation {mutation_id}: {code}")]
+    CausalCommitRejected { mutation_id: String, code: String },
+    #[error("causal commit admission saturated: {0:?}")]
+    CausalCommitSaturated(CausalCommitSaturation),
+    #[error("causal commit admission is unavailable")]
+    CausalAdmissionUnavailable,
+    #[error("causal commit admission config is invalid")]
+    InvalidCausalAdmissionConfig,
+    #[error("conflict not found")]
+    ConflictNotFound,
+    #[error("invalid snapshot token")]
+    InvalidSnapshotToken,
+    #[error("snapshot expired")]
+    SnapshotExpired,
+    #[error("snapshot stale")]
+    SnapshotStale,
+    #[error("conflict snapshot page exceeds the encoded response budget")]
+    ConflictSnapshotPageTooLarge,
+    #[error("source relation request invalid: {0}")]
+    InvalidSourceRelationRequest(&'static str),
+    #[error("authority graph validation failed ({reason_code}) for {entity_type} {client_uuid}")]
+    AuthorityGraphInvalid {
+        reason_code: &'static str,
+        entity_type: String,
+        client_uuid: String,
+        rev: Option<i64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -347,7 +408,6 @@ pub struct BundleCommitResult {
 
 #[derive(Debug, Clone)]
 pub struct StoredBundle {
-    pub media: Vec<Entity>,
     pub required_media: Vec<String>,
     pub media_integrity: BTreeMap<String, BundleMediaIntegrity>,
     pub status: String,
@@ -373,6 +433,20 @@ pub struct CommittedPendingBundleMedia {
 #[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
+    read_only: bool,
+    snapshot_receipt_key: Arc<[u8]>,
+    causal_commit_limiter: Arc<crate::rate_limit::RateLimiter>,
+    max_open_causal_branches_per_root: usize,
+    causal_media_publication_locks:
+        Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
+    causal_media_gc_in_flight: Arc<std::sync::Mutex<BTreeSet<String>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorityGraphValidationSummary {
+    pub family_count: usize,
+    pub entity_count: usize,
+    pub deferred_fulfillment_count: usize,
 }
 
 /// Entity primary key: `(entity_type, client_uuid)`.
@@ -403,7 +477,21 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
 
 impl Store {
     fn connect(&self) -> Result<Connection, StoreError> {
+        if self.read_only {
+            let connection = Connection::open_with_flags(
+                &self.database_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            connection.busy_timeout(Duration::from_secs(10))?;
+            connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+            return Ok(connection);
+        }
         let connection = Connection::open(&self.database_path)?;
+        #[cfg(test)]
+        let mut connection = connection;
+        #[cfg(test)]
+        connection.trace(Some(tests::test_support::trace_counted_pull_statement));
         crate::secure_file(&self.database_path)?;
         connection.busy_timeout(Duration::from_secs(10))?;
         connection.execute_batch(

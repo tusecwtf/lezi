@@ -30,6 +30,29 @@ allow_tls_bootstrap="${LEZI_ALLOW_TLS_BOOTSTRAP:-0}"
 allow_secret_recovery="${LEZI_ALLOW_SECRET_RECOVERY:-0}"
 allow_secret_reseed="${LEZI_ALLOW_SECRET_RESEED:-0}"
 forward_bootstrap_secret="${LEZI_FORWARD_BOOTSTRAP_SECRET:-0}"
+inherited_deploy_lock_token="${LEZI_INHERITED_DEPLOY_LOCK_TOKEN:-}"
+preflight_only="${LEZI_DEPLOY_PREFLIGHT_ONLY:-0}"
+
+if [[ "${preflight_only}" != "0" && "${preflight_only}" != "1" ]]; then
+  echo "error: LEZI_DEPLOY_PREFLIGHT_ONLY must be 0 or 1" >&2
+  exit 1
+fi
+
+if [[ -n "${inherited_deploy_lock_token}" ]]; then
+  if [[ "${LEZI_SCHEMA_CUTOVER_APPROVAL:-}" != "I_ACKNOWLEDGE_0_4_0_SCHEMA_CUTOVER" ]]; then
+    echo "error: an inherited deploy lease is restricted to the explicitly approved schema-cutover workflow" >&2
+    exit 1
+  fi
+  if [[ ! "${inherited_deploy_lock_token}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "error: LEZI_INHERITED_DEPLOY_LOCK_TOKEN must be 64 lowercase hexadecimal characters" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" && "${SKIP_PACKAGE}" != "1" ]]; then
+  echo "error: schema-12 cutover must set LEZI_SKIP_PACKAGE=1 and reuse the pre-attested package" >&2
+  exit 1
+fi
 
 if [[ "${NAS_REMOTE_DIR}" != /* \
     || ! "${NAS_REMOTE_DIR}" =~ ^/[A-Za-z0-9._/-]+$ \
@@ -126,6 +149,8 @@ guarded_package_files=(
   init-tls.sh
   promote-nas-package.sh
   remote-deploy.sh
+  schema-cutover.sh
+  schema-cutover-steps.sh
   tls-certificate-sha256.sh
   tls-spki.sh
   validate-nas-package.sh
@@ -198,6 +223,12 @@ manifest_image_architecture="$(local_manifest_string architecture)"
 manifest_data_host_path="$(local_manifest_string data_host_path)"
 manifest_tls_host="$(local_manifest_string tls_host)"
 manifest_lan_apk_download_origin="$(local_manifest_string lan_apk_download_origin)"
+if [[ -n "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" ]]; then
+  if [[ "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID}" != "${manifest_image_id}" ]]; then
+    echo "error: package image_id drifted from LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID" >&2
+    exit 1
+  fi
+fi
 expected_data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
 expected_tls_host="${LEZI_TLS_HOST:-192.168.50.4}"
 expected_lan_apk_download_origin="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-http://${expected_tls_host}:8767}"
@@ -213,10 +244,7 @@ if ! command -v docker >/dev/null 2>&1 \
   echo "error: the package's image must be locally inspectable before push, including LEZI_SKIP_PACKAGE reuse" >&2
   exit 1
 fi
-local_image_id="$(
-  docker image inspect "${manifest_image}" \
-    --format '{{index .Descriptor.Annotations "config.digest"}}'
-)"
+local_image_id="$("${SCRIPT_DIR}/image-config-digest.sh" "${manifest_image}")"
 local_image_os="$(docker image inspect "${manifest_image}" --format '{{.Os}}')"
 local_image_architecture="$(docker image inspect "${manifest_image}" --format '{{.Architecture}}')"
 if [[ "${local_image_id}" != "${manifest_image_id}" \
@@ -300,6 +328,11 @@ LEZI_APP_UPDATE_JSON="${PACKAGE_DIR}/app-update/app-update.json" \
 LEZI_NAS_PACKAGE_DIR="${REPO_ROOT}/dist/lezi-sync-${version}-nas" \
   "${SCRIPT_DIR}/package-nas.sh" >/dev/null
 
+if [[ "${preflight_only}" == "1" ]]; then
+  echo "==> deploy preflight complete; no NAS connection or mutation performed"
+  exit 0
+fi
+
 # Hold one NAS-side lease across scp, the pre-replace snapshot, replacement,
 # and any deferred post-recovery snapshot. This closes the cross-SSH gap where
 # two otherwise safe push workflows could interleave their backup/deploy phases.
@@ -332,15 +365,20 @@ if [[ "${deploy_lock_dir}" != /* \
   echo "error: derived credential/deploy lock path is outside the normalized NAS path contract" >&2
   exit 1
 fi
-deploy_lock_token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+deploy_lock_token="${inherited_deploy_lock_token:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
+update_lock_dir="${deploy_lock_dir}.app-update"
+update_lock_token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
 if [[ ! "${deploy_lock_token}" =~ ^[0-9a-f]{64}$ ]]; then
   echo "error: could not generate the credential/deploy lease token" >&2
   exit 1
 fi
 printf -v deploy_lock_dir_q '%q' "${deploy_lock_dir}"
 printf -v deploy_lock_token_q '%q' "${deploy_lock_token}"
+printf -v update_lock_dir_q '%q' "${update_lock_dir}"
+printf -v update_lock_token_q '%q' "${update_lock_token}"
 
 deploy_lock_acquired=0
+update_lock_acquired=0
 release_deploy_lock() {
   local original_status=$?
   trap - EXIT
@@ -354,6 +392,14 @@ release_deploy_lock() {
       fi
     fi
   fi
+  if [[ "${update_lock_acquired}" == "1" ]]; then
+    if ! ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
+        "bash -s -- release ${update_lock_dir_q} ${update_lock_token_q}" \
+        <"${SCRIPT_DIR}/credential-deploy-lock.sh"; then
+      echo "error: failed to release the app-update publication lease" >&2
+      original_status=1
+    fi
+  fi
   exit "${original_status}"
 }
 trap release_deploy_lock EXIT
@@ -361,11 +407,23 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "==> acquire NAS credential/deploy lease before package transfer"
-ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
-  "bash -s -- acquire ${deploy_lock_dir_q} ${deploy_lock_token_q}" \
-  <"${SCRIPT_DIR}/credential-deploy-lock.sh"
-deploy_lock_acquired=1
+if [[ -n "${inherited_deploy_lock_token}" ]]; then
+  echo "==> validate inherited schema-cutover credential/deploy lease"
+  ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
+    "bash -s -- validate ${deploy_lock_dir_q} ${deploy_lock_token_q}" \
+    <"${SCRIPT_DIR}/credential-deploy-lock.sh"
+else
+  echo "==> acquire app-update publication lease before package transfer"
+  ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
+    "bash -s -- acquire ${update_lock_dir_q} ${update_lock_token_q}" \
+    <"${SCRIPT_DIR}/credential-deploy-lock.sh"
+  update_lock_acquired=1
+  echo "==> acquire NAS credential/deploy lease before package transfer"
+  ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
+    "bash -s -- acquire ${deploy_lock_dir_q} ${deploy_lock_token_q}" \
+    <"${SCRIPT_DIR}/credential-deploy-lock.sh"
+  deploy_lock_acquired=1
+fi
 remote_env_prefix+="LEZI_DEPLOY_LOCK_TOKEN=${deploy_lock_token} "
 
 remote_package_dir="${NAS_REMOTE_DIR}.incoming-${deploy_lock_token}"

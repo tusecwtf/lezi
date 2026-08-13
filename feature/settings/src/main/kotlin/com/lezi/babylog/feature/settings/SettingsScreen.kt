@@ -74,6 +74,7 @@ import com.lezi.babylog.core.common.SingleFlightAction
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.birthWeightValidationError
@@ -82,11 +83,14 @@ import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.BabyAvatarSizeMedium
 import com.lezi.babylog.core.ui.BabyBirthdayDatePickerDialog
 import com.lezi.babylog.core.ui.BabyProfileFormFields
+import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.settingsBabyLocalSubtitle
 import com.lezi.babylog.designsystem.LeziAlertDialog
 import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziIconSize
 import com.lezi.babylog.designsystem.LeziMenuIcon
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziSwitch
@@ -98,6 +102,7 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.family.BabyLocalMoveResult
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.localdata.LocalRecordsClearCommittedException
 import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
@@ -132,11 +137,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-private val BabyThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
-    com.lezi.babylog.designsystem.normalizeBabyThemeArgb(it)
-}
-private val BabyThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
-
 internal const val SETTINGS_MENU_ROW_MORE_TAG = "settings_menu_row_more"
 
 internal fun clearRecordsFailureCopy(error: Throwable): String = when {
@@ -159,6 +159,13 @@ internal fun settingsAddBabyPrimaryPresentation(
     enabled = !busy,
     dismissible = !busy,
 )
+
+private fun BabyLocalMoveResult.feedback(): String? = when (this) {
+    BabyLocalMoveResult.Moved -> null
+    BabyLocalMoveResult.Empty -> "暂无可排序的宝宝"
+    BabyLocalMoveResult.Unavailable -> "宝宝已不在当前列表"
+    BabyLocalMoveResult.Boundary -> "宝宝已在该位置"
+}
 
 data class SettingsUi(
     val settings: SettingsLocal = SettingsLocal(),
@@ -358,23 +365,21 @@ class SettingsViewModel @Inject constructor(
     fun setBabyLocalTheme(id: Long, argb: Int, onDone: (String?) -> Unit) =
         viewModelScope.launch {
             val result = runCatching {
-                careLog.updateBabyLocalPreferences(id, themeColorArgb = argb)
+                careLog.updateBabyLocalTheme(id, argb)
             }
             onDone(result.exceptionOrNull()?.let { productUiError(it, "本机主题保存失败") })
         }
 
     fun moveBabyLocal(id: Long, delta: Int, onDone: (String?) -> Unit) =
         viewModelScope.launch {
-            val ordered = ui.value.babies.toMutableList()
-            val from = ordered.indexOfFirst { it.id == id }
-            val to = (from + delta).coerceIn(0, ordered.lastIndex)
             val result = runCatching {
-                require(from >= 0 && from != to) { "宝宝已在该位置" }
-                val moved = ordered.removeAt(from)
-                ordered.add(to, moved)
-                careLog.updateBabyLocalOrder(ordered.map(Baby::id))
+                careLog.moveBabyLocal(id, delta).feedback()
             }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机顺序保存失败") })
+            onDone(
+                result.getOrElse { error ->
+                    productUiError(error, "本机顺序保存失败")
+                },
+            )
         }
     fun setVisualStyle(key: String) = viewModelScope.launch { settingsStore.setVisualStyle(key) }
     fun setPreferredHand(hand: String) = viewModelScope.launch { settingsStore.setPreferredHand(hand) }
@@ -742,14 +747,15 @@ fun SettingsRoute(
             text = {
                 ScrollableDialogColumn {
                     Text("界面模板", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf("warm" to "温暖卡片", "journal" to "紧凑记录簿").forEach { (key, label) ->
-                            LeziFilterChip(selected = ui.settings.visualStyle == key, onClick = { vm.setVisualStyle(key) }, label = label)
-                        }
-                    }
+                    VisualStylePicker(
+                        selected = ui.settings.visualStyle,
+                        onSelect = vm::setVisualStyle,
+                    )
+                    Text(
+                        "两套模板共用同一套记录图标，只改变密度、圆角与配色。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Text("单手操作 · 惯用手", style = LeziTypography.Label)
                     Text(
                         "影响圆盘调时与表单靠边；首页常用坞按你编排的左右序，不镜像。",
@@ -940,6 +946,83 @@ private fun ScrollableDialogColumn(
     )
 }
 
+private val visualStylePreviewTypes = listOf(
+    RecordType.PEE,
+    RecordType.SLEEP,
+    RecordType.FORMULA,
+)
+
+@Composable
+private fun VisualStylePicker(
+    selected: String,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+    ) {
+        VisualStylePreviewCard(
+            title = "温暖卡片",
+            compact = false,
+            selected = selected == "warm",
+            onClick = { onSelect("warm") },
+            modifier = Modifier.weight(1f),
+        )
+        VisualStylePreviewCard(
+            title = "紧凑记录簿",
+            compact = true,
+            selected = selected == "journal",
+            onClick = { onSelect("journal") },
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun VisualStylePreviewCard(
+    title: String,
+    compact: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val wellShape = if (compact) LeziShapes.JournalCard else CircleShape
+    val outline = if (selected) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.outline.copy(alpha = 0.45f)
+    }
+    Column(
+        modifier = modifier
+            .heightIn(min = LeziSpacing.Touch)
+            .clip(if (compact) LeziShapes.JournalCard else LeziShapes.Sm)
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = outline,
+                shape = if (compact) LeziShapes.JournalCard else LeziShapes.Sm,
+            )
+            .clickable(role = Role.Button, onClickLabel = title, onClick = onClick)
+            .padding(LeziSpacing.Sm),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xxs)) {
+            visualStylePreviewTypes.forEach { type ->
+                Box(
+                    Modifier
+                        .size(LeziIconSize.Chip)
+                        .clip(wellShape)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    RecordTypeIcon(type, size = LeziIconSize.Glyph)
+                }
+            }
+        }
+        Text(title, style = LeziTypography.Label)
+    }
+}
+
 @Composable
 internal fun SettingsBabyRow(
     baby: Baby,
@@ -964,47 +1047,6 @@ internal fun SettingsBabyRow(
             )
         },
     )
-}
-
-@Composable
-private fun BabyThemeColorSwatch(
-    argb: Int,
-    selected: Boolean,
-    actionLabel: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    Box(
-        modifier = modifier
-            .size(LeziSpacing.Touch)
-            .clip(CircleShape)
-            .clickable(
-                enabled = enabled,
-                onClickLabel = actionLabel,
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .then(
-                if (selected) {
-                    Modifier.border(
-                        2.dp,
-                        MaterialTheme.colorScheme.primary,
-                        CircleShape,
-                    )
-                } else {
-                    Modifier
-                },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Box(
-            Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(Color(argb)),
-        )
-    }
 }
 
 @Composable

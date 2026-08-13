@@ -455,28 +455,34 @@ class RecordComposerViewModel @Inject constructor(
         }
     }
 
-    internal fun importPhotos(uris: List<Uri>) {
-        val draft = _state.value.draft ?: return
-        if (uris.isEmpty()) return
-        if (!importSave.allowImport()) return
-        val session = sessionGate.current() ?: return
-        val begin = importSave.beginImport() ?: return
+    internal fun importPhotos(uris: List<Uri>) = importPhotos(uris) { }
+
+    private fun importPhotos(
+        uris: List<Uri>,
+        onFinished: (Boolean) -> Unit,
+    ) {
+        val draft = _state.value.draft ?: return onFinished(false)
+        if (uris.isEmpty()) return onFinished(false)
+        if (!importSave.allowImport()) return onFinished(false)
+        val session = sessionGate.current() ?: return onFinished(false)
+        val begin = importSave.beginImport() ?: return onFinished(false)
         // Last-wins: cancel any prior in-flight import before starting this one.
         val previousImport = importJob
         previousImport?.cancel()
         val slots = uris.take(RecordPhotoChrome.remainingSlots(draft.photos.size))
         importJob = viewModelScope.launch {
-            previousImport?.join()
-            // beginImport already handed prior unattached via supersededUnattached; after
-            // join, also drain late produce that landed under a non-current epoch (e.g.
-            // markProduced after reclaimEpoch emptied the superseded slot).
-            val lateUnattached = importSave.drainNonCurrentUnattached()
-            val supersededOrphans = (begin.supersededUnattached + lateUnattached).distinct()
-            if (supersededOrphans.isNotEmpty()) {
-                photoStore.delete(supersededOrphans)
-            }
+            var attached = false
             try {
-                runComposerPhotoImport(
+                previousImport?.join()
+                // beginImport already handed prior unattached via supersededUnattached; after
+                // join, also drain late produce that landed under a non-current epoch (e.g.
+                // markProduced after reclaimEpoch emptied the superseded slot).
+                val lateUnattached = importSave.drainNonCurrentUnattached()
+                val supersededOrphans = (begin.supersededUnattached + lateUnattached).distinct()
+                if (supersededOrphans.isNotEmpty()) {
+                    photoStore.delete(supersededOrphans)
+                }
+                attached = runComposerPhotoImport(
                     importSave = importSave,
                     epoch = begin.epoch,
                     import = { onPathCommitted ->
@@ -484,7 +490,8 @@ class RecordComposerViewModel @Inject constructor(
                     },
                     delete = photoStore::delete,
                     attach = { imported ->
-                        var attached = false
+                        if (imported.isEmpty()) return@runComposerPhotoImport false
+                        var attachedToDraft = false
                         sessionGate.deliver(session) {
                             if (!importSave.isCurrent(begin.epoch)) return@deliver
                             val current = _state.value.draft ?: return@deliver
@@ -496,10 +503,10 @@ class RecordComposerViewModel @Inject constructor(
                             }
                             if (importSave.markAttached(begin.epoch)) {
                                 persistCurrentDraft()
-                                attached = true
+                                attachedToDraft = true
                             }
                         }
-                        attached
+                        attachedToDraft
                     },
                 )
             } catch (cancelled: CancellationException) {
@@ -509,8 +516,14 @@ class RecordComposerViewModel @Inject constructor(
                 sessionGate.deliver(session) {
                     _state.update { it.copy(error = productUiError(error, "图片导入失败")) }
                 }
+            } finally {
+                onFinished(attached)
             }
         }
+    }
+
+    internal fun importCapturedPhoto(uri: Uri, onFinished: (Boolean) -> Unit) {
+        importPhotos(listOf(uri), onFinished)
     }
 
     internal fun removePhoto(path: String) {

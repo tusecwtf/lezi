@@ -4,34 +4,31 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MediaFileCleanupClaim
 import com.lezi.babylog.core.database.MediaLocalPathGate
+import com.lezi.babylog.core.database.causal.MediaReferenceDao
+import com.lezi.babylog.core.database.causal.mediaBytesEligibleForCleanup
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Reclaims local media bytes after their last active MediaAsset reference disappears.
+ * Reclaims local media bytes after their last active MediaAsset reference disappears
+ * and no [media_references] holder (stable / mutation / branch / duplicate) remains.
  *
  * Two-phase protocol (path gate → short Room leases; never hold Room across FS delete):
  *
  * 1. **Claim (short Room write)** — re-read the exact tombstone, and if the path has no
- *    active owner, freeze a durable cleanup claim identity
+ *    active owner or media_reference holder, freeze a durable cleanup claim identity
  *    (`clientUuid` + path + `updatedAt` revision + `deletedAt`). When other active rows
- *    still share the path, only clear this tombstone's `local_uri` marker.
+ *    or holders still share the path, only clear this tombstone's `local_uri` marker.
  * 2. **File phase (path gate, outside Room)** — under [MediaLocalPathGate] shared with
- *    attach/import/revive, re-validate the claim and active-ref count in a short Room
- *    lease, then run the slow [SyncMediaFileStore.delete] **outside** any write lease.
- *    This reclaim path is the fail-closed “outside Room write lease” seam; the shared
- *    [SyncMediaFileStore] itself is also used under a lease by local replica clear and
- *    must not enforce a global depth==0 guard.
+ *    attach/import/revive, re-validate the claim and holder-aware eligibility in a short
+ *    Room lease, then run the slow [SyncMediaFileStore.delete] **outside** any write lease.
  * 3. **Clear marker (short Room write)** — clear `local_uri` only when the claim still
  *    matches the tombstone (ABA / revive / path replace leave the marker alone).
- *
- * A tombstone's non-blank `local_uri` remains the durable retry evidence across IO
- * failure and process death. Missing files are idempotent success; permission/IO
- * failures keep the marker and never roll back the business tombstone.
  */
 @Singleton
 class ReferenceAwareMediaFileCleanup @Inject constructor(
     private val mediaDao: MediaAssetDao,
+    private val mediaReferenceDao: MediaReferenceDao,
     private val mediaFiles: SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
     private val pathGate: MediaLocalPathGate,
@@ -51,10 +48,8 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
     }
 
     /**
-     * Reclaims staged/discarded paths that have no active MediaAsset row.
-     * The path gate is acquired before the final Room recheck, so a concurrent
-     * attach either publishes first and protects the bytes or waits until the
-     * reclaim finishes; filesystem I/O never holds a Room write lease.
+     * Reclaims staged/discarded paths that have no active MediaAsset row and no
+     * media_reference holder. The path gate is acquired before the final Room recheck.
      */
     suspend fun cleanupUnreferencedPaths(paths: Set<String>) {
         paths.asSequence()
@@ -62,10 +57,10 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
             .distinct()
             .forEach { path ->
                 pathGate.withLock(path) {
-                    val hasActiveOwner = transactionRunner.run {
-                        mediaDao.countActiveReferences(path) > 0
+                    val eligible = transactionRunner.run {
+                        bytesEligibleForCleanup(path)
                     }
-                    if (!hasActiveOwner) mediaFiles.delete(path)
+                    if (eligible) mediaFiles.delete(path)
                 }
             }
     }
@@ -90,9 +85,12 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
                         // Holding the wrong path lock; release and re-acquire the live path.
                         return@run ClaimDecision.RetryWithPath(path)
                     }
-                    if (mediaDao.countActiveReferences(path) > 0) {
-                        // Shared bytes still owned — only drop this tombstone's retry marker.
-                        clearMarkerIfMatches(current, path)
+                    if (!bytesEligibleForCleanup(path)) {
+                        // Shared bytes still owned by asset or media_reference holders —
+                        // only drop this tombstone's retry marker when an active asset remains.
+                        if (mediaDao.countActiveReferences(path) > 0) {
+                            clearMarkerIfMatches(current, path)
+                        }
                         return@run ClaimDecision.Skip
                     }
                     val deletedAt = current.deletedAt ?: return@run ClaimDecision.Skip
@@ -117,11 +115,11 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
                 // path gate so attach/import/revive cannot publish a new active owner.
                 val stillSafe = transactionRunner.run {
                     val current = mediaDao.getByClientUuid(frozen.clientUuid) ?: return@run false
-                    frozen.matches(current) && mediaDao.countActiveReferences(frozen.path) == 0
+                    frozen.matches(current) && bytesEligibleForCleanup(frozen.path)
                 }
                 if (!stillSafe) {
-                    // New active reference or ABA revision — leave marker for a later pass
-                    // only when the row still looks like our pending tombstone path.
+                    // New active reference, media_reference holder, or ABA revision —
+                    // leave marker for a later pass only when still our pending path.
                     transactionRunner.run {
                         val current = mediaDao.getByClientUuid(frozen.clientUuid) ?: return@run
                         if (current.deletedAt != null && current.localUri == frozen.path) {
@@ -134,7 +132,6 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
                 }
 
                 // FILE PHASE — reclaim-scoped: outside DatabaseTransactionRunner / Room lease.
-                // Caller invariant for this type only (not a shared SyncMediaFileStore guard).
                 mediaFiles.delete(frozen.path)
 
                 transactionRunner.run {
@@ -151,6 +148,12 @@ class ReferenceAwareMediaFileCleanup @Inject constructor(
             }
         }
     }
+
+    private suspend fun bytesEligibleForCleanup(path: String): Boolean =
+        mediaBytesEligibleForCleanup(
+            activeMediaAssetReferences = mediaDao.countActiveReferences(path),
+            mediaReferenceHolders = mediaReferenceDao.countHoldersForLocalUri(path),
+        )
 
     private suspend fun clearMarkerIfMatches(current: MediaAssetEntity, path: String) {
         if (current.deletedAt != null && current.localUri == path) {

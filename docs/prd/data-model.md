@@ -6,11 +6,14 @@
 > [ADR-0012](../adr/0012-preserve-android-local-data-across-in-place-upgrades.md)。
 > 主 PRD：[`README.md`](./README.md)
 >
-> **当前身份与网络合同（0.3.8）：** 历史的一设备一 membership、`left_at`、长期
+> **当前身份与网络合同（0.3.9）：** 历史的一设备一 membership、`left_at`、长期
 > credential、网络名称/明文传输的 0.3 实现说明已由
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 和
 > [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
 > membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
+>
+> **当前 tree：** 0.4.0 / Room 28，commit-first、完整 ConflictSnapshot、choice-only
+> resolution，只协商 `causal_sync_v2`。0.3.13 / Room 27 保留为非破坏升级源；生产 NAS 切割未执行。
 
 ---
 
@@ -121,7 +124,7 @@ rename request；Owner 可批准、拒绝、主动改名或添加 membership。
 
 | | 管理员 | 成员 |
 |--|--------|------|
-| 编辑/删记录 | ✓（全部） | ✓（`created_by_membership_id == self`，含本人其它设备创建） |
+| 编辑/删记录 | ✓（全部） | ✓（`created_by_membership_id == self`，含本人其它设备创建）；**0.3.11 已交付例外**：任一成员可将他人仍开放的 `sleep`（`end_timestamp = null`）闭合为醒来（保留原作者；只合并 end/备注/照片）；**本机 B1** 纠错窗见 CONTEXT。**0.3.13 规划**：醒来改为独立 WakeObservation（观察者改自己的观察；Sleep 作者/Owner 选有效观察）；不扩大其它字段 ACL |
 | 审批/添加/改名/删除成员 | ✓ | ×（本人改名只能申请） |
 | 查看设备 | 全部 | 仅本人 membership |
 | 撤销设备 | 全部 | 仅退出当前设备 |
@@ -159,15 +162,19 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 | `baby_id` | |
 | `type` | 见主 PRD §3 |
 | `timestamp` | 主时间 |
-| `end_timestamp` | 睡眠等区间 |
+| `end_timestamp` | **0.3.12 及以前已交付**：睡眠等区间结束。**0.3.13 规划**：Sleep wire 根不再同步该字段；醒来见 §3.5.1 WakeObservation |
 | `note` | |
 | `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；尚未加入家庭的本机记录可空 |
-| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire。独立 log 媒体包会抬高 NAS 根 `updated_at`，成功后须把本机回执与（内容 epoch 未变时的）本地 `updated_at` 对齐到同一 `rootUpdatedAt`，不能只 ack 媒体 |
+| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire。独立 log 媒体包会抬高 NAS 根 `updated_at`，成功后须把本机回执与（内容 epoch 未变时的）本地 `updated_at` 对齐到同一 `rootUpdatedAt`，不能只 ack 媒体。0.4.0 另存服务器 `base_version` / 冻结 `mutation_id`（Room 28），见 [`causal-sync-wire.md`](./causal-sync-wire.md) |
 | `payload_json` | 类型扩展 |
 | `schema_version` | 当前固定为 v2 |
-| `updated_at` / `deleted_at` | 软删 / LWW |
+| `updated_at` / `deleted_at` | 软删。**0.3.10 已交付**：家庭权威图上 record tombstone 相对 `updated_at` LWW **永胜**（更高 live 不得清零 `deleted_at`）；误删/近邻落选后需事实时 **新记一条**。**0.3.13 规划**：删除服从因果基线；稳定 tombstone 后陈旧 live replay 不得复活；**仅** 授权 conflict resolution 可恢复同 UUID（ADR-0020） |
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
+
+**近邻落选（0.3.10 已交付；0.3.13 规划废止服务器路径）：** 白名单类型跨 membership、主时间 ≤30 分钟的 live 近邻曾由家庭服务器在 atomic commit 同事务内裁决并 tombstone 落选；同 membership 豁免。详见 ADR-0018（历史）/ ADR-0021（规划）。**0.3.13 规划** 改为客户端 **疑似重复组** + 显式确认 + **来源关系**（非普通 tombstone）。
+
+#### 3.5.0 开放睡眠（0.3.11–0.3.12 已交付行为）
 
 每个宝宝最多只有一条 `end_timestamp = null` 的开放睡眠。若本地维护或家庭 pull 发现多条，
 两条路径必须调用同一个纯决策：按 `timestamp` 升序排列，时间相同时按跨设备稳定的
@@ -176,14 +183,39 @@ Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、�
 规则本身不读数据库和系统时间。本地适配仍在原事务中走本地更新与 dirty 语义；
 pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语义，不伪造待发布事实。
 
-家庭 wake 是宝宝级事实，而不是只作用于某个 sleep UUID：pull 到任一已闭合睡眠后，所有开始
-时间不晚于该 wake 的开放睡眠都在本机闭合到同一 wake，标记 anomaly 并以更高修订发布；时钟
-偏斜导致开始晚于 wake 的开放行保留为唯一 residual，禁止生成负区间。
+家庭 wake 是宝宝级事实，而不是只作用于某个 sleep UUID：
+1. **写入**：任一家庭成员可用本机「醒来 / confirmSleep / sleepUp」闭合当前开放睡眠根（同一
+   `client_uuid`）；服务端对「仍 open 的 sleep → 写入非空 `end_timestamp`」放行非作者成员，
+   强制保留已发布开睡字段（至少主时间与 `is_nap`），只合并 end/备注/照片与同包 log 媒体，
+   并保留首次 `created_by_membership_id`。非作者对**已闭合**睡眠的再次权威推送仍拒绝。
+2. **本机 B1**：仅本机刚用醒来路径闭合的那条，在 `syncDirty` 未收敛且未被权威更高修订覆盖
+   期间，闭合者可受限 update（end+备注+照片）；时间轴 `canEdit=true`、`canDelete=false`；
+   编辑面板锁定睡下时间与开睡字段。资格作废后非作者不可再改。Owner/作者始终全权。
+3. **收敛**：pull 到任一已闭合睡眠后，所有开始时间不晚于该 wake 的开放睡眠都在本机闭合到
+   同一 wake，标记 anomaly 并以更高修订发布；时钟偏斜导致开始晚于 wake 的开放行保留为唯一
+   residual，禁止生成负区间。并发多次闭合走普通 LWW（`updated_at`）。
+
+#### 3.5.1 SleepStart + WakeObservation（0.3.13 tree 已落地；NAS 切割待维护窗）
+
+权威 closed keys、verdict、迁移 UUIDv5 与 API 见
+[`causal-sync-wire.md`](./causal-sync-wire.md) §4–§11。产品摘要：
+
+- **SleepStart**：`type=sleep` 的 Record **禁止** `end_timestamp` 键；开睡主时间为
+  `timestamp`；有效观察指针为 `effective_wake_observation_client_uuid`。
+- **WakeObservation**：独立根；`sleep_record_client_uuid`、`wake_timestamp`、`withdrawn`；
+  服务器盖章 `observer_membership_id`；0–3 张 `wake` 媒体。
+- **暂定区间**：未设有效观察前，end = 最早合法未撤回观察的 `wake_timestamp`
+  （`>=` Sleep 的 `timestamp`）。
+- **有效观察 / 撤回 / 纠正**：见 wire §4.5（sleep mutation 与观察 mutation，非 LWW end）。
+- **重叠开放**：新开睡不得自动改写较旧开放 SleepStart。
+- **历史迁移**：wire §11 同式 UUIDv5；server 与 Android 不得各算各的。
 
 已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 atomic commit
-与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次
-作者。Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止
-同步，不发送降级 payload。
+与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑或删除不得改写首次作者。
+**0.3.10–0.3.12：** tombstone 后不得再以 live 恢复同一 `client_uuid`。**0.3.13 规划：**
+见因果删除/显式 restore（[`causal-sync-wire.md`](./causal-sync-wire.md) §7–8）。
+Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止同步，
+不发送降级 payload。
 
 当前 Room schema 的 `pending_reminder_cleanup` 持久化 `carePlanIds`、
 `systemCalendarProjectionsJson`、可空的 `currentBabyId`、哺乳计时 epoch，以及
@@ -242,7 +274,7 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `pee` | `pee_amount` 1=小 · 2=中 · 3=大（默认 2） |
 | `poop` | `stool_amount?` 1–4, `stool_consistency?` 1–4, `stool_color?` 0–7 |
 | `both_diaper` | `pee_amount` + 便便三字段（同上） |
-| `sleep` | `anomaly_flag`, `is_nap?`（起止用 timestamp/end） |
+| `sleep` | `anomaly_flag`, `is_nap?`（**≤0.3.12** 起止用 timestamp/end；**0.3.13 规划** 仅 SleepStart，醒来见 WakeObservation） |
 | `temperature` | `celsius` |
 | `height` / `weight` / … | `value`, `unit` |
 | `medicine` | `name`, `dose?` |
@@ -445,8 +477,11 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 
 两字段本身也是「同时为空或同时非空」；禁止残缺绑定。`status=completed` 的首次 atomic
 root 写入必须在同一事务携带完整 pair，不能先 completed 再补绑。若 bound Record 已在同
-家庭存在，须与计划同宝宝（否则引用冲突）；产品发布序仍允许 completed CarePlan → Record
-的前向引用。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
+家庭存在，须与计划同宝宝（否则引用冲突）；传输仍允许 completed CarePlan → Record 的
+前向提交，但 NAS 只把它保留为不可 pull 的延后履行。启动校验须验证已提交 bundle 的完整
+manifest/hash；成员注销后由服务端匿名化的提交证据继续有效。关联 Record 完整到达后须复验 ACL/LWW、
+不可变 pair、历史 CustomItem 许可，以及计划媒体 publication/manifest/大小/摘要/文件，才在
+同一家庭事务公开完整关系。NAS **一旦首次持久化** completed 完整 pair，后续版本必须精确保留这两个值；
 清空、改绑其它 Record 或改变确认时间：残缺/清空在 model 边界 `422`，合法完整但改绑/改时
 的 rewrite 返回 `409`，creator 与 owner 遵循相同规则。精确 replay（同 pair）幂等；stage
 与 commit 间的并发 rebind 仍由 commit 时冻结检查拦截。其它计划字段仍可按原 ACL/LWW 更新。
@@ -464,7 +499,9 @@ CarePlan → 关联 Record（含 0–3 张照片）→ FulfillmentCandidate，�
 `missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务
 中写入关联 Record 并将计划标为 `completed`。多候选时各设备用盖章证据稳定裁决
 唯一权威记录，并在不置脏、不回写 NAS immutable pair 的前提下本地重链
-`fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
+`fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。本机 completion 与 replica pull
+共用一个事务自持的 fulfillment-authority settlement；候选 adoption patches 与计划重链原子
+提交，调用方不得依赖外层恰好已有事务。
 
 下次喂养 marker 的计划写入回调不是持久化回执。若 callback 丢失、返回失败或 UI 从
 `Scheduling`/持久化查询中恢复，Composer 与 Nursing Timer 必须经同一 domain seam 读取当前
@@ -524,8 +561,14 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 
 ### 3.12 权威裁决与临时发布计划
 
-> 当前合同：ADR-0017 已实现；0.3.8 保留 ADR-0016 的 Room-first、先 pull、临时计划、
-> atomic bundle 与修订 CAS，并以批量权威裁决取代 raw-dirty 直接发布。
+> **0.3.9–0.3.12 已交付：** ADR-0017；Room-first、先 pull、临时计划、atomic bundle 与修订
+> CAS；批量 head-by-UUID + LWW。
+> **0.3.13 tree：** ADR-0019/0020 与 [`causal-sync-wire.md`](./causal-sync-wire.md)；
+> 因果 `base_version`/`mutation_id`、三方合并/分支；FulfillmentCandidate **仍不** 三方编辑。
+> **0.4.0 目标：** ADR-0022；普通发表 commit-first、完整 snapshot 与 choice-only resolution；
+> 0.3.13 source 路径在各 root/media 迁移完成前保留，但不得作为 v2 fallback。
+
+#### 3.12.1 已交付（head-by-UUID + LWW）
 
 发布计划不是 Room 表，也不跨进程保存 payload。每个已加入家庭的同步周期先增量 pull，再把
 六类待对账 Room 实体按 Baby+avatar、Record+照片、CarePlan+照片、CustomItem 和
@@ -541,6 +584,28 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
 走全量实体快照，不推测 absence。commit 回执、远端采用、重绑和技术清理都必须绑定冻结修订；
 并发新编辑进入下一周期。完整静止周期结束时冻结集必须全部终态，浅层 pending 按未终态原子
 单元计数。contract 2→3 的旧 outbox identity 仍只用于把相应 Room 行转成待对账，然后删除旧表。
+
+#### 3.12.2 0.3.13 因果版本（tree 已落地；NAS 切割待维护窗）
+
+- 可变原子根：Baby+avatar、Record+record media、CarePlan+plan media、CustomItem、
+  **WakeObservation+wake media**。FulfillmentCandidate 仍为不可变证据，只引用不三方合并。
+- 冻结修改携带完整期望根/媒体、`base_version`、`mutation_id`。
+- Reconcile：`confirmed|publish|conflict_preview|rejected`（dry-run）。
+- Commit：`accepted|merged|branched` + 稳定 `version_id` + 完整稳定投影 + 可选冲突引用。
+- Pull：稳定投影 + `version_id` + 有界冲突摘要；详情与 resolution CAS 见 wire 文档。
+- LocalWrite no-pull **仅** 在因果协议后启用，且不推进 pull cursor（CONTEXT /
+  [`causal-sync-wire.md`](./causal-sync-wire.md) §13）。
+
+#### 3.12.3 0.4.0 conflict-v2（当前 tree 已激活）
+
+- 已知业务 nullable 字段必须显式具体值或 null；清空为 `set(null)`，普通业务字段没有 remove。
+- stable 与每个 branch 的 root/media/deleted/base/provenance 进入一个完整 ConflictSnapshot；
+  auto/conflict paths 不相交，choice ID 在同 token 全页与重启间稳定。
+- resolution 请求只有 snapshot token、resolution mutation ID 和完整 path→choice ID；服务端重建、
+  共用普通 commit validator 并 full-set CAS。纯 restore 只选 tombstone 声明的完整直接 live base。
+- pending mutation 可持久一份不可变 frozen envelope，但 Room product facts 仍是领域真相。
+- H27 已完成 0.4.0/code21/Room28/contract5/server13/floor21 全链；两端只 advertise/接受
+  `causal_sync_v2`。
 
 ---
 
@@ -564,7 +629,10 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
 
 - **日汇总**：睡眠分钟、尿次、便次、配方+母乳+挤出乳 ml、母乳分钟等。  
 - **周汇总**：按类型分桶给图表。  
-- **睡眠配对**：由 sleep 记录推导区间；`anomaly_flag` 写入或查询时计算。
+- **睡眠配对（≤0.3.12）**：由 sleep 记录 `timestamp`/`end_timestamp` 推导区间；
+  `anomaly_flag` 写入或查询时计算。
+- **睡眠投影（0.3.13 规划）**：由 SleepStart + 非撤回 WakeObservation + 可选有效观察
+  resolution 推导区间；未确认时用最早合法观察作暂定 end；不得把多条观察当多次睡眠计入。
 
 ### 5.1 聚合时钟与「已确认但时间未到」
 
@@ -583,6 +651,23 @@ FulfillmentCandidate 原子单元冻结，以 `(client_uuid, updated_at, canonic
   但 **暂不计入** 日/周/窗/Widget 累计；时钟到达该 `timestamp` 后，下一次聚合自然计入，
   **无需改库**。
 - 不取消履行侧的 5 分钟 skew；只在聚合侧按时钟延迟可见累计。
+
+### 5.2 疑似重复组与汇总上下界（0.3.13 tree 已落地；NAS 切割待维护窗）
+
+- 时间轴默认 **展开** 疑似重复组内全部来源记录，不隐藏、不自动 tombstone。
+- 未确认组：对每项受影响的次数/奶量等指标，在「只计展示候选」到「组成员彼此独立」的
+  合法解释上运行既有 `CareAggregation` 语义，取 **最小与最大** 为上下界展示；不得假装
+  已精确单一计数。
+- 目标自然日/range 先按 `ZoneId` 转成真实 instant 边界，再精确扩展含边界 **±30 分钟**候选
+  halo；23/25 小时 DST 日不得猜固定 24 小时。每个未确认组在整个 range 只选择一次解释，
+  不能逐日更换候选。实现以排序后的有界 union 建连通分量，并逐记录复用 `CareAggregation`
+  指标向量后按组组合上下界；不得物化跨组解释笛卡尔积。当前上界为
+  `O(n·a·log n + (r+c)·d + t·c)` 时间、`O(n + r·d + t)` 辅助空间（`a` 为 shard 作者数，
+  `r` 为目标记录数，`c` 为组内合法选择总数，`d` 为天数，`t` 为体温事实数），长计算必须
+  响应 coroutine cancellation。
+- 确认同一事件并选定展示版本后：汇总/时间轴主路径只计该展示版 **单值**；其它来源与照片
+  以 **来源关系** 永久保留，不进普通 tombstone，不因后续历史被误标为已删除。
+- 同 membership 窗内多记不进疑似重复组。
 
 ---
 
@@ -707,7 +792,11 @@ interface SyncPort {
 | 继续不同步 | 系统日历 ID/权限/披露级别、提醒偏好、快捷槽位与布局顺序 |
 | 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`/`family_authority`、护理计划提醒与系统日历状态、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
-| 冲突 | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
+| 冲突（已交付） | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
+| 冲突（0.3.13 source） | `base_version` 三方合并 / 持久分支 / client-supplied resolution result；仅作升级源 runtime |
+| 冲突（0.4.0） | 完整 N-way ConflictSnapshot / choice-only resolution / direct-base restore；见 [`causal-sync-wire.md`](./causal-sync-wire.md) |
+| 同步域扩展（0.3.13 规划） | + WakeObservation（+ wake 媒体）；近邻不再服务器落选 |
+| LocalWrite（0.3.13 规划） | 因果协议后才允许 no-pull；不推进 pull cursor |
 | 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |
 | 通知 | **不**对成员新记录推送 |
 | 验收 | 双方在家且打开 App 时回前台/下拉一致；**不**承诺息屏 60s |
@@ -725,9 +814,11 @@ avatar-only Baby 包仍发布完整 atomic root 并可能抬高 root 修订：�
 须 CAS 写入精确 `rootUpdatedAt` 回执并在内容未并发编辑时对齐本地 `updated_at`；Baby
 以 CAS 前进的 `updated_at` 作为等价水印。较旧回执不得倒退较新水印。
 
-记录页通过一个不可变的 timeline window snapshot 消费这些状态。每次 Room invalidation
-固定执行 1 次根记录读取、1 次计划读取和 1 次活跃日志媒体读取；根与媒体读取位于同一
-Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot 同时携带一个家庭成员/角色
+记录页通过一个不可变的 timeline window snapshot 消费这些状态。共享的 Record + Wake
+投影固定执行 1 次根记录读取、1 次 WakeObservation 读取和 1 次 wake 媒体读取；完整 timeline
+snapshot 再执行 1 次计划读取和 1 次活跃日志媒体读取，共 5 次 batch read。所有读取位于
+同一 Room 事务，查询数不随 Sleep/Wake 行数或每行 0–3 张照片增长。轻量 invalidation signal
+只负责触发该 snapshot，不通过 JOIN、COUNT 或 payload 扫描拼装数据。snapshot 同时携带一个家庭成员/角色
 快照，并为根发布状态、媒体本机齐备状态、作者称呼和行级编辑/删除/履行/跳过能力标记
 同一 revision。UI 只消费该 revision，不把新根与旧媒体或旧权限拼接；成员/家庭、宝宝、
 窗口或 refresh 改变时取消旧装配，旧结果不得覆盖新结果。该批量投影只复用既有 ACL，
@@ -756,9 +847,18 @@ Room 事务，查询数不随行数或每行 0–3 张照片增长。snapshot �
 
 Android 本地数据永久基线契约 v1（0.3.0 / versionCode 6）的 Room schema 为 v24；契约
 v2（0.3.5 / versionCode 12）为 Room v25，并通过 `CustomItemClientUuidIndexUpgradeStep`
-相邻升级；当前契约 v3（0.3.8 / versionCode 15）仍为 Room v26，通过
-`OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含 LocalUser、Family、
-Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、CustomItemDef、CarePlan 与 FulfillmentCandidate，
-并使用真实 `SyncPort` 和 Record/计划媒体原子包。后续本地数据契约必须通过相邻迁移链保留
-Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前无破坏阻断。
-当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、待对账标记/发布回执、计时与提醒恢复状态。后续裁决模型升级必须把 0.3.6 可能被角色/结构过滤的 dirty 行收敛为发布、采用远端、本机保留或技术清理，不能清库或静默删除用户事实。
+相邻升级；当前交付使用契约 v5（0.4.0 / versionCode 21）与 Room **v28**
+（tree 以 `config/android-release-compatibility.json` 与 `LeziDatabase` 为准；文档数字若
+漂移以清单重核）。`OutboxRetirementUpgradeStep` 转交旧发布意图并移除 outbox。数据域包含
+LocalUser、Family、Membership、Baby、Record、MediaAsset、SettingsLocal、ShareInvite、
+CustomItemDef、CarePlan 与 FulfillmentCandidate，并使用真实 `SyncPort` 和 Record/计划媒体
+原子包。
+
+**0.4.0 tree 目标（NAS 切割前重核）：** versionName `0.4.0` / versionCode **21** /
+Room **28** / local-data contract **5** / server schema **13**。Room 27→28 须原地
+迁移保留全部业务行、dirty、媒体、会话与 endpoint 信任，并容纳 `baseVersion`、冻结
+`mutation_id`、WakeObservation、冲突摘要/详情、疑似重复与来源关系。后续本地数据契约必须
+通过相邻迁移链保留 Room、设置、家庭凭证与受影响媒体；基线之前的 Room schema 在业务入口前
+无破坏阻断。当前数据库在进程重启及 APK 原地替换后必须完整保留业务数据、待对账标记/发布
+回执、计时与提醒恢复状态。后续裁决模型升级必须把 0.3.6 可能被角色/结构过滤的 dirty 行
+收敛为发布、采用远端、本机保留或技术清理，不能清库或静默删除用户事实。

@@ -27,35 +27,10 @@ internal fun buildLeziDatabase(
 
 private object CurrentSchemaCallback : RoomDatabase.Callback() {
     override fun onCreate(db: SupportSQLiteDatabase) {
-        db.execSQL(mediaAssetOwnerTrigger("media_assets_owner_insert", "INSERT"))
-        db.execSQL(mediaAssetOwnerTrigger("media_assets_owner_update", "UPDATE"))
+        db.execSQL(mediaAssetOwnerTriggerSql("media_assets_owner_insert", "INSERT"))
+        db.execSQL(mediaAssetOwnerTriggerSql("media_assets_owner_update", "UPDATE"))
     }
 }
-
-private fun mediaAssetOwnerTrigger(name: String, operation: String): String =
-    """
-    CREATE TRIGGER $name
-    BEFORE $operation ON media_assets
-    WHEN NOT (
-        (
-            NEW.kind = 'log'
-            AND NEW.babyId IS NULL
-            AND (
-                (NEW.recordId IS NOT NULL AND NEW.carePlanId IS NULL)
-                OR (NEW.recordId IS NULL AND NEW.carePlanId IS NOT NULL)
-            )
-        )
-        OR (
-            NEW.kind = 'avatar'
-            AND NEW.babyId IS NOT NULL
-            AND NEW.recordId IS NULL
-            AND NEW.carePlanId IS NULL
-        )
-    )
-    BEGIN
-        SELECT RAISE(ABORT, 'invalid media asset ownership');
-    END
-    """.trimIndent()
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -74,9 +49,17 @@ object DatabaseModule {
     @Provides fun fulfillmentCandidateDao(db: LeziDatabase): FulfillmentCandidateDao =
         db.fulfillmentCandidateDao()
     @Provides fun mediaAssetDao(db: LeziDatabase): MediaAssetDao = db.mediaAssetDao()
+    @Provides
+    fun recordWakeProjectionDao(db: LeziDatabase): RecordWakeProjectionDao = db.timelineWindowDao()
     @Provides fun timelineWindowDao(db: LeziDatabase): TimelineWindowDao = db.timelineWindowDao()
     @Provides fun pendingPublishDao(db: LeziDatabase): PendingPublishDao = db.pendingPublishDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
+    @Provides fun wakeObservationDao(db: LeziDatabase) = db.wakeObservationDao()
+    @Provides fun conflictSummaryDao(db: LeziDatabase) = db.conflictSummaryDao()
+    @Provides fun conflictSnapshotCacheDao(db: LeziDatabase) = db.conflictSnapshotCacheDao()
+    @Provides fun suspectedDuplicateGroupDao(db: LeziDatabase) = db.suspectedDuplicateGroupDao()
+    @Provides fun sourceRelationDao(db: LeziDatabase) = db.sourceRelationDao()
+    @Provides fun mediaReferenceDao(db: LeziDatabase) = db.mediaReferenceDao()
     @Provides
     @Singleton
     fun pendingReminderCleanupStore(db: LeziDatabase): PendingReminderCleanupStore =

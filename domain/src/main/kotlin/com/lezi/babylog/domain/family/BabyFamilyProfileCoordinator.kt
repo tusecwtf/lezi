@@ -77,7 +77,6 @@ internal class BabyFamilyProfileCoordinator(
     private val reminderProjection: CarePlanReminderProjection,
     private val sleepMutationMutex: Mutex,
     private val mediaPathGate: MediaLocalPathGate,
-    private val healDuplicateOpenSleeps: suspend (Long) -> Unit,
     /** Best-effort post-commit GC; same policy as [RecordMutationCoordinator.cleanupCommittedPhotoTombstones]. */
     private val cleanupCommittedPhotoTombstones: suspend (Set<String>) -> Unit,
     private val requestLocalSync: () -> Unit,
@@ -337,12 +336,8 @@ internal class BabyFamilyProfileCoordinator(
         settings.setCurrentBabyId(baby.id)
     }
 
-    /** Member-safe local appearance/order mutation; never advances family LWW data. */
-    suspend fun updateBabyLocalPreferences(
-        babyId: Long,
-        themeColorArgb: Int? = null,
-        sortOrder: Int? = null,
-    ) {
+    /** Member-safe local appearance mutation; never advances family LWW data. */
+    suspend fun updateBabyLocalTheme(babyId: Long, themeColorArgb: Int) {
         val baby = babyDao.get(babyId) ?: return
         if (
             syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
@@ -350,30 +345,33 @@ internal class BabyFamilyProfileCoordinator(
         ) {
             throw BabyProfilePermissionException()
         }
-        themeColorArgb?.let { babyDao.updateLocalTheme(baby.id, it) }
-        sortOrder?.let { babyDao.updateLocalSortOrder(baby.id, it) }
+        babyDao.updateLocalTheme(baby.id, themeColorArgb)
     }
 
-    /** Reorder only the locally visible Baby list; family profile revisions stay untouched. */
-    suspend fun updateBabyLocalOrder(orderedBabyIds: List<Long>) {
-        val role = syncPort.session().first().role
-        val visible = visibleBabyEntities(babyDao.listAll(), role)
-        require(
-            orderedBabyIds.size == visible.size &&
-                orderedBabyIds.toSet() == visible.mapTo(linkedSetOf(), BabyEntity::id),
-        ) {
-            "宝宝顺序与当前可见档案不一致"
-        }
-        val byId = visible.associateBy(BabyEntity::id)
+    suspend fun moveBabyLocal(babyId: Long, delta: Int): BabyLocalMoveResult =
         transactionRunner.run {
-            orderedBabyIds.forEachIndexed { index, babyId ->
-                val baby = requireNotNull(byId[babyId])
-                if (baby.sortOrder != index) {
-                    babyDao.updateLocalSortOrder(baby.id, index)
+            val role = syncPort.session().first().role
+            val visible = visibleBabyEntities(babyDao.listAll(), role)
+            if (visible.isEmpty()) {
+                BabyLocalMoveResult.Empty
+            } else if (visible.none { baby -> baby.id == babyId }) {
+                BabyLocalMoveResult.Unavailable
+            } else {
+                val ordered = visible.toMutableList()
+                val from = ordered.indexOfFirst { baby -> baby.id == babyId }
+                val to = (from.toLong() + delta.toLong())
+                    .coerceIn(0L, ordered.lastIndex.toLong())
+                    .toInt()
+                if (from == to) {
+                    BabyLocalMoveResult.Boundary
+                } else {
+                    val moved = ordered.removeAt(from)
+                    ordered.add(to, moved)
+                    babyDao.writeCompleteLocalOrder(ordered.map(BabyEntity::id))
+                    BabyLocalMoveResult.Moved
                 }
             }
         }
-    }
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
         requireCanManageBabyProfiles()
@@ -548,7 +546,6 @@ internal class BabyFamilyProfileCoordinator(
                     )
                     avatarCleanupClientUuids += asset.clientUuid
                 }
-                healDuplicateOpenSleeps(target.id)
                 babyDao.update(
                     nextSyncUpdatedAt(source.updatedAt, now).let { deletedAt ->
                         source.copy(

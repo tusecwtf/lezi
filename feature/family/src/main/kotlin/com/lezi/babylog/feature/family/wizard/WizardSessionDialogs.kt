@@ -55,7 +55,6 @@ import com.lezi.babylog.feature.family.components.familyWizardProgress
 import com.lezi.babylog.feature.family.components.familyWizardTitle
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.session.SetupProbeResult
 @Composable
@@ -333,6 +332,19 @@ internal fun OwnerLoginDialog(
 }
 
 
+/** Dangerous owner-takeover copy — pure seam for JVM chrome tests. */
+internal object OwnerTakeoverChrome {
+    const val TITLE = "接管管理员身份？"
+    const val BODY =
+        "所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。"
+    const val CONFIRM = "确认接管"
+    const val CONFIRM_BUSY = "正在接管…"
+    const val CANCEL = "取消"
+
+    fun confirmLabel(submitting: Boolean): String =
+        if (submitting) CONFIRM_BUSY else CONFIRM
+}
+
 @Composable
 internal fun OwnerTakeoverConfirmationDialog(
     submitting: Boolean,
@@ -341,15 +353,23 @@ internal fun OwnerTakeoverConfirmationDialog(
 ) {
     LeziAlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
-        title = { Text("接管管理员身份？") },
+        title = { Text(OwnerTakeoverChrome.TITLE) },
         text = {
-            Text("所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。")
+            Text(OwnerTakeoverChrome.BODY)
         },
         confirmButton = {
-            LeziTextButton(label = if (submitting) "正在接管…" else "确认接管", onClick = onConfirm, enabled = !submitting)
+            LeziTextButton(
+                label = OwnerTakeoverChrome.confirmLabel(submitting),
+                onClick = onConfirm,
+                enabled = !submitting,
+            )
         },
         dismissButton = {
-            LeziTextButton(label = "取消", onClick = onDismiss, enabled = !submitting)
+            LeziTextButton(
+                label = OwnerTakeoverChrome.CANCEL,
+                onClick = onDismiss,
+                enabled = !submitting,
+            )
         },
     )
 }
@@ -572,94 +592,5 @@ internal fun CreateFamilyDialog(
                 LeziTextButton(label = "取消", onClick = onDismiss, enabled = !creating)
             }
         },
-    )
-}
-
-
-@Composable
-internal fun MemberLoginQrConfirmDialog(
-    familyName: String?,
-    memberDisplayName: String,
-    deviceName: String,
-    onDeviceNameChange: (String) -> Unit,
-    feedback: String?,
-    submitting: Boolean,
-    verificationInProgress: Boolean = false,
-    verificationRetryRequired: Boolean = false,
-    recoveryRetryRequired: Boolean = false,
-    deviceNameEditable: Boolean = true,
-    showConfirm: Boolean = true,
-    confirmLabel: String = "在这台设备登录",
-    title: String = "登录家庭",
-    onConfirm: () -> Unit,
-    onManualJoin: () -> Unit,
-    onDismiss: () -> Unit,
-    showManualJoin: Boolean = true,
-) {
-    com.lezi.babylog.designsystem.MemberLoginQrConfirmSurface(
-        familyName = familyName,
-        memberDisplayName = memberDisplayName,
-        deviceName = deviceName,
-        onDeviceNameChange = onDeviceNameChange,
-        feedback = feedback,
-        submitting = submitting,
-        verificationInProgress = verificationInProgress,
-        verificationRetryRequired = verificationRetryRequired,
-        recoveryRetryRequired = recoveryRetryRequired,
-        deviceNameEditable = deviceNameEditable,
-        showConfirm = showConfirm,
-        confirmLabel = confirmLabel,
-        title = title,
-        onConfirm = onConfirm,
-        onManualJoin = onManualJoin,
-        onDismiss = onDismiss,
-        showManualJoin = showManualJoin,
-    )
-}
-
-/** Compatibility overload for tests that still pass a live payload. */
-
-@Composable
-internal fun MemberLoginQrConfirmDialog(
-    payload: MemberLoginQrPayload,
-    deviceName: String,
-    onDeviceNameChange: (String) -> Unit,
-    feedback: String?,
-    submitting: Boolean,
-    verificationInProgress: Boolean = false,
-    verificationRetryRequired: Boolean = false,
-    recoveryRetryRequired: Boolean = false,
-    onLogin: () -> Unit,
-    onRetryVerification: () -> Unit = {},
-    onRetryRecovery: () -> Unit = {},
-    onManualJoin: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    MemberLoginQrConfirmDialog(
-        familyName = payload.familyName,
-        memberDisplayName = payload.memberDisplayName,
-        deviceName = deviceName,
-        onDeviceNameChange = onDeviceNameChange,
-        feedback = feedback,
-        submitting = submitting,
-        verificationInProgress = verificationInProgress,
-        verificationRetryRequired = verificationRetryRequired,
-        recoveryRetryRequired = recoveryRetryRequired,
-        deviceNameEditable = !submitting && !verificationInProgress,
-        showConfirm = !verificationInProgress,
-        confirmLabel = when {
-            submitting -> "同步中…"
-            verificationRetryRequired -> "重新确认"
-            recoveryRetryRequired -> "重试首次同步"
-            else -> "在这台设备登录"
-        },
-        title = if (verificationInProgress) "正在确认家庭服务器…" else "登录家庭",
-        onConfirm = when {
-            verificationRetryRequired -> onRetryVerification
-            recoveryRetryRequired -> onRetryRecovery
-            else -> onLogin
-        },
-        onManualJoin = onManualJoin,
-        onDismiss = onDismiss,
     )
 }

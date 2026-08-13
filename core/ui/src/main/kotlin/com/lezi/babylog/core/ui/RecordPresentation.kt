@@ -36,6 +36,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.payloadSummary
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziIconSize
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
@@ -60,32 +61,6 @@ enum class RecordSection(val title: String) {
 
     companion object
 }
-
-/**
- * Legacy text-glyph palette for custom item icons.
- * Kept for call sites not yet migrated; new UI must render the vector
- * `LeziCustomItemGlyphIcon(slot)` (designsystem) — the glyphs depend on system
- * fonts and mismatch the record glyph stroke language. Slot order is identical.
- */
-@Deprecated(
-    "Text glyphs depend on system fonts; render LeziCustomItemGlyphIcon(slot) instead.",
-    ReplaceWith(
-        "LeziCustomItemGlyphIcon(slot)",
-        "com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon",
-    ),
-)
-val CUSTOM_ITEM_ICON_GLYPHS: List<String> =
-    listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
-
-@Deprecated(
-    "Text glyphs depend on system fonts; render LeziCustomItemGlyphIcon(slot) instead.",
-    ReplaceWith(
-        "LeziCustomItemGlyphIcon(slot)",
-        "com.lezi.babylog.designsystem.LeziCustomItemGlyphIcon",
-    ),
-)
-fun customItemIconGlyph(slot: Int): String =
-    CUSTOM_ITEM_ICON_GLYPHS[slot.coerceIn(0, CUSTOM_ITEM_ICON_GLYPHS.lastIndex)]
 
 enum class RecordChartMark {
     Circle,
@@ -250,7 +225,7 @@ fun RecordType.presentationTone(): LeziTone = when (presentation.colorRole) {
 fun RecordTypeIcon(
     type: RecordType,
     modifier: Modifier = Modifier,
-    size: Dp = 18.dp,
+    size: Dp = LeziIconSize.Glyph,
     tint: Color = leziRecordColor(type.presentation.colorRole),
 ) {
     LeziRecordGlyphIcon(
@@ -268,12 +243,13 @@ data class RecordSummaryValue(
 )
 
 /**
- * Five-column summary strip with the same semantic icons used by record rows.
+ * Equal-width summary strip with the same semantic icons used by record rows.
  *
- * Division of labor vs `SummaryMetric` (designsystem): this is the flat **strip**
- * language (cells split by dividers, record-type glyphs, optional filter selection)
- * for record panels; `SummaryMetric` is the standalone warm **card** language with
- * tinted tone backgrounds. Keep both — see the note on `SummaryMetric`.
+ * Record home uses four glance cells (奶量 / 睡眠 / 尿 / 便). Division of labor
+ * vs `SummaryMetric` (designsystem): this is the flat **strip** language
+ * (cells split by dividers, record-type glyphs, optional filter selection)
+ * for record panels; `SummaryMetric` is the standalone warm **card** language
+ * with tinted tone backgrounds. Keep both — see the note on `SummaryMetric`.
  */
 @Composable
 fun RecordSummaryStrip(
@@ -286,8 +262,7 @@ fun RecordSummaryStrip(
     val journal = LeziThemeExt.isJournal
     val body: @Composable () -> Unit = {
         Row(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
-            val visibleValues = values.take(5)
-            visibleValues.forEachIndexed { index, item ->
+            values.forEachIndexed { index, item ->
                 val color = leziRecordColor(item.type.presentation.colorRole)
                 val selected = item.type == selectedType
                 val selectable = onSelect != null && item.type in selectableTypes
@@ -324,20 +299,32 @@ fun RecordSummaryStrip(
                                 Modifier
                             },
                         )
-                        .padding(horizontal = 3.dp, vertical = 7.dp),
+                        .padding(horizontal = 6.dp, vertical = 7.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
                     Box(
                         Modifier
-                            .size(26.dp)
+                            .size(LeziIconSize.Chip)
                             .clip(if (journal) LeziShapes.JournalButton else CircleShape)
                             .background(color.copy(alpha = 0.14f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        RecordTypeIcon(item.type, size = 15.dp, tint = color)
+                        RecordTypeIcon(item.type, size = LeziIconSize.Glyph, tint = color)
                     }
-                    Text(item.value, style = LeziTypography.Mono, maxLines = 1)
+                    Box(
+                        Modifier.height(18.dp),
+                        contentAlignment = Alignment.BottomCenter,
+                    ) {
+                        Text(
+                            item.value,
+                            // Match warm SummaryMetric: four equal cells, ChipMetric
+                            // sized so full-day sleep totals (12h20m) stay unclipped.
+                            style = LeziTypography.ChipMetric,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                    }
                     Text(
                         item.label,
                         style = LeziTypography.Meta,
@@ -345,7 +332,7 @@ fun RecordSummaryStrip(
                         maxLines = 1,
                     )
                 }
-                if (index < visibleValues.lastIndex) {
+                if (index < values.lastIndex) {
                     Spacer(
                         Modifier
                             .width(1.dp)

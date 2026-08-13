@@ -6,6 +6,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.domain.carelog.CareAggregation
 import java.time.LocalDate
 import java.time.ZoneOffset
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 class SummaryAggregationTest {
@@ -47,15 +48,17 @@ class SummaryAggregationTest {
             record(11, RecordType.FORMULA, anchor.plusDays(1), """{"amount_ml":999}"""),
         )
 
-        val week = buildSummaryUi(
-            records = records,
-            range = SummaryRange.Week,
-            anchorDate = anchor,
-            showAvgSleep = false,
-            comparePrevWeek = true,
-            babyName = "年年",
-            zone = zone,
-        )
+        val week = runBlocking {
+            buildSummaryUi(
+                records = records,
+                range = SummaryRange.Week,
+                anchorDate = anchor,
+                showAvgSleep = false,
+                comparePrevWeek = true,
+                babyName = "年年",
+                zone = zone,
+            )
+        }
         assertThat(week.rangeStartDate).isEqualTo(LocalDate.of(2026, 7, 20))
         assertThat(week.totals.feedMl).isEqualTo(150)
         assertThat(week.totals.feedCount).isEqualTo(2)
@@ -89,14 +92,16 @@ class SummaryAggregationTest {
         assertThat(week.previousWeekTotals!!.feedMl).isEqualTo(70)
         assertThat(week.previousWeekTotals!!.nursingMin).isEqualTo(15)
 
-        val day = buildSummaryUi(
-            records = records,
-            range = SummaryRange.Day,
-            anchorDate = anchor,
-            showAvgSleep = false,
-            babyName = "年年",
-            zone = zone,
-        )
+        val day = runBlocking {
+            buildSummaryUi(
+                records = records,
+                range = SummaryRange.Day,
+                anchorDate = anchor,
+                showAvgSleep = false,
+                babyName = "年年",
+                zone = zone,
+            )
+        }
         assertThat(day.totals.feedMl).isEqualTo(150)
         assertThat(day.totals.dayValuesFeed).containsExactly(150f)
         assertThat(day.totals.dayValuesFeed.single()).isEqualTo(week.totals.dayValuesFeed[3])
@@ -107,14 +112,16 @@ class SummaryAggregationTest {
         assertThat(day.totals.feedTimeBuckets).containsExactly(0f, 2f, 0f, 0f).inOrder()
         assertThat(day.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 20))
 
-        val month = buildSummaryUi(
-            records = records,
-            range = SummaryRange.Month,
-            anchorDate = anchor,
-            showAvgSleep = false,
-            babyName = "年年",
-            zone = zone,
-        )
+        val month = runBlocking {
+            buildSummaryUi(
+                records = records,
+                range = SummaryRange.Month,
+                anchorDate = anchor,
+                showAvgSleep = false,
+                babyName = "年年",
+                zone = zone,
+            )
+        }
         assertThat(month.totals.feedMl).isEqualTo(250)
         assertThat(month.totals.dayValuesFeed).hasSize(30)
         assertThat(month.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 20))
@@ -132,21 +139,23 @@ class SummaryAggregationTest {
 
     @Test
     fun nursingWithoutVolume_isStillNonEmpty() {
-        val ui = buildSummaryUi(
-            records = listOf(
-                record(
-                    1,
-                    RecordType.NURSING,
-                    anchor,
-                    """{"left_min":7,"right_min":8,"order":"LR","record_mode":"end"}""",
+        val ui = runBlocking {
+            buildSummaryUi(
+                records = listOf(
+                    record(
+                        1,
+                        RecordType.NURSING,
+                        anchor,
+                        """{"left_min":7,"right_min":8,"order":"LR","record_mode":"end"}""",
+                    ),
                 ),
-            ),
-            range = SummaryRange.Day,
-            anchorDate = anchor,
-            showAvgSleep = true,
-            babyName = "年年",
-            zone = zone,
-        )
+                range = SummaryRange.Day,
+                anchorDate = anchor,
+                showAvgSleep = true,
+                babyName = "年年",
+                zone = zone,
+            )
+        }
 
         assertThat(ui.empty).isFalse()
         assertThat(ui.totals.feedCount).isEqualTo(1)
@@ -168,14 +177,16 @@ class SummaryAggregationTest {
             ),
         )
         val day = CareAggregation.day(records, anchor, zone)
-        val summary = buildSummaryUi(
-            records = records,
-            range = SummaryRange.Day,
-            anchorDate = anchor,
-            showAvgSleep = false,
-            babyName = "年年",
-            zone = zone,
-        )
+        val summary = runBlocking {
+            buildSummaryUi(
+                records = records,
+                range = SummaryRange.Day,
+                anchorDate = anchor,
+                showAvgSleep = false,
+                babyName = "年年",
+                zone = zone,
+            )
+        }
         val widget = CareAggregation.widget(
             records = records,
             babyName = "年年",

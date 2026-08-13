@@ -1,20 +1,28 @@
 package com.lezi.babylog.sync
+
+import com.lezi.babylog.core.common.cancellation.cancellationCauseOrNull
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.fulfillment.FulfillmentAuthoritySettlement
 import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.PendingPublishDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
+import com.lezi.babylog.core.database.causal.ConflictSummaryDao
+import com.lezi.babylog.core.database.causal.SourceRelationDao
+import com.lezi.babylog.core.database.causal.WakeObservationDao
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Named
@@ -25,16 +33,15 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -44,6 +51,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+
 import com.lezi.babylog.sync.availability.AvailabilityProbeReason
 import com.lezi.babylog.sync.availability.FamilyServerAvailability
 import com.lezi.babylog.sync.availability.FamilyServerAvailabilityPolicy
@@ -70,14 +78,16 @@ import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
 import com.lezi.babylog.sync.backend.SyncBackend
 import com.lezi.babylog.sync.backend.SyncHttpException
 import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
+import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
 import com.lezi.babylog.sync.clear.LocalReplicaClearCoordinator
+import com.lezi.babylog.sync.conflict.ConflictSnapshotProjection
+import com.lezi.babylog.sync.conflict.ConflictSnapshotLoadLocks
 import com.lezi.babylog.sync.disasterrecovery.DisasterRecoverySnapshotBuilder
 import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.engine.ForegroundSyncBlockedException
 import com.lezi.babylog.sync.engine.ForegroundSyncDecision
 import com.lezi.babylog.sync.engine.ForegroundSyncGate
-import com.lezi.babylog.sync.engine.ForegroundSyncRetryPolicy
 import com.lezi.babylog.sync.engine.NoOpCarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.engine.NoOpFamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.engine.ReplicaSyncEngine
@@ -85,13 +95,15 @@ import com.lezi.babylog.sync.engine.ReplicaSyncOutcome
 import com.lezi.babylog.sync.media.MediaPrepareException
 import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
 import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.media.ImmutableMediaSpool
 import com.lezi.babylog.sync.qr.MemberLoginQrCode
 import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.session.CAPABILITY_ATOMIC_BUNDLE
-import com.lezi.babylog.sync.session.CAPABILITY_AUTHORITATIVE_RECONCILE
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
 import com.lezi.babylog.sync.session.CAPABILITY_DISASTER_RESTORE
 import com.lezi.babylog.sync.session.CAPABILITY_RECORD_MEMBERSHIP_AUTHOR
+import com.lezi.babylog.sync.session.CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT
 import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.FamilySessionCommand
@@ -111,6 +123,24 @@ import com.lezi.babylog.sync.session.requireDeviceName
 import com.lezi.babylog.sync.session.requireMemberDisplayName
 import com.lezi.babylog.sync.session.receiptFor
 
+private data class ConflictSnapshotSessionIdentity(
+    val familyId: String,
+    val deviceId: String,
+    val baseUrl: String,
+    val membershipId: String,
+    val pullGeneration: String,
+    val joined: Boolean,
+)
+
+private fun SyncSession.conflictSnapshotIdentity() = ConflictSnapshotSessionIdentity(
+    familyId = familyId,
+    deviceId = deviceId,
+    baseUrl = baseUrl,
+    membershipId = membershipId,
+    pullGeneration = pullGeneration,
+    joined = isJoined,
+)
+
 @Singleton
 class RealSyncPort @Inject constructor(
     private val backend: SyncBackend,
@@ -127,6 +157,7 @@ class RealSyncPort @Inject constructor(
     private val clock: PolicyClock,
     private val foregroundState: ForegroundState,
     private val mediaFiles: SyncMediaFileStore,
+    private val immutableMediaSpool: ImmutableMediaSpool,
     private val mediaFileCleanup: ReferenceAwareMediaFileCleanup,
     private val transactionRunner: DatabaseTransactionRunner,
     private val pendingReplicaCleanupStore: PendingReplicaCleanupStore,
@@ -139,6 +170,11 @@ class RealSyncPort @Inject constructor(
     private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val fulfillmentAuthoritySettlement: FulfillmentAuthoritySettlement,
+    private val wakeObservationDao: WakeObservationDao,
+    private val conflictSummaryDao: ConflictSummaryDao,
+    private val conflictSnapshotCacheDao: ConflictSnapshotCacheDao,
+    private val sourceRelationDao: SourceRelationDao? = null,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     private val apkIdentityReader: AppUpdateApkIdentityReader =
@@ -164,12 +200,21 @@ class RealSyncPort @Inject constructor(
     /** Process-session "稍后" suppressions keyed by server package versionCode. */
     private val dismissedOptionalUpdateVersionCodes =
         java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
+    /** Invalidates detail intents captured before a committed local/identity clear. */
+    private val conflictSnapshotClearEpoch = AtomicLong()
+    private val conflictSnapshotLoadLocks = ConflictSnapshotLoadLocks()
+    private val conflictSnapshotProjection = ConflictSnapshotProjection(
+        summaries = conflictSummaryDao,
+        snapshots = conflictSnapshotCacheDao,
+        transactions = transactionRunner,
+    )
     /**
      * Serializes app-update install + staging cleanup so about-check, banner install,
      * and force overlay cannot race the same private staging path.
@@ -186,11 +231,13 @@ class RealSyncPort @Inject constructor(
         familyDao = familyDao,
         clock = clock,
         mediaFiles = mediaFiles,
+        immutableMediaSpool = immutableMediaSpool,
         mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactionRunner,
         carePlanAppliedListener = carePlanAppliedListener,
         familyBabyAppliedListener = familyBabyAppliedListener,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
+        fulfillmentAuthoritySettlement = fulfillmentAuthoritySettlement,
         requireRemoteAllowed = { session ->
             val decision = foregroundSyncGate.evaluate(
                 session.endpointConfig,
@@ -200,6 +247,10 @@ class RealSyncPort @Inject constructor(
             requireAllowed(decision)
             currentStatus.value = SyncStatus.Syncing
         },
+        wakeObservationDao = wakeObservationDao,
+        conflictSummaryDao = conflictSummaryDao,
+        conflictSnapshotCacheDao = conflictSnapshotCacheDao,
+        sourceRelationDao = sourceRelationDao,
     )
     private val disasterRecoverySnapshotBuilder = DisasterRecoverySnapshotBuilder(
         babyDao = babyDao,
@@ -240,8 +291,6 @@ class RealSyncPort @Inject constructor(
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)
-    private val pendingAvailabilityReason =
-        AtomicReference(AvailabilityProbeReason.LocalChanges)
     private val lastAcceptedNetworkRecoveredAtMillis = AtomicReference<Long?>(null)
     @Volatile private var cachedSession = SyncSession()
 
@@ -273,76 +322,14 @@ class RealSyncPort @Inject constructor(
             }
         }
         processScope.launch {
-            var consecutiveRetryableFailures = 0
-            var scheduledRetry: Job? = null
-            var scheduledRetryNeedsPull = false
             for (ignored in syncSignal) {
                 if (!foregroundState.isForeground()) continue
-                if (scheduledRetryNeedsPull) {
-                    pullRequested.set(true)
-                }
-                scheduledRetryNeedsPull = false
                 val trigger = if (pullRequested.getAndSet(false)) {
                     SyncTrigger.Foreground
                 } else {
                     SyncTrigger.LocalWrite
                 }
-                val probeReason = pendingAvailabilityReason.getAndSet(
-                    AvailabilityProbeReason.LocalChanges,
-                )
-                val availability = probeServerAvailability(probeReason).getOrNull()
-                if (availability !is FamilyServerAvailability.Available) {
-                    if (trigger != SyncTrigger.LocalWrite) {
-                        scheduledRetryNeedsPull = true
-                    }
-                    val unavailable = availability as? FamilyServerAvailability.Unavailable
-                    if (unavailable != null) {
-                        val forced = probeReason == AvailabilityProbeReason.Foreground ||
-                            probeReason == AvailabilityProbeReason.NetworkRecovered ||
-                            probeReason == AvailabilityProbeReason.PullToRefresh
-                        if (scheduledRetry?.isActive != true || forced) {
-                            scheduledRetry?.cancel()
-                            val retryDelay =
-                                (unavailable.nextProbeAtMillis - clock.nowMillis()).coerceAtLeast(0)
-                            scheduledRetry = processScope.launch {
-                                delay(retryDelay)
-                                if (foregroundState.isForeground()) {
-                                    pendingAvailabilityReason.set(
-                                        AvailabilityProbeReason.RetryDeadline,
-                                    )
-                                    syncSignal.trySend(Unit)
-                                }
-                            }
-                        }
-                    }
-                    continue
-                }
-                scheduledRetry?.cancel()
-                scheduledRetry = null
-                val result = sync(trigger)
-                val failure = result.exceptionOrNull()
-                if (failure == null) {
-                    consecutiveRetryableFailures = 0
-                    continue
-                }
-                val retryDelay = ForegroundSyncRetryPolicy.delayMillis(
-                    failure = failure,
-                    consecutiveFailures = consecutiveRetryableFailures,
-                )
-                if (retryDelay == null || !foregroundState.isForeground()) {
-                    consecutiveRetryableFailures = 0
-                    continue
-                }
-                consecutiveRetryableFailures += 1
-                val retryNeedsPull = trigger != SyncTrigger.LocalWrite
-                scheduledRetryNeedsPull = retryNeedsPull
-                scheduledRetry = processScope.launch {
-                    delay(retryDelay)
-                    if (foregroundState.isForeground()) {
-                        if (retryNeedsPull) pullRequested.set(true)
-                        syncSignal.trySend(Unit)
-                    }
-                }
+                sync(trigger)
             }
         }
     }
@@ -469,6 +456,8 @@ class RealSyncPort @Inject constructor(
     override fun verifiedEndpoint(): Flow<TrustedEndpointProfile?> = preferences.verifiedEndpoint
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = preferences.pendingMemberLogin
     override fun memberLoginChecks(): Flow<MemberLoginCheckResult> = memberLoginCheckEvents
+
+    override fun neighborAlignmentHints(): Flow<String> = emptyFlow()
     override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         optionalAppUpdateState
 
@@ -598,12 +587,6 @@ class RealSyncPort @Inject constructor(
         if (trigger != SyncTrigger.LocalWrite) {
             pullRequested.set(true)
         }
-        pendingAvailabilityReason.accumulateAndGet(trigger.toAvailabilityProbeReason()) {
-                current,
-                incoming,
-            ->
-            mergeAvailabilityProbeReason(current, incoming)
-        }
         syncSignal.trySend(Unit)
     }
 
@@ -626,7 +609,6 @@ class RealSyncPort @Inject constructor(
             if (lastAcceptedNetworkRecoveredAtMillis.compareAndSet(lastAccepted, now)) break
         }
         pullRequested.set(true)
-        pendingAvailabilityReason.set(AvailabilityProbeReason.NetworkRecovered)
         syncSignal.trySend(Unit)
     }
 
@@ -636,6 +618,68 @@ class RealSyncPort @Inject constructor(
                 mediaFileCleanup.cleanupTombstones(clientUuids)
             }
         }
+
+    override suspend fun fetchConflictSnapshot(
+        conflictId: String,
+    ): com.lezi.babylog.sync.conflict.ConflictSnapshot {
+        val requestedClearEpoch = conflictSnapshotClearEpoch.get()
+        return conflictSnapshotLoadLocks.withLock(conflictId) {
+            check(conflictSnapshotClearEpoch.get() == requestedClearEpoch) {
+                "冲突详情请求已跨越 session/local clear 边界"
+            }
+            val session = preferences.session.first()
+            check(session.isJoined) { "未加入家庭，无法加载冲突详情" }
+            val sessionIdentity = session.conflictSnapshotIdentity()
+            val isLoadCurrent: suspend () -> Boolean = {
+                conflictSnapshotClearEpoch.get() == requestedClearEpoch &&
+                    preferences.session.first().conflictSnapshotIdentity() == sessionIdentity
+            }
+            suspend fun load() = conflictSnapshotProjection.loadComplete(
+                conflictId = conflictId,
+                persistenceBarrier = syncMutex,
+                isLoadCurrent = isLoadCurrent,
+            ) { request -> backend.fetchConflictSnapshotPage(session, conflictId, request) }
+            try {
+                load()
+            } catch (failure: SyncHttpException) {
+                val code = syncHttpCodeOrNull(failure.responseBody)
+                val receiptCanRestart = code in setOf(
+                    "invalid_snapshot_token",
+                    "snapshot_expired",
+                    "snapshot_stale",
+                )
+                if (!receiptCanRestart || !conflictSnapshotProjection.discardStaging(conflictId)) {
+                    throw failure
+                }
+                load()
+            }
+        }
+    }
+
+    override suspend fun resolveConflict(
+        conflictId: String,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
+    ): com.lezi.babylog.sync.backend.ConflictResolveResult {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法解决冲突" }
+        return backend.resolveConflict(session, conflictId, request)
+    }
+
+    override suspend fun declareSourceRelation(
+        request: com.lezi.babylog.sync.backend.SourceRelationDeclareRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法声明来源关系" }
+        return backend.declareSourceRelation(session, request)
+    }
+
+    override suspend fun resolveSourceRelationGroup(
+        request: com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult {
+        val session = preferences.session.first()
+        check(session.isJoined) { "未加入家庭，无法解决疑似重复组" }
+        return backend.resolveSourceRelationGroup(session, request)
+    }
 
     override suspend fun saveEndpointConfig(
         config: FamilyEndpointConfig,
@@ -1133,11 +1177,14 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> {
         val remote = executeFamily(FamilySessionCommand.ListMembers)
-        val members = remote.getOrElse { return Result.failure(it) }
-            .let { (it as FamilySessionOutcome.MembersListed).members }
+        val directory = remote.getOrElse { return Result.failure(it) }
+            .let { it as FamilySessionOutcome.MembersListed }
         return try {
-            preferences.saveFamilyMemberDirectory(members)
-            Result.success(members)
+            preferences.saveFamilyMemberDirectorySnapshot(
+                generation = directory.generation,
+                members = directory.members,
+            )
+            Result.success(directory.members)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Throwable) {
@@ -1186,11 +1233,6 @@ class RealSyncPort @Inject constructor(
         ).map { Unit }
 
     override suspend fun syncWhenAvailable(trigger: SyncTrigger): Result<Unit> {
-        val availability = probeServerAvailability(trigger.toAvailabilityProbeReason())
-            .getOrElse { return Result.failure(it) }
-        if (availability !is FamilyServerAvailability.Available) {
-            return Result.failure(FamilyServerCurrentlyUnavailableException())
-        }
         return sync(trigger)
     }
 
@@ -1301,13 +1343,15 @@ class RealSyncPort @Inject constructor(
     override suspend fun clearLocalData(
         scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
-    ): Result<Unit> = localReplicaClearCoordinator
-        .clear(
+    ): Result<Unit> {
+        conflictSnapshotClearEpoch.incrementAndGet()
+        return localReplicaClearCoordinator.clear(
             scope = scope,
             workflow = workflow,
             recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
         )
         .onFailure(::updateFailureStatus)
+    }
 
     override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> {
         // Opportunistic staging cleanup on the check path — never while an install
@@ -1813,6 +1857,7 @@ class RealSyncPort @Inject constructor(
     }
 
     private suspend fun finishPendingTerminalIdentityClear() {
+        conflictSnapshotClearEpoch.incrementAndGet()
         syncMutex.withLock {
             // Terminal identity and every local family projection converge under
             // the same barrier used by foreground sync. Credentials are already
@@ -2195,32 +2240,14 @@ private val REQUIRED_HEALTH_CAPABILITIES = setOf(
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
     CAPABILITY_DISASTER_RESTORE,
-    CAPABILITY_AUTHORITATIVE_RECONCILE,
+    CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
+    // 0.4.0 causal generation (wire §1): one atomic capability or stop care sync.
+    CAPABILITY_CAUSAL_SYNC_V2,
 )
 
 /** Reauth keeps the family replica/identity; only a true leave/unconfigure retires force UI. */
 private fun SyncSession.retainsFamilyIdentityForReauth(): Boolean =
     reauthRequired && familyId.isNotBlank() && membershipId.isNotBlank() && baseUrl.isNotBlank()
-
-private fun SyncTrigger.toAvailabilityProbeReason(): AvailabilityProbeReason = when (this) {
-    SyncTrigger.Foreground -> AvailabilityProbeReason.Foreground
-    SyncTrigger.PullToRefresh -> AvailabilityProbeReason.PullToRefresh
-    SyncTrigger.LocalWrite -> AvailabilityProbeReason.LocalChanges
-}
-
-private fun mergeAvailabilityProbeReason(
-    current: AvailabilityProbeReason,
-    incoming: AvailabilityProbeReason,
-): AvailabilityProbeReason = if (incoming.priority >= current.priority) incoming else current
-
-private val AvailabilityProbeReason.priority: Int
-    get() = when (this) {
-        AvailabilityProbeReason.LocalChanges -> 0
-        AvailabilityProbeReason.RetryDeadline -> 1
-        AvailabilityProbeReason.Foreground -> 2
-        AvailabilityProbeReason.PullToRefresh -> 3
-        AvailabilityProbeReason.NetworkRecovered -> 4
-    }
 
 private inline fun <reified T : Throwable> Throwable.causeChainContains(): Boolean =
     generateSequence(this) { it.cause }.any { it is T }
@@ -2235,18 +2262,9 @@ internal suspend fun runProcessStartupRecovery(
     } catch (cancellation: CancellationException) {
         throw cancellation
     } catch (failure: Exception) {
-        failure.startupCancellationCauseOrNull()?.let { throw it }
+        failure.cancellationCauseOrNull()?.let { throw it }
         reportFailure(failure)
     }
-}
-
-private fun Throwable.startupCancellationCauseOrNull(): CancellationException? {
-    var current: Throwable? = this
-    while (current != null) {
-        if (current is CancellationException) return current
-        current = current.cause
-    }
-    return null
 }
 
 /**

@@ -85,7 +85,12 @@ fun FamilyNetworkSettingsScreen(
 
     PageScaffoldBackground {
         Column(Modifier.fillMaxSize()) {
-            LeziDetailTopBar(title = "家庭网络设置", onBack = onBack)
+            LeziDetailTopBar(
+                title = "家庭网络设置",
+                onBack = onBack,
+                // Family tab still owns the root brand header + status-bar inset.
+                applyStatusBarsPadding = false,
+            )
             Column(
                 modifier = Modifier
                     .fillMaxSize()

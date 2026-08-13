@@ -14,6 +14,7 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
     let certificate = directory.path().join("server.crt");
     let private_key = directory.path().join("server.key");
     generate_certificate(&certificate, &private_key);
+    write_protocol_cutover_release(directory.path());
     let certificate_before = std::fs::read(&certificate).unwrap();
     let public_port = free_port();
     let internal_port = free_port();
@@ -38,7 +39,8 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
                     "atomic_bundle",
                     "record_membership_author",
                     "device_disaster_restore_v1",
-                    "authoritative_reconcile_v1",
+                    "validated_deferred_fulfillment_v1",
+                    "causal_sync_v2",
                 ],
                 "family_state": "empty",
             })
@@ -53,25 +55,93 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
 }
 
 #[test]
-fn configured_lan_apk_listener_serves_plain_http_and_shuts_down_with_the_server() {
+fn authenticated_sync_handshake_succeeds_over_isolated_tls() {
     let directory = tempfile::tempdir().unwrap();
     let certificate = directory.path().join("server.crt");
     let private_key = directory.path().join("server.key");
     generate_certificate(&certificate, &private_key);
+    write_protocol_cutover_release(directory.path());
+    let public_port = free_port();
+    let internal_port = free_port();
+    let mut server = spawn_server(
+        directory.path(),
+        &certificate,
+        &private_key,
+        public_port,
+        internal_port,
+    );
+    let _ = wait_for_https(&certificate, public_port);
+
+    let create = curl_json(
+        &certificate,
+        public_port,
+        "/v1/family/create",
+        &[
+            "X-Lezi-Bootstrap-Secret: tls-test-bootstrap-secret",
+            "Content-Type: application/json",
+        ],
+        json!({
+            "create_request_id": "14141414-1414-4141-8141-141414141414",
+            "display_name": "Owner",
+            "device_name": "TLS test device",
+            "family_name": "TLS test family",
+        }),
+    );
+    let token = create["access_token"].as_str().unwrap();
+    let authorization = format!("Authorization: Bearer {token}");
+    let handshake = curl_json(
+        &certificate,
+        public_port,
+        "/v1/sync/handshake",
+        &[
+            authorization.as_str(),
+            "X-Lezi-Client-Version-Code: 21",
+            "Content-Type: application/json",
+        ],
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": ["causal_sync_v2"],
+        }),
+    );
+
+    assert_eq!(handshake["ready"], true);
+    assert_eq!(handshake["principal"]["device_id"], create["device_id"]);
+    assert_eq!(
+        handshake["principal"]["membership_id"],
+        create["membership_id"]
+    );
+    assert!(handshake["directory_generation"]
+        .as_str()
+        .is_some_and(|it| !it.is_empty()));
+    assert!(!plain_http_succeeds(public_port));
+    server.kill().unwrap();
+    server.wait().unwrap();
+}
+
+fn write_protocol_cutover_release(data_root: &Path) {
     let apk_bytes = b"tls-black-box-release-apk";
-    std::fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    std::fs::write(data_root.join("app-release.apk"), apk_bytes).unwrap();
     std::fs::write(
-        directory.path().join("app-update.json"),
+        data_root.join("app-update.json"),
         json!({
             "package_name": "com.lezi.babylog",
-            "version_code": 12,
-            "version_name": "0.3.5",
-            "min_supported_version_code": 6,
+            "version_code": 21,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 21,
             "sha256": hex::encode(Sha256::digest(apk_bytes)),
         })
         .to_string(),
     )
     .unwrap();
+}
+
+#[test]
+fn configured_lan_apk_listener_serves_plain_http_and_shuts_down_with_the_server() {
+    let directory = tempfile::tempdir().unwrap();
+    let certificate = directory.path().join("server.crt");
+    let private_key = directory.path().join("server.key");
+    generate_certificate(&certificate, &private_key);
+    write_protocol_cutover_release(directory.path());
     let public_port = free_port();
     let internal_port = free_port();
     let lan_port = 8767;
@@ -192,6 +262,28 @@ fn wait_for_https(certificate: &Path, port: u16) -> Value {
         thread::sleep(Duration::from_millis(100));
     }
     panic!("TLS server did not become ready");
+}
+
+fn curl_json(certificate: &Path, port: u16, path: &str, headers: &[&str], body: Value) -> Value {
+    let mut command = Command::new("curl");
+    command
+        .args(["--fail", "--silent", "--show-error", "--cacert"])
+        .arg(certificate)
+        .args(["--request", "POST"]);
+    for header in headers {
+        command.args(["--header", header]);
+    }
+    let output = command
+        .args(["--data", &body.to_string()])
+        .arg(format!("https://localhost:{port}{path}"))
+        .output()
+        .expect("curl must be installed for the TLS black-box test");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 fn internal_ready(port: u16) -> bool {

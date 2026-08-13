@@ -9,7 +9,7 @@
 mod anonymize;
 mod login;
 mod membership_admin;
-mod session;
+pub(in crate::store) mod session;
 
 use rusqlite::{params, OptionalExtension, Transaction};
 

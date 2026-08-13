@@ -24,6 +24,10 @@ struct MemberView {
     is_self: bool,
     /// Server-minted immutable membership identity. Safe public key for ACL.
     membership_id: String,
+    /// Max `last_used_at` across this membership's active devices (epoch seconds).
+    /// Visible to every authenticated family role. Null when no active device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_sync_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     devices: Option<Vec<DeviceView>>,
 }
@@ -39,6 +43,7 @@ struct DeviceView {
 
 #[derive(Debug, Serialize)]
 pub(super) struct MembersResponse {
+    directory_generation: String,
     members: Vec<MemberView>,
 }
 
@@ -51,15 +56,12 @@ pub(super) async fn list_family_members(
     let store = state.store.clone();
     let family_id = principal.family_id.clone();
     let membership_id = principal.membership_id.clone();
-    let (memberships, devices) = run_blocking(move || {
-        Ok((
-            store.active_memberships(&family_id)?,
-            store.visible_active_devices(&family_id, &membership_id, viewer_is_owner)?,
-        ))
+    let snapshot = run_blocking(move || {
+        Ok(store.family_directory_snapshot(&family_id, &membership_id, viewer_is_owner)?)
     })
     .await?;
     let mut devices_by_membership = HashMap::<String, Vec<DeviceView>>::new();
-    for device in devices {
+    for device in snapshot.visible_devices {
         let is_current = device.device_id == principal.device_id;
         devices_by_membership
             .entry(device.membership_id)
@@ -73,10 +75,15 @@ pub(super) async fn list_family_members(
     }
 
     // Runtime projection is one row per server-minted membership.
-    let mut members = memberships
+    let mut members = snapshot
+        .memberships
         .into_iter()
         .map(|membership| {
             let is_self = membership.membership_id == principal.membership_id;
+            let last_sync_at = snapshot
+                .last_sync_by_membership
+                .get(&membership.membership_id)
+                .copied();
             let devices = if viewer_is_owner || is_self {
                 Some(
                     devices_by_membership
@@ -91,6 +98,7 @@ pub(super) async fn list_family_members(
                 role: membership.role,
                 is_self,
                 membership_id: membership.membership_id,
+                last_sync_at,
                 devices,
             }
         })
@@ -101,7 +109,10 @@ pub(super) async fn list_family_members(
             .then_with(|| left.display_name.cmp(&right.display_name))
             .then_with(|| left.membership_id.cmp(&right.membership_id))
     });
-    Ok(Json(MembersResponse { members }))
+    Ok(Json(MembersResponse {
+        directory_generation: snapshot.generation,
+        members,
+    }))
 }
 
 /// Owner self-renames immediately. An ordinary member creates an approval

@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 当前 0.3.8：可信 HTTPS、每设备会话、仅前台 pull/批量权威 reconcile/临时 plan/push；见 ADR-0017 |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 tree 0.4.0**：ADR-0022 commit-first + ConflictSnapshot v2，只协商 `causal_sync_v2`，mixed generation 在 mutation 前 fail closed；本文不表示家庭 NAS 已切换 |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -32,9 +32,11 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.3.8` |
-| versionCode | `14`（安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明） |
-| 本地数据契约 | 当前 `v3` / Room v26（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.4.0 / versionCode **21**）；家庭 NAS 是否已切到该代以 live health 为准 |
+| versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
+| 本地数据契约 | 当前 tree `v5` / Room **v28**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| **0.3.13 已发布 source 基线** | versionName `0.3.13`、versionCode **20**、Room **27**、历史 server schema **12**；作为非破坏升级源保留 |
+| **0.4.0 当前 tree（生产切割待维护窗）** | versionName `0.4.0`、versionCode **21**、Room **28**、local-data contract **5**、server schema **13**、floor **21**；H27 已原子激活版本/capability，H28 已完成离线迁移，H29–H30 仍负责 guarded CD/rollback；**不得**在未确认维护窗时对家庭 NAS stop/rm/replace |
 | 应用名 | 乐记 |
 
 ---
@@ -97,9 +99,10 @@ sideways seam（非分层违规；完整边表见 §2.2）。feature 之间无 `
 | 模块 | 根 façade / 壳 | 已落地子包 |
 |------|----------------|------------|
 | `:feature:log` | `LogScreen` / `LogViewModel` / `LogDialogHost` | `timeline/`、`dock/`、`composer/`、`layout/`、`photo/` |
-| `:feature:family` | `FamilyScreen` 导航壳 | `overview/`、`members/`、`wizard/`、`baby/`、`components/` |
+| `:feature:family` | `FamilyScreen` 导航壳 | `overview/`、`members/`、`wizard/`、`baby/`、`components/`、`conflict/`（app-shell 共享 inbox/resolver route） |
 | `:feature:onboarding` | 导航壳 | wizard 步态与 QR UI 与 Family 向导逻辑对齐（薄壳 + 步态包） |
 | `:feature:settings` | Settings 入口 | `calendar/`、`record/` |
+| `:core:database` | `LeziDatabase` / DAO / DI 入口 | `causal/`、`fulfillment/`（事务自持的履行权威派生结算） |
 | `:domain` | `CareLog` | `carelog/`、`careplan/`、`family/`、`timeline/`、`catalog/`、`growth/`、`export/`、`localdata/`、`calendar/` |
 | `:sync` | `SyncPort` / `RealSyncPort` / `SyncModule` | `engine/`、`backend/`、`session/`、`media/`、`appupdate/`、`qr/`、`clear/` |
 | `tools/lezi-sync` | crate 根 + 单一 `Store` 事务面 | crate-private `handlers::*`、`store::{schema,identity,bundles,media,…}`；`offline_migrate/` 独立维护窗 CLI |
@@ -116,7 +119,7 @@ seam）。**不得**为迎合文档而静默删改 Gradle 边；亦不得在文�
 | `app → sync` | composition root：前台生命周期 / `ForegroundState`、强制更新壳、`SyncPort` 注入、本地数据升级相关凭证存储 |
 | `domain → sync` | CareLog 与协调器：本地写后的同步触发、家庭向导网关、会话/角色、本机清空与家庭权威回调 |
 | `feature:log → sync` | 时间轴下拉刷新触发 sync；记录/计划本地发布文案 |
-| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理、可选更新横幅与退出 |
+| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理、可选更新横幅与退出；共享冲突 resolver 会话/ACL |
 | `feature:onboarding → sync` | 引导内连接家庭服务器、TOFU / 成员登录 QR、setup probe |
 | `feature:growth → sync` | 成长页下拉刷新触发 sync |
 | `feature:settings → sync` | 关于区检查更新 / 安装更新与相关文案 |
@@ -139,7 +142,12 @@ UI 事件
   → Room（立刻成功 → UI 刷新）
   → 标记 syncDirty；LocalWrite 只通知协调器“有待发布内容”
   → 仅当：前台 && availability 健康租约 && trusted HTTPS endpoint && 有效 device session
-        → pull/reconcile → 从 Room 临时 plan → atomic bundle push；回前台/下拉同序执行
+        → LocalWrite（因果 capability 已具备）:
+             冻结 dirty 原子单元 → causal reconcile/commit（可含 media preimage）
+             **不** incremental pull、**不** 推进 pull cursor
+        → Foreground / 网络恢复 / PullToRefresh（完整周期）:
+             pull → 冻结 → causal reconcile/commit（或 legacy fulfillment 路径）
+        → 无因果 wire 时 LocalWrite 不得 no-pull（仍先 pull，避免更快 LWW 覆盖）
 ```
 
 实现继续无后台同步、无推送拉同步。系统 PKI 或 TOFU/SPKI 验证 HTTPS endpoint，每台设备
@@ -151,15 +159,29 @@ Owner 与 Member 使用同一对账优先次序。跨进程只持久化 Room 实
 0.3.8 浅层待同步数量按 Baby+avatar、Record+photos、CarePlan+photos、CustomItem 与
 FulfillmentCandidate 原子单元投影，不再直接求和六类 Room dirty 行。
 升级完成后能在本机看到记录只证明数据保留；家庭侧可见性仍须等待首次成功的
-`pull/reconcile → plan → push`，运营验收不得把“本机可见”误报为“已发布到家庭”。
+发布结算（LocalWrite 无 pull 或完整周期 pull+settle），运营验收不得把“本机可见”误报为
+“已发布到家庭”。
 
 ### 3.1 已实现的权威收敛周期
 
-ADR-0017 在现有写路径之后执行：pull → 冻结 atomic units → 批量
-head-by-UUID 裁决 → 终结 confirmed/adopt/local-only/technical residue → 仅 publish verdict
-进入临时 plan → atomic bundle push。普通路径按本机待对账 UUID 取存在/缺失证明；
+ADR-0017 的对账优先骨架保留；因果代（ADR-0020）下完整周期为：pull → 冻结 atomic units →
+causal reconcile/commit（`confirmed|publish|conflict_preview|rejected` /
+`accepted|merged|branched`），fulfillment 等仍可走 legacy authority 路径。LocalWrite 在
+因果 capability 下跳过 pull 与 cursor 推进，与完整周期共用同一 settlement seam。
 generation/cursor 证明失效时才走全量实体快照。浅层待同步数量按未终态 atomic units 投影，
 静止且完整落库的周期必须把冻结集收敛到零；健康探测成功本身不能清状态。
+
+普通同步传输的自动重试统一位于 `sync/backend/retry` 深 module：handshake/detail 使用
+3s connect、10s response、3 attempts、30s elapsed；pull/commit/resolution 使用
+3s/20s/3/60s。合法 Retry-After 优先，否则执行 capped exponential full jitter；只重放幂等的
+冻结请求；policy deadline 透传到 HTTP adapter，让晚启动 attempt 收缩 socket timeout 并到期
+disconnect，且不再由 `RealSyncPort` 另建 30s/2min/10min 广域同步调度。stale/expired resolution
+保留旧事实并转 ConflictSnapshot refresh；auth/capability/ACL/canonical 为终态。
+
+履行权威的本机派生结算统一由 `core:database/fulfillment` 的
+`FulfillmentAuthoritySettlement` 自持 Room 事务：domain 本机完成与 sync pull apply 只传
+CarePlan portable identity；Module 在同一事务读取完整候选证据、计算 adoption patches，并重链
+计划。该派生写不改变候选/计划的 `updatedAt`、`syncDirty` 或候选的独立记录转换指针。
 
 `FamilyServerAvailability` 是协调器私有网络门闩和家庭网络设置的结果态，不替代浅层
 `SyncStatus`。匿名客户端在可信 TLS 下并行检查 `/health`、`/ready` 与 setup capability，
@@ -287,7 +309,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 项 | 合同 |
 |----|------|
 | 通道 | 平台 `PackageInstaller.Session` + 家庭服务器鉴权元数据/APK；无 FCM、无后台推包 |
-| 资格 | **仅已加入家庭**、endpoint 已信任、有效设备会话；未加入 / 离线模式无下载通道 |
+| 资格 | 鉴权 `/v1/app-update*` 仅供已加入家庭且 endpoint 已信任、会话有效的客户端；所有 `config/android-release-compatibility.json` 已枚举正式版本都可在家庭 LAN 通过独立 HTTP `8767` 取得同一个已验证 APK，恢复下载资格不受 `min_supported_version_code` 控制 |
 | 版本语义 | 比较与门槛只用整数 **versionCode**；**versionName** 仅展示 |
 | 双档 | `local < latest` → 可选；`local < minSupportedVersionCode` → 强制全屏（无「稍后」绕过主功能） |
 | 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
@@ -299,6 +321,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；鉴权 `/v1/app-update*` 不设匿名旁路，同一已验证 APK 可由 §4.3 的隔离邀请安装页提供首装 |
 | 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`（`ForcedAppUpdateState?`）、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
 | 安装约束 | 装前解析 APK 归档：`packageName` == 本机 applicationId == 元数据；`versionCode` == 元数据且 &gt; 本机；签名证书与已装乐记一致；再 PackageInstaller 同签名原地替换；仅 release `applicationId = com.lezi.babylog`；本轮不承诺 debug 后缀包自更新 |
+| 历史枚举 | `config/android-release-compatibility.json` 是 versionCode、versionName、Room schema、本地数据契约与当前同步 floor 的单一清单；Gradle、Android 更新矩阵、Room 迁移夹具和 lezi-sync 路由矩阵共同校验。永久无损基线仍是 0.3.0 / versionCode 6 / contract 1，后续正式版必须连续追加 |
 | 无残留 | 流程结束后应用私有目录无 APK；**不**承诺清除系统 PackageInstaller 内部缓存 |
 
 元数据形状（wire **snake_case**；部署文件 `app-update.json`）：
@@ -306,13 +329,18 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 ```json
 {
   "package_name": "com.lezi.babylog",
-  "version_code": 15,
-  "version_name": "0.3.8",
-  "min_supported_version_code": 6,
+  "version_code": 21,
+  "version_name": "0.4.0",
+  "min_supported_version_code": 21,
   "sha256": "<64 lowercase hex of APK>",
   "release_notes": "可选"
 }
 ```
+
+**当前 floor** 以 `config/android-release-compatibility.json` 的
+`minimum_sync_version_code` 与部署 `app-update.json` 的 `min_supported_version_code`
+为唯一真值（tree 目标 **21** / 0.4.0）。发版与 CD 前必须重核 catalog、`app-update.json`、
+Cargo/Gradle 与签名 APK sha256 一致；不得沿用历史 16/0.3.9 或 16/0.3.12 示例当生产 floor。
 
 触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查；② 菜单关于区点击检查。
 可选更新：确认层 → 下载 → sha256 → **归档身份校验**（包名 / versionCode / 签名）→
@@ -332,17 +360,23 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 2. **先抬 floor：** 在 `app-update.json` 将 `min_supported_version_code` 提到**能解析新 shape 的最低官方 versionCode**；同时准备该 versionCode（或更高）的 **已签名 release APK**，`sha256` 与包一致。
 3. **先发布可安装通道：** CD 原子对发布（APK 再 metadata），确认 `load_verified` 成功；旧客户端随后在权威 sync / restore 写路径收到 `client_update_required` 并能装包。
 4. **再启用新写入：** 仅当通道已验证后，再让新客户端/服务端发布破坏性 shape。
-5. **支持范围内 wire 冻结：** 当前 floor（例如 `min_supported=6`）到最新 versionCode 之间，wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。
+5. **支持范围内 wire 冻结：** 当前 floor 以 catalog `minimum_sync_version_code`（tree **21**）为准，到最新 versionCode 之间 wire/`schema_version`/allowlist 视为冻结；该范围内多机可混用。下一轮任何破坏性变更必须先执行 2–4，**禁止**指望旧机 skip-unknown。低于 floor 的已发布版本仍可取得 APK，但不能借此继续使用旧同步 wire。
+6. **0.4.0 因果切割（tree 已落地；NAS 生产切割待维护窗）：** 新实体 `wake_observation`、因果字段
+   `base_version`/`mutation_id`/`version_id`、verdict 枚举与移除服务器近邻落选均属破坏性
+   wire；打包须 minSupported=21 且 verified 通道可装，再在维护窗部署 server schema 13 与新客户端。
+   权威 shape 见 [`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 完整运维条目见 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)「Wire-break checklist」。
 
 ---
 
-## 4.3 邀请安装页（首次安装分发）
+## 4.3 LAN 安装页（首次安装与历史版本恢复）
 
 尚未安装乐记的受邀 Android 设备可用系统相机扫描同一个成员登录二维码，在家庭 LAN 内进入
-由 lezi-sync 提供的邀请安装页。该能力不是应用内更新，也不完成家庭登录：安装结束后用户必须
-打开乐记并重新扫描管理员仍在展示的二维码；十分钟 grant 已过期时由管理员重新生成。
+由 lezi-sync 提供的安装页；无法使用当前鉴权 HTTPS 更新流的历史正式版本也可直接下载同一个
+APK。该端口不完成家庭登录，也不放宽同步门禁。首次安装结束后用户必须打开乐记并重新扫描
+管理员仍在展示的二维码；同签名原地升级保留本机数据、家庭 session、endpoint 与 SPKI 信任，
+只有原会话本来就处于 reauth 时才继续既有重新登录流程。
 
 | 项 | 合同 |
 |----|------|
@@ -371,11 +405,17 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 | `lezi-sync` NAS | API/镜像/自动化；物理 NAS 生产部署待目标环境 |
 
 **NAS schema / offline-migrate 边界：** 日常启动只接受精确 current schema（fail closed；
-见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。历史 v3
-数据根**不得**在 server startup 自动迁移；唯一出路是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)
-的两阶段路径：维护窗前在备份上用显式 `lezi-sync offline-migrate`（固定源→current、
-独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。发布二进制
-含该子命令 ≠ 滚动兼容；普通 CD 不执行。权威 runbook：
+见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。**当前 tree**
+server `DATABASE_SCHEMA_VERSION` 以 `tools/lezi-sync` 源码为准（当前 **13**；H24 增加
+media reachability reverse index、durable GC cursor 与 upload marker）。**v11 仅为 offline-migrate 源**；
+R20 历史工具仅能冻结产生/validate schema **12**，不会跟随 live current。历史 v3 数据根
+**不得**在 server startup 自动迁移；维护窗内的 schema 11/12→13 copy-out mapping 专属 H28，唯一出路
+是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md) 的两阶段路径：
+维护窗前在备份上用当前显式 `lezi-sync offline-migrate`（仅接受冻结 user_version **11 或 12**→13；
+历史 R20 内部迁移链曾以 v3/11 产生 legacy 12，但不是当前 CLI 入口）、
+独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。0.3.13 的 wire
+minSupported / 客户端能力门与 schema 12 落地分开叙述。发布二进制含该子命令 ≠ 滚动兼容；
+普通 CD 不执行。权威 runbook：
 [`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)。
 
 > **当前同步策略（2026-07-25）**：中心化 NAS、硬家网、仅前台、无即时通知；

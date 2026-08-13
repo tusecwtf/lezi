@@ -22,36 +22,55 @@ impl Default for RateLimitConfig {
 
 pub(super) struct RateLimiter {
     scoped_max_attempts: u32,
-    global_max_attempts: u32,
+    group_max_attempts: u32,
     window_seconds: i64,
     windows: Mutex<RateLimitWindows>,
 }
 
+pub(super) enum RateLimitRejection {
+    Scoped,
+    Group,
+    Unavailable,
+}
+
 #[derive(Default)]
 struct RateLimitWindows {
-    global: VecDeque<i64>,
-    scoped: HashMap<String, VecDeque<i64>>,
+    groups: HashMap<String, VecDeque<i64>>,
+    scoped: HashMap<(String, String), VecDeque<i64>>,
     last_cleanup: Option<i64>,
 }
 
 impl RateLimiter {
     pub(super) fn new(config: RateLimitConfig) -> Self {
+        let group_max_attempts = config
+            .max_attempts
+            .saturating_mul(GLOBAL_RATE_LIMIT_MULTIPLIER);
+        Self::new_with_group_limit(config, group_max_attempts)
+    }
+
+    pub(super) fn new_with_group_limit(config: RateLimitConfig, group_max_attempts: u32) -> Self {
         Self {
             scoped_max_attempts: config.max_attempts,
-            global_max_attempts: config
-                .max_attempts
-                .saturating_mul(GLOBAL_RATE_LIMIT_MULTIPLIER),
+            group_max_attempts,
             window_seconds: config.window_seconds,
             windows: Mutex::new(RateLimitWindows::default()),
         }
     }
 
     pub(super) fn check_and_record(&self, scope: &str, now: i64) -> bool {
+        self.check_and_record_in(scope, "__process__", now).is_ok()
+    }
+
+    pub(super) fn check_and_record_in(
+        &self,
+        scope: &str,
+        group: &str,
+        now: i64,
+    ) -> Result<(), RateLimitRejection> {
         let Ok(mut windows) = self.windows.lock() else {
-            return false;
+            return Err(RateLimitRejection::Unavailable);
         };
 
-        prune_window(&mut windows.global, now, self.window_seconds);
         if windows
             .last_cleanup
             .is_none_or(|last| now.saturating_sub(last) >= self.window_seconds || now < last)
@@ -60,29 +79,48 @@ impl RateLimiter {
                 prune_window(queue, now, self.window_seconds);
                 !queue.is_empty()
             });
+            windows.groups.retain(|_, queue| {
+                prune_window(queue, now, self.window_seconds);
+                !queue.is_empty()
+            });
             windows.last_cleanup = Some(now);
         }
 
-        if windows.global.len() as u32 >= self.global_max_attempts {
-            return false;
+        let group_count = windows
+            .groups
+            .get_mut(group)
+            .map(|queue| {
+                prune_window(queue, now, self.window_seconds);
+                queue.len()
+            })
+            .unwrap_or(0);
+        if group_count as u32 >= self.group_max_attempts {
+            return Err(RateLimitRejection::Group);
         }
-        let queue = windows.scoped.entry(scope.to_owned()).or_default();
-        prune_window(queue, now, self.window_seconds);
-        if queue.len() as u32 >= self.scoped_max_attempts {
-            return false;
+        let scoped_key = (group.to_owned(), scope.to_owned());
+        let scoped_count = windows
+            .scoped
+            .get_mut(&scoped_key)
+            .map(|queue| {
+                prune_window(queue, now, self.window_seconds);
+                queue.len()
+            })
+            .unwrap_or(0);
+        if scoped_count as u32 >= self.scoped_max_attempts {
+            return Err(RateLimitRejection::Scoped);
         }
-        queue.push_back(now);
-        windows.global.push_back(now);
-        true
+        windows.scoped.entry(scoped_key).or_default().push_back(now);
+        windows
+            .groups
+            .entry(group.to_owned())
+            .or_default()
+            .push_back(now);
+        Ok(())
     }
 }
 
 fn prune_window(queue: &mut VecDeque<i64>, now: i64, window_seconds: i64) {
-    while queue.front().is_some_and(|timestamp| {
-        now < *timestamp || now.saturating_sub(*timestamp) >= window_seconds
-    }) {
-        queue.pop_front();
-    }
+    queue.retain(|timestamp| *timestamp <= now && now.saturating_sub(*timestamp) < window_seconds);
 }
 
 #[cfg(test)]

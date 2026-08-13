@@ -132,16 +132,36 @@ object LeziSpacing {
 }
 
 /**
- * Menu / settings row leading-icon treatment — one well + glyph size so every
+ * Shared icon geometry for both visual templates. Warm and journal restyle the
+ * well (circle vs 8dp square) and density; they must not ship a second glyph set.
+ * Record / custom items always draw [LeziRecordGlyphIcon] / [LeziCustomItemGlyphIcon].
+ */
+@Immutable
+object LeziIconSize {
+    /** Stroke glyph inside a disc (dock, catalog, timeline, default RecordTypeIcon). */
+    val Glyph: Dp = 18.dp
+    /** Tinted disc behind a record glyph (dock + catalog). */
+    val Disc: Dp = 32.dp
+    /** Tinted well on summary metric cards. */
+    val Chip: Dp = 28.dp
+    /** Empty / error / success state mark. */
+    val State: Dp = 32.dp
+    /** Circular well behind a menu / settings row glyph. */
+    val MenuWell: Dp = 40.dp
+    /** Menu / settings Material glyph (same as [LeziSpacing.Lg]). */
+    val MenuGlyph: Dp = LeziSpacing.Lg
+}
+
+/**
+ * Menu / settings row leading-icon treatment — aliases [LeziIconSize] so every
  * row paints the same optical weight (ticket 11 weak-surface polish).
- * Glyph uses [LeziSpacing.Lg] (20dp); well is 10×4dp grid (40dp).
  */
 @Immutable
 object LeziMenuIcon {
     /** Circular well behind the menu glyph. */
-    val WellSize: Dp = 40.dp
+    val WellSize: Dp = LeziIconSize.MenuWell
     /** Fixed glyph box; apply via `Modifier.size(GlyphSize)` on Material Icon. */
-    val GlyphSize: Dp = LeziSpacing.Lg
+    val GlyphSize: Dp = LeziIconSize.MenuGlyph
 }
 
 /**
@@ -497,6 +517,13 @@ object LeziTypography {
         lineHeight = 18.sp,
         letterSpacing = 0.2.sp,
     )
+    /** Catalog / dock labels — one step above [Label], still below [Body]. */
+    val LabelLg = TextStyle(
+        fontFamily = BodyFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 14.sp,
+        lineHeight = 18.sp,
+    )
     val Meta = TextStyle(
         fontFamily = BodyFamily,
         fontWeight = FontWeight.Normal,
@@ -510,6 +537,18 @@ object LeziTypography {
         fontWeight = FontWeight.Bold,
         fontSize = 22.sp,
         lineHeight = 28.sp,
+    )
+    /** Journal KPI numerals — same mono face as [Metric] at Title size. */
+    val MetricSm = Metric.copy(fontSize = 20.sp, lineHeight = 26.sp)
+    /**
+     * Four-column glance numerals (e.g. `12h20m`). 13sp is the largest mono
+     * that still fits a 1/4-width phone cell; do not replace with [Mono] 14sp.
+     */
+    val ChipMetric = TextStyle(
+        fontFamily = MonoFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 13.sp,
+        lineHeight = 16.sp,
     )
     val Mono = TextStyle(
         fontFamily = MonoFamily,

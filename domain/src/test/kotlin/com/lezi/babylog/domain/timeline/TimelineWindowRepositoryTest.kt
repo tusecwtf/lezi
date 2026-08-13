@@ -4,6 +4,7 @@ import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.database.TimelineWindowDao
+import com.lezi.babylog.core.database.causal.WakeObservationEntity
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.session.FamilyRole
@@ -214,7 +215,7 @@ class TimelineWindowRepositoryTest {
     }
 
     @Test
-    fun oneAndFiveHundredRootsUseTheSameFourRoomQueries() = runTest {
+    fun oneAndFiveHundredRootsUseTheSameSixRoomQueries() = runTest {
         val day = LocalDate.of(2026, 7, 30)
         val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
 
@@ -258,10 +259,192 @@ class TimelineWindowRepositoryTest {
         val (singleDatabase, singleSync) = load(1)
         val (largeDatabase, largeSync) = load(500)
 
-        assertThat(singleDatabase.totalQueryCount).isEqualTo(4)
-        assertThat(largeDatabase.totalQueryCount).isEqualTo(4)
+        assertThat(singleDatabase.totalQueryCount).isEqualTo(6)
+        assertThat(largeDatabase.totalQueryCount).isEqualTo(6)
         assertThat(singleSync.memberQueryCount).isEqualTo(0)
         assertThat(largeSync.memberQueryCount).isEqualTo(0)
+    }
+
+    @Test
+    fun wakeProjectionReadsStayConstantAsSleepRootsGrow() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val at = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+
+        suspend fun projectionReads(sleepCount: Int): Int {
+            val records = List(sleepCount) { index ->
+                record(
+                    id = index + 1L,
+                    at = at + index,
+                    updatedAt = 100,
+                    receipt = 100,
+                    type = "sleep",
+                )
+            }
+            val database = FakeTimelineWindowDao(records, emptyList(), emptyList())
+            TimelineWindowRepository(
+                timelineWindowDao = database,
+                syncPort = TimelineSyncPort(),
+            ).observe(request(day, at)).first()
+            return database.totalQueryCount
+        }
+
+        assertThat(projectionReads(1)).isEqualTo(6)
+        assertThat(projectionReads(100)).isEqualTo(6)
+    }
+
+    @Test
+    fun timelineUsesTheSameExplicitWakeProjectionAndWakeMediaSnapshot() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val sleep = record(
+            id = 1L,
+            at = start,
+            updatedAt = 100L,
+            receipt = 100L,
+            type = "sleep",
+        ).copy(effectiveWakeObservationClientUuid = "wake-later")
+        val wakes = listOf(
+            wake(id = 10L, uuid = "wake-earlier", sleepUuid = sleep.clientUuid, at = start + 60_000L),
+            wake(id = 11L, uuid = "wake-later", sleepUuid = sleep.clientUuid, at = start + 120_000L),
+        )
+        val wakePhoto = media(
+            id = 12L,
+            wakeObservationId = 11L,
+            localUri = "record-media/later.jpg",
+            remoteUri = "receipt",
+        )
+        val snapshot = TimelineWindowRepository(
+            timelineWindowDao = FakeTimelineWindowDao(
+                records = listOf(sleep),
+                plans = emptyList(),
+                media = emptyList(),
+                wakes = wakes,
+                wakeMedia = listOf(wakePhoto),
+            ),
+            syncPort = TimelineSyncPort(),
+        ).observe(request(day, start + 180_000L)).first()
+
+        val row = snapshot.recordRows.single()
+        assertThat(row.record.endTimestamp).isEqualTo(start + 120_000L)
+        assertThat(row.sleepInterval?.endObservationClientUuid).isEqualTo("wake-later")
+        assertThat(row.wakeObservations.single { it.clientUuid == "wake-later" }.effective).isTrue()
+        assertThat(row.wakeObservations.single { it.clientUuid == "wake-later" }.photoPaths)
+            .containsExactly("record-media/later.jpg")
+    }
+
+    @Test
+    fun wakeCreateEditSelectAndWithdrawReemitTimelineProjection() = runTest {
+        val day = LocalDate.of(2026, 7, 30)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli() + 60_000
+        val sleep = record(1L, start, 100L, 100L, type = "sleep")
+        val database = FakeTimelineWindowDao(listOf(sleep), emptyList(), emptyList())
+        val repository = TimelineWindowRepository(database, TimelineSyncPort())
+
+        suspend fun awaitEnd(expected: Long, mutate: () -> Unit) {
+            val reemitted = async(start = CoroutineStart.UNDISPATCHED) {
+                repository.observe(request(day, start + 180_000L))
+                    .first { it.recordRows.single().record.endTimestamp == expected }
+            }
+            runCurrent()
+            mutate()
+            database.invalidate()
+            assertThat(reemitted.await().recordRows.single().record.endTimestamp)
+                .isEqualTo(expected)
+        }
+
+        val primary = wake(10L, "wake-primary", sleep.clientUuid, start + 60_000L)
+        awaitEnd(start + 60_000L) { database.replaceWakes(listOf(primary)) }
+
+        val edited = primary.copy(wakeTimestamp = start + 90_000L)
+        awaitEnd(start + 90_000L) { database.replaceWakes(listOf(edited)) }
+
+        val earlier = wake(11L, "wake-earlier", sleep.clientUuid, start + 30_000L)
+        awaitEnd(start + 30_000L) { database.replaceWakes(listOf(edited, earlier)) }
+
+        awaitEnd(start + 90_000L) {
+            database.replaceSnapshot(
+                records = listOf(
+                    sleep.copy(effectiveWakeObservationClientUuid = edited.clientUuid),
+                ),
+                plans = emptyList(),
+                media = emptyList(),
+            )
+        }
+
+        awaitEnd(start + 30_000L) {
+            database.replaceWakes(listOf(edited.copy(withdrawn = true), earlier))
+        }
+    }
+
+    @Test
+    fun monthScaleSleepWakeProjectionCompletesWithinFixedTimeout() = runTest {
+        val day = LocalDate.of(2026, 7, 1)
+        val start = day.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+        val sleeps = List(31 * 24) { index ->
+            record(
+                id = index + 1L,
+                at = start + index * 60L * 60_000L,
+                updatedAt = 100L,
+                receipt = 100L,
+                type = "sleep",
+            )
+        }
+        val wakes = sleeps.flatMap { sleep ->
+            listOf(
+                wake(sleep.id * 2, "wake-${sleep.id}-a", sleep.clientUuid, sleep.timestamp + 20 * 60_000L),
+                wake(sleep.id * 2 + 1, "wake-${sleep.id}-b", sleep.clientUuid, sleep.timestamp + 40 * 60_000L),
+            )
+        }
+        val database = FakeTimelineWindowDao(
+            records = sleeps,
+            plans = emptyList(),
+            media = emptyList(),
+            wakes = wakes,
+        )
+
+        val projected = withTimeout(2_000L) {
+            database.loadRecordProjection(
+                babyId = 1L,
+                startInclusive = start,
+                endExclusive = start + 31L * 24 * 60 * 60_000L,
+            )
+        }
+
+        assertThat(projected).hasSize(31 * 24)
+        assertThat(projected.all { it.sleepInterval?.isProvisional == true }).isTrue()
+        assertThat(database.totalQueryCount).isEqualTo(3)
+    }
+
+    @Test
+    fun monthScaleAllOpenProjectionKeepsLinearPeerArbitration() = runTest {
+        val start = LocalDate.of(2026, 7, 1)
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val sleeps = List(31 * 24) { index ->
+            record(
+                id = index + 1L,
+                at = start + index * 60L * 60_000L,
+                updatedAt = 100L,
+                receipt = 100L,
+                type = "sleep",
+            )
+        }
+        val database = FakeTimelineWindowDao(sleeps, emptyList(), emptyList())
+
+        val projected = withTimeout(2_000L) {
+            database.loadRecordProjection(
+                babyId = 1L,
+                startInclusive = start,
+                endExclusive = start + 31L * 24 * 60 * 60_000L,
+            )
+        }
+
+        assertThat(projected).hasSize(31 * 24)
+        assertThat(projected.count { it.sleepInterval?.isOverlapPending == false }).isEqualTo(1)
+        assertThat(projected.count { it.sleepInterval?.isOverlapPending == true })
+            .isEqualTo(31 * 24 - 1)
+        assertThat(database.totalQueryCount).isEqualTo(3)
     }
 
     @Test
@@ -449,6 +632,8 @@ private class FakeTimelineWindowDao(
     private var records: List<RecordEntity>,
     private var plans: List<CarePlanEntity>,
     private var media: List<MediaAssetEntity>,
+    private var wakes: List<WakeObservationEntity> = emptyList(),
+    private var wakeMedia: List<MediaAssetEntity> = emptyList(),
 ) : TimelineWindowDao {
     private val invalidations = MutableStateFlow(0L)
     var totalQueryCount: Int = 0
@@ -481,6 +666,55 @@ private class FakeTimelineWindowDao(
         return records
     }
 
+    override suspend fun listWakeObservationRoots(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<WakeObservationEntity> {
+        totalQueryCount += 1
+        return wakes
+    }
+
+    override suspend fun listActiveWakeMedia(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): List<MediaAssetEntity> {
+        totalQueryCount += 1
+        return wakeMedia
+    }
+
+    override suspend fun listRecordRootsByClientUuids(
+        rootClientUuids: List<String>,
+    ): List<RecordEntity> = records.filter { it.clientUuid in rootClientUuids }
+
+    override suspend fun listWakeObservationsForRoots(
+        sleepRootClientUuids: List<String>,
+    ): List<WakeObservationEntity> {
+        val projectedRoots = listRecordRootsByClientUuids(sleepRootClientUuids)
+            .mapTo(hashSetOf(), RecordEntity::clientUuid)
+        return wakes.filter { it.sleepRecordClientUuid in projectedRoots }
+    }
+
+    override suspend fun listActiveWakeMediaForRoots(
+        sleepRootClientUuids: List<String>,
+    ): List<MediaAssetEntity> = wakeMedia.filter { media ->
+        wakes.any {
+            it.id == media.wakeObservationId && it.sleepRecordClientUuid in sleepRootClientUuids
+        }
+    }
+
+    override suspend fun listOpenSleepCandidateRoots(babyId: Long): List<RecordEntity> =
+        records.filter { it.babyId == babyId && it.type == "sleep" && it.endTimestamp == null }
+
+    override suspend fun listWakesForOpenSleepCandidates(
+        babyId: Long,
+    ): List<WakeObservationEntity> = wakes
+
+    override suspend fun listWakeMediaForOpenSleepCandidates(
+        babyId: Long,
+    ): List<MediaAssetEntity> = wakeMedia
+
     override suspend fun listPlanRoots(
         babyId: Long,
         dayStart: Long,
@@ -509,7 +743,7 @@ private class FakeTimelineWindowDao(
         records: List<RecordEntity> = this.records,
         plans: List<CarePlanEntity> = this.plans,
         media: List<MediaAssetEntity> = this.media,
-    ) = FakeTimelineWindowDao(records, plans, media)
+    ) = FakeTimelineWindowDao(records, plans, media, wakes, wakeMedia)
 
     fun replaceSnapshot(
         records: List<RecordEntity>,
@@ -519,6 +753,10 @@ private class FakeTimelineWindowDao(
         this.records = records
         this.plans = plans
         this.media = media
+    }
+
+    fun replaceWakes(wakes: List<WakeObservationEntity>) {
+        this.wakes = wakes
     }
 
     fun invalidate() {
@@ -579,13 +817,18 @@ private fun record(
     updatedAt: Long,
     receipt: Long?,
     creator: String = "",
+    type: String = "formula",
 ): RecordEntity = RecordEntity(
     id = id,
     clientUuid = "record-$id",
     babyId = 1,
-    type = "formula",
+    type = type,
     timestamp = at,
-    payloadJson = """{"amount_ml":90}""",
+    payloadJson = if (type == "sleep") {
+        """{"is_nap":false,"anomaly_flag":false}"""
+    } else {
+        """{"amount_ml":90}"""
+    },
     updatedAt = updatedAt,
     syncDirty = receipt != updatedAt,
     createdByMembershipId = creator,
@@ -641,16 +884,33 @@ private fun media(
     id: Long,
     recordId: Long? = null,
     carePlanId: Long? = null,
+    wakeObservationId: Long? = null,
     localUri: String,
     remoteUri: String?,
 ): MediaAssetEntity = MediaAssetEntity(
     id = id,
     recordId = recordId,
     carePlanId = carePlanId,
+    wakeObservationId = wakeObservationId,
     clientUuid = "media-$id",
+    kind = if (wakeObservationId != null) "wake" else "log",
     localUri = localUri,
     remoteUri = remoteUri,
     createdAt = id,
     updatedAt = id,
     syncDirty = false,
+)
+
+private fun wake(
+    id: Long,
+    uuid: String,
+    sleepUuid: String,
+    at: Long,
+) = WakeObservationEntity(
+    id = id,
+    clientUuid = uuid,
+    sleepRecordClientUuid = sleepUuid,
+    wakeTimestamp = at,
+    observerMembershipId = "member",
+    updatedAt = at,
 )

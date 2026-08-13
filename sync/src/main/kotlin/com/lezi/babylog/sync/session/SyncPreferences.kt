@@ -25,6 +25,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
@@ -131,6 +132,8 @@ interface SyncPreferences {
     val verifiedEndpoint: Flow<TrustedEndpointProfile?>
     val familyMemberDirectory: Flow<List<FamilyMember>>
         get() = kotlinx.coroutines.flow.flowOf(emptyList())
+    val familyMemberDirectoryGeneration: Flow<String>
+        get() = kotlinx.coroutines.flow.flowOf("")
     val lastServerHealthyAt: Flow<Long?>
         get() = kotlinx.coroutines.flow.flowOf(null)
     val pendingMemberLogin: Flow<PendingMemberLogin?>
@@ -140,6 +143,10 @@ interface SyncPreferences {
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile)
     suspend fun forgetEndpoint()
     suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) = Unit
+    suspend fun saveFamilyMemberDirectorySnapshot(
+        generation: String,
+        members: List<FamilyMember>,
+    ) = saveFamilyMemberDirectory(members)
     suspend fun clearFamilyMemberDirectory() = Unit
     suspend fun saveLastServerHealthyAt(atMillis: Long) = Unit
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
@@ -250,6 +257,9 @@ class DataStoreSyncPreferences @Inject constructor(
     override val familyMemberDirectory: Flow<List<FamilyMember>> = dataStore.data.map { prefs ->
         decodeFamilyMemberDirectory(prefs[Keys.FAMILY_MEMBER_DIRECTORY])
     }
+    override val familyMemberDirectoryGeneration: Flow<String> = dataStore.data.map { prefs ->
+        prefs[Keys.FAMILY_MEMBER_DIRECTORY_GENERATION].orEmpty()
+    }
     override val lastServerHealthyAt: Flow<Long?> = dataStore.data.map { prefs ->
         prefs[Keys.LAST_SERVER_HEALTHY_AT]
     }
@@ -313,6 +323,23 @@ class DataStoreSyncPreferences @Inject constructor(
     override suspend fun saveFamilyMemberDirectory(members: List<FamilyMember>) {
         val encoded = encodeFamilyMemberDirectory(members)
         dataStore.edit { prefs ->
+            prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
+            if (encoded == "[]") {
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+            } else {
+                prefs[Keys.FAMILY_MEMBER_DIRECTORY] = encoded
+            }
+        }
+    }
+
+    override suspend fun saveFamilyMemberDirectorySnapshot(
+        generation: String,
+        members: List<FamilyMember>,
+    ) {
+        require(generation.isNotBlank()) { "member directory generation must not be blank" }
+        val encoded = encodeFamilyMemberDirectory(members)
+        dataStore.edit { prefs ->
+            prefs[Keys.FAMILY_MEMBER_DIRECTORY_GENERATION] = generation
             if (encoded == "[]") {
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
             } else {
@@ -322,7 +349,10 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun clearFamilyMemberDirectory() {
-        dataStore.edit { it.remove(Keys.FAMILY_MEMBER_DIRECTORY) }
+        dataStore.edit {
+            it.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+            it.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
+        }
     }
 
     override suspend fun saveLastServerHealthyAt(atMillis: Long) {
@@ -499,11 +529,13 @@ class DataStoreSyncPreferences @Inject constructor(
                 // family_id is intentionally preserved. Retire the old display projection in
                 // the same DataStore commit as endpoint/session activation.
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
             }
             prefs[Keys.FAMILY_ID] = session.familyId
             if (previousFamilyId != session.familyId) {
                 prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
                 prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+                prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
             }
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
@@ -939,6 +971,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.MEMBERSHIP_ID)
         prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
         prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY)
+        prefs.remove(Keys.FAMILY_MEMBER_DIRECTORY_GENERATION)
         prefs.remove(Keys.REAUTH_REQUIRED)
         clearPendingReplicaReset(prefs)
         clearDisasterRestoreValues(prefs)
@@ -1062,6 +1095,7 @@ class DataStoreSyncPreferences @Inject constructor(
                             put("display_name", member.displayName)
                             put("role", member.role.name)
                             put("is_self", member.isSelf)
+                            member.lastSyncAtEpochSeconds?.let { put("last_sync_at", it) }
                         },
                     )
                 }
@@ -1077,6 +1111,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 ?: return@mapNotNull null
             val isSelf = value["is_self"]?.jsonPrimitive?.booleanOrNull
                 ?: return@mapNotNull null
+            val lastSyncAt = value["last_sync_at"]?.jsonPrimitive?.longOrNull
             normalizeDirectoryMember(
                 FamilyMember(
                     displayName = displayName,
@@ -1084,6 +1119,7 @@ class DataStoreSyncPreferences @Inject constructor(
                     isSelf = isSelf,
                     membershipId = membershipId,
                     devices = null,
+                    lastSyncAtEpochSeconds = lastSyncAt,
                 ),
             )
         }.distinctBy(FamilyMember::membershipId)
@@ -1099,6 +1135,7 @@ class DataStoreSyncPreferences @Inject constructor(
             isSelf = member.isSelf,
             membershipId = membershipId,
             devices = null,
+            lastSyncAtEpochSeconds = member.lastSyncAtEpochSeconds,
         )
     }
 
@@ -1169,6 +1206,8 @@ class DataStoreSyncPreferences @Inject constructor(
         val VERIFIED_ENDPOINT_SPKI_SHA256 =
             stringPreferencesKey("sync_verified_endpoint_spki_sha256")
         val FAMILY_MEMBER_DIRECTORY = stringPreferencesKey("sync_family_member_directory_v1")
+        val FAMILY_MEMBER_DIRECTORY_GENERATION =
+            stringPreferencesKey("sync_family_member_directory_generation_v1")
         val RESTORE_BATCH_ID = stringPreferencesKey("sync_restore_batch_id")
         val RESTORE_ENDPOINT_ORIGIN = stringPreferencesKey("sync_restore_endpoint_origin")
         val RESTORE_ENDPOINT_TRUST_MODE = stringPreferencesKey("sync_restore_endpoint_trust_mode")

@@ -66,6 +66,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -161,6 +162,9 @@ internal fun AppHeaderBar(
     onNextDate: () -> Unit,
     onOpenDatePicker: () -> Unit,
     onSearch: () -> Unit,
+    /** Secondary shallow-sync line after data-page content chrome collapses (0.3.10). */
+    collapsedSyncText: String? = null,
+    collapsedSyncIsError: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val background = leziTopBarBackground(dark)
@@ -254,10 +258,22 @@ internal fun AppHeaderBar(
                     )
                 }
                 Text(
-                    babyAge.ifBlank { "本地记录" },
-                    color = content.copy(alpha = headerSecondaryAlpha),
+                    // Identity line stays the baby age. Collapsed sync only
+                    // replaces it when the status is actionable (error / reauth).
+                    if (collapsedSyncIsError && !collapsedSyncText.isNullOrBlank()) {
+                        collapsedSyncText
+                    } else {
+                        babyAge.ifBlank { "本地记录" }
+                    },
+                    color = if (collapsedSyncIsError && !collapsedSyncText.isNullOrBlank()) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        content.copy(alpha = headerSecondaryAlpha)
+                    },
                     style = LeziTypography.Meta,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("topbar_shallow_sync_status"),
                 )
             }
         }

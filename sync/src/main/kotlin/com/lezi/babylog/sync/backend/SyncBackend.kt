@@ -2,8 +2,11 @@ package com.lezi.babylog.sync.backend
 
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.CAPABILITY_CAUSAL_SYNC_V2
 import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 
@@ -14,6 +17,60 @@ data class SyncEntity(
     val updatedAt: Long,
     val deletedAt: Long? = null,
     val rev: Long = 0,
+    /**
+     * Opaque stable `version_id` for causal roots (wire §7). Null for media /
+     * fulfillment_candidate and for pre-causal projections without a head.
+     */
+    val versionId: String? = null,
+    /** Bounded open-conflict summary from pull (wire §7). */
+    val conflictSummary: PullConflictSummary? = null,
+    /** Wire §12.3 optional source-relation summary on record roots. */
+    val sourceRelationSummary: PullSourceRelationSummary? = null,
+)
+
+/** Wire §7 conflict_summary closed keys on ordinary pull entities. */
+data class PullConflictSummary(
+    val conflictId: String,
+    val entityType: String,
+    val clientUuid: String,
+    val stableVersionId: String,
+    val branchVersionIds: List<String>,
+)
+
+/** Wire §12.3 `source_relation_summary` on stable pull entities. */
+data class PullSourceRelationSummary(
+    val relationId: String,
+    /** display | source */
+    val role: String,
+    val peerIds: List<String>,
+)
+
+/** Wire §12.1 author declare request. */
+data class SourceRelationDeclareRequest(
+    val mutationId: String,
+    val recordClientUuid: String,
+    val equivalentToClientUuid: String,
+    val expectedRecordVersion: String,
+    val expectedOtherVersion: String,
+)
+
+/** Wire §12.2 Owner group resolve request. */
+data class SourceRelationResolveGroupRequest(
+    val mutationId: String,
+    val memberClientUuids: List<String>,
+    val displayClientUuid: String,
+    val expectedVersions: Map<String, String>,
+)
+
+/** Wire §12 declare / resolve-group receipt. */
+data class SourceRelationResult(
+    val status: String,
+    val relationId: String? = null,
+    val displayClientUuid: String? = null,
+    val sourceClientUuids: List<String> = emptyList(),
+    val mediaRetained: Boolean? = null,
+    val code: String? = null,
+    val latestVersions: Map<String, String> = emptyMap(),
 )
 
 data class PullResult(
@@ -21,40 +78,183 @@ data class PullResult(
     val cursor: Long,
     val generation: String,
     val hasMore: Boolean,
+    /** Zero-based continuation index echoed by the ordinary pull page. */
+    val pageIndex: Int = 0,
     /** Current wire always contains family_name; null explicitly clears it. */
     val familyName: String? = null,
 )
 
-enum class AuthorityDisposition {
-    Confirmed,
-    Publish,
-    AdoptRemote,
-    RemoteAbsentRejected,
-    RetryAuthority,
+enum class PullResponseEncoding(val wireName: String) {
+    Gzip("gzip"),
+    Identity("identity"),
 }
 
-data class ReconcileUnitDraft(
-    val contentHash: String,
-    val root: SyncEntity,
-    val media: List<SyncEntity> = emptyList(),
+data class PullPageBudget(
+    val maxEntities: Int,
+    val maxEncodedBytes: Int,
+    val maxDecodedBytes: Int,
+    val maxPages: Int,
 )
 
-data class AuthorityResult(
-    val type: String,
+internal val FROZEN_PULL_PAGE_BUDGET = PullPageBudget(
+    maxEntities = 200,
+    maxEncodedBytes = 9 * 1024 * 1024,
+    maxDecodedBytes = 8 * 1024 * 1024,
+    maxPages = 500,
+)
+
+data class PullPageRequest(
+    val pageIndex: Int,
+    val encoding: PullResponseEncoding,
+    val budget: PullPageBudget,
+)
+
+internal fun PullResult.requireValidPage(request: PullPageRequest): PullResult {
+    require(pageIndex == request.pageIndex) {
+        "家庭服务器返回了跳页或重复的 pull page_index"
+    }
+    require(entities.size <= request.budget.maxEntities) {
+        "家庭服务器 pull 页超过 item 上限"
+    }
+    require(entities.map { it.type to it.clientUuid }.distinct().size == entities.size) {
+        "家庭服务器 pull 页包含重复实体"
+    }
+    return this
+}
+
+data class PullTransportContract(
+    val encoding: PullResponseEncoding,
+    val budget: PullPageBudget,
+) {
+    fun page(index: Int): PullPageRequest = PullPageRequest(index, encoding, budget)
+}
+
+/** Wire §4.6 causal media manifest item (no bytes). */
+data class CausalMediaItem(
+    val mediaUuid: String,
+    val role: String,
+    val sha256: String,
+    val byteSize: Long,
+    val mime: String,
+    val width: Long? = null,
+    val height: Long? = null,
+)
+
+/** Durable server receipt for one exact causal media preimage (wire §4.6.1). */
+data class CausalMediaPreimageReceipt(
+    val mediaUuid: String,
+    /** staged | consumed */
+    val status: String,
+    val byteSize: Long,
+    val sha256: String,
+    val expiresAtEpochSeconds: Long,
+)
+
+/**
+ * Wire §3.1 frozen mutation unit for `/v1/causal/commit`.
+ * [rootJson] is the closed-key root object (includes `updated_at`).
+ */
+data class CausalMutationUnit(
+    val mutationId: String,
+    val baseVersion: String?,
+    val entityType: String,
     val clientUuid: String,
-    val requestContentHash: String,
-    val disposition: AuthorityDisposition,
-    val reason: String,
-    val remoteContentHash: String? = null,
-    val remoteRoot: SyncEntity? = null,
-    val remoteMedia: List<SyncEntity> = emptyList(),
+    val rootJson: String,
+    val media: List<CausalMediaItem> = emptyList(),
+    val deleted: Boolean = false,
 )
 
-data class ReconcileResult(
-    val generation: String,
-    val cursor: Long,
-    val results: List<AuthorityResult>,
+/** Wire §3.2 contracted commit unit; no cursor, generation, or rejection payload. */
+data class CausalCommitUnitResult(
+    val status: String,
+    val mutationId: String,
+    val requestHash: String,
+    val replay: Boolean = false,
+    val stableVersionId: String,
+    val stableRootJson: String,
+    val stableMedia: List<CausalMediaItem> = emptyList(),
+    val stableDeleted: Boolean = false,
+    val stableDeletedAt: Long? = null,
+    /** Adapter evidence: required stable projection members were present on the wire. */
+    val stableRootPresent: Boolean = true,
+    val stableMediaPresent: Boolean = true,
+    val branchVersionId: String? = null,
+    val conflictId: String? = null,
 )
+
+data class CausalCommitBatchResult(
+    val generation: String,
+    val results: List<CausalCommitUnitResult>,
+)
+
+class CausalCommitRejectedException(
+    val mutationId: String?,
+    val code: String,
+) : IllegalStateException("因果 commit 被服务器拒绝：$code")
+
+/** One opaque choice in the wire §8.2 resolution command. */
+data class ConflictResolutionChoice(
+    val path: String,
+    val choiceId: String,
+)
+
+/** Wire §8.2 choice-only resolve request. */
+data class ConflictResolveRequest(
+    val snapshotToken: String,
+    val resolutionMutationId: String,
+    val choices: List<ConflictResolutionChoice>,
+)
+
+sealed class ConflictResolveResult {
+    /**
+     * Wire §8.2 accepted terminal. Root/media are validated against the H05 typed
+     * decoder, but local settlement waits for pull because this envelope omits
+     * authoritative deleted state.
+     */
+    data class Accepted(
+        val stableVersionId: String,
+        val resolutionMutationId: String,
+        val stableRootJson: String = "{}",
+        val stableMedia: List<CausalMediaItem> = emptyList(),
+        val replay: Boolean,
+    ) : ConflictResolveResult()
+
+    data class Rejected(
+        val code: String,
+        val resolutionMutationId: String?,
+        val retryable: Boolean,
+    ) : ConflictResolveResult()
+}
+
+/** Wire §9.5 closed rejection codes shared by conflict detail and resolution. */
+internal val CONFLICT_TERMINAL_REJECTION_CODES = setOf(
+    "unknown_field",
+    "missing_field",
+    "wrong_type",
+    "non_canonical_value",
+    "invalid_domain",
+    "content_drift",
+    "unauthenticated",
+    "forbidden",
+    "capability_mismatch",
+    "invalid_snapshot_token",
+    "snapshot_expired",
+    "snapshot_stale",
+    "invalid_choice",
+    "duplicate_choice",
+    "incomplete_choices",
+    "missing_restore_base",
+    "incomplete_restore_base",
+    "missing_restore_media",
+    "cas_mismatch",
+)
+
+/** Closed causal commit statuses (wire §6). */
+object CausalCommitStatus {
+    const val ACCEPTED = "accepted"
+    const val MERGED = "merged"
+    const val BRANCHED = "branched"
+}
 
 /** A syntactically successful response that cannot prove every frozen authority key. */
 class AuthorityProofException(
@@ -259,6 +459,69 @@ data class DisasterRestoreStatus(
     val committed: Boolean get() = status == "committed"
 }
 
+internal const val AUTHENTICATED_SYNC_PROTOCOL_VERSION = 1
+
+/** Complete 0.4.0 generation requested by every authenticated handshake. */
+internal val REQUIRED_CAUSAL_WIRE_CAPABILITIES = setOf(
+    CAPABILITY_CAUSAL_SYNC_V2,
+)
+
+data class SyncHandshakePrincipal(
+    val membershipId: String,
+    val deviceId: String,
+    val role: FamilyRole,
+)
+
+data class SyncHandshakeLimits(
+    val pullPageMaxEntities: Int,
+    val pullPageMaxEncodedBytes: Int,
+    val pullPageMaxDecodedBytes: Int,
+    val pullMaxPages: Int,
+    val commitBatchMaxUnits: Int,
+    val mediaMaxBytes: Long,
+) {
+    fun pullBudget(): PullPageBudget = PullPageBudget(
+        maxEntities = pullPageMaxEntities,
+        maxEncodedBytes = pullPageMaxEncodedBytes,
+        maxDecodedBytes = pullPageMaxDecodedBytes,
+        maxPages = pullMaxPages,
+    )
+}
+
+data class SyncHandshakeCompression(val pullResponse: Set<String>)
+
+data class SyncHandshakeRetryHints(val retryAfter: Boolean)
+
+data class AuthenticatedSyncHandshake(
+    val protocolVersion: Int,
+    val serverVersion: String,
+    val ready: Boolean,
+    val capabilities: Set<String>,
+    val principal: SyncHandshakePrincipal,
+    val directoryGeneration: String,
+    val limits: SyncHandshakeLimits,
+    val compression: SyncHandshakeCompression,
+    val retryHints: SyncHandshakeRetryHints,
+) {
+    fun pullTransport(): PullTransportContract {
+        require(compression.pullResponse == setOf("gzip", "identity")) {
+            "普通 pull compression 合同不兼容"
+        }
+        return PullTransportContract(
+            encoding = PullResponseEncoding.Gzip,
+            budget = limits.pullBudget(),
+        )
+    }
+}
+
+data class FamilyMemberDirectorySnapshot(
+    val generation: String,
+    val members: List<FamilyMember>,
+)
+
+class SyncHandshakeRejectedException(val code: String) :
+    IllegalStateException("同步握手被服务器拒绝：$code")
+
 interface SyncBackend {
     /** Trusted TLS only; never sends family credentials or client data. */
     suspend fun anonymousHealth(endpoint: TrustedEndpointProfile): AnonymousHealth =
@@ -442,12 +705,73 @@ interface SyncBackend {
         deviceName: String,
     ): SessionBootstrapResult = throw UnsupportedOperationException("Member login grant claim is not implemented")
 
-    suspend fun pull(session: SyncSession): PullResult
-    suspend fun reconcile(
+    /** H16 ordinary-pull transport seam; wrappers must preserve this exact immutable request. */
+    suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult
+
+    suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake
+    /**
+     * Production [HttpSyncBackend] returns true only when the last health probe
+     * advertised the frozen causal capability set. A false value makes mutable
+     * roots fail closed rather than falling back to a legacy publish protocol.
+     */
+    fun supportsCausalWire(): Boolean = false
+
+    /**
+     * Causal atomic commit (wire §6). Successful units are accepted / merged / branched;
+     * semantic rejection is a batch-level terminal envelope and never a partial result.
+     */
+    suspend fun causalCommit(
         session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult = throw UnsupportedOperationException("Authoritative reconcile is not implemented")
-    suspend fun members(session: SyncSession): List<FamilyMember>
+        units: List<CausalMutationUnit>,
+    ): CausalCommitBatchResult = throw UnsupportedOperationException("Causal commit is not implemented")
+
+    /**
+     * Stage media bytes into the family authority media store before causal commit.
+     * Mutation envelopes carry only the manifest; bytes must already be present for
+     * accept/branch. Idempotent when the same sha256/size is already stored.
+     */
+    suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ): CausalMediaPreimageReceipt =
+        throw UnsupportedOperationException("Causal media preimage upload is not implemented")
+
+    /**
+     * On-demand conflict detail (wire §8.1). Not included in ordinary pull pages.
+     */
+    suspend fun fetchConflictSnapshotPage(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictSnapshotPageRequest,
+    ): FetchedConflictSnapshotPage =
+        throw UnsupportedOperationException("Conflict detail paging is not implemented")
+
+    /** CAS conflict resolution (wire §8.2): receipt token + canonical opaque choices only. */
+    suspend fun resolveConflict(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictResolveRequest,
+    ): ConflictResolveResult = throw UnsupportedOperationException("Conflict resolve is not implemented")
+
+    /**
+     * Author equivalence declare (wire §12.1).
+     */
+    suspend fun declareSourceRelation(
+        session: SyncSession,
+        request: SourceRelationDeclareRequest,
+    ): SourceRelationResult = throw UnsupportedOperationException("Source relation declare is not implemented")
+
+    /**
+     * Owner full-group resolve (wire §12.2).
+     */
+    suspend fun resolveSourceRelationGroup(
+        session: SyncSession,
+        request: SourceRelationResolveGroupRequest,
+    ): SourceRelationResult = throw UnsupportedOperationException("Source relation resolve-group is not implemented")
+
+    suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot
     /** Owner updates immediately; ordinary Member receives a pending approval request. */
     suspend fun updateMyDisplayName(
         session: SyncSession,
@@ -509,14 +833,6 @@ interface SyncBackend {
      * Nothing is visible on family pull until [commitBundle].
      */
     suspend fun stageBundle(session: SyncSession, draft: AtomicBundleDraft): BundleStageStatus
-
-    /** Upload one media blob into a staged bundle manifest slot. */
-    suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus
 
     /** Publish a complete package in one server transaction (idempotent). */
     suspend fun commitBundle(session: SyncSession, bundleId: String): BundleCommitResult

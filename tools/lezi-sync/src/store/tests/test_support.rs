@@ -1,11 +1,60 @@
 //! Shared fixtures for store unit tests.
 
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use super::super::*;
+use crate::model::Entity;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+fn statement_counts() -> &'static Mutex<BTreeMap<String, usize>> {
+    static COUNTS: OnceLock<Mutex<BTreeMap<String, usize>>> = OnceLock::new();
+    COUNTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(in crate::store) fn trace_counted_pull_statement(sql: &str) {
+    {
+        let mut counts = statement_counts().lock().unwrap();
+        for (family_id, count) in counts.iter_mut() {
+            if sql.contains(family_id.as_str()) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+}
+
+pub(super) fn begin_statement_count(family_id: &str) {
+    statement_counts()
+        .lock()
+        .unwrap()
+        .insert(family_id.to_owned(), 0);
+}
+
+pub(super) fn finish_statement_count(family_id: &str) -> usize {
+    statement_counts()
+        .lock()
+        .unwrap()
+        .remove(family_id)
+        .expect("pull statement counter was started")
+}
+
+pub(super) trait TestPull {
+    fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError>;
+}
+
+impl TestPull for Store {
+    fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError> {
+        self.pull_with_final_envelope_size(
+            family_id,
+            cursor,
+            |serialized_entity_bytes, entity_count, _, _| {
+                Ok(serialized_entity_bytes.saturating_add(entity_count.saturating_sub(1)))
+            },
+        )
+    }
+}
 
 pub(super) fn entity(
     entity_type: &str,
@@ -54,12 +103,18 @@ pub(super) fn publish_bundle(
     max_updated_at: i64,
 ) -> Result<BundleCommitResult, StoreError> {
     let bundle_id = Uuid::new_v4().to_string();
-    let media_ready = media
-        .iter()
-        .filter(|entity| entity.deleted_at.is_none())
-        .map(|entity| (entity.client_uuid.clone(), true))
-        .collect::<BTreeMap<_, _>>();
+    assert!(
+        media.is_empty(),
+        "current fulfillment bundles are media-free"
+    );
+    let mut media_ready = BTreeMap::new();
     store.stage_bundle(principal, &bundle_id, root, media, 1_700_000_000)?;
+    media_ready.extend(
+        store
+            .deferred_fulfillment_media_integrity_for_bundle(&principal.family_id, &bundle_id)?
+            .into_keys()
+            .map(|media_id| (media_id, true)),
+    );
     store
         .commit_bundle(
             principal,
@@ -76,7 +131,37 @@ pub(super) fn publish_root(
     root: Entity,
     max_updated_at: i64,
 ) -> Result<BundleCommitResult, StoreError> {
-    publish_bundle(store, principal, root, vec![], max_updated_at)
+    if root.entity_type == "fulfillment_candidate" {
+        return publish_bundle(store, principal, root, vec![], max_updated_at);
+    }
+    let mut causal_root = root.payload.clone();
+    causal_root.insert("updated_at".to_owned(), json!(root.updated_at));
+    let result = store.causal_commit(
+        principal,
+        vec![CausalMutation {
+            mutation_id: Uuid::new_v4().to_string(),
+            base_version: None,
+            entity_type: root.entity_type,
+            client_uuid: root.client_uuid,
+            root: causal_root,
+            media: vec![],
+            deleted: root.deleted_at.is_some(),
+        }],
+        1_700_000_000,
+    )?;
+    let applied = usize::from(
+        result
+            .results
+            .first()
+            .is_some_and(|unit| unit.status == "accepted" || unit.status == "merged"),
+    );
+    Ok(BundleCommitResult {
+        bundle_id: "causal-test-setup".to_owned(),
+        status: "committed".to_owned(),
+        applied,
+        cursor: store.pull(&principal.family_id, 0)?.cursor,
+        record_authors: vec![],
+    })
 }
 
 pub(super) struct FulfillmentCandidateFixture {

@@ -49,10 +49,18 @@ data class FamilyMember(
     val membershipId: String,
     /** Null means this viewer is not authorized to receive this member's device details. */
     val devices: List<FamilyDevice>? = null,
+    /**
+     * Max active-device last_used_at for this membership (epoch seconds).
+     * Present for every role; null means no active device / never synced.
+     */
+    val lastSyncAtEpochSeconds: Long? = null,
 ) {
     init {
         require(displayName.isNotBlank()) { "家庭成员称呼不能为空" }
         require(membershipId.isNotBlank()) { "家庭成员 membership_id 不能为空" }
+        require(lastSyncAtEpochSeconds == null || lastSyncAtEpochSeconds >= 0) {
+            "家庭成员上次同步时间无效"
+        }
     }
 }
 
@@ -190,8 +198,12 @@ data class ClientAppVersion(
     }
 
     companion object {
-        /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
-        val FALLBACK = ClientAppVersion(versionCode = 12, versionName = "0.3.5")
+        /** Generated from the shared released-version compatibility catalog. */
+        val FALLBACK = ClientAppVersion(
+            versionCode = BuildConfig.LATEST_RELEASED_VERSION_CODE,
+            versionName = BuildConfig.LATEST_RELEASED_VERSION_NAME,
+            localDataContractVersion = BuildConfig.LATEST_RELEASED_LOCAL_DATA_CONTRACT,
+        )
     }
 }
 
@@ -314,6 +326,12 @@ interface SyncPort {
         pendingMemberLogin = pendingMemberLogin(),
         pendingPublishCount = pendingPublishCount(),
     )
+    /**
+     * Retired neighbor-loser toast path (0.3.10–0.3.12). Causal generation never
+     * emits; ordinary remote tombstones must not be interpreted as duplicates.
+     * Kept as an empty flow so existing collectors compile without toast UX.
+     */
+    fun neighborAlignmentHints(): Flow<String> = kotlinx.coroutines.flow.emptyFlow()
     /** Dirty Room entity count for the current retained family. */
     fun pendingPublishCount(): Flow<Int> = kotlinx.coroutines.flow.flowOf(0)
     /** Device-local minimal roster; never waits for the family server. */
@@ -349,6 +367,38 @@ interface SyncPort {
     suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
     /** Reclaims exact committed media tombstones; logical mutation success is independent. */
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
+
+    /**
+     * Complete on-demand conflict detail for the resolver (wire §8.1).
+     * Implementations persist/resume pages below this seam and never expose a
+     * partial receipt. Must not block ordinary CareLog local saves.
+     */
+    suspend fun fetchConflictSnapshot(
+        conflictId: String,
+    ): com.lezi.babylog.sync.conflict.ConflictSnapshot =
+        throw UnsupportedOperationException("Conflict detail is not implemented")
+
+    /**
+     * CAS conflict resolution (wire §8.2). Default: unavailable.
+     */
+    suspend fun resolveConflict(
+        conflictId: String,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
+    ): com.lezi.babylog.sync.backend.ConflictResolveResult =
+        throw UnsupportedOperationException("Conflict resolve is not implemented")
+
+    /** Author equivalence declare (wire §12.1). */
+    suspend fun declareSourceRelation(
+        request: com.lezi.babylog.sync.backend.SourceRelationDeclareRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult =
+        throw UnsupportedOperationException("Source relation declare is not implemented")
+
+    /** Owner full-group resolve (wire §12.2). */
+    suspend fun resolveSourceRelationGroup(
+        request: com.lezi.babylog.sync.backend.SourceRelationResolveGroupRequest,
+    ): com.lezi.babylog.sync.backend.SourceRelationResult =
+        throw UnsupportedOperationException("Source relation resolve-group is not implemented")
+
     /** Persists an endpoint origin; trust is established separately by setup probe. */
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
     /**
@@ -569,6 +619,15 @@ class NoOpSyncPort : SyncPort {
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
+    override suspend fun fetchConflictSnapshot(
+        conflictId: String,
+    ): com.lezi.babylog.sync.conflict.ConflictSnapshot =
+        throw UnsupportedOperationException("Conflict detail is not implemented")
+    override suspend fun resolveConflict(
+        conflictId: String,
+        request: com.lezi.babylog.sync.backend.ConflictResolveRequest,
+    ): com.lezi.babylog.sync.backend.ConflictResolveResult =
+        throw UnsupportedOperationException("Conflict resolve is not implemented")
     override suspend fun saveEndpointConfig(config: FamilyEndpointConfig) = Result.success(Unit)
     override suspend fun createFamily(
         displayName: String,

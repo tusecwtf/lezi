@@ -16,16 +16,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
-use crate::store::Store;
-use crate::SERVER_SECRET_BYTES;
-
 use super::cutover::{cutover_help_text, COPY_BACK_RUNBOOK, COPY_BACK_SCRIPT};
 use super::live_cutover::live_cutover_help_text;
-use super::media::{cleanup_migrator_data_dir_outputs, migrate_v3_data_dir};
-use super::migrator::{
-    validate_new_root_password, MigrateError, MigrateReport, MIN_NEW_ROOT_PASSWORD_LEN,
-    REAUTH_OPS_NOTE,
-};
+use super::migrator::{validate_new_root_password, MigrateError, MigrateReport};
+use super::v13::migrate_v11_or_v12_data_dir_to_v13;
 
 /// Process exit: success.
 pub(crate) const EXIT_OK: u8 = 0;
@@ -49,13 +43,11 @@ pub(crate) enum CliCommand {
     Migrate {
         input: PathBuf,
         output: PathBuf,
-        new_root_password: String,
     },
     /// Dry-run: validate + count as if migrating; write only a temp dir then delete.
     /// Never creates a durable out/ suitable for copy-back.
     DryRun {
         input: PathBuf,
-        new_root_password: String,
     },
     /// Validate an existing out/ with preflight + secret length gate.
     Validate {
@@ -122,21 +114,19 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliCommand, String> {
         "dry-run" => {
             reject_unknown_flags(flags, &["--in", "--new-root-password"])?;
             let input = require_flag(flags, "--in")?;
-            let password = resolve_password(flags)?;
+            resolve_legacy_password(flags)?;
             Ok(CliCommand::DryRun {
                 input: PathBuf::from(input),
-                new_root_password: password,
             })
         }
         "migrate" => {
             reject_unknown_flags(flags, &["--in", "--out", "--new-root-password"])?;
             let input = require_flag(flags, "--in")?;
             let output = require_flag(flags, "--out")?;
-            let password = resolve_password(flags)?;
+            resolve_legacy_password(flags)?;
             Ok(CliCommand::Migrate {
                 input: PathBuf::from(input),
                 output: PathBuf::from(output),
-                new_root_password: password,
             })
         }
         other => Err(format!(
@@ -201,22 +191,21 @@ fn flag_present(flags: &[&str], name: &str) -> bool {
         .any(|f| *f == name || f.starts_with(&format!("{name}=")))
 }
 
-fn resolve_password(flags: &[&str]) -> Result<String, String> {
-    // If the flag is present, never silently fall through to env (even on empty value).
+fn resolve_legacy_password(flags: &[&str]) -> Result<(), String> {
+    // Schema 11/12→13 preserves the existing identity. Accept the historical
+    // argument for old scripts, but never require or use it.
     let password = if flag_present(flags, "--new-root-password") {
         require_flag(flags, "--new-root-password")?.to_owned()
     } else {
         match env::var(ENV_NEW_ROOT_PASSWORD) {
             Ok(p) if !p.is_empty() => p,
-            _ => {
-                return Err(format!(
-                    "new root password required via --new-root-password or env {ENV_NEW_ROOT_PASSWORD} (≥{MIN_NEW_ROOT_PASSWORD_LEN} chars)"
-                ));
-            }
+            _ => String::new(),
         }
     };
-    validate_new_root_password(&password).map_err(|e| e.to_string())?;
-    Ok(password)
+    if !password.is_empty() {
+        validate_new_root_password(&password).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Run a parsed command; pure enough for unit tests (stdout/stderr captured as strings).
@@ -254,15 +243,8 @@ pub(crate) fn run(command: CliCommand) -> CliOutcome {
                 stderr: format!("validate failed: {message}\n"),
             },
         },
-        CliCommand::DryRun {
-            input,
-            new_root_password,
-        } => run_dry_run(&input, &new_root_password),
-        CliCommand::Migrate {
-            input,
-            output,
-            new_root_password,
-        } => run_migrate(&input, &output, &new_root_password),
+        CliCommand::DryRun { input } => run_dry_run(&input),
+        CliCommand::Migrate { input, output } => run_migrate(&input, &output),
     }
 }
 
@@ -286,32 +268,27 @@ pub(crate) fn main_from_args(args: &[String]) -> u8 {
     outcome.exit_code
 }
 
-fn run_migrate(input: &Path, output: &Path, new_root_password: &str) -> CliOutcome {
+fn run_migrate(input: &Path, output: &Path) -> CliOutcome {
     if let Err(message) = refuse_in_place(input, output) {
         return usage_outcome(&message);
     }
     if let Err(message) = ensure_out_empty_for_migrate(output) {
         return usage_outcome(&message);
     }
-    if let Err(error) = validate_new_root_password(new_root_password) {
-        return usage_outcome(&error.to_string());
-    }
+    // The retained password argv is ignored for v11/12 identity-preserving
+    // migration. It stays parse-compatible until the H29 operator scripts move
+    // to the schema-13-only syntax.
 
     migrate_and_validate(
         input,
         output,
-        new_root_password,
         "migrate ok",
         /*cleanup_out_on_validate_fail=*/ true,
         /*durable_out=*/ true,
     )
 }
 
-fn run_dry_run(input: &Path, new_root_password: &str) -> CliOutcome {
-    if let Err(error) = validate_new_root_password(new_root_password) {
-        return usage_outcome(&error.to_string());
-    }
-
+fn run_dry_run(input: &Path) -> CliOutcome {
     let temp_root = std::env::temp_dir().join(format!(
         "lezi-offline-migrate-dry-run-{}-{}",
         std::process::id(),
@@ -329,7 +306,6 @@ fn run_dry_run(input: &Path, new_root_password: &str) -> CliOutcome {
     let mut outcome = migrate_and_validate(
         input,
         &temp_out,
-        new_root_password,
         "dry-run ok",
         /*cleanup_out_on_validate_fail=*/ false,
         /*durable_out=*/ false,
@@ -356,15 +332,18 @@ fn run_dry_run(input: &Path, new_root_password: &str) -> CliOutcome {
 }
 
 /// Shared migrate → validate control flow (dry-run and migrate).
+///
+/// Auto-detects a frozen source `lezi.db` user_version 11/12 and rebuilds schema 13.
 fn migrate_and_validate(
     input: &Path,
     output: &Path,
-    new_root_password: &str,
     title_ok: &str,
     cleanup_out_on_validate_fail: bool,
     durable_out: bool,
 ) -> CliOutcome {
-    match migrate_v3_data_dir(input, output, new_root_password) {
+    let migrate_result = migrate_v11_or_v12_data_dir_to_v13(input, output);
+
+    match migrate_result {
         Ok(report) => match validate_out_data_dir(output) {
             Ok(()) => CliOutcome {
                 exit_code: EXIT_OK,
@@ -372,13 +351,12 @@ fn migrate_and_validate(
                     title_ok,
                     if durable_out { Some(output) } else { None },
                     &report,
-                    /*include_reauth=*/ true,
                 ),
                 stderr: String::new(),
             },
             Err(message) => {
                 if cleanup_out_on_validate_fail {
-                    cleanup_migrator_data_dir_outputs(output);
+                    let _ = fs::remove_dir_all(output);
                 }
                 CliOutcome {
                     exit_code: EXIT_FAILURE,
@@ -419,45 +397,11 @@ fn unique_suffix() -> u128 {
 
 /// Preflight + contract checks for a migrated out/ data dir.
 ///
-/// Requires `lezi.db` with current schema shape and `server.secret` with at least
-/// [`SERVER_SECRET_BYTES`] (same gate as `load_or_create_server_secret`).
-/// This is the CLI preflight handoff for ticket 06; full `/ready` still needs TLS
-/// and process config at cutover.
+/// Requires `lezi.db` with exact current schema-13 shape and a server identity root accepted by
+/// the schema-13 migrator validator.
+/// This is H28 local preflight; full `/ready` and copy-back remain H29 work.
 pub(crate) fn validate_out_data_dir(out: &Path) -> Result<(), String> {
-    if !out.try_exists().map_err(|e| e.to_string())? {
-        return Err(format!("out data dir missing: {}", out.display()));
-    }
-    let db = out.join("lezi.db");
-    if !db.try_exists().map_err(|e| e.to_string())? {
-        return Err(format!("out lezi.db missing: {}", db.display()));
-    }
-    if !db.is_file() {
-        return Err(format!(
-            "out lezi.db is not a regular file: {}",
-            db.display()
-        ));
-    }
-    Store::preflight_existing_schema(&db).map_err(|e| format!("preflight: {e}"))?;
-    let secret_path = out.join("server.secret");
-    if !secret_path.try_exists().map_err(|e| e.to_string())? {
-        return Err(format!(
-            "server.secret missing under {} (migrator must RegenerateAlways)",
-            out.display()
-        ));
-    }
-    if !secret_path.is_file() {
-        return Err(format!(
-            "server.secret is not a regular file: {}",
-            secret_path.display()
-        ));
-    }
-    let secret = fs::read(&secret_path).map_err(|e| format!("read server.secret: {e}"))?;
-    if secret.len() < SERVER_SECRET_BYTES {
-        return Err(format!(
-            "server.secret must contain at least {SERVER_SECRET_BYTES} bytes (got {}); matches live open gate",
-            secret.len()
-        ));
-    }
+    super::v13::validate_schema13_data_dir(out).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -555,20 +499,12 @@ fn failure_outcome(prefix: &str, error: &MigrateError) -> CliOutcome {
     }
 }
 
-fn format_report(
-    title: &str,
-    out: Option<&Path>,
-    report: &MigrateReport,
-    include_reauth: bool,
-) -> String {
+fn format_report(title: &str, out: Option<&Path>, report: &MigrateReport) -> String {
     let mut s = format!("{title}\n");
     if let Some(path) = out {
         s.push_str(&format!("out={}\n", path.display()));
     }
     s.push_str(&format_report_counters(report));
-    if include_reauth {
-        s.push_str(REAUTH_OPS_NOTE);
-    }
     s
 }
 
@@ -600,11 +536,11 @@ media_files_copied={}\n",
 fn usage_text() -> String {
     format!(
         "\
-lezi-sync offline-migrate — private NAS v3→current offline pipeline (tickets 05–07)
+lezi-sync offline-migrate — copy-out server schema 11/12→13 pipeline (H28)
 
 Subcommands:
-  migrate   --in <backup_data_dir> --out <out_data_dir> --new-root-password <secret>
-  dry-run   --in <backup_data_dir> --new-root-password <secret>
+  migrate   --in <backup_data_dir> --out <out_data_dir>
+  dry-run   --in <backup_data_dir>
   validate  --out <out_data_dir>
   copy-out-help
   copy-back-help   (alias: cutover-help)
@@ -614,19 +550,19 @@ Subcommands:
 Notes:
   - --in is the local NAS copy-out backup; it is never modified.
   - --out must be independent of --in (not equal, not nested) and empty (or absent).
-  - Password may also come from env {ENV_NEW_ROOT_PASSWORD} (≥{MIN_NEW_ROOT_PASSWORD_LEN} chars).
-  - validate = current-schema preflight + server.secret ≥ {SERVER_SECRET_BYTES} bytes (not full /ready).
+  - Source must be an exact, checkpointed schema 11 or 12 data root.
+  - server.secret and a complete valid TLS pair are preserved byte-for-byte.
+  - validate = exact schema-13 Store shape + integrity/media/identity gates (not full /ready).
   - migrate/dry-run/validate do NOT stop the live NAS container and do NOT copy back.
-  - copy-back-help prints the ticket-06 maintenance order; it does NOT execute live cutover (ticket 07).
-  - live-cutover-help prints ticket-07 evidence + APK smoke checklist; it does NOT invent live success.
+  - copy-back/live-cutover help are frozen legacy pointers; H29 must replace their schema-12 flow.
   - On success, migrate/dry-run print object counts; on failure exit={EXIT_FAILURE} with a report.
-  - usage / short password / bad flags → exit={EXIT_USAGE}.
+  - usage / bad flags → exit={EXIT_USAGE}.
 
 Copy-out script (authoritative): {COPY_OUT_SCRIPT}
 Copy-back runbook / script: {COPY_BACK_RUNBOOK} ; {COPY_BACK_SCRIPT}
 Live cutover probe / evidence: tools/lezi-sync/deploy/live-cutover-probe.sh ;
   .scratch/nas-v3-offline-migrate/evidence/07/
-After migrate/validate success, out/ is the ticket-06 copy-back input.
+After migrate/validate success, keep out/ local; H29 is still required before copy-back/CD.
 "
     )
 }
@@ -637,7 +573,7 @@ pub(crate) fn copy_out_help_text() -> String {
         "\
 # Copy-out (ticket 05) — NAS data → timestamped local backup
 #
-# Does NOT stop the live container. Does NOT copy back (ticket 06).
+# Does NOT stop the live container. Does NOT copy back (H29 owns cutover).
 #
 # Authoritative steps + defaults: {COPY_OUT_SCRIPT}
 #   bash {COPY_OUT_SCRIPT}
@@ -653,12 +589,10 @@ pub(crate) fn copy_out_help_text() -> String {
 #                        host data bind is mode 700 / Permission denied
 #
 # Script uses rsync (preferred) or scp, with docker-tar fallback when the host
-# path is unreadable (measured family NAS). Checks lezi.db presence and
-# user_version=3 when sqlite3 is available. Hot-copy risk while the live WAL
-# store writes — see script header (quiesce / sqlite3 .backup preferred).
+# path is unreadable. H28 accepts only an exact checkpointed schema 11/12 root;
+# any SQLite sidecar aborts migration.
 #
 # After copy-out:
-#   export {ENV_NEW_ROOT_PASSWORD}='…ops-chosen ≥{MIN_NEW_ROOT_PASSWORD_LEN} chars…'
 #   lezi-sync offline-migrate dry-run --in \"$BACKUP_DIR\"
 #   lezi-sync offline-migrate migrate --in \"$BACKUP_DIR\" --out \"$OUT_DIR\"
 #   lezi-sync offline-migrate validate --out \"$OUT_DIR\"
@@ -670,9 +604,13 @@ pub(crate) fn copy_out_help_text() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::offline_migrate::schema_contract::LEGACY_SCHEMA_V12;
     use crate::offline_migrate::test_support::{
-        open_v3_fixture, seed_baby_entity, seed_minimal_family, TEST_NEW_ROOT_PASSWORD,
+        generate_test_tls_identity, TEST_NEW_ROOT_PASSWORD,
     };
+    use crate::offline_migrate::v13::migrate_v11_or_v12_data_dir_to_v13;
+    use crate::SERVER_SECRET_BYTES;
+    use rusqlite::Connection;
     use std::fs;
     use std::time::UNIX_EPOCH;
     use tempfile::tempdir;
@@ -681,13 +619,23 @@ mod tests {
         parts.iter().map(|s| (*s).to_owned()).collect()
     }
 
-    fn write_v3_backup(dir: &Path) {
-        fs::create_dir_all(dir).unwrap();
-        let db = dir.join("lezi.db");
-        let conn = open_v3_fixture(&db);
-        seed_minimal_family(&conn);
-        seed_baby_entity(&conn);
+    fn write_v12_backup(dir: &Path) {
+        fs::create_dir_all(dir.join("media")).unwrap();
+        fs::create_dir_all(dir.join("tls")).unwrap();
+        let conn = Connection::open(dir.join("lezi.db")).unwrap();
+        LEGACY_SCHEMA_V12.initialize(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO families(id, created_at, name, owner_root_fingerprint)
+             VALUES ('family', 1, 'Family', 'fingerprint');
+             INSERT INTO memberships(
+                 membership_id, family_id, role, display_name, display_name_key, left_at
+             ) VALUES ('owner', 'family', 'owner', 'Owner', 'owner', NULL);
+             INSERT INTO family_meta(family_id, rev) VALUES ('family', 0);",
+        )
+        .unwrap();
+        drop(conn);
         fs::write(dir.join("server.secret"), vec![7u8; 32]).unwrap();
+        generate_test_tls_identity(&dir.join("tls"));
     }
 
     fn file_fingerprint(path: &Path) -> (u64, std::time::SystemTime) {
@@ -712,7 +660,6 @@ mod tests {
             cmd,
             CliCommand::DryRun {
                 input: PathBuf::from("/tmp/backup"),
-                new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
             }
         );
     }
@@ -734,7 +681,6 @@ mod tests {
             CliCommand::Migrate {
                 input: PathBuf::from("/tmp/backup"),
                 output: PathBuf::from("/tmp/out"),
-                new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
             }
         );
     }
@@ -748,6 +694,13 @@ mod tests {
                 output: PathBuf::from("/tmp/out"),
             }
         );
+    }
+
+    #[test]
+    fn public_help_names_both_sources_and_frozen_legacy_target() {
+        let help = usage_text();
+        assert!(help.contains("schema 11/12→13"), "{help}");
+        assert!(help.contains("schema-13"), "{help}");
     }
 
     #[test]
@@ -796,14 +749,14 @@ mod tests {
     fn dry_run_prints_known_counts_exits_ok_and_leaves_backup_untouched() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
-        write_v3_backup(&backup);
+        write_v12_backup(&backup);
         let db = backup.join("lezi.db");
         let before = file_fingerprint(&db);
+        let before_db_bytes = fs::read(&db).unwrap();
         let before_secret = fs::read(backup.join("server.secret")).unwrap();
 
         let outcome = run(CliCommand::DryRun {
             input: backup.clone(),
-            new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
         });
 
         assert_eq!(outcome.exit_code, EXIT_OK, "stderr={}", outcome.stderr);
@@ -818,12 +771,12 @@ mod tests {
             outcome.stdout
         );
         assert!(
-            outcome.stdout.contains("memberships=2"),
+            outcome.stdout.contains("memberships=1"),
             "stdout={}",
             outcome.stdout
         );
         assert!(
-            outcome.stdout.contains("entities=1"),
+            outcome.stdout.contains("entities=0"),
             "stdout={}",
             outcome.stdout
         );
@@ -845,6 +798,11 @@ mod tests {
             "backup lezi.db must not be mutated"
         );
         assert_eq!(
+            before_db_bytes,
+            fs::read(&db).unwrap(),
+            "backup lezi.db must remain byte-identical"
+        );
+        assert_eq!(
             before_secret,
             fs::read(backup.join("server.secret")).unwrap(),
             "backup server.secret must not be mutated"
@@ -859,13 +817,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
         let out = dir.path().join("out");
-        write_v3_backup(&backup);
-        let before = file_fingerprint(&backup.join("lezi.db"));
+        write_v12_backup(&backup);
+        let source_db = backup.join("lezi.db");
+        let before = file_fingerprint(&source_db);
+        let before_db_bytes = fs::read(&source_db).unwrap();
+        let before_secret_bytes = fs::read(backup.join("server.secret")).unwrap();
 
         let outcome = run(CliCommand::Migrate {
             input: backup.clone(),
             output: out.clone(),
-            new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
         });
 
         assert_eq!(outcome.exit_code, EXIT_OK, "stderr={}", outcome.stderr);
@@ -873,23 +833,27 @@ mod tests {
         assert!(outcome.stdout.contains("families=1"), "{}", outcome.stdout);
         assert!(out.join("lezi.db").is_file());
         assert!(out.join("server.secret").is_file());
-        assert_ne!(
+        assert_eq!(
             fs::read(backup.join("server.secret")).unwrap(),
             fs::read(out.join("server.secret")).unwrap()
         );
-        assert_eq!(before, file_fingerprint(&backup.join("lezi.db")));
+        assert_eq!(before, file_fingerprint(&source_db));
+        assert_eq!(before_db_bytes, fs::read(&source_db).unwrap());
+        assert_eq!(
+            before_secret_bytes,
+            fs::read(backup.join("server.secret")).unwrap()
+        );
     }
 
     #[test]
     fn migrate_refuses_identical_in_and_out() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
-        write_v3_backup(&backup);
+        write_v12_backup(&backup);
 
         let outcome = run(CliCommand::Migrate {
             input: backup.clone(),
             output: backup.clone(),
-            new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
         });
         assert_eq!(outcome.exit_code, EXIT_USAGE, "stderr={}", outcome.stderr);
         assert!(
@@ -903,13 +867,12 @@ mod tests {
     fn migrate_refuses_nested_out_under_in() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
-        write_v3_backup(&backup);
+        write_v12_backup(&backup);
         let nested = backup.join("out");
 
         let outcome = run(CliCommand::Migrate {
             input: backup.clone(),
             output: nested.clone(),
-            new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
         });
         assert_eq!(outcome.exit_code, EXIT_USAGE, "stderr={}", outcome.stderr);
         assert!(
@@ -937,14 +900,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
         let out = dir.path().join("out");
-        write_v3_backup(&backup);
+        write_v12_backup(&backup);
         fs::create_dir_all(&out).unwrap();
         fs::write(out.join("junk.txt"), b"smuggle").unwrap();
 
         let outcome = run(CliCommand::Migrate {
             input: backup,
             output: out.clone(),
-            new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
         });
         assert_eq!(outcome.exit_code, EXIT_USAGE, "stderr={}", outcome.stderr);
         assert!(
@@ -963,8 +925,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
         let out = dir.path().join("out");
-        write_v3_backup(&backup);
-        migrate_v3_data_dir(&backup, &out, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        write_v12_backup(&backup);
+        migrate_v11_or_v12_data_dir_to_v13(&backup, &out).expect("migrate");
 
         let ok = run(CliCommand::Validate {
             output: out.clone(),
@@ -984,8 +946,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
         let out = dir.path().join("out");
-        write_v3_backup(&backup);
-        migrate_v3_data_dir(&backup, &out, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        write_v12_backup(&backup);
+        migrate_v11_or_v12_data_dir_to_v13(&backup, &out).expect("migrate");
         // Truncate secret below SERVER_SECRET_BYTES.
         fs::write(out.join("server.secret"), vec![1u8; 8]).unwrap();
 
@@ -999,46 +961,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_rejects_wrong_current_version_and_shape() {
+        let dir = tempdir().unwrap();
+        let backup = dir.path().join("backup");
+        write_v12_backup(&backup);
+
+        let wrong_version = dir.path().join("wrong-version");
+        migrate_v11_or_v12_data_dir_to_v13(&backup, &wrong_version).expect("migrate");
+        Connection::open(wrong_version.join("lezi.db"))
+            .unwrap()
+            .pragma_update(None, "user_version", 12)
+            .unwrap();
+        let error = validate_out_data_dir(&wrong_version).expect_err("version must fail closed");
+        assert!(
+            error.contains("version 12") || error.contains("user_version=12"),
+            "{error}"
+        );
+
+        let wrong_shape = dir.path().join("wrong-shape");
+        migrate_v11_or_v12_data_dir_to_v13(&backup, &wrong_shape).expect("migrate");
+        Connection::open(wrong_shape.join("lezi.db"))
+            .unwrap()
+            .execute("DROP INDEX entity_versions_root", [])
+            .unwrap();
+        let error = validate_out_data_dir(&wrong_shape).expect_err("shape must fail closed");
+        assert!(
+            error.contains("does not match current version 13") || error.contains("schema-13"),
+            "{error}"
+        );
+    }
+
     // --- Seam: failure exit + report ---
 
     #[test]
     fn dry_run_authoritative_failure_is_nonzero_with_kind() {
         let dir = tempdir().unwrap();
         let backup = dir.path().join("backup");
-        fs::create_dir_all(&backup).unwrap();
+        write_v12_backup(&backup);
         let conn = rusqlite::Connection::open(backup.join("lezi.db")).unwrap();
-        conn.pragma_update(None, "user_version", 0i64).unwrap();
+        conn.pragma_update(None, "user_version", 10i64).unwrap();
         drop(conn);
 
-        let outcome = run(CliCommand::DryRun {
-            input: backup,
-            new_root_password: TEST_NEW_ROOT_PASSWORD.to_owned(),
-        });
+        let outcome = run(CliCommand::DryRun { input: backup });
         assert_eq!(outcome.exit_code, EXIT_FAILURE, "stderr={}", outcome.stderr);
         assert!(
-            outcome.stderr.contains("dry-run failed"),
+            outcome.stderr.contains("dry-run failed") || outcome.stderr.contains("migrate failed"),
             "{}",
             outcome.stderr
         );
         assert!(
             outcome.stderr.contains("SourceUserVersionNotThree")
-                || outcome.stderr.contains("authoritative"),
+                || outcome.stderr.contains("authoritative")
+                || outcome
+                    .stderr
+                    .contains("unsupported schema-13 source user_version"),
             "stderr={}",
             outcome.stderr
         );
-    }
-
-    #[test]
-    fn short_password_on_run_is_usage_not_migrate_failure() {
-        let dir = tempdir().unwrap();
-        let backup = dir.path().join("backup");
-        write_v3_backup(&backup);
-        let outcome = run(CliCommand::DryRun {
-            input: backup,
-            new_root_password: "short".to_owned(),
-        });
-        assert_eq!(outcome.exit_code, EXIT_USAGE, "stderr={}", outcome.stderr);
-        assert!(outcome.stderr.contains("usage error"), "{}", outcome.stderr);
     }
 
     // --- Seam: copy-out help ---

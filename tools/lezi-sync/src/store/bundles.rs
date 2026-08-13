@@ -406,6 +406,16 @@ pub(crate) fn bundle_content_hash(root: &Entity, media: &[Entity]) -> Result<Str
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+/// Framed hash used by schema-12 migration-base versions and their media rows.
+pub(crate) fn migration_content_hash(parts: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0xff]);
+    }
+    hex::encode(hasher.finalize())
+}
+
 /// Stamp creator membership on first insert; freeze creator; enforce member-own /
 /// owner-all ACL; refuse clearing deleted_at on tombstones.
 fn stamp_and_authorize_custom_items(
@@ -460,7 +470,8 @@ fn stamp_and_authorize_custom_items(
 
 /// Record authorship belongs to the authenticated principal, never to client claims.
 /// Once published, only that membership (across all of its devices) or the
-/// family owner may edit, tombstone, or restore the record.
+/// family owner may edit or tombstone the record. Soft-deleted records cannot
+/// be resurrected (record tombstone wins — ADR-0018 / 0.3.10).
 fn canonicalize_record_authors(
     role: &str,
     membership_id: &str,
@@ -473,6 +484,9 @@ fn canonicalize_record_authors(
         }
         let key = ("record".to_owned(), entity.client_uuid.clone());
         if let Some(current) = existing.get(&key) {
+            if current.deleted_at.is_some() && entity.deleted_at.is_none() {
+                return Err(StoreError::RecordTombstoneResurrection);
+            }
             let value = current
                 .payload
                 .get("created_by_membership_id")
@@ -878,6 +892,29 @@ fn validation_reference_keys(entities: &[Entity]) -> BTreeSet<EntityKey> {
                 {
                     references.insert(("record".to_owned(), id.to_owned()));
                 }
+                if let Some(id) = entity
+                    .payload
+                    .get("source_record_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("record".to_owned(), id.to_owned()));
+                }
+                if let Some(id) = entity
+                    .payload
+                    .get("effective_wake_observation_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("wake_observation".to_owned(), id.to_owned()));
+                }
+            }
+            "wake_observation" => {
+                if let Some(id) = entity
+                    .payload
+                    .get("sleep_record_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("record".to_owned(), id.to_owned()));
+                }
             }
             "fulfillment_candidate" => {
                 if let Some(id) = entity.payload["care_plan_client_uuid"].as_str() {
@@ -956,6 +993,158 @@ fn load_fulfillment_custom_references(
     Ok(references)
 }
 
+fn validate_deferred_fulfillment_resolutions(
+    connection: &Connection,
+    family_id: &str,
+    entities: &[Entity],
+    media_ready: Option<&BTreeMap<String, bool>>,
+) -> Result<Vec<(String, String)>, StoreError> {
+    let mut resolutions = Vec::new();
+    for record in entities
+        .iter()
+        .filter(|entity| entity.entity_type == "record" && entity.deleted_at.is_none())
+    {
+        let record_baby = record
+            .payload
+            .get("baby_client_uuid")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        for (plan_id, raw) in
+            load_deferred_plan_rows_for_record(connection, family_id, &record.client_uuid)?
+        {
+            let plan = parse_payload(&raw)?;
+            let plan_baby = plan
+                .get("baby_client_uuid")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::InvalidStoredPayload)?;
+            if plan.get("fulfilled_at").and_then(Value::as_i64).is_none() {
+                return Err(StoreError::InvalidStoredPayload);
+            }
+            if plan_baby != record_baby {
+                return Err(StoreError::UnresolvedReference(
+                    "fulfilled record baby does not match care_plan baby".to_owned(),
+                ));
+            }
+            if let Some(media_ready) = media_ready {
+                for (media_id, _) in
+                    load_deferred_plan_media_integrity(connection, family_id, &plan_id)?
+                {
+                    if !media_ready.get(&media_id).copied().unwrap_or(false) {
+                        return Err(StoreError::BundleMediaIncomplete);
+                    }
+                }
+            }
+            resolutions.push((plan_id, record.client_uuid.clone()));
+        }
+    }
+    Ok(resolutions)
+}
+
+fn load_deferred_plan_rows_for_record(
+    connection: &Connection,
+    family_id: &str,
+    record_client_uuid: &str,
+) -> Result<Vec<(String, String)>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT plan.client_uuid, plan.payload_json
+        FROM entities AS plan
+        WHERE plan.family_id = ?1
+          AND plan.entity_type = 'care_plan'
+          AND plan.deleted_at IS NULL
+          AND json_extract(plan.payload_json, '$.status') = 'completed'
+          AND json_extract(plan.payload_json, '$.fulfilled_record_client_uuid') = ?2
+          AND NOT EXISTS (
+              SELECT 1
+              FROM entities AS record
+              WHERE record.family_id = ?1
+                AND record.entity_type = 'record'
+                AND record.client_uuid = ?2
+                AND record.deleted_at IS NULL
+          )
+        ",
+    )?;
+    let rows = statement
+        .query_map(params![family_id, record_client_uuid], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)?;
+    Ok(rows)
+}
+
+fn load_deferred_plan_media_integrity(
+    connection: &Connection,
+    family_id: &str,
+    plan_client_uuid: &str,
+) -> Result<BTreeMap<String, BundleMediaIntegrity>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT media.client_uuid,
+               json_extract(media.payload_json, '$.byte_size'),
+               publication.source,
+               bundle.status,
+               bundle_media.declared_byte_size,
+               bundle_media.staged_sha256
+        FROM entities AS media
+        LEFT JOIN media_publications AS publication
+          ON publication.family_id = media.family_id
+         AND publication.media_uuid = media.client_uuid
+        LEFT JOIN sync_bundles AS bundle
+          ON bundle.family_id = publication.family_id
+         AND bundle.bundle_id = publication.bundle_id
+        LEFT JOIN sync_bundle_media AS bundle_media
+          ON bundle_media.family_id = publication.family_id
+         AND bundle_media.bundle_id = publication.bundle_id
+         AND bundle_media.media_uuid = media.client_uuid
+        WHERE media.family_id = ?1
+          AND media.entity_type = 'media'
+          AND media.deleted_at IS NULL
+          AND json_extract(media.payload_json, '$.kind') = 'log'
+          AND json_extract(media.payload_json, '$.care_plan_client_uuid') = ?2
+        ORDER BY media.client_uuid
+        ",
+    )?;
+    let rows = statement
+        .query_map(params![family_id, plan_client_uuid], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut integrity = BTreeMap::new();
+    for (media_id, payload_size, source, bundle_status, declared_size, digest) in rows {
+        let valid_digest = digest.as_deref().is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if payload_size.is_none()
+            || payload_size != declared_size
+            || payload_size.is_some_and(|value| value <= 0)
+            || source.as_deref() != Some("bundle")
+            || bundle_status.as_deref() != Some("committed")
+            || !valid_digest
+        {
+            return Err(StoreError::BundleMediaIncomplete);
+        }
+        integrity.insert(
+            media_id,
+            BundleMediaIntegrity {
+                declared_byte_size: payload_size.and_then(|value| usize::try_from(value).ok()),
+                staged_sha256: digest,
+            },
+        );
+    }
+    Ok(integrity)
+}
+
 fn validate_push(
     role: &str,
     membership_id: &str,
@@ -964,6 +1153,73 @@ fn validate_push(
     persisted: &HashMap<EntityKey, ExistingEntity>,
     fulfillment_custom_references: &BTreeSet<(String, String)>,
 ) -> Result<(), StoreError> {
+    for entity in entities {
+        match entity.entity_type.as_str() {
+            "wake_observation" if entity.deleted_at.is_none() => {
+                let sleep_id = entity
+                    .payload
+                    .get("sleep_record_client_uuid")
+                    .and_then(Value::as_str)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                let sleep =
+                    effective_entity(entities, existing, "record", sleep_id).ok_or_else(|| {
+                        StoreError::UnresolvedReference(
+                            "wake_observation sleep_record_client_uuid does not exist".to_owned(),
+                        )
+                    })?;
+                if sleep.deleted_at.is_some()
+                    || sleep.payload.get("type").and_then(Value::as_str) != Some("sleep")
+                {
+                    return Err(StoreError::UnresolvedReference(
+                        "wake_observation must reference a live sleep record".to_owned(),
+                    ));
+                }
+                let sleep_start = sleep
+                    .payload
+                    .get("timestamp")
+                    .and_then(Value::as_i64)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                let wake_timestamp = entity
+                    .payload
+                    .get("wake_timestamp")
+                    .and_then(Value::as_i64)
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                if wake_timestamp < sleep_start {
+                    return Err(StoreError::UnresolvedReference(
+                        "wake_observation precedes its sleep record".to_owned(),
+                    ));
+                }
+            }
+            "record" if entity.deleted_at.is_none() => {
+                let Some(wake_id) = entity
+                    .payload
+                    .get("effective_wake_observation_client_uuid")
+                    .and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let wake = effective_entity(entities, existing, "wake_observation", wake_id)
+                    .ok_or_else(|| {
+                        StoreError::UnresolvedReference(
+                            "effective WakeObservation does not exist".to_owned(),
+                        )
+                    })?;
+                let valid = wake.deleted_at.is_none()
+                    && wake
+                        .payload
+                        .get("sleep_record_client_uuid")
+                        .and_then(Value::as_str)
+                        == Some(entity.client_uuid.as_str())
+                    && wake.payload.get("withdrawn").and_then(Value::as_bool) == Some(false);
+                if !valid {
+                    return Err(StoreError::UnresolvedReference(
+                        "effective WakeObservation is not valid for this sleep".to_owned(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
     let mut baby_ids = existing
         .keys()
         .filter(|(entity_type, _)| entity_type == "baby")
@@ -1291,100 +1547,72 @@ fn validate_push(
     Ok(())
 }
 
-/// Dry-run the same canonicalization, ACL, immutable-evidence, reference, and
-/// atomic-package rules that commit applies. Reconciliation calls this while
-/// holding its own Store transaction; no staging or entity row is written.
-pub(in crate::store) fn validate_reconcile_package(
+fn effective_entity(
+    entities: &[Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+    entity_type: &str,
+    client_uuid: &str,
+) -> Option<ExistingEntity> {
+    entities
+        .iter()
+        .rev()
+        .find(|entity| entity.entity_type == entity_type && entity.client_uuid == client_uuid)
+        .map(|entity| ExistingEntity {
+            updated_at: entity.updated_at,
+            deleted_at: entity.deleted_at,
+            payload: entity.payload.clone(),
+        })
+        .or_else(|| {
+            existing
+                .get(&(entity_type.to_owned(), client_uuid.to_owned()))
+                .cloned()
+        })
+}
+
+/// Validate one already shape-adapted canonical atomic package against the
+/// current family graph. Causal ingress routes reference and association
+/// invariants through `validate_push`; wire adapters do not reimplement them.
+pub(in crate::store) fn validate_canonical_package_ingress(
     transaction: &Transaction<'_>,
     principal: &Principal,
-    mut package: Vec<Entity>,
-    max_updated_at: i64,
-    now: i64,
+    package: &[Entity],
 ) -> Result<(), StoreError> {
-    let Principal {
-        family_id,
-        role,
-        membership_id,
-        ..
-    } = principal;
-    let root = package
-        .iter()
-        .find(|entity| entity.entity_type != "media")
-        .ok_or(StoreError::InvalidStoredPayload)?;
-    if role != "owner" && root.entity_type == "baby" {
-        return Err(StoreError::ForbiddenBaby);
-    }
-    if package
-        .iter()
-        .any(|entity| entity.updated_at > max_updated_at)
-    {
-        return Err(StoreError::TimestampOutOfRange);
-    }
+    validate_pull_entity_sizes(package)?;
     let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
-    let mut existing = load_existing_entities(transaction, family_id, &incoming_keys)?;
-    existing.extend(load_family_custom_items(transaction, family_id)?);
-    existing.extend(load_family_media(transaction, family_id)?);
-    stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
-    let noop_care_plan_ids =
-        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
-    discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
-    canonicalize_equal_lww_bundle_root(&mut package, &existing);
-    canonicalize_record_authors(role, membership_id, &mut package, &existing)?;
-    let confirmed_at = package
-        .iter()
-        .find(|entity| entity.entity_type == "fulfillment_candidate")
-        .and_then(|entity| entity.payload.get("confirmed_at"))
-        .and_then(Value::as_i64)
-        .unwrap_or_else(|| confirmed_at_millis(now));
-    stamp_and_authorize_fulfillment_candidates(
-        role,
-        membership_id,
-        confirmed_at,
-        &mut package,
-        &existing,
-    )?;
-    let mut effective = effective_lww_winners(package.clone(), &existing);
-    stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
-    let noop_care_plan_ids =
-        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
-    discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
-    stamp_and_authorize_fulfillment_candidates(
-        role,
-        membership_id,
-        confirmed_at,
-        &mut effective,
-        &existing,
-    )?;
-    let reference_keys = validation_reference_keys(&effective);
+    let mut existing = load_existing_entities(transaction, &principal.family_id, &incoming_keys)?;
+    existing.extend(load_family_custom_items(transaction, &principal.family_id)?);
+    existing.extend(load_family_media(transaction, &principal.family_id)?);
+    let reference_keys = validation_reference_keys(package);
     let missing_references = reference_keys
         .difference(&incoming_keys)
         .cloned()
         .collect::<BTreeSet<_>>();
     existing.extend(load_existing_entities(
         transaction,
-        family_id,
+        &principal.family_id,
         &missing_references,
     )?);
     let persisted = existing.clone();
     let fulfillment_custom_references =
-        load_fulfillment_custom_references(transaction, family_id, &effective)?;
-    for entity in &package {
-        existing
-            .entry(entity_key(entity))
-            .or_insert_with(|| ExistingEntity {
-                updated_at: entity.updated_at,
-                deleted_at: entity.deleted_at,
-                payload: entity.payload.clone(),
-            });
-    }
+        load_fulfillment_custom_references(transaction, &principal.family_id, package)?;
     validate_push(
-        role,
-        membership_id,
-        &effective,
+        &principal.role,
+        &principal.membership_id,
+        package,
         &existing,
         &persisted,
         &fulfillment_custom_references,
     )
+}
+
+fn validate_pull_entity_sizes(entities: &[Entity]) -> Result<(), StoreError> {
+    for entity in entities {
+        let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
+        if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
+            return Err(StoreError::PullEntityTooLarge);
+        }
+    }
+    Ok(())
 }
 
 fn validate_custom_item_reference(
@@ -1551,6 +1779,16 @@ impl Store {
             membership_id,
             ..
         } = principal;
+        if root.entity_type != "fulfillment_candidate" {
+            return Err(StoreError::LegacyBundleCausalRootUnsupported(
+                root.entity_type.clone(),
+            ));
+        }
+        if !media.is_empty() {
+            return Err(StoreError::UnresolvedReference(
+                "fulfillment_candidate bundle does not accept media".to_owned(),
+            ));
+        }
         if media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
             return Err(StoreError::UnresolvedReference(format!(
                 "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
@@ -1600,6 +1838,7 @@ impl Store {
         let persisted = existing.clone();
         let fulfillment_custom_references =
             load_fulfillment_custom_references(&transaction, family_id, &package)?;
+        let _ = validate_deferred_fulfillment_resolutions(&transaction, family_id, &package, None)?;
         for entity in &package {
             existing.insert(
                 entity_key(entity),
@@ -1735,7 +1974,6 @@ impl Store {
         let required = required_live_media_uuids(&media);
         let media_integrity = load_bundle_media_integrity(&connection, family_id, bundle_id)?;
         Ok(Some(StoredBundle {
-            media,
             required_media: required,
             media_integrity,
             status: row.status,
@@ -1743,72 +1981,28 @@ impl Store {
         }))
     }
 
-    /// Record that staged bytes for a manifest media UUID are durable.
-    pub fn mark_bundle_media_staged(
+    pub fn deferred_fulfillment_media_integrity_for_bundle(
         &self,
-        principal: &Principal,
+        family_id: &str,
         bundle_id: &str,
-        media_uuid: &str,
-        staged_byte_size: usize,
-        staged_sha256: &str,
-        now: i64,
-    ) -> Result<BundleStageStatus, StoreError> {
-        let family_id = &principal.family_id;
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let _row = load_open_staging_bundle_for_membership(
-            &transaction,
-            family_id,
-            bundle_id,
-            &principal.membership_id,
-        )?
-        .ok_or(StoreError::BundleMediaUploadClosed)?;
-        let updated = transaction.execute(
-            "
-        UPDATE sync_bundle_media
-        SET staged_byte_size = ?1, staged_sha256 = ?2, staged_at = ?3
-        WHERE family_id = ?4 AND bundle_id = ?5 AND media_uuid = ?6
-        ",
-            params![
-                staged_byte_size as i64,
-                staged_sha256,
-                now,
+    ) -> Result<BTreeMap<String, BundleMediaIntegrity>, StoreError> {
+        let connection = self.connect()?;
+        let row = load_bundle_row(&connection, family_id, bundle_id)?
+            .ok_or(StoreError::BundleNotFound)?;
+        if row.root_type != "record" || row.root_deleted_at.is_some() {
+            return Ok(BTreeMap::new());
+        }
+        let mut integrity = BTreeMap::new();
+        for (plan_id, _) in
+            load_deferred_plan_rows_for_record(&connection, family_id, &row.root_client_uuid)?
+        {
+            integrity.extend(load_deferred_plan_media_integrity(
+                &connection,
                 family_id,
-                bundle_id,
-                media_uuid
-            ],
-        )?;
-        if updated == 0 {
-            return Err(StoreError::BundleMediaNotInManifest);
+                &plan_id,
+            )?);
         }
-        // Size must match declared byte_size for live media.
-        let declared: Option<i64> = transaction.query_row(
-            "
-        SELECT declared_byte_size FROM sync_bundle_media
-        WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-        ",
-            params![family_id, bundle_id, media_uuid],
-            |r| r.get(0),
-        )?;
-        if let Some(declared) = declared {
-            if declared != staged_byte_size as i64 {
-                // Clear the bad staging mark so commit still sees it missing.
-                transaction.execute(
-                    "
-                UPDATE sync_bundle_media
-                SET staged_byte_size = NULL, staged_sha256 = NULL, staged_at = NULL
-                WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-                ",
-                    params![family_id, bundle_id, media_uuid],
-                )?;
-                transaction.commit()?;
-                return Err(StoreError::BundleMediaIncomplete);
-            }
-        }
-        transaction.commit()?;
-        self.secure_database_files()?;
-        self.bundle_status(family_id, bundle_id)?
-            .ok_or(StoreError::BundleNotFound)
+        Ok(integrity)
     }
 
     /// Publish a complete package in one transaction. Idempotent after success.
@@ -1992,12 +2186,7 @@ impl Store {
             &mut effective,
             &existing,
         )?;
-        for entity in &effective {
-            let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
-            if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
-                return Err(StoreError::PullEntityTooLarge);
-            }
-        }
+        validate_pull_entity_sizes(&effective)?;
         let reference_keys = validation_reference_keys(&effective);
         let missing_references = reference_keys
             .difference(&incoming_keys)
@@ -2011,6 +2200,12 @@ impl Store {
         let persisted = existing.clone();
         let fulfillment_custom_references =
             load_fulfillment_custom_references(&transaction, family_id, &effective)?;
+        let deferred_fulfillment_resolutions = validate_deferred_fulfillment_resolutions(
+            &transaction,
+            family_id,
+            &effective,
+            Some(media_ready),
+        )?;
         // Intra-package references: treat full package (not only LWW winners) as present.
         for entity in &package {
             existing
@@ -2154,6 +2349,18 @@ impl Store {
         }
         transaction.commit()?;
         self.secure_database_files()?;
+        for (care_plan_client_uuid, record_client_uuid) in
+            deferred_fulfillment_resolutions.into_iter().take(32)
+        {
+            tracing::info!(
+                family_id,
+                entity_type = "care_plan",
+                client_uuid = %care_plan_client_uuid,
+                record_client_uuid = %record_client_uuid,
+                reason_code = "deferred_fulfillment_resolved",
+                "deferred legacy fulfillment joined the public authority graph"
+            );
+        }
         let _ = original_count;
         Ok((
             BundleCommitResult {

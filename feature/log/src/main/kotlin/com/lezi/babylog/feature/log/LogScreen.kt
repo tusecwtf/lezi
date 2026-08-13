@@ -33,7 +33,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -85,6 +84,8 @@ import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.carelog.DayChartCategories
 import com.lezi.babylog.domain.carelog.DayChartCategory
+import com.lezi.babylog.domain.carelog.DuplicateGroupAction
+import com.lezi.babylog.domain.carelog.SourceRelationOutcome
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -100,13 +101,16 @@ import com.lezi.babylog.feature.log.photo.*
 fun LogRoute(
     onOpenComposer: (RecordComposerRequest) -> Unit,
     onGoToday: () -> Unit,
+    onSelectedDayChange: (LocalDate) -> Unit,
     onMessage: (String) -> Unit = {},
     onLayoutEditModeChanged: (Boolean) -> Unit = {},
+    onOpenConflictResolver: (String) -> Unit = {},
     externalDay: LocalDate? = null,
     clock: RecordScreenClock = SystemRecordScreenClock,
     vm: LogViewModel = hiltViewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
+    val timelineInteraction by vm.timelineInteraction.collectAsStateWithLifecycle()
     val layoutWriteState by vm.deviceLayoutWriteState.collectAsStateWithLifecycle()
     val layoutSession by vm.layoutEditSession.collectAsStateWithLifecycle()
     val layoutUndoSession by vm.layoutUndoSession.collectAsStateWithLifecycle()
@@ -121,6 +125,7 @@ fun LogRoute(
     var showCustomManage by remember { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
+    var causalDetailRecord by remember { mutableStateOf<Record?>(null) }
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     val listState = rememberLazyListState()
     val timelineListState = rememberLogTimelineListState()
@@ -143,47 +148,21 @@ fun LogRoute(
             guidanceCompleted = state.settings.layoutDragGuidanceCompleted,
         )
     }
-    val dayChartContext = remember(state.baby?.id, state.day) {
-        DayChartFilterContext(babyId = state.baby?.id, day = state.day)
-    }
-    var dayChartFilterState by remember {
-        mutableStateOf(DayChartFilterState(context = dayChartContext))
-    }
     val today = screenTime.localDate
     val zone = screenTime.zoneId
     val nowMs = screenTime.epochMillis
     val journal = LeziThemeExt.isJournal
-    val contextualDayChartFilterState = remember(dayChartFilterState, dayChartContext) {
-        reduceDayChartFilter(
-            dayChartFilterState,
-            DayChartFilterAction.ChangeContext(dayChartContext),
-        )
-    }
-    // Reconcile after refresh/delete so a vanished category does not stick at 0 rows.
-    val reconciledDayChartFilterState = remember(contextualDayChartFilterState, state.records) {
-        reduceDayChartFilter(
-            contextualDayChartFilterState,
-            DayChartFilterAction.RefreshRecords(state.records),
-        )
-    }
-    LaunchedEffect(reconciledDayChartFilterState) {
-        if (dayChartFilterState != reconciledDayChartFilterState) {
-            dayChartFilterState = reconciledDayChartFilterState
-        }
-    }
-    val dayChartFilter = reconciledDayChartFilterState.selection
+    val dayChartFilter = timelineInteraction.filter.selection
     val selectedSummaryType = summaryRecordType(dayChartFilter)
-    val selectableSummaryTypes = remember(state.records) {
-        DayChartCategories.legendCategories(state.records)
-            .mapNotNull(::summaryRecordType)
-            .toSet()
+    val selectableSummaryTypes = remember(state.records, dayChartFilter) {
+        timelineSelectableSummaryTypes(state.records, dayChartFilter)
     }
 
     fun selectSummary(type: RecordType) {
-        dayChartFilterState = reduceSummaryDayChartSelection(
-            reconciledDayChartFilterState,
-            type,
-            state.records,
+        val category = summaryDayChartCategory(type) ?: return
+        vm.selectTimelineCategory(
+            categoryKey = category.name.takeUnless { category == dayChartFilter },
+            dayRecords = state.records,
         )
     }
     val timelineRecords = if (state.settings.timelineOrder == "oldest_first") {
@@ -195,8 +174,8 @@ fun LogRoute(
     val filteredTimelineRecords = remember(timelineRecords, dayChartFilter) {
         DayChartCategories.filterRecords(timelineRecords, dayChartFilter)
     }
-    val dayChartLegend = remember(state.records) {
-        DayChartCategories.legendCategories(state.records).map { cat ->
+    val dayChartLegend = remember(state.records, dayChartFilter) {
+        timelineLegendCategories(state.records, dayChartFilter).map { cat ->
             TimelineLegendEntry(
                 key = cat.name,
                 label = cat.label,
@@ -236,33 +215,33 @@ fun LogRoute(
         openComposer(RecordItemIdentity.builtIn(type))
     }
 
+    fun openCausalDetails(record: Record) {
+        record.openConflictId?.let(onOpenConflictResolver) ?: run { causalDetailRecord = record }
+    }
+
+    fun duplicateOutcomeMessage(outcome: SourceRelationOutcome): String = when (outcome) {
+        is SourceRelationOutcome.Accepted -> "重复来源已确认并保留"
+        is SourceRelationOutcome.CasMismatch -> outcome.message
+        is SourceRelationOutcome.Rejected -> outcome.message
+    }
+
     LaunchedEffect(externalDay) {
         if (externalDay != null && externalDay != state.day) {
             vm.setExternalDay(externalDay)
         }
     }
     LaunchedEffect(screenTime) {
-        vm.setScreenTime(screenTime)
+        vm.setScreenTime(screenTime)?.let(onSelectedDayChange)
+    }
+    LaunchedEffect(state.baby?.id) {
+        vm.setTimelineBaby(state.baby?.id)
+    }
+    LaunchedEffect(state.day, state.records) {
+        vm.setTimelineRecords(state.records)
     }
 
-    // Now line: wall-clock absolute time on the three-local-day content axis; only when
-    // now falls inside [D−1 00:00, D+1 24:00). Viewport start is day-keyed UI
-    // state: init from today/now-centered or non-today D+peek defaults; pan
-    // clamps inside the calendar-derived window and never mutates D / summary / list. Reset when the
-    // selected day, local date, or time zone changes.
-    val timelineAxis = remember(state.day, zone) { ThreeDayTimelineAxis(state.day, zone) }
-    val nowContentMinute = timelineAxis.instantToContentMinute(nowMs)
-    val timelineViewportDuration = timelineAxis.defaultViewportDurationMinutes
-    var timelineViewportStart by remember(state.day, today, zone) {
-        mutableIntStateOf(
-            initialThreeDayViewportStartMinutes(
-                selectedDay = state.day,
-                today = today,
-                nowMs = nowMs,
-                axis = timelineAxis,
-                viewportDurationMinutes = timelineViewportDuration,
-            ),
-        )
+    val timelinePresentation = remember(timelineInteraction, nowMs) {
+        timelineInteraction.toTimelinePresentation(nowMs)
     }
 
     val layoutPresentation = layoutEditPresentation(layoutSession, layoutWriteState)
@@ -433,26 +412,46 @@ fun LogRoute(
                             onSelectSummary = ::selectSummary,
                             dayChartFilter = dayChartFilter,
                             onSelectDayChartCategory = { key ->
-                                dayChartFilterState = reduceDayChartFilter(
-                                    reconciledDayChartFilterState,
-                                    DayChartFilterAction.Select(
-                                        categoryKey = key,
-                                        dayRecords = state.records,
-                                    ),
-                                )
+                                vm.selectTimelineCategory(key, state.records)
                             },
                             dayChartLegend = dayChartLegend,
-                            nowContentMinute = nowContentMinute,
-                            timelineViewportStart = timelineViewportStart,
-                            timelineViewportDuration = timelineViewportDuration,
-                            timelineAxis = timelineAxis,
-                            onTimelineViewportStartChange = { timelineViewportStart = it },
+                            nowContentMinute = timelinePresentation.nowContentMinute,
+                            timelineViewportStart = timelinePresentation.viewportStartMinutes,
+                            timelineViewportDuration = timelinePresentation.viewportDurationMinutes,
+                            timelineAxis = timelinePresentation.axis,
+                            onTimelinePan = { gesture ->
+                                vm.changeTimelineDrag(
+                                    gesture = gesture,
+                                    nowMs = nowMs,
+                                )
+                            },
+                            onTimelinePanEnd = {
+                                vm.endTimelineDrag(nowMs)?.let(onSelectedDayChange)
+                            },
+                            onTimelinePanCancel = {
+                                vm.cancelTimelineDrag(nowMs)
+                            },
                             filteredTimelineRecords = filteredTimelineRecords,
                             onGoToday = onGoToday,
                             onRefresh = vm::refresh,
                             onOpenComposer = onOpenComposer,
                             onRequestDelete = { listDeleteTarget = it },
                             onOpenPublishChrome = { publishChromeRecord = it },
+                            onOpenCausalDetails = ::openCausalDetails,
+                            onDuplicateAction = { action ->
+                                when (action) {
+                                    is DuplicateGroupAction.AuthorDeclare ->
+                                        vm.declareDuplicateEquivalent(
+                                            action.recordClientUuid,
+                                            action.equivalentToClientUuid,
+                                        ) { onMessage(duplicateOutcomeMessage(it)) }
+                                    is DuplicateGroupAction.OwnerResolve ->
+                                        vm.resolveDuplicateGroupAsOwner(
+                                            action.memberClientUuids,
+                                            action.displayClientUuid,
+                                        ) { onMessage(duplicateOutcomeMessage(it)) }
+                                }
+                            },
                             onSkipCarePlan = vm::skipCarePlan,
                             onMessage = onMessage,
                             modifier = Modifier.weight(1f),
@@ -563,6 +562,44 @@ fun LogRoute(
             openLayoutEdit()
         },
     )
+
+    val causalRecord = causalDetailRecord
+    val causalRow = causalRecord?.let { state.recordMetadata[it.id] }
+    if (causalRecord != null && causalRow != null && causalRow.sleepInterval != null) {
+        SleepObservationSheet(
+            row = causalRow,
+            zone = zone,
+            onDismiss = { causalDetailRecord = null },
+            onAddWake = {
+                causalDetailRecord = null
+                onOpenComposer(
+                    RecordComposerRequest.New(
+                        babyId = causalRecord.babyId,
+                        type = RecordType.SLEEP,
+                        timestamp = nowMs,
+                        historical = state.day != today,
+                        openSleepId = causalRecord.id,
+                    ),
+                )
+            },
+            onUpdate = { wake, timestamp, note ->
+                vm.updateWakeObservation(wake.clientUuid, timestamp, note) { error ->
+                    onMessage(error ?: "醒来观察已修正")
+                }
+            },
+            onWithdraw = { wake ->
+                vm.withdrawWakeObservation(wake.clientUuid) { error ->
+                    onMessage(error ?: "醒来观察已撤回")
+                }
+            },
+            onSelect = { wake ->
+                vm.selectEffectiveWakeObservation(
+                    causalRecord.clientUuid,
+                    wake?.clientUuid,
+                ) { error -> onMessage(error ?: "有效观察已更新") }
+            },
+        )
+    }
 }
 
 internal fun moreRecordContentDescription(entry: MoreCatalogEntry): String =

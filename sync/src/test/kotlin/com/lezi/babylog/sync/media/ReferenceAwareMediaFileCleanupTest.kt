@@ -3,6 +3,9 @@ import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MediaLocalPathGate
+import com.lezi.babylog.core.database.causal.MediaReferenceDao
+import com.lezi.babylog.core.database.causal.MediaReferenceEntity
+import com.lezi.babylog.core.database.causal.MediaReferenceHolderKind
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -13,6 +16,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import com.lezi.babylog.sync.MemoryMediaDao
+import com.lezi.babylog.sync.MemoryMediaReferenceDao
 import com.lezi.babylog.sync.RecordingTransactionRunner
 
 /**
@@ -253,6 +257,7 @@ class ReferenceAwareMediaFileCleanupTest {
         )
         val cleanup = ReferenceAwareMediaFileCleanup(
             mediaDao = media,
+            mediaReferenceDao = MemoryMediaReferenceDao(),
             mediaFiles = files,
             transactionRunner = transactions,
             pathGate = MediaLocalPathGate(),
@@ -313,6 +318,7 @@ class ReferenceAwareMediaFileCleanupTest {
         // delete of the old bytes, marker clear is skipped because claim no longer matches.
         val cleanup = ReferenceAwareMediaFileCleanup(
             mediaDao = media,
+            mediaReferenceDao = MemoryMediaReferenceDao(),
             mediaFiles = files,
             transactionRunner = transactions,
             pathGate = pathGate,
@@ -359,6 +365,7 @@ class ReferenceAwareMediaFileCleanupTest {
         }
         val cleanup = ReferenceAwareMediaFileCleanup(
             mediaDao = media,
+            mediaReferenceDao = MemoryMediaReferenceDao(),
             mediaFiles = files,
             transactionRunner = transactions,
             pathGate = pathGate,
@@ -428,6 +435,7 @@ class ReferenceAwareMediaFileCleanupTest {
         )
         val cleanup = ReferenceAwareMediaFileCleanup(
             mediaDao = media,
+            mediaReferenceDao = MemoryMediaReferenceDao(),
             mediaFiles = files,
             transactionRunner = transactions,
             pathGate = pathGate,
@@ -484,6 +492,7 @@ class ReferenceAwareMediaFileCleanupTest {
                     return media.getByClientUuid(clientUuid)
                 }
             },
+            mediaReferenceDao = MemoryMediaReferenceDao(),
             mediaFiles = files,
             transactionRunner = RecordingTransactionRunner(),
             pathGate = pathGate,
@@ -535,13 +544,56 @@ class ReferenceAwareMediaFileCleanupTest {
         assertThat(files.deletedPaths).containsExactly(shared.absolutePath, shared.absolutePath)
     }
 
+    @Test
+    fun mediaReferenceHolderBlocksReclaimUntilHoldersRemoved() = runTest {
+        val media = MemoryMediaDao()
+        val refs = MemoryMediaReferenceDao()
+        val files = RealTemporaryMediaFileStore()
+        val cleanup = newCleanup(media, files, mediaReferences = refs)
+        val photo = temporaryFolder.newFile("branch-holder.jpg").apply {
+            writeBytes(byteArrayOf(9, 9, 9))
+        }
+        val clientUuid = "aaaaaaaa-aaaa-3aaa-8aaa-aaaaaaaaaaaa"
+        media.seed(
+            logMedia(
+                clientUuid = clientUuid,
+                localUri = photo.absolutePath,
+                recordId = 3L,
+                deletedAt = 300L,
+                updatedAt = 300L,
+            ),
+        )
+        refs.upsert(
+            MediaReferenceEntity(
+                mediaUuid = clientUuid,
+                holderKind = MediaReferenceHolderKind.CONFLICT_BRANCH,
+                holderId = "branch-v1",
+                localUri = photo.absolutePath,
+                createdAt = 1L,
+            ),
+        )
+
+        cleanup.cleanupTombstones(setOf(clientUuid))
+
+        assertThat(photo.isFile).isTrue()
+        assertThat(media.getByClientUuid(clientUuid)?.localUri).isEqualTo(photo.absolutePath)
+
+        refs.remove(clientUuid, MediaReferenceHolderKind.CONFLICT_BRANCH, "branch-v1")
+        cleanup.cleanupTombstones(setOf(clientUuid))
+
+        assertThat(photo.exists()).isFalse()
+        assertThat(media.getByClientUuid(clientUuid)?.localUri).isEmpty()
+    }
+
     private fun newCleanup(
         media: MemoryMediaDao,
         files: RealTemporaryMediaFileStore,
         transactions: RecordingTransactionRunner = RecordingTransactionRunner(),
         pathGate: MediaLocalPathGate = MediaLocalPathGate(),
+        mediaReferences: MediaReferenceDao = MemoryMediaReferenceDao(),
     ) = ReferenceAwareMediaFileCleanup(
         mediaDao = media,
+        mediaReferenceDao = mediaReferences,
         mediaFiles = files,
         transactionRunner = transactions,
         pathGate = pathGate,

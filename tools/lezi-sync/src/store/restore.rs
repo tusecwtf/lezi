@@ -133,15 +133,20 @@ impl Store {
 }
 
 fn reauthor_history(entity: &mut Entity, owner_membership_id: &str) {
-    for key in ["created_by_membership_id", "submitter_membership_id"] {
-        if entity.payload.contains_key(key) {
-            entity.payload.insert(
-                key.to_owned(),
-                Value::String(owner_membership_id.to_owned()),
-            );
-        }
+    if matches!(
+        entity.entity_type.as_str(),
+        "record" | "care_plan" | "custom_item"
+    ) {
+        entity.payload.insert(
+            "created_by_membership_id".to_owned(),
+            Value::String(owner_membership_id.to_owned()),
+        );
     }
-    if entity.payload.contains_key("submitter_role") {
+    if entity.entity_type == "fulfillment_candidate" {
+        entity.payload.insert(
+            "submitter_membership_id".to_owned(),
+            Value::String(owner_membership_id.to_owned()),
+        );
         entity.payload.insert(
             "submitter_role".to_owned(),
             Value::String("owner".to_owned()),

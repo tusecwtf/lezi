@@ -5,10 +5,16 @@
 > 架构决策：[ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)、
 > [ADR-0014](../adr/0014-owner-device-restores-only-empty-family-servers.md)、
 > [ADR-0017](../adr/0017-authoritative-reconcile-settles-local-deltas.md)
+> （0.3.13 因果代见 ADR-0019/0020/0021；0.4.0 commit-first supersession 见 ADR-0022）
 > UI/UX：[家庭服务器与身份 UI](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 
-> 权威裁决扩展状态：0.3.8 已实现批量 head-by-UUID 裁决、Android 冻结/CAS 终结与
-> atomic pending 投影；发布验收证据由本地 tracker 固定到实际构建与联调结果。
+> 权威裁决扩展状态：0.3.9 在既有批量 head-by-UUID 裁决、Android 冻结/CAS 终结与
+> atomic pending 投影上增加启动 authority graph 校验及延迟履约能力门闩；发布验收证据
+> 由本地 tracker 固定到实际构建与联调结果。
+>
+> 当前 0.4.0 tree 已按 [`causal-sync-wire.md`](./causal-sync-wire.md) 启用 `causal_sync_v2`
+> commit-first、完整 ConflictSnapshot 与 choice-only resolution；家庭 NAS 是否完成生产切割仍须
+> live 证据，不能把本地激活写成已上线。
 
 本文定义家庭同步下一条 fresh-current 产品合同。它取代已退役的家局域网/SSID/明文/长期 family token 合同（旧文 `sync-home-lan`，见 git 历史）；Room 本地优先、同步实体、原子照片包、冲突裁决和 ACL 仍沿用既有基线，发布候选按 ADR-0016 的先对账临时计划与 ADR-0017 的权威终态裁决生成。
 
@@ -180,7 +186,9 @@ probe 的地址草稿离开即丢弃，不能覆盖上一次可信 endpoint、�
   grant，不生成或显示 QR 图像。
 - 同一个二维码同时携带 endpoint、固定信任材料和一次性设备登录 grant；没有第二张配置码。
 - 服务器启用邀请安装页时，管理员 App 把原邀请载荷包装为系统相机可识别的 LAN URL；浏览器
-  只提供 APK 首装，安装后仍须回到乐记重新扫描同一码。未启用时继续生成旧 raw JSON QR。
+  同时承担 APK 首装与历史版本恢复升级。首装后仍须回到乐记重新扫描同一码；同包名覆盖升级
+  保留本地记录、家庭会话与 endpoint/SPKI 信任，不要求重新扫码。未启用时继续生成旧 raw
+  JSON QR。
 - grant 十分钟过期、单次使用，且只能绑定目标 membership；根密码永不进入 QR。
 - 普通成员扫描后仍可确认或编辑设备称呼，然后一次完成信任配置与设备登录。
 - 管理员登录不提供 QR；服务端部署页面也不需要显示 QR。
@@ -358,9 +366,14 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 - authenticated session summary：从 credential 返回 canonical family/membership/device/role；
 - bundle push/pull/media：沿用原子同步和服务端 ACL；并在请求头 versionCode 低于 minSupported 时
   以 `client_update_required` 拒绝；
-- authenticated reconcile：对有界 atomic-unit 批次返回同一 generation/cursor 的
+- authenticated reconcile：**0.3.13 source runtime** 对有界 atomic-unit 批次返回同一 generation/cursor 的
   canonical head/absence、hash、typed disposition 与稳定 reason；复用 Store 的 LWW/ACL/
-  tombstone/履行冻结/atomic bundle 规则，不接受请求体自报权限，不传媒体 bytes；
+  tombstone/履行冻结/atomic bundle 规则，不接受请求体自报权限，不传媒体 bytes。
+  0.3.13 因果 dry-run 为 `confirmed|publish|conflict_preview|rejected`；
+- authenticated commit：0.3.13 source 返回 `accepted|merged|branched`。0.4.0 v2 普通发表只
+  commit-first，返回一个 batch generation、原终态与 replay marker；不调用 reconcile、不推进 cursor；
+- conflict detail / resolution CAS：0.4.0 返回持久 receipt 支撑的完整 ConflictSnapshot pages；
+  resolution 只提交 token + mutation ID + 每 path 一个 choice ID，服务端独立重建和 full-set CAS；
 - authenticated app-update：`GET /v1/app-update` 返回部署元数据 JSON；`GET /v1/app-update/apk`
   在 sha256 与元数据一致时提供 release APK；均需设备会话，不设匿名旁路；
 - invite install：独立 LAN HTTP Router 只能提供无家庭信息的 `/join` 与经同一 SHA-256 校验的
@@ -387,6 +400,15 @@ Room dirty/发布回执或 media。
 - 服务端提供版本化 start/manifest/media/status/commit/cancel API。根密码只在 start/commit 验证
   且不落盘；中段用高熵、限时、可撤销恢复凭证。`/data` staging/journal 校验引用、大小与
   SHA-256 后一次激活，24 小时过期；request ID 幂等，重启与 commit 回包丢失后可查询续传。
+- batch UUID 只在请求持有或等待 journal 临界区期间占用恢复专用 keyed lock；最后一个
+  holder/waiter 离开即回收，不能由随机 UUID 变成进程级持久状态。lease 与 owned guard 由实际
+  blocking journal task 持有到 I/O 完成，请求 future 取消不能提前释放。每个新 batch 另存只含
+  恢复 token 哈希的私有 auth envelope，journal existence、凭证校验与
+  manifest/media/status/cancel/commit 读写仍在同一 lease 内完成；合法但不存在的 UUID、已存在
+  batch 的错误凭证以及未授权探测到的损坏 journal 返回相同未授权响应，不提供 existence oracle。
+  正确凭证仍获得真实 protocol/storage 错误。普通 family 同步锁与 provisioning 锁维持原有独立语义。
+  运行时过期回收只在锁外枚举 canonical batch ID，随后逐 batch 取得同一 lease、重读 journal 后
+  决定删除；缺 journal 的创建中目录留给启动期单线程清理，不能与请求 I/O 并发误删。
 - staging 提交前不能加入或普通同步。commit 成功后客户端在 sync mutex 内切换 endpoint/session、
   替换成员目录并按精确 Room 修订退休发布回执。现有 configured 数据根升级 0.3.5 不进入恢复路径。
 - 普通 NAS CD、回滚与容器重启必须保留已有 TLS 证书/私钥并在部署前后得到相同 SPKI；证书
@@ -423,9 +445,18 @@ Room dirty/发布回执或 media。
 
 ## 12. 文档与代码处置
 
-- 本文、ADR-0011、ADR-0014 与 ADR-0017 是当前合同；ADR-0009、ADR-0010 已被取代，
-  ADR-0016 的无 head/full-snapshot 限制被 ADR-0017 取代但先对账/临时 plan 仍有效。
+- 本文、ADR-0011、ADR-0014 与 ADR-0017 是 **当前已交付** 传输/身份/前台同步合同；
+  ADR-0009、ADR-0010 已被取代，ADR-0016 的无 head/full-snapshot 限制被 ADR-0017 取代但
+  先对账/临时 plan 仍有效。
+- **0.4.0 目标** wire 以 [`causal-sync-wire.md`](./causal-sync-wire.md) 与 ADR-0022 为权威；
+  ADR-0019/0021 的服务器/事实边界保留，ADR-0020 的 immutable version/branch 保留；0.3.13
+  reconcile-first 只作 source runtime，H26 后不得残留为 v2 fallback。
+- LocalWrite no-pull 快速路径 **只能** 在因果协议落地后启用，且不推进 pull cursor；在
+  无 base/三方合并/分支前去掉 pull 不构成正确性（见 CONTEXT「LocalWrite 因果快速路径」）。
 - 旧 `sync-home-lan` 合同已删除；不得据 git 历史中的旧文恢复旧 wire、配置或界面。
 - 0.3.1 已完成 fresh-current 收口：生产只保留可信 HTTPS、每设备会话、成员申请/审批与
   单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。
 - 拆票输入曾在 `.scratch/trusted-sync-endpoint-auth/`（0.3.1 后已清出工作区）；实现与证据见 git 历史（如 `aa7d3df`）。不得按已删除旧票重开旁路路径。
+- 相关已完成专题：`neighbor-dedup-tombstone-0.3.10`、`sync-authoritative-reconciliation`、
+  `family-sleep-wake-acl` 的 **已交付** 行为仍以当时版本为准；其被 0.3.13 规划取代的范围
+  已在 ADR-0017/0018/0021 与 CONTEXT 标明，实现完成前不得混写为已上线无损因果同步。

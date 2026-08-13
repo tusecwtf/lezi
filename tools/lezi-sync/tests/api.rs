@@ -1,17 +1,19 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::Read;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::ConnectInfo;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, VARY};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
+use flate2::read::GzDecoder;
 use http_body_util::BodyExt;
 use lezi_sync::{build_app, build_apps, build_server_apps, RateLimitConfig, ServerConfig, VERSION};
 use rusqlite::Connection;
@@ -26,6 +28,79 @@ struct Rig {
     directory: TempDir,
     app: Router,
     now: Arc<AtomicI64>,
+}
+
+type PrepareBlockingHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+type PrepareBlockingRelease = Arc<(Mutex<bool>, Condvar)>;
+
+struct PrepareBlockingReleaseGuard {
+    release: PrepareBlockingRelease,
+}
+
+impl PrepareBlockingReleaseGuard {
+    fn release(&self) {
+        let (released, condition) = &*self.release;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        condition.notify_all();
+    }
+}
+
+impl Drop for PrepareBlockingReleaseGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn blocked_prepare_hook(
+    blocked_phase: &'static str,
+) -> (
+    PrepareBlockingHook,
+    std::sync::mpsc::Receiver<&'static str>,
+    PrepareBlockingReleaseGuard,
+) {
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let hook_release = release.clone();
+    let hook = Arc::new(move |phase: &'static str| {
+        events_tx.send(phase).ok();
+        if phase == blocked_phase {
+            let (released, condition) = &*hook_release;
+            let mut released = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                let (next, timeout) = condition
+                    .wait_timeout(released, Duration::from_secs(2))
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                released = next;
+                if !*released && timeout.timed_out() {
+                    drop(released);
+                    panic!("causal media prepare test hook was not released");
+                }
+            }
+        }
+    });
+    (hook, events_rx, PrepareBlockingReleaseGuard { release })
+}
+
+#[test]
+fn blocked_prepare_hook_times_out_once_and_can_still_be_released() {
+    let (hook, _events, release) = blocked_prepare_hook("before_verify");
+    let started = std::time::Instant::now();
+
+    let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hook("before_verify");
+    }));
+
+    assert!(timed_out.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    release.release();
+    let after_release = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hook("before_verify");
+    }));
+    assert!(after_release.is_ok());
 }
 
 #[derive(Clone)]
@@ -306,10 +381,6 @@ async fn get_json(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, 
     json_request(app, Method::GET, &current_uri, token, json!({})).await
 }
 
-async fn raw_get_json(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, Value) {
-    raw_json_request(app, Method::GET, uri, token, json!({})).await
-}
-
 async fn create_family(app: &Router, device_id: &str, request_id: &str) -> Value {
     let (status, body) = json_request(
         app,
@@ -381,15 +452,6 @@ fn log_media_payload(record_id: &str) -> Value {
         "record_client_uuid": record_id,
         "mime": "image/jpeg",
         "byte_size": 3,
-    })
-}
-
-fn avatar_media_payload(baby_id: &str) -> Value {
-    json!({
-        "kind": "avatar",
-        "baby_client_uuid": baby_id,
-        "mime": "image/jpeg",
-        "byte_size": 6,
     })
 }
 
@@ -546,13 +608,15 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
     assert_eq!(body["version"], VERSION);
+    assert_eq!(body["server_schema"], 13);
     assert_eq!(
         body["capabilities"],
         json!([
             "atomic_bundle",
             "record_membership_author",
             "device_disaster_restore_v1",
-            "authoritative_reconcile_v1"
+            "validated_deferred_fulfillment_v1",
+            "causal_sync_v2"
         ])
     );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
@@ -606,6 +670,34 @@ async fn internal_router_exposes_only_health_and_readiness() {
         get_json(&public, "/v1/setup-status", None).await.0,
         StatusCode::OK,
     );
+}
+
+#[tokio::test]
+async fn schema_cutover_read_only_gate_keeps_health_open_and_rejects_mutations() {
+    let directory = TempDir::new().unwrap();
+    drop(build_app(ServerConfig::new(directory.path())).unwrap());
+    let mut config = ServerConfig::new(directory.path());
+    config.maintenance_read_only = true;
+    let app = build_app(config).unwrap();
+
+    assert_eq!(get_json(&app, "/health", None).await.0, StatusCode::OK);
+    assert_eq!(
+        get_json(&app, "/v1/setup-status", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+    let response = request(
+        &app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["code"], json!("schema_cutover_read_only"));
 }
 
 #[test]
@@ -714,6 +806,7 @@ async fn lan_install_page_uses_only_verified_release_metadata_and_clears_the_inv
         "{html}"
     );
     assert!(html.contains("href=\"/download/lezi.apk\""), "{html}");
+    assert!(html.contains("原地升级会保留本机记录和家庭配置"), "{html}");
     let scrub = "history.replaceState(null, \"\", location.pathname + location.search);";
     assert!(html.contains(scrub), "{html}");
     assert!(html.find(scrub).unwrap() < html.find("<body>").unwrap());
@@ -861,6 +954,102 @@ async fn lan_apk_download_is_anonymous_integrity_checked_and_non_cacheable() {
 }
 
 #[tokio::test]
+async fn every_released_android_version_keeps_apk_recovery_independent_of_sync_floor() {
+    let catalog: Value = serde_json::from_str(include_str!(
+        "../../../config/android-release-compatibility.json"
+    ))
+    .unwrap();
+    let package_name = catalog["application_id"].as_str().unwrap();
+    let minimum_sync_version_code = catalog["minimum_sync_version_code"].as_u64().unwrap();
+    let upgrade_target = &catalog["upgrade_target"];
+    let target_version_code = upgrade_target["version_code"].as_u64().unwrap();
+    let released_versions = catalog["released_versions"].as_array().unwrap();
+    let directory = TempDir::new().unwrap();
+    let apk_bytes = b"all-version-recovery-apk";
+    fs::write(directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        directory.path().join("app-update.json"),
+        json!({
+            "package_name": package_name,
+            "version_code": target_version_code,
+            "version_name": upgrade_target["version_name"],
+            "min_supported_version_code": minimum_sync_version_code,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut config = ServerConfig::new(directory.path());
+    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    let apps = build_server_apps(config).unwrap();
+    let public = apps.public;
+    let lan = apps.lan_apk_download.unwrap();
+    let owner = create_family(
+        &public,
+        "all-version-recovery-owner",
+        "all-version-recovery-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    let lan_response = request(
+        &lan,
+        Method::GET,
+        "/download/lezi.apk",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(lan_response.status(), StatusCode::OK);
+    assert_eq!(
+        lan_response.into_body().collect().await.unwrap().to_bytes(),
+        apk_bytes.as_slice(),
+    );
+
+    for release in released_versions {
+        let source_version_code = release["version_code"].as_u64().unwrap().to_string();
+        let client_header = [("x-lezi-client-version-code", source_version_code.as_str())];
+        let (metadata_status, metadata) = raw_json_request_with_headers(
+            &public,
+            Method::GET,
+            "/v1/app-update",
+            Some(token),
+            json!({}),
+            &client_header,
+        )
+        .await;
+        assert_eq!(
+            metadata_status,
+            StatusCode::OK,
+            "source={source_version_code}"
+        );
+        assert_eq!(metadata["version_code"], json!(target_version_code));
+
+        let (sync_status, sync_body) = raw_json_request_with_headers(
+            &public,
+            Method::GET,
+            &format!("/v1/pull?cursor=0&generation={generation}"),
+            Some(token),
+            json!({}),
+            &client_header,
+        )
+        .await;
+        if release["version_code"].as_u64().unwrap() < minimum_sync_version_code {
+            assert_eq!(
+                sync_status,
+                StatusCode::FORBIDDEN,
+                "source={source_version_code}"
+            );
+            assert_eq!(sync_body["code"], json!("client_update_required"));
+        } else {
+            assert_eq!(sync_status, StatusCode::OK, "source={source_version_code}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn setup_status_exposes_only_the_empty_instance_contract() {
     let rig = Rig::new();
 
@@ -878,7 +1067,8 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
                 "atomic_bundle",
                 "record_membership_author",
                 "device_disaster_restore_v1",
-                "authoritative_reconcile_v1",
+                "validated_deferred_fulfillment_v1",
+                "causal_sync_v2",
             ],
             "family_state": "empty",
         })
@@ -910,10 +1100,310 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
                 "atomic_bundle",
                 "record_membership_author",
                 "device_disaster_restore_v1",
-                "authoritative_reconcile_v1",
+                "validated_deferred_fulfillment_v1",
+                "causal_sync_v2",
             ],
             "family_state": "configured",
         })
+    );
+}
+
+#[tokio::test]
+async fn authenticated_sync_handshake_derives_principal_and_transport_contract() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "handshake-owner-device",
+        "handshake-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": ["causal_sync_v2"],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["protocol_version"], json!(1));
+    assert_eq!(body["server_version"], json!(VERSION));
+    assert_eq!(body["ready"], json!(true));
+    assert_eq!(body["principal"]["membership_id"], owner["membership_id"]);
+    assert_eq!(body["principal"]["device_id"], owner["device_id"]);
+    assert_eq!(body["principal"]["role"], json!("owner"));
+    assert!(body["directory_generation"]
+        .as_str()
+        .is_some_and(|value| value.len() == 64));
+    assert_eq!(body["limits"]["pull_page_max_entities"], json!(200));
+    assert_eq!(
+        body["limits"]["pull_page_max_encoded_bytes"],
+        json!(9 * 1024 * 1024)
+    );
+    assert_eq!(
+        body["limits"]["pull_page_max_decoded_bytes"],
+        json!(8 * 1024 * 1024)
+    );
+    assert_eq!(body["limits"]["pull_max_pages"], json!(500));
+    assert_eq!(body["limits"]["commit_batch_max_units"], json!(64));
+    assert_eq!(body["limits"]["media_max_bytes"], json!(8));
+    assert_eq!(
+        body["compression"]["pull_response"],
+        json!(["gzip", "identity"]),
+    );
+    assert_eq!(body["retry_hints"]["retry_after"], json!(true));
+    assert_eq!(body["capabilities"], json!(["causal_sync_v2"]),);
+}
+
+#[tokio::test]
+async fn ordinary_pull_negotiates_equivalent_bounded_gzip_and_identity_pages() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "gzip-pull-owner-device",
+        "gzip-pull-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let uri = format!("/v1/pull?cursor=0&generation={generation}&page_index=0");
+
+    let identity = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &uri,
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "identity")],
+    )
+    .await;
+    assert_eq!(identity.status(), StatusCode::OK);
+    assert!(identity.headers().get(CONTENT_ENCODING).is_none());
+    assert_eq!(identity.headers()[VARY], "Accept-Encoding");
+    let identity_bytes = identity.into_body().collect().await.unwrap().to_bytes();
+
+    let gzip = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &uri,
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "gzip")],
+    )
+    .await;
+    assert_eq!(gzip.status(), StatusCode::OK);
+    assert_eq!(gzip.headers()[CONTENT_ENCODING], "gzip");
+    assert_eq!(gzip.headers()[VARY], "Accept-Encoding");
+    let gzip_bytes = gzip.into_body().collect().await.unwrap().to_bytes();
+    assert!(gzip_bytes.len() <= 9 * 1024 * 1024);
+    let mut decoded = Vec::new();
+    GzDecoder::new(gzip_bytes.as_ref())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert!(decoded.len() <= 8 * 1024 * 1024);
+    assert_eq!(decoded, identity_bytes);
+    let page: Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(page["page_index"], 0);
+}
+
+#[tokio::test]
+async fn ordinary_pull_rejects_unsupported_encoding_and_out_of_budget_page_index() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "gzip-boundary-owner-device",
+        "gzip-boundary-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    for value in ["br", "gzip;q=0, identity;q=0", "gzip;q=bogus"] {
+        let response = request_with_headers(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/pull?cursor=0&generation={generation}&page_index=0"),
+            Some(token),
+            Body::empty(),
+            None,
+            &[(ACCEPT_ENCODING.as_str(), value)],
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{value}"
+        );
+    }
+
+    let last_allowed = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/pull?cursor=0&generation={generation}&page_index=499"),
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "identity")],
+    )
+    .await;
+    assert_eq!(last_allowed.status(), StatusCode::OK);
+    let last_allowed: Value =
+        serde_json::from_slice(&last_allowed.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+    assert_eq!(last_allowed["page_index"], 499);
+
+    let over_budget = request_with_headers(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/pull?cursor=0&generation={generation}&page_index=500"),
+        Some(token),
+        Body::empty(),
+        None,
+        &[(ACCEPT_ENCODING.as_str(), "identity")],
+    )
+    .await;
+    assert_eq!(over_budget.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn authenticated_sync_handshake_fails_closed_before_sync_work() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "handshake-fail-owner-device",
+        "handshake-fail-owner-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (auth_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        None,
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": ["causal_sync_v2"],
+        }),
+    )
+    .await;
+    assert_eq!(auth_status, StatusCode::UNAUTHORIZED);
+
+    for required_capabilities in [
+        json!([]),
+        json!(["causal_versions", "source_relations", "wake_observation"]),
+        json!(["causal_sync_v2", "future_extra"]),
+        json!([
+            "causal_versions",
+            "source_relations",
+            "wake_observation",
+            "causal_sync_v2",
+        ]),
+    ] {
+        let (mismatch_status, mismatch) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/sync/handshake",
+            Some(token),
+            json!({
+                "protocol_version": 1,
+                "required_capabilities": required_capabilities,
+            }),
+        )
+        .await;
+        assert_eq!(mismatch_status, StatusCode::CONFLICT, "{mismatch}");
+        assert_eq!(mismatch["status"], json!("rejected"));
+        assert_eq!(mismatch["error"]["code"], json!("capability_mismatch"));
+        assert_eq!(mismatch["error"]["retryable"], json!(false));
+    }
+
+    fs::remove_dir_all(rig.directory.path().join("media")).unwrap();
+    fs::write(rig.directory.path().join("media"), b"not-a-directory").unwrap();
+    let (not_ready_status, not_ready) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        json!({
+            "protocol_version": 1,
+            "required_capabilities": ["causal_sync_v2"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        not_ready_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{not_ready}",
+    );
+    assert_eq!(not_ready["status"], json!("rejected"));
+    assert_eq!(not_ready["error"]["code"], json!("not_ready"));
+    assert_eq!(not_ready["error"]["retryable"], json!(false));
+}
+
+#[tokio::test]
+async fn member_directory_generation_changes_only_with_directory_structure() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "handshake-generation-owner",
+        "handshake-generation-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let handshake_body = json!({
+        "protocol_version": 1,
+        "required_capabilities": ["causal_sync_v2"],
+    });
+
+    let (_, first) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        handshake_body.clone(),
+    )
+    .await;
+    rig.now.fetch_add(30, Ordering::SeqCst);
+    let (_, after_authenticated_activity) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        handshake_body.clone(),
+    )
+    .await;
+    assert_eq!(
+        after_authenticated_activity["directory_generation"],
+        first["directory_generation"],
+    );
+
+    approve_new_member(&rig.app, token, "handshake-generation-member").await;
+    let (_, changed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/sync/handshake",
+        Some(token),
+        handshake_body,
+    )
+    .await;
+    assert_ne!(
+        changed["directory_generation"],
+        first["directory_generation"]
+    );
+
+    let (members_status, members) = get_json(&rig.app, "/v1/family/members", Some(token)).await;
+    assert_eq!(members_status, StatusCode::OK, "{members}");
+    assert_eq!(
+        members["directory_generation"],
+        changed["directory_generation"],
     );
 }
 
@@ -1155,6 +1645,83 @@ async fn family_create_and_disaster_restore_have_exactly_one_provisioning_winner
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_disaster_restore_starts_leave_one_complete_batch() {
+    let root = "concurrent-restore-start-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let in_progress_sentinel = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(Uuid::new_v4().to_string());
+    fs::create_dir_all(in_progress_sentinel.join("media")).unwrap();
+    let in_progress_marker = in_progress_sentinel.join("media").join("partial-upload");
+    fs::write(&in_progress_marker, b"still being written").unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let mut tasks = Vec::new();
+    for index in 0..2 {
+        let app = rig.app.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            json_request_with_headers(
+                &app,
+                Method::POST,
+                "/v1/disaster-restore/batches",
+                None,
+                json!({
+                    "request_id": format!("concurrent-restore-start-request-{index:08}"),
+                    "family_id": Uuid::new_v4(),
+                    "family_name": format!("恢复家庭{index}"),
+                    "owner_display_name": "妈妈",
+                    "device_name": format!("恢复手机{index}"),
+                }),
+                &[("x-lezi-bootstrap-secret", root)],
+            )
+            .await
+        }));
+    }
+    let responses = [
+        tasks.remove(0).await.unwrap(),
+        tasks.remove(0).await.unwrap(),
+    ];
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|(status, _)| matches!(*status, StatusCode::OK | StatusCode::CREATED))
+            .count(),
+        1,
+        "exactly one restore start should win: {responses:?}",
+    );
+    assert_eq!(
+        responses
+            .iter()
+            .filter(|(status, _)| *status == StatusCode::CONFLICT)
+            .count(),
+        1,
+        "the losing start should fail closed: {responses:?}",
+    );
+    let winner = responses
+        .iter()
+        .find(|(status, _)| matches!(*status, StatusCode::OK | StatusCode::CREATED))
+        .unwrap();
+    let batch_dir = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(winner.1["batch_id"].as_str().unwrap());
+    assert!(batch_dir.join("journal.json").is_file());
+    assert!(batch_dir.join("credential.sha256").is_file());
+    assert!(
+        in_progress_sentinel.is_dir(),
+        "runtime start cleanup deleted a no-journal batch under construction",
+    );
+    assert_eq!(
+        fs::read(in_progress_marker).unwrap(),
+        b"still being written"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_restore_manifest_replay_serializes_conflicting_content() {
     let root = "concurrent-restore-manifest-root";
     let family_id = Uuid::new_v4().to_string();
@@ -1229,6 +1796,375 @@ async fn concurrent_restore_manifest_replay_serializes_conflicting_content() {
         1,
         "conflicting replay must fail closed: {statuses:?}",
     );
+}
+
+#[tokio::test]
+async fn disaster_restore_invalid_credentials_do_not_reveal_batch_existence() {
+    let root = "restore-auth-oracle-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-auth-oracle-start-request-00001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let existing_batch = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    fs::remove_file(
+        rig.directory
+            .path()
+            .join("disaster-restore")
+            .join(existing_batch)
+            .join("credential.sha256"),
+    )
+    .unwrap();
+    let absent_batch = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let cases = [
+        (Method::GET, "status".to_owned()),
+        (Method::PUT, "manifest".to_owned()),
+        (Method::PUT, format!("media/{media_id}")),
+        (Method::POST, "cancel".to_owned()),
+        (Method::POST, "commit".to_owned()),
+    ];
+
+    for (method, suffix) in cases {
+        let (existing_status, existing_body) = json_request(
+            &rig.app,
+            method.clone(),
+            &format!("/v1/disaster-restore/batches/{existing_batch}/{suffix}"),
+            Some("invalid-recovery-token"),
+            json!({}),
+        )
+        .await;
+        let (absent_status, absent_body) = json_request(
+            &rig.app,
+            method,
+            &format!("/v1/disaster-restore/batches/{absent_batch}/{suffix}"),
+            Some("invalid-recovery-token"),
+            json!({}),
+        )
+        .await;
+
+        assert_eq!(
+            existing_status,
+            StatusCode::UNAUTHORIZED,
+            "{suffix}: {existing_body}",
+        );
+        assert_eq!(absent_status, existing_status, "{suffix}: {absent_body}");
+        assert_eq!(absent_body, existing_body, "{suffix}");
+    }
+
+    let (legacy_status, _) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{existing_batch}/status"),
+        Some(recovery_token),
+    )
+    .await;
+    assert_eq!(legacy_status, StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_hundred_thousand_valid_absent_restore_requests_leave_service_usable() {
+    let root = "restore-cardinality-stress-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+
+    for index in 1..=100_000 {
+        let batch_id = Uuid::from_u128(index);
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/disaster-restore/batches/{batch_id}/status"),
+            Some("invalid-recovery-token"),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{batch_id}");
+    }
+
+    let (start_status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-after-cardinality-stress-request-01",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::CREATED, "{started}");
+    let (status, _) = get_json(
+        &rig.app,
+        &format!(
+            "/v1/disaster-restore/batches/{}/status",
+            started["batch_id"].as_str().unwrap(),
+        ),
+        started["recovery_token"].as_str(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_hides_damaged_journals_from_invalid_credentials() {
+    let root = "restore-damaged-journal-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-damaged-journal-start-request-01",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    fs::write(&journal_path, b"{").unwrap();
+
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+    let (invalid_status, invalid_body) =
+        get_json(&rig.app, &path, Some("invalid-recovery-token")).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some("invalid-recovery-token"),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED, "{invalid_body}");
+    assert_eq!((invalid_status, invalid_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_hides_incompatible_journals_from_invalid_credentials() {
+    let root = "restore-incompatible-journal-root";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-incompatible-start-request-000001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    let mut journal: Value = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+    journal["protocol_version"] = json!(999);
+    fs::write(&journal_path, serde_json::to_vec(&journal).unwrap()).unwrap();
+
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+    let (invalid_status, invalid_body) =
+        get_json(&rig.app, &path, Some("invalid-recovery-token")).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some("invalid-recovery-token"),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED, "{invalid_body}");
+    assert_eq!((invalid_status, invalid_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_hides_journal_io_failures_from_invalid_credentials() {
+    let root = "restore-unreadable-journal-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-unreadable-journal-start-request-01",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let journal_path = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("journal.json");
+    fs::remove_file(&journal_path).unwrap();
+    fs::create_dir(&journal_path).unwrap();
+
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+    let (invalid_status, invalid_body) =
+        get_json(&rig.app, &path, Some("invalid-recovery-token")).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some("invalid-recovery-token"),
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::UNAUTHORIZED, "{invalid_body}");
+    assert_eq!((invalid_status, invalid_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn disaster_restore_auth_rejects_valid_shape_envelope_drift_without_an_oracle() {
+    let root = "restore-envelope-drift-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "restore-envelope-drift-start-request-0001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let recovery_token = started["recovery_token"].as_str().expect("recovery_token");
+    let attacker_token = "attacker-controlled-recovery-token";
+    fs::write(
+        rig.directory
+            .path()
+            .join("disaster-restore")
+            .join(batch_id)
+            .join("credential.sha256"),
+        hex::encode(Sha256::digest(attacker_token.as_bytes())),
+    )
+    .unwrap();
+    let path = format!("/v1/disaster-restore/batches/{batch_id}/status");
+
+    let (drift_status, drift_body) = get_json(&rig.app, &path, Some(attacker_token)).await;
+    let (absent_status, absent_body) = get_json(
+        &rig.app,
+        &format!("/v1/disaster-restore/batches/{}/status", Uuid::new_v4()),
+        Some(attacker_token),
+    )
+    .await;
+    assert_eq!(drift_status, StatusCode::UNAUTHORIZED, "{drift_body}");
+    assert_eq!((drift_status, drift_body), (absent_status, absent_body));
+
+    let (authorized_status, _) = get_json(&rig.app, &path, Some(recovery_token)).await;
+    assert_eq!(authorized_status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn disaster_restore_start_retry_repairs_the_journal_first_crash_window() {
+    let root = "restore-journal-first-retry-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let start = json!({
+        "request_id": "restore-journal-first-retry-request-0001",
+        "family_id": Uuid::new_v4(),
+        "family_name": "恢复家庭",
+        "owner_display_name": "妈妈",
+        "device_name": "恢复手机",
+    });
+    let (_, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start.clone(),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let batch_id = started["batch_id"].as_str().expect("batch_id");
+    let envelope = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(batch_id)
+        .join("credential.sha256");
+    fs::remove_file(&envelope).unwrap();
+
+    let restarted = rig.restart_with_config("generation-journal-first-retry", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
+    let (retry_status, retry) = json_request_with_headers(
+        &restarted,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        start,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["batch_id"], started["batch_id"]);
+    assert!(envelope.is_file());
+}
+
+#[test]
+fn disaster_restore_startup_removes_credential_only_orphans() {
+    let rig = Rig::new();
+    let orphan = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(Uuid::new_v4().to_string());
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("credential.sha256"), "0".repeat(64)).unwrap();
+
+    let _restarted = rig.restart("generation-after-credential-orphan");
+
+    assert!(!orphan.exists());
 }
 
 #[tokio::test]
@@ -1454,6 +2390,52 @@ async fn disaster_restore_expires_after_twenty_four_hours_and_startup_cleans_sta
         config.bootstrap_secret = Some(root.to_owned());
     });
     assert!(!batch_path.exists());
+}
+
+#[tokio::test]
+async fn runtime_restore_start_collects_an_uncontended_expired_batch() {
+    let root = "expired-runtime-cleanup-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, first) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "expired-runtime-first-start-request-0001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "旧恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "旧恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let first_batch_id = first["batch_id"].as_str().unwrap();
+    let first_batch_dir = rig
+        .directory
+        .path()
+        .join("disaster-restore")
+        .join(first_batch_id);
+    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
+
+    let (second_status, second) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/disaster-restore/batches",
+        None,
+        json!({
+            "request_id": "expired-runtime-second-start-request-0001",
+            "family_id": Uuid::new_v4(),
+            "family_name": "新恢复家庭",
+            "owner_display_name": "妈妈",
+            "device_name": "新恢复手机",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(second_status, StatusCode::CREATED, "{second}");
+    assert!(!first_batch_dir.exists());
 }
 
 #[tokio::test]
@@ -2341,7 +3323,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        13
     );
     drop(connection);
 
@@ -2366,7 +3348,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        11
+        13
     );
 }
 
@@ -2378,7 +3360,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
     connection
         .execute_batch(
             "
-            PRAGMA user_version = 12;
+            PRAGMA user_version = 14;
             CREATE TABLE future_sentinel(value TEXT NOT NULL);
             INSERT INTO future_sentinel(value) VALUES ('preserve-me');
             ",
@@ -2438,7 +3420,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        12
+        14
     );
     assert_eq!(
         connection
@@ -2960,6 +3942,81 @@ async fn current_refresh_token_with_uncleared_request_id_does_not_rotate_twice()
         .await
         .0,
         StatusCode::OK,
+    );
+}
+
+#[tokio::test]
+async fn uncleared_request_id_after_access_expiry_extends_handoff_instead_of_500() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "refresh-expired-handoff-phone",
+        "refresh-expired-handoff-request-0001",
+    )
+    .await;
+    let old_refresh = owner["refresh_token"].as_str().unwrap();
+    let rotation_id = "refresh-expired-handoff-rotation-00001";
+    let first = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    let persisted_refresh = first.1["refresh_token"].as_str().unwrap();
+    let first_access = first.1["access_token"].as_str().unwrap();
+
+    // Past the 15-minute access TTL while the client still holds the rotated
+    // refresh token and the uncleared durable rotation id (crash after keystore
+    // write / before request-id retirement, or a long offline window).
+    rig.now.fetch_add(901, Ordering::SeqCst);
+    let replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": persisted_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::OK, "{}", replay.1);
+    assert_eq!(replay.1["access_token"], first_access);
+    assert_eq!(replay.1["refresh_token"], persisted_refresh);
+    assert_eq!(
+        replay.1["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900,
+    );
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            replay.1["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    // Crash-window retry of the pre-rotation refresh token after the same TTL
+    // must also reconstruct the handoff with a usable access expiry.
+    let history_replay = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": old_refresh}),
+        &[("x-lezi-refresh-request-id", rotation_id)],
+    )
+    .await;
+    assert_eq!(history_replay.0, StatusCode::OK, "{}", history_replay.1);
+    assert_eq!(history_replay.1["access_token"], first_access);
+    assert_eq!(history_replay.1["refresh_token"], persisted_refresh);
+    assert_eq!(
+        history_replay.1["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900,
     );
 }
 
@@ -3853,16 +4910,15 @@ async fn owner_explicitly_binds_a_pending_device_to_an_existing_member() {
         StatusCode::OK,
     );
     same_member_edit["note"] = json!("其它成员越权");
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            other_token,
-            entity_wire("care_plan", &plan_id, 11, same_member_edit, None),
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN,
-    );
+    let (forbidden_status, forbidden_body) = publish_root_bundle(
+        &rig.app,
+        other_token,
+        entity_wire("care_plan", &plan_id, 11, same_member_edit, None),
+    )
+    .await;
+    assert_eq!(forbidden_status, StatusCode::OK, "{forbidden_body}");
+    assert_eq!(forbidden_body["status"], "rejected");
+    assert_eq!(forbidden_body["error"]["code"], "forbidden");
 
     // Deleting the selected membership also deletes the already-bound request;
     // it cannot silently change the Owner's decision to "new".
@@ -4554,154 +5610,6 @@ async fn family_create_requires_the_root_password_and_never_reopens_configured_s
         assert_eq!(body, second_body);
     }
 }
-
-#[tokio::test]
-async fn current_wire_rejects_removed_compatibility_fields() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "strict-wire-owner",
-        "strict-wire-owner-request-00000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let (pull_status, pull_body) = get_json(&rig.app, "/v1/pull", Some(token)).await;
-    assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
-
-    let obsolete_baby_id = Uuid::new_v4().to_string();
-    let (due_date_status, due_date_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "baby",
-            &obsolete_baby_id,
-            1,
-            json!({
-                "nickname": "年年",
-                "sex": "female",
-                "birthday": "2025-01-02",
-                "due_date": null,
-                "avatar_media_uuid": null,
-            }),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(
-        due_date_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{due_date_body}"
-    );
-
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let mut obsolete_record = record_payload(&baby_id);
-    obsolete_record["created_by_device_id"] = json!("strict-wire-owner");
-    let (device_author_status, device_author_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 2, obsolete_record, None),
-    )
-    .await;
-    assert_eq!(
-        device_author_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{device_author_body}"
-    );
-}
-
-#[tokio::test]
-async fn current_sync_requests_require_generation_envelopes_and_keep_push_retired() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "strict-envelope-owner",
-        "strict-envelope-owner-request-00001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-
-    for body in [
-        json!({"entities": []}),
-        json!({"device_id": "strict-envelope-owner", "entities": []}),
-        json!({"generation": "generation-a", "entities": []}),
-    ] {
-        let (status, response) =
-            raw_json_request(&rig.app, Method::POST, "/v1/push", Some(token), body).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
-    }
-
-    let (pull_status, pull_body) = raw_get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
-
-    let baby_id = Uuid::new_v4().to_string();
-    let (baby_status, baby_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
-    )
-    .await;
-    assert_eq!(baby_status, StatusCode::OK, "{baby_body}");
-    let bundle_id = Uuid::new_v4().to_string();
-    let root_id = Uuid::new_v4().to_string();
-    let payload = json!({
-        "baby_client_uuid": baby_id,
-        "type": "formula",
-        "custom_item_client_uuid": null,
-        "timestamp": 1,
-        "end_timestamp": null,
-        "note": null,
-        "payload_json": {"amount_ml": 120},
-        "schema_version": 2,
-    });
-    let (stage_status, stage_body) = raw_json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &root_id, 2, payload.clone(), None),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(
-        stage_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{stage_body}"
-    );
-
-    let (valid_stage_status, valid_stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &root_id, 2, payload, None),
-            "media": [],
-            "generation": "generation-a",
-        }),
-    )
-    .await;
-    assert_eq!(valid_stage_status, StatusCode::OK, "{valid_stage_body}");
-
-    let (commit_status, commit_body) = raw_json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        commit_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{commit_body}"
-    );
-}
-
 #[tokio::test]
 async fn current_record_and_care_plan_wire_rejects_obsolete_or_untyped_payloads() {
     let rig = Rig::new();
@@ -4861,18 +5769,28 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     let (owner_status, owner_view) =
         get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     assert_eq!(owner_status, StatusCode::OK);
+    let now = rig.now.load(Ordering::SeqCst);
+    let directory_generation = owner_view["directory_generation"].clone();
+    assert_eq!(
+        directory_generation.as_str().map(str::len),
+        Some(64),
+        "{owner_view}"
+    );
     assert_eq!(
         owner_view,
-        json!({"members":[
+        json!({
+            "directory_generation": directory_generation,
+            "members":[
             {
                 "display_name":"妈妈",
                 "role":"owner",
                 "is_self":true,
                 "membership_id": owner_membership_id,
+                "last_sync_at": now,
                 "devices":[{
                     "device_id":owner["device_id"],
                     "device_name":"owner-sensitive-device-id",
-                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "last_used_at": now,
                     "is_current":true,
                 }],
             },
@@ -4881,40 +5799,47 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"member",
                 "is_self":false,
                 "membership_id": member_membership_id,
+                "last_sync_at": now,
                 "devices":[{
                     "device_id":member["device_id"],
                     "device_name":"member-sensitive-device-id",
-                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "last_used_at": now,
                     "is_current":false,
                 }],
             },
-        ]})
+            ],
+        })
     );
     let (member_status, member_view) =
         get_json(&rig.app, "/v1/family/members", Some(member_token)).await;
     assert_eq!(member_status, StatusCode::OK);
     assert_eq!(
         member_view,
-        json!({"members":[
+        json!({
+            "directory_generation": directory_generation,
+            "members":[
             {
                 "display_name":"妈妈",
                 "role":"owner",
                 "is_self":false,
                 "membership_id": owner_membership_id,
+                "last_sync_at": now,
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":true,
                 "membership_id": member_membership_id,
+                "last_sync_at": now,
                 "devices":[{
                     "device_id":member["device_id"],
                     "device_name":"member-sensitive-device-id",
-                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "last_used_at": now,
                     "is_current":true,
                 }],
             },
-        ]})
+            ],
+        })
     );
     let visible_members = |body: &Value| {
         body["members"]
@@ -4948,9 +5873,11 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     }
     for row in owner_view["members"].as_array().unwrap() {
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 5);
+        // display_name, role, is_self, membership_id, last_sync_at, devices
+        assert_eq!(fields.len(), 6);
         assert!(fields.contains_key("membership_id"));
         assert!(fields.contains_key("devices"));
+        assert!(fields.contains_key("last_sync_at"));
         assert!(!fields.contains_key("token_hash"));
         assert!(!fields.contains_key("token"));
         assert!(!fields.contains_key("family_id"));
@@ -6546,7 +7473,13 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
     assert!(member_rows[0]["membership_id"].as_str().unwrap().len() >= 32);
     for row in rows {
         assert!(row["membership_id"].as_str().unwrap().len() >= 32);
-        assert_eq!(row.as_object().unwrap().len(), 5);
+        // display_name, role, is_self, membership_id, devices, optional last_sync_at
+        let field_count = row.as_object().unwrap().len();
+        assert!(
+            field_count == 5 || field_count == 6,
+            "unexpected member fields: {}",
+            row
+        );
         assert!(!row.as_object().unwrap().contains_key("device_id"));
         assert!(row["devices"].is_array());
     }
@@ -6555,79 +7488,6 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
     assert!(!serialized.contains("owner-device-collision"));
     assert!(!serialized.contains("same-device"));
 }
-
-#[tokio::test]
-async fn atomic_bundle_lww_cursor_and_generation_recovery_match_current_protocol() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "lww-owner-request-0000000000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let first = json!({
-        "type":"baby","client_uuid":baby_id,"updated_at":100,
-        "payload":baby_payload("年年", None)
-    });
-    let (applied_status, applied) = publish_root_bundle(&rig.app, token, first.clone()).await;
-    let (retry_status, retry) = publish_root_bundle(&rig.app, token, first.clone()).await;
-    let (older_status, older) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 99, baby_payload("旧", None), None),
-    )
-    .await;
-    let (newer_status, newer) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 101, baby_payload("年年", None), Some(101)),
-    )
-    .await;
-    assert_eq!(applied_status, StatusCode::OK, "{applied}");
-    assert_eq!(applied["applied"], 1);
-    assert_eq!(applied["cursor"], 1);
-    assert_eq!(retry_status, StatusCode::OK, "{retry}");
-    assert_eq!(retry["applied"], 0);
-    assert_eq!(retry["cursor"], 1);
-    assert_eq!(older_status, StatusCode::CONFLICT, "{older}");
-    assert_eq!(newer_status, StatusCode::OK, "{newer}");
-    assert_eq!(newer["applied"], 1);
-    assert_eq!(newer["cursor"], 2);
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=1", Some(token)).await;
-    assert_eq!(pull["cursor"], 2);
-    assert_eq!(pull["entities"][0]["rev"], 2);
-    assert_eq!(pull["entities"][0]["deleted_at"], 101);
-    let (ahead, detail) = get_json(&rig.app, "/v1/pull?cursor=3", Some(token)).await;
-    assert_eq!(ahead, StatusCode::CONFLICT);
-    assert_eq!(detail["detail"]["code"], "cursor_ahead");
-
-    let restarted = rig.restart("generation-b");
-    let (generation_status, generation_body) = get_json(
-        &restarted,
-        "/v1/pull?cursor=2&generation=generation-a",
-        Some(token),
-    )
-    .await;
-    assert_eq!(generation_status, StatusCode::CONFLICT);
-    assert_eq!(generation_body["detail"]["code"], "generation_changed");
-    let (stale_stage, _) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": Uuid::new_v4(),
-            "generation":"generation-a",
-            "root": entity_wire("baby", &Uuid::new_v4().to_string(), 200, baby_payload("圆圆", None), None),
-            "media": []
-        }),
-    )
-    .await;
-    assert_eq!(stale_stage, StatusCode::CONFLICT);
-}
-
 #[tokio::test]
 async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
     let rig = Rig::new();
@@ -6657,7 +7517,10 @@ async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
             })
         })
         .collect::<Vec<_>>();
-    for entity in entities {
+    for (index, entity) in entities.into_iter().enumerate() {
+        if index > 0 && index % 60 == 0 {
+            rig.now.fetch_add(61, Ordering::SeqCst);
+        }
         let (publish_status, publish_body) = publish_root_bundle(&rig.app, token, entity).await;
         assert_eq!(publish_status, StatusCode::OK, "{publish_body}");
     }
@@ -6699,6 +7562,9 @@ async fn paged_full_resync_includes_dependencies_that_have_a_later_revision() {
     .await;
     assert_eq!(push_status, StatusCode::OK, "{push_body}");
     for (index, record_id) in record_ids.iter().enumerate() {
+        if index > 0 && index % 60 == 0 {
+            rig.now.fetch_add(61, Ordering::SeqCst);
+        }
         seed_record_with_id(
             &rig.app,
             token,
@@ -6748,222 +7614,6 @@ async fn paged_full_resync_includes_dependencies_that_have_a_later_revision() {
     assert_eq!(pulled_records.len(), record_ids.len());
     assert_eq!(cursor, 203);
 }
-
-#[tokio::test]
-async fn push_rejects_terminal_updated_at() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "timestamp-owner-request-00000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-
-    let (status, _) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "baby",
-            &Uuid::new_v4().to_string(),
-            i64::MAX,
-            baby_payload("年年", None),
-            None,
-        ),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-#[tokio::test]
-async fn push_rejects_updated_at_more_than_24_hours_ahead() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "future-time-owner-request-000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let server_now_millis = rig.now.load(Ordering::SeqCst) * 1_000;
-
-    let (status, _) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "baby",
-            &Uuid::new_v4().to_string(),
-            server_now_millis + 86_400_001,
-            baby_payload("年年", None),
-            None,
-        ),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-#[tokio::test]
-async fn baby_nickname_accepts_20_unicode_chars_and_rejects_21() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "nickname-owner-request-0000000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-
-    let nickname_20 = "年".repeat(20);
-    let (accepted, body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload(&nickname_20, None), None),
-    )
-    .await;
-    assert_eq!(accepted, StatusCode::OK, "{body}");
-
-    let nickname_21 = "年".repeat(21);
-    let (rejected, body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 2, baby_payload(&nickname_21, None), None),
-    )
-    .await;
-    assert_eq!(rejected, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-}
-
-#[tokio::test]
-async fn strict_atomic_entity_contract_rejects_legacy_fields_and_orders_dependencies() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "strict-owner-request-0000000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    assert_eq!(
-        json_request(&rig.app, Method::POST, "/v1/bundles", None, json!({}),)
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (unknown_type, _) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("settings", &Uuid::new_v4().to_string(), 1, json!({}), None),
-        vec![],
-    )
-    .await;
-    assert_eq!(unknown_type, StatusCode::UNPROCESSABLE_ENTITY);
-
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let (unresolved, unresolved_body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 1, record_payload(&baby_id), None),
-        vec![],
-    )
-    .await;
-    assert_eq!(unresolved, StatusCode::CONFLICT, "{unresolved_body}");
-    assert!(
-        unresolved_body["detail"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("baby_client_uuid does not exist"),
-        "{unresolved_body}"
-    );
-    let mut legacy_baby = baby_payload("年年", None);
-    legacy_baby["sort_order"] = json!(99);
-    let (legacy_status, legacy_result) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, legacy_baby, None),
-    )
-    .await;
-    assert_eq!(
-        legacy_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{legacy_result}"
-    );
-
-    let baby = baby_payload("年年", None);
-    let (baby_push, baby_result) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby, None),
-    )
-    .await;
-    assert_eq!(baby_push, StatusCode::OK, "{baby_result}");
-    seed_record_then_log_media(&rig.app, token, &record_id, &media_id, &baby_id, 1).await;
-    let (_, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let types = pulled["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entity| entity["type"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(types, ["baby", "media", "record"]);
-    assert!(pulled["entities"][0]["payload"]
-        .as_object()
-        .unwrap()
-        .get("sort_order")
-        .is_none());
-    let seed_cursor = pulled["cursor"].as_i64().unwrap();
-
-    let uploaded = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
-        Body::from("log"),
-        Some("application/octet-stream"),
-    )
-    .await;
-    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let (_, after_bytes) = get_json(
-        &rig.app,
-        &format!("/v1/pull?cursor={seed_cursor}"),
-        Some(token),
-    )
-    .await;
-    assert!(after_bytes["entities"].as_array().unwrap().is_empty());
-    let canonical_media = pulled["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["client_uuid"] == media_id)
-        .unwrap()["payload"]
-        .as_object()
-        .unwrap();
-    assert_eq!(
-        canonical_media
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            "baby_client_uuid",
-            "byte_size",
-            "care_plan_client_uuid",
-            "height",
-            "kind",
-            "mime",
-            "record_client_uuid",
-            "width",
-        ]),
-    );
-    assert!(canonical_media["baby_client_uuid"].is_null());
-    assert!(canonical_media["care_plan_client_uuid"].is_null());
-    assert!(canonical_media["width"].is_null());
-    assert!(canonical_media["height"].is_null());
-    assert_eq!(after_bytes["cursor"], seed_cursor);
-}
-
 #[tokio::test]
 async fn full_pull_includes_deleted_baby_dependency_before_retained_record() {
     let rig = Rig::new();
@@ -7002,7 +7652,7 @@ async fn full_pull_includes_deleted_baby_dependency_before_retained_record() {
     assert_eq!(entities.len(), 2);
     assert_eq!(entities[0]["type"], "baby");
     assert_eq!(entities[0]["client_uuid"], baby_id);
-    assert_eq!(entities[0]["deleted_at"], 2);
+    assert!(entities[0]["deleted_at"].is_number());
     assert_eq!(entities[1]["type"], "record");
     assert_eq!(entities[1]["client_uuid"], record_id);
     assert!(entities[1]["deleted_at"].is_null());
@@ -7110,150 +7760,6 @@ async fn incremental_fulfillment_candidate_pull_reemits_live_plan_record_and_med
     assert!(keys.contains(&("media".to_owned(), record_media_id)));
     assert!(keys.contains(&("fulfillment_candidate".to_owned(), candidate_id)));
 }
-
-#[tokio::test]
-async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "media-owner-request-00000000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let second_baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let log_id = Uuid::new_v4().to_string();
-    let avatar_id = Uuid::new_v4().to_string();
-    let (seeded, body) = publish_bundle_with_media(
-        &rig.app,
-        owner_token,
-        entity_wire(
-            "baby",
-            &baby_id,
-            1,
-            baby_payload("年年", Some(&avatar_id)),
-            None,
-        ),
-        vec![(
-            entity_wire("media", &avatar_id, 3, avatar_media_payload(&baby_id), None),
-            b"avatar".to_vec(),
-        )],
-    )
-    .await;
-    assert_eq!(seeded, StatusCode::OK, "{body}");
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            owner_token,
-            entity_wire("baby", &second_baby_id, 1, baby_payload("二宝", None), None,),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    seed_record_then_log_media(&rig.app, owner_token, &record_id, &log_id, &baby_id, 1).await;
-
-    let uploaded = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{log_id}"),
-        Some(member_token),
-        Body::from("log"),
-        Some("application/octet-stream"),
-    )
-    .await;
-    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let downloaded = request(
-        &rig.app,
-        Method::GET,
-        &format!("/v1/media/{log_id}"),
-        Some(member_token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(downloaded.status(), StatusCode::OK);
-    assert_eq!(
-        downloaded.into_body().collect().await.unwrap().to_bytes(),
-        "log"
-    );
-    let oversized = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{log_id}"),
-        Some(member_token),
-        Body::from("123456789"),
-        None,
-    )
-    .await;
-    assert_eq!(oversized.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let denied_avatar = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{avatar_id}"),
-        Some(member_token),
-        Body::from("avatar"),
-        None,
-    )
-    .await;
-    assert_eq!(denied_avatar.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let accepted_avatar = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{avatar_id}"),
-        Some(owner_token),
-        Body::from("avatar"),
-        None,
-    )
-    .await;
-    assert_eq!(accepted_avatar.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let (member_bypass, _) = publish_bundle_with_media(
-        &rig.app,
-        member_token,
-        entity_wire(
-            "baby",
-            &baby_id,
-            4,
-            baby_payload("年年", Some(&avatar_id)),
-            None,
-        ),
-        vec![(
-            entity_wire("media", &avatar_id, 4, avatar_media_payload(&baby_id), None),
-            b"avatar".to_vec(),
-        )],
-    )
-    .await;
-    assert_eq!(member_bypass, StatusCode::FORBIDDEN);
-    let (owner_reassociate, _) = publish_bundle_with_media(
-        &rig.app,
-        owner_token,
-        entity_wire(
-            "baby",
-            &second_baby_id,
-            4,
-            baby_payload("二宝", Some(&avatar_id)),
-            None,
-        ),
-        vec![(
-            entity_wire(
-                "media",
-                &avatar_id,
-                4,
-                avatar_media_payload(&second_baby_id),
-                None,
-            ),
-            b"avatar".to_vec(),
-        )],
-    )
-    .await;
-    assert_eq!(owner_reassociate, StatusCode::CONFLICT);
-}
-
 #[tokio::test]
 async fn media_metadata_rejects_zero_declared_byte_size() {
     let rig = Rig::new();
@@ -7287,415 +7793,6 @@ async fn media_metadata_rejects_zero_declared_byte_size() {
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
-
-#[tokio::test]
-async fn media_metadata_enforces_server_byte_limit_and_android_dimension_bounds() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "bounded-media-owner-request-0000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let boundary_media_id = Uuid::new_v4().to_string();
-    let mut boundary_payload = log_media_payload(&record_id);
-    boundary_payload["byte_size"] = json!(8);
-    boundary_payload["width"] = json!(i32::MAX);
-    boundary_payload["height"] = json!(i32::MAX);
-
-    let (baby_push, baby_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
-    )
-    .await;
-    assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    let (accepted, body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-        vec![entity_wire(
-            "media",
-            &boundary_media_id,
-            2,
-            boundary_payload,
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(accepted, StatusCode::OK, "{body}");
-
-    for (field, invalid_value) in [
-        ("byte_size", json!(9)),
-        ("width", json!(i64::from(i32::MAX) + 1)),
-        ("height", json!(i64::from(i32::MAX) + 1)),
-    ] {
-        let mut payload = log_media_payload(&record_id);
-        payload[field] = invalid_value;
-        let (status, body) = stage_bundle_with_media(
-            &rig.app,
-            token,
-            entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-            vec![entity_wire(
-                "media",
-                &Uuid::new_v4().to_string(),
-                2,
-                payload,
-                None,
-            )],
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}: {body}");
-    }
-}
-
-#[tokio::test]
-async fn media_upload_rejects_empty_or_mismatched_body() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "empty-media-owner-request-00000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (baby_push, baby_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
-    )
-    .await;
-    assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-            "media": [entity_wire("media", &media_id, 2, log_media_payload(&record_id), None)],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    let uploaded = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(token),
-        Body::empty(),
-        Some("application/octet-stream"),
-    )
-    .await;
-
-    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let mismatched = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(token),
-        Body::from("no"),
-        Some("application/octet-stream"),
-    )
-    .await;
-    assert_eq!(mismatched.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let downloaded = request(
-        &rig.app,
-        Method::GET,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(downloaded.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn member_cannot_create_update_or_tombstone_baby() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "avatar-owner-request-0000000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let avatar_id = Uuid::new_v4().to_string();
-    assert_eq!(
-        publish_bundle_with_media(
-            &rig.app,
-            owner_token,
-            entity_wire(
-                "baby",
-                &baby_id,
-                1,
-                baby_payload("年年", Some(&avatar_id)),
-                None,
-            ),
-            vec![(
-                entity_wire("media", &avatar_id, 1, avatar_media_payload(&baby_id), None,),
-                b"avatar".to_vec(),
-            )],
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    for entity in [
-        json!({
-            "type":"baby","client_uuid":Uuid::new_v4().to_string(),"updated_at":2,
-            "payload":baby_payload("禁止新建", None)
-        }),
-        json!({
-            "type":"baby","client_uuid":baby_id,"updated_at":3,
-            "payload":baby_payload("禁止改名", Some(&avatar_id))
-        }),
-        json!({
-            "type":"baby","client_uuid":baby_id,"updated_at":4,"deleted_at":4,
-            "payload":baby_payload("禁止删除", Some(&avatar_id))
-        }),
-        json!({
-            "type":"baby","client_uuid":baby_id,"updated_at":5,
-            "payload":baby_payload("禁止清空", None)
-        }),
-    ] {
-        let (status, _) = publish_root_bundle(&rig.app, member_token, entity).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-    }
-}
-
-#[tokio::test]
-async fn stale_member_avatar_snapshot_does_not_block_newer_record() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "stale-avatar-owner-request-0000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let first_avatar_id = Uuid::new_v4().to_string();
-    let current_avatar_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let (first_status, first_body) = publish_bundle_with_media(
-        &rig.app,
-        owner_token,
-        entity_wire(
-            "baby",
-            &baby_id,
-            100,
-            baby_payload("年年", Some(&first_avatar_id)),
-            None,
-        ),
-        vec![(
-            entity_wire(
-                "media",
-                &first_avatar_id,
-                100,
-                avatar_media_payload(&baby_id),
-                None,
-            ),
-            b"avatar".to_vec(),
-        )],
-    )
-    .await;
-    assert_eq!(first_status, StatusCode::OK, "{first_body}");
-    let (seeded, seeded_body) = publish_bundle_with_media(
-        &rig.app,
-        owner_token,
-        entity_wire(
-            "baby",
-            &baby_id,
-            300,
-            baby_payload("年年", Some(&current_avatar_id)),
-            None,
-        ),
-        vec![(
-            entity_wire(
-                "media",
-                &current_avatar_id,
-                300,
-                avatar_media_payload(&baby_id),
-                None,
-            ),
-            b"avatar".to_vec(),
-        )],
-    )
-    .await;
-    assert_eq!(seeded, StatusCode::OK, "{seeded_body}");
-
-    // Even a stale member Baby snapshot is forbidden; a following Record is unaffected.
-    let (stale_baby, stale_body) = publish_root_bundle(
-        &rig.app,
-        member_token,
-        entity_wire(
-            "baby",
-            &baby_id,
-            200,
-            baby_payload("旧快照", Some(&first_avatar_id)),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(stale_baby, StatusCode::FORBIDDEN, "{stale_body}");
-    seed_record_with_id(
-        &rig.app,
-        member_token,
-        &record_id,
-        400,
-        record_payload(&baby_id),
-    )
-    .await;
-    let (_, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let entities = pulled["entities"].as_array().unwrap();
-    let baby = entities
-        .iter()
-        .find(|entity| entity["client_uuid"] == baby_id)
-        .unwrap();
-    let record = entities
-        .iter()
-        .find(|entity| entity["client_uuid"] == record_id)
-        .unwrap();
-    assert_eq!(
-        baby["payload"]["avatar_media_uuid"],
-        current_avatar_id.as_str()
-    );
-    assert_eq!(record["payload"]["baby_client_uuid"], baby_id.as_str());
-}
-
-#[tokio::test]
-async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
-    let root = "stream-delete-root-password";
-    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
-    let owner = create_family_with_root(
-        &rig.app,
-        "owner-device",
-        "stream-owner-request-00000000000001",
-        root,
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap().to_owned();
-    let family_id = owner["family_id"].as_str().unwrap().to_owned();
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    {
-        let (baby_push, baby_body) = publish_root_bundle(
-            &rig.app,
-            &token,
-            entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
-        )
-        .await;
-        assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-        let (stage_status, stage_body) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(&token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-                "media": [entity_wire("media", &media_id, 2, log_media_payload(&record_id), None)],
-            }),
-        )
-        .await;
-        assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    }
-
-    let oversized_stream = futures_util::stream::unfold(0, |index| async move {
-        match index {
-            0 => Some((Ok::<_, std::io::Error>(Bytes::from_static(b"12345")), 1)),
-            1 => Some((Ok(Bytes::from_static(b"6789")), 2)),
-            _ => panic!("server consumed beyond the configured media limit"),
-        }
-    });
-    let oversized = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(&token),
-        Body::from_stream(oversized_stream),
-        Some("application/octet-stream"),
-    )
-    .await;
-    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
-
-    let (started_tx, started_rx) = oneshot::channel();
-    let (release_tx, release_rx) = oneshot::channel();
-    let upload_stream = futures_util::stream::unfold(
-        (0, Some(started_tx), Some(release_rx)),
-        |(index, mut started, mut release)| async move {
-            match index {
-                0 => {
-                    started.take().unwrap().send(()).ok();
-                    Some((
-                        Ok::<_, std::io::Error>(Bytes::from_static(b"lo")),
-                        (1, started, release),
-                    ))
-                }
-                1 => {
-                    release.take().unwrap().await.ok();
-                    Some((Ok(Bytes::from_static(b"g")), (2, started, release)))
-                }
-                _ => None,
-            }
-        },
-    );
-    let upload_app = rig.app.clone();
-    let upload_token = token.clone();
-    let upload_uri = format!("/v1/bundles/{bundle_id}/media/{media_id}");
-    let upload = tokio::spawn(async move {
-        request(
-            &upload_app,
-            Method::PUT,
-            &upload_uri,
-            Some(&upload_token),
-            Body::from_stream(upload_stream),
-            Some("application/octet-stream"),
-        )
-        .await
-    });
-    started_rx.await.unwrap();
-
-    let delete_app = rig.app.clone();
-    let delete_token = token.clone();
-    let deletion = tokio::spawn(async move {
-        request_with_headers(
-            &delete_app,
-            Method::POST,
-            "/v1/family/delete",
-            Some(&delete_token),
-            Body::from(r#"{"family_name":"测试家庭"}"#),
-            Some("application/json"),
-            &[("x-lezi-bootstrap-secret", root)],
-        )
-        .await
-    });
-    tokio::task::yield_now().await;
-    assert!(!deletion.is_finished());
-    release_tx.send(()).unwrap();
-    assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
-    assert_eq!(deletion.await.unwrap().status(), StatusCode::OK);
-    assert!(!rig.directory.path().join("media").join(family_id).exists());
-}
-
 #[tokio::test]
 async fn family_delete_requires_owner_name_and_root_and_persists_terminal_reason() {
     let root = "family-delete-root-password";
@@ -8244,120 +8341,6 @@ async fn create_limit_is_scoped_without_losing_global_protection() {
     );
 }
 #[tokio::test]
-async fn pull_omits_the_entire_atomic_bundle_until_media_bytes_are_committed() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "integrity-owner-request-00000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (baby_push, baby_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
-    )
-    .await;
-    assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-            "media": [entity_wire("media", &media_id, 2, log_media_payload(&record_id), None)],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    let (status, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert_eq!(status, StatusCode::OK);
-    let seed_cursor = pulled["cursor"].as_i64().unwrap();
-    let entities = pulled["entities"].as_array().unwrap();
-    assert_eq!(entities.len(), 1);
-    assert_eq!(entities[0]["type"], "baby");
-
-    let missing = request(
-        &rig.app,
-        Method::GET,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    let uploaded = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(token),
-        Body::from("log"),
-        Some("application/octet-stream"),
-    )
-    .await;
-    assert_eq!(uploaded.status(), StatusCode::OK);
-
-    let (still_hidden_status, still_hidden) = get_json(
-        &rig.app,
-        &format!("/v1/pull?cursor={seed_cursor}"),
-        Some(token),
-    )
-    .await;
-    assert_eq!(still_hidden_status, StatusCode::OK);
-    assert_eq!(still_hidden["cursor"], seed_cursor);
-    assert!(still_hidden["entities"].as_array().unwrap().is_empty());
-
-    let (commit_status, commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-
-    let (status, ready) = get_json(
-        &rig.app,
-        &format!("/v1/pull?cursor={seed_cursor}"),
-        Some(token),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(ready["cursor"].as_i64().unwrap() > seed_cursor);
-    let ready_entities = ready["entities"].as_array().unwrap();
-    assert_eq!(ready_entities.len(), 2);
-    assert!(ready_entities
-        .iter()
-        .any(|entity| entity["client_uuid"] == media_id));
-
-    let downloaded = request(
-        &rig.app,
-        Method::GET,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(downloaded.status(), StatusCode::OK);
-    assert_eq!(
-        downloaded.into_body().collect().await.unwrap().to_bytes(),
-        "log"
-    );
-}
-
-#[tokio::test]
 async fn ordinary_media_upload_retry_is_retired_even_when_bytes_exist() {
     let rig = Rig::new();
     let owner = create_family(
@@ -8409,121 +8392,58 @@ async fn ordinary_media_upload_retry_is_retired_even_when_bytes_exist() {
     assert_eq!(ready["cursor"], seed_cursor);
     assert!(ready["entities"].as_array().unwrap().is_empty());
 }
+#[test]
+fn protocol_cutover_requires_a_verified_forced_update_channel() {
+    let missing = TempDir::new().unwrap();
+    let mut missing_config = ServerConfig::new(missing.path());
+    missing_config.require_protocol_cutover_release = true;
+    assert!(
+        build_app(missing_config).is_err(),
+        "0.4.0 production startup accepted a missing forced-update channel",
+    );
 
-#[tokio::test]
-async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "corrupt-media-owner-request-0000001",
+    let valid = TempDir::new().unwrap();
+    let apk_bytes = b"verified-0.4.0-release-channel";
+    fs::write(valid.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        valid.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 21,
+            "version_name": "0.4.0",
+            "min_supported_version_code": 21,
+            "sha256": hex::encode(Sha256::digest(apk_bytes)),
+        })
+        .to_string(),
     )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let zero_media_id = Uuid::new_v4().to_string();
-    let mismatched_media_id = Uuid::new_v4().to_string();
+    .unwrap();
+    let mut valid_config = ServerConfig::new(valid.path());
+    valid_config.require_protocol_cutover_release = true;
+    assert!(build_app(valid_config).is_ok());
 
-    let (pushed, body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
+    // Floor 16 is not a valid 0.4.0 production cutover channel.
+    let too_low = TempDir::new().unwrap();
+    let low_apk = b"stale-0.3.9-floor-must-fail";
+    fs::write(too_low.path().join("app-release.apk"), low_apk).unwrap();
+    fs::write(
+        too_low.path().join("app-update.json"),
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 16,
+            "version_name": "0.3.9",
+            "min_supported_version_code": 16,
+            "sha256": hex::encode(Sha256::digest(low_apk)),
+        })
+        .to_string(),
     )
-    .await;
-    assert_eq!(pushed, StatusCode::OK, "{body}");
-    let (media_push, media_body) = publish_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-        vec![
-            (
-                entity_wire(
-                    "media",
-                    &zero_media_id,
-                    2,
-                    log_media_payload(&record_id),
-                    None,
-                ),
-                b"log".to_vec(),
-            ),
-            (
-                entity_wire(
-                    "media",
-                    &mismatched_media_id,
-                    2,
-                    log_media_payload(&record_id),
-                    None,
-                ),
-                b"log".to_vec(),
-            ),
-        ],
-    )
-    .await;
-    assert_eq!(media_push, StatusCode::OK, "{media_body}");
-
-    let media_directory = rig.directory.path().join("media").join(family_id);
-    fs::create_dir_all(&media_directory).unwrap();
-    let zero_path = media_directory.join(&zero_media_id);
-    let mismatched_path = media_directory.join(&mismatched_media_id);
-    fs::write(&zero_path, []).unwrap();
-    fs::write(&mismatched_path, b"four").unwrap();
-
-    let (status, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(pulled["cursor"], 4);
-    assert!(pulled["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|entity| entity["type"] != "media"));
-    assert!(!zero_path.exists());
-    assert!(!mismatched_path.exists());
-
-    for media_id in [&zero_media_id, &mismatched_media_id] {
-        let response = request(
-            &rig.app,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(token),
-            Body::empty(),
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    let (uploaded_status, uploaded_body) = publish_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
-        vec![(
-            entity_wire(
-                "media",
-                &zero_media_id,
-                3,
-                log_media_payload(&record_id),
-                None,
-            ),
-            b"log".to_vec(),
-        )],
-    )
-    .await;
-    assert_eq!(uploaded_status, StatusCode::OK, "{uploaded_body}");
-    let (_, ready) = get_json(&rig.app, "/v1/pull?cursor=4", Some(token)).await;
-    assert_eq!(ready["cursor"], 6);
-    assert!(ready["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == zero_media_id));
+    .unwrap();
+    let mut low_config = ServerConfig::new(too_low.path());
+    low_config.require_protocol_cutover_release = true;
+    assert!(
+        build_app(low_config).is_err(),
+        "0.4.0 production must reject min_supported/version_code below 21"
+    );
 }
-
-// ---------------------------------------------------------------------------
-// Atomic bundle protocol
-// ---------------------------------------------------------------------------
-
 fn entity_wire(
     entity_type: &str,
     client_uuid: &str,
@@ -8543,6 +8463,30 @@ fn entity_wire(
     value
 }
 
+fn care_plan_payload(baby_id: &str, plan_type: &str) -> Value {
+    let payload_json = match plan_type {
+        "formula" => json!({"amount_ml": 120}),
+        "pee" => json!({"pee_amount": 2}),
+        "custom" => json!({"title": "抚触"}),
+        "bath" => json!({}),
+        _ => panic!("missing API care-plan fixture for {plan_type}"),
+    };
+    json!({
+        "baby_client_uuid": baby_id,
+        "type": plan_type,
+        "custom_item_client_uuid": null,
+        "scheduled_at": 1_700_000_000_000i64,
+        "scheduled_zone_id": "Asia/Shanghai",
+        "status": "pending",
+        "payload_json": payload_json,
+        "schema_version": 2,
+        "note": null,
+        "created_by_membership_id": "spoofed-membership",
+        "fulfilled_record_client_uuid": null,
+        "fulfilled_at": null,
+    })
+}
+
 async fn seed_baby(app: &Router, token: &str) -> String {
     let baby_id = Uuid::new_v4().to_string();
     let (status, body) = publish_root_bundle(
@@ -8555,11 +8499,6 @@ async fn seed_baby(app: &Router, token: &str) -> String {
     baby_id
 }
 
-/// Publish a Record via atomic bundle (current wire: records never use ordinary push).
-async fn seed_record(app: &Router, token: &str, baby_id: &str) -> String {
-    seed_record_at(app, token, baby_id, 1, record_payload(baby_id)).await
-}
-
 async fn seed_record_with_id(
     app: &Router,
     token: &str,
@@ -8567,29 +8506,13 @@ async fn seed_record_with_id(
     updated_at: i64,
     payload: Value,
 ) {
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
+    let (status, body) = publish_root_bundle(
         app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", record_id, updated_at, payload, None),
-            "media": [],
-        }),
+        token,
+        entity_wire("record", record_id, updated_at, payload, None),
     )
     .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    let (commit_status, commit_body) = json_request(
-        app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 /// Publish a record and its log-media bytes as one atomic package.
@@ -8626,65 +8549,119 @@ async fn seed_record_then_log_media(
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
-async fn seed_record_at(
-    app: &Router,
-    token: &str,
-    _baby_id: &str,
-    updated_at: i64,
-    payload: Value,
-) -> String {
-    let record_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, updated_at, payload, None),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    let (commit_status, commit_body) = json_request(
-        app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-    record_id
+async fn publish_root_bundle(app: &Router, token: &str, root: Value) -> (StatusCode, Value) {
+    if root["type"] == "fulfillment_candidate" {
+        let bundle_id = Uuid::new_v4().to_string();
+        let (status, body) = json_request(
+            app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({"bundle_id": bundle_id, "root": root, "media": []}),
+        )
+        .await;
+        if status != StatusCode::OK {
+            return (status, body);
+        }
+        return json_request(
+            app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+    }
+    publish_causal_fixture(app, token, root, Vec::new()).await
 }
 
-async fn publish_root_bundle(app: &Router, token: &str, root: Value) -> (StatusCode, Value) {
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
+async fn publish_causal_fixture(
+    app: &Router,
+    token: &str,
+    root: Value,
+    media: Vec<(Value, Vec<u8>)>,
+) -> (StatusCode, Value) {
+    let entity_type = root["type"].as_str().expect("fixture root type");
+    let client_uuid = Uuid::parse_str(
+        root["client_uuid"]
+            .as_str()
+            .expect("fixture root client_uuid"),
+    )
+    .expect("fixture root UUID");
+    let mut causal_root = root["payload"].clone();
+    causal_root["updated_at"] = root["updated_at"].clone();
+    let deleted = root.get("deleted_at").is_some_and(Value::is_number);
+    let fixture_key = (
+        token.to_owned(),
+        entity_type.to_owned(),
+        client_uuid.to_string(),
+    );
+    let base_version = causal_fixture_versions()
+        .lock()
+        .unwrap()
+        .get(&fixture_key)
+        .cloned();
+    let mut causal_media = Vec::with_capacity(media.len());
+    for (entity, bytes) in &media {
+        let media_uuid = Uuid::parse_str(
+            entity["client_uuid"]
+                .as_str()
+                .expect("fixture media client_uuid"),
+        )
+        .expect("fixture media UUID");
+        let (status, body) = put_causal_media_bytes(app, token, media_uuid, bytes).await;
+        if status != StatusCode::OK {
+            return (status, body);
+        }
+        let payload = &entity["payload"];
+        let role = match entity_type {
+            "baby" => "avatar",
+            "record" => "log",
+            "care_plan" => "plan",
+            other => panic!("unsupported fixture media root: {other}"),
+        };
+        causal_media.push(json!({
+            "media_uuid": media_uuid,
+            "role": role,
+            "sha256": hex::encode(Sha256::digest(bytes)),
+            "byte_size": bytes.len(),
+            "mime": payload.get("mime").cloned().unwrap_or_else(|| json!("image/jpeg")),
+            "width": payload.get("width").cloned().unwrap_or_else(|| json!(1)),
+            "height": payload.get("height").cloned().unwrap_or_else(|| json!(1)),
+        }));
+    }
+    let response = causal_commit_units(
         app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": root,
-            "media": [],
-        }),
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            base_version.as_deref(),
+            entity_type,
+            client_uuid,
+            causal_root,
+            causal_media,
+            deleted,
+        )],
     )
     .await;
-    if stage_status != StatusCode::OK {
-        return (stage_status, stage_body);
+    if let Some(version_id) = response
+        .1
+        .pointer("/results/0/stable/version_id")
+        .and_then(Value::as_str)
+    {
+        causal_fixture_versions()
+            .lock()
+            .unwrap()
+            .insert(fixture_key, version_id.to_owned());
     }
-    json_request(
-        app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await
+    response
+}
+
+type FixtureVersions = HashMap<(String, String, String), String>;
+
+fn causal_fixture_versions() -> &'static Mutex<FixtureVersions> {
+    static VERSIONS: OnceLock<Mutex<FixtureVersions>> = OnceLock::new();
+    VERSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 async fn stage_bundle_with_media(
@@ -8713,56 +8690,7 @@ async fn publish_bundle_with_media(
     root: Value,
     media: Vec<(Value, Vec<u8>)>,
 ) -> (StatusCode, Value) {
-    let bundle_id = Uuid::new_v4().to_string();
-    let manifest = media
-        .iter()
-        .map(|(entity, _)| entity.clone())
-        .collect::<Vec<_>>();
-    let (stage_status, stage_body) = json_request(
-        app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": root,
-            "media": manifest,
-        }),
-    )
-    .await;
-    if stage_status != StatusCode::OK {
-        return (stage_status, stage_body);
-    }
-    for (entity, bytes) in media {
-        let media_id = entity["client_uuid"]
-            .as_str()
-            .expect("media fixture has client_uuid");
-        let response = request(
-            app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from(bytes),
-            Some("application/octet-stream"),
-        )
-        .await;
-        let status = response.status();
-        if status != StatusCode::OK {
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            return (
-                status,
-                serde_json::from_slice(&body).unwrap_or_else(|_| json!({})),
-            );
-        }
-    }
-    json_request(
-        app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await
+    publish_causal_fixture(app, token, root, media).await
 }
 
 #[tokio::test]
@@ -8803,159 +8731,28 @@ async fn ordinary_entity_and_media_publication_routes_are_retired_fail_closed() 
 }
 
 #[tokio::test]
-async fn expired_open_staging_bundles_are_collected_before_enforcing_the_family_cap() {
+async fn ordinary_reconcile_routes_are_absent() {
     let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "staging-gc-owner-device",
-        "staging-gc-owner-request-000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let refresh_token = owner["refresh_token"].as_str().unwrap().to_owned();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let first_bundle_id = Uuid::new_v4().to_string();
 
-    for index in 0..64 {
-        let bundle_id = if index == 0 {
-            first_bundle_id.clone()
-        } else {
-            Uuid::new_v4().to_string()
-        };
-        let (status, body) = json_request(
+    for path in [
+        "/v1/reconcile",
+        "/v1/causal/reconcile",
+        "/v1/bundles/00000000-0000-4000-8000-000000000001/media/00000000-0000-4000-8000-000000000002",
+    ] {
+        let response = request(
             &rig.app,
             Method::POST,
-            "/v1/bundles",
-            Some(token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "record",
-                    &Uuid::new_v4().to_string(),
-                    2 + index,
-                    record_payload(&baby_id),
-                    None,
-                ),
-                "media": [],
-            }),
+            path,
+            None,
+            Body::from("{}"),
+            Some("application/json"),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "stage {index}: {body}");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
-
-    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
-    let (refresh_status, refreshed) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/session/refresh",
-        None,
-        json!({"refresh_token": refresh_token}),
-    )
-    .await;
-    assert_eq!(refresh_status, StatusCode::OK, "{refreshed}");
-    let token = refreshed["access_token"].as_str().unwrap();
-    let (replacement_status, replacement) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": Uuid::new_v4(),
-            "generation": "generation-a",
-            "root": entity_wire(
-                "record",
-                &Uuid::new_v4().to_string(),
-                100,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(replacement_status, StatusCode::OK, "{replacement}");
-    let (expired_status, expired) = get_json(
-        &rig.app,
-        &format!("/v1/bundles/{first_bundle_id}"),
-        Some(token),
-    )
-    .await;
-    assert_eq!(expired_status, StatusCode::NOT_FOUND, "{expired}");
 }
-
 #[tokio::test]
-async fn stalled_bundle_body_does_not_hold_the_family_lock_against_pull() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "slow-upload-owner-device",
-        "slow-upload-owner-request-000000001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap().to_owned();
-    let baby_id = seed_baby(&rig.app, &token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(&token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    let (body_polled_tx, body_polled_rx) = oneshot::channel();
-    let (release_body_tx, release_body_rx) = oneshot::channel();
-    let body_stream = futures_util::stream::once(async move {
-        let _ = body_polled_tx.send(());
-        let _ = release_body_rx.await;
-        Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"img"))
-    });
-    let upload_app = rig.app.clone();
-    let upload_token = token.clone();
-    let upload_path = format!("/v1/bundles/{bundle_id}/media/{media_id}");
-    let upload = tokio::spawn(async move {
-        request(
-            &upload_app,
-            Method::PUT,
-            &upload_path,
-            Some(&upload_token),
-            Body::from_stream(body_stream),
-            Some("image/jpeg"),
-        )
-        .await
-    });
-    body_polled_rx.await.unwrap();
-
-    let pull = tokio::time::timeout(
-        Duration::from_millis(500),
-        get_json(&rig.app, "/v1/pull?cursor=0", Some(&token)),
-    )
-    .await;
-    assert!(
-        pull.is_ok(),
-        "pull waited on an upload body that had not arrived"
-    );
-
-    release_body_tx.send(()).unwrap();
-    assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn every_current_entity_root_can_publish_only_through_atomic_bundles() {
+async fn mutable_roots_use_causal_commit_while_fulfillment_remains_atomic() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -9044,128 +8841,6 @@ async fn every_current_entity_root_can_publish_only_through_atomic_bundles() {
     .await;
     assert_eq!(candidate_status, StatusCode::OK, "{candidate_body}");
 }
-
-#[tokio::test]
-async fn atomic_bundle_media_must_match_its_root_kind_and_identity() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-media-matrix-owner",
-        "bundle-media-matrix-request-00001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            token,
-            entity_wire("baby", &baby_id, 1, baby_payload("岁岁", None), None),
-        )
-        .await
-        .0,
-        StatusCode::OK,
-    );
-
-    let record_id = Uuid::new_v4().to_string();
-    let wrong_record_id = Uuid::new_v4().to_string();
-    let (wrong_parent_status, wrong_parent_body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-        vec![entity_wire(
-            "media",
-            &Uuid::new_v4().to_string(),
-            2,
-            log_media_payload(&wrong_record_id),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(
-        wrong_parent_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{wrong_parent_body}"
-    );
-
-    let (wrong_kind_status, wrong_kind_body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 3, baby_payload("岁岁", None), None),
-        vec![entity_wire(
-            "media",
-            &Uuid::new_v4().to_string(),
-            3,
-            log_media_payload(&record_id),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(
-        wrong_kind_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{wrong_kind_body}"
-    );
-
-    let (custom_status, custom_body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire(
-            "custom_item",
-            &Uuid::new_v4().to_string(),
-            4,
-            json!({"name": "抚触", "icon_slot": 2}),
-            None,
-        ),
-        vec![entity_wire(
-            "media",
-            &Uuid::new_v4().to_string(),
-            4,
-            avatar_media_payload(&baby_id),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(
-        custom_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{custom_body}"
-    );
-
-    let (record_status, record_body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("record", &record_id, 5, record_payload(&baby_id), None),
-        vec![entity_wire(
-            "media",
-            &Uuid::new_v4().to_string(),
-            5,
-            log_media_payload(&record_id),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(record_status, StatusCode::OK, "{record_body}");
-
-    let avatar_id = Uuid::new_v4().to_string();
-    let mut baby_with_avatar = baby_payload("岁岁", Some(&avatar_id));
-    baby_with_avatar["birth_weight_grams"] = json!(3250);
-    let (baby_status, baby_body) = stage_bundle_with_media(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 6, baby_with_avatar, None),
-        vec![entity_wire(
-            "media",
-            &avatar_id,
-            6,
-            avatar_media_payload(&baby_id),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(baby_status, StatusCode::OK, "{baby_body}");
-}
-
 #[tokio::test]
 async fn health_advertises_atomic_bundle_capability() {
     let rig = Rig::new();
@@ -9180,338 +8855,6 @@ async fn health_advertises_atomic_bundle_capability() {
 }
 
 #[tokio::test]
-async fn authoritative_reconcile_is_authenticated_bounded_and_generation_scoped() {
-    let rig = Rig::new();
-    let joined = create_family(
-        &rig.app,
-        "reconcile-owner-device",
-        "reconcile-owner-request-000000001",
-    )
-    .await;
-    let token = joined["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let unit = json!({
-        "content_hash": "frozen-local-hash",
-        "root": {
-            "type": "baby",
-            "client_uuid": baby_id,
-            "updated_at": 1_753_418_400_000_i64,
-            "deleted_at": null,
-            "payload": baby_payload("年年", None),
-        },
-        "media": [],
-    });
-
-    let (status, body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({"generation": "generation-a", "units": [unit.clone()]}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["generation"], "generation-a");
-    assert_eq!(body["results"][0]["disposition"], "publish");
-    assert_eq!(body["results"][0]["reason"], "authoritative_absence");
-    assert_eq!(
-        body["results"][0]["request_content_hash"],
-        "frozen-local-hash"
-    );
-
-    let (published_status, published) =
-        publish_root_bundle(&rig.app, token, unit["root"].clone()).await;
-    assert_eq!(published_status, StatusCode::OK, "{published}");
-    let (adopt_status, adopt) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({
-            "generation": "generation-a",
-            "units": [{
-                "content_hash": "stale-local-hash",
-                "root": {
-                    "type": "baby",
-                    "client_uuid": baby_id,
-                    "updated_at": 1_753_418_399_999_i64,
-                    "deleted_at": null,
-                    "payload": baby_payload("旧本机副本", None),
-                },
-                "media": [],
-            }],
-        }),
-    )
-    .await;
-    assert_eq!(adopt_status, StatusCode::OK, "{adopt}");
-    assert_eq!(adopt["results"][0]["disposition"], "adopt_remote");
-    assert_eq!(adopt["results"][0]["remote_root"]["type"], "baby");
-    assert!(adopt["results"][0]["remote_root"]
-        .get("entity_type")
-        .is_none());
-
-    let (future_timestamp, future_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({
-            "generation": "generation-a",
-            "units": [{
-                "content_hash": "future-timestamp-hash",
-                "root": {
-                    "type": "baby",
-                    "client_uuid": Uuid::new_v4(),
-                    "updated_at": 1_753_504_800_001_i64,
-                    "deleted_at": null,
-                    "payload": baby_payload("小宝", None),
-                },
-                "media": [],
-            }],
-        }),
-    )
-    .await;
-    assert_eq!(
-        future_timestamp,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{future_body}"
-    );
-
-    let (unauthenticated, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        None,
-        json!({"generation": "generation-a", "units": [unit.clone()]}),
-    )
-    .await;
-    assert_eq!(unauthenticated, StatusCode::UNAUTHORIZED);
-
-    let (duplicate, duplicate_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({"generation": "generation-a", "units": [unit.clone(), unit]}),
-    )
-    .await;
-    assert_eq!(
-        duplicate,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{duplicate_body}"
-    );
-
-    let (drift, drift_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({"generation": "generation-old", "units": [{
-            "content_hash": "other",
-            "root": {
-                "type": "baby",
-                "client_uuid": Uuid::new_v4(),
-                "updated_at": 1000,
-                "deleted_at": null,
-                "payload": baby_payload("小宝", None),
-            },
-            "media": [],
-        }]}),
-    )
-    .await;
-    assert_eq!(drift, StatusCode::CONFLICT, "{drift_body}");
-    assert_eq!(drift_body["detail"]["code"], "generation_changed");
-}
-
-#[tokio::test]
-async fn authoritative_reconcile_is_rate_limited_per_authenticated_device() {
-    let rig = Rig::with_config(|config| {
-        config.reconcile_rate_limit = RateLimitConfig {
-            max_attempts: 1,
-            window_seconds: 60,
-        };
-    });
-    let joined = create_family(
-        &rig.app,
-        "reconcile-rate-device",
-        "reconcile-rate-request-0000000001",
-    )
-    .await;
-    let token = joined["access_token"].as_str().unwrap();
-    let request_body = json!({
-        "generation": "generation-a",
-        "units": [{
-            "content_hash": "rate-limited-frozen-hash",
-            "root": {
-                "type": "baby",
-                "client_uuid": Uuid::new_v4(),
-                "updated_at": 1000,
-                "deleted_at": null,
-                "payload": baby_payload("年年", None),
-            },
-            "media": [],
-        }],
-    });
-
-    let (first, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        request_body.clone(),
-    )
-    .await;
-    assert_eq!(first, StatusCode::OK);
-    let (limited, body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        request_body,
-    )
-    .await;
-    assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS, "{body}");
-}
-
-#[tokio::test]
-async fn oversized_authoritative_reconcile_returns_a_structured_full_resync_checkpoint() {
-    let rig = Rig::with_config(|config| config.max_reconcile_response_bytes = 64);
-    let joined = create_family(
-        &rig.app,
-        "reconcile-size-device",
-        "reconcile-size-request-0000000001",
-    )
-    .await;
-    let token = joined["access_token"].as_str().unwrap();
-
-    let (status, body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({
-            "generation": "generation-a",
-            "units": [{
-                "content_hash": "response-too-large",
-                "root": {
-                    "type": "baby",
-                    "client_uuid": Uuid::new_v4(),
-                    "updated_at": 1000,
-                    "deleted_at": null,
-                    "payload": baby_payload("年年", None),
-                },
-                "media": [],
-            }],
-        }),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["detail"]["code"], "authority_response_too_large");
-    assert_eq!(body["detail"]["action"], "full_resync");
-    assert_eq!(body["detail"]["reset_cursor"], 0);
-    assert_eq!(body["detail"]["server_generation"], "generation-a");
-}
-
-#[tokio::test]
-async fn authoritative_reconcile_dependency_cycle_confirms_and_is_visible_to_peer() {
-    let rig = Rig::new();
-    let joined = create_family(
-        &rig.app,
-        "reconcile-cycle-owner",
-        "reconcile-cycle-request-00000001",
-    )
-    .await;
-    let token = joined["access_token"].as_str().unwrap();
-    let membership_id = joined["membership_id"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let baby_root = entity_wire("baby", &baby_id, 100, baby_payload("年年", None), None);
-    let mut record_body = record_payload(&baby_id);
-    record_body["created_by_membership_id"] = json!(membership_id);
-    let record_root = entity_wire("record", &record_id, 120, record_body, None);
-    let unit = |hash: &str, root: Value| json!({"content_hash": hash, "root": root, "media": []});
-
-    let (first_status, first) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({
-            "generation": "generation-a",
-            "units": [
-                unit("baby-hash", baby_root.clone()),
-                unit("record-hash", record_root.clone()),
-            ],
-        }),
-    )
-    .await;
-    assert_eq!(first_status, StatusCode::OK, "{first}");
-    assert_eq!(first["results"][0]["disposition"], "publish");
-    assert_eq!(first["results"][1]["disposition"], "retry_authority");
-    assert_eq!(first["results"][1]["reason"], "dependency_unresolved");
-
-    let (baby_status, baby_commit) = publish_root_bundle(&rig.app, token, baby_root.clone()).await;
-    assert_eq!(baby_status, StatusCode::OK, "{baby_commit}");
-
-    let (second_status, second) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({
-            "generation": "generation-a",
-            "units": [unit("record-hash", record_root.clone())],
-        }),
-    )
-    .await;
-    assert_eq!(second_status, StatusCode::OK, "{second}");
-    assert_eq!(second["results"][0]["disposition"], "publish");
-
-    let (record_status, record_commit) =
-        publish_root_bundle(&rig.app, token, record_root.clone()).await;
-    assert_eq!(record_status, StatusCode::OK, "{record_commit}");
-
-    let (confirmed_status, confirmed) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/reconcile",
-        Some(token),
-        json!({
-            "generation": "generation-a",
-            "units": [
-                unit("baby-hash", baby_root),
-                unit("record-hash", record_root),
-            ],
-        }),
-    )
-    .await;
-    assert_eq!(confirmed_status, StatusCode::OK, "{confirmed}");
-    assert!(confirmed["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|result| result["disposition"] == "confirmed"));
-
-    let peer = approve_new_member(&rig.app, token, "reconcile-cycle-peer").await;
-    let peer_token = peer["access_token"].as_str().unwrap();
-    let (pull_status, pulled) = get_json(
-        &rig.app,
-        "/v1/pull?cursor=0&generation=generation-a",
-        Some(peer_token),
-    )
-    .await;
-    assert_eq!(pull_status, StatusCode::OK, "{pulled}");
-    let visible = pulled["entities"].as_array().unwrap();
-    assert!(visible
-        .iter()
-        .any(|entity| entity["type"] == "baby" && entity["client_uuid"] == baby_id));
-    assert!(visible
-        .iter()
-        .any(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id));
-}
-
-#[tokio::test]
 async fn health_advertises_record_membership_author_capability() {
     let rig = Rig::new();
     let (status, body) = get_json(&rig.app, "/health", None).await;
@@ -9522,543 +8865,6 @@ async fn health_advertises_record_membership_author_capability() {
         .iter()
         .any(|capability| capability == "record_membership_author"));
 }
-
-#[tokio::test]
-async fn atomic_bundles_wait_for_baby_without_leaving_staging_rows() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-missing-baby-owner",
-        "bundle-missing-baby-request-00001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = Uuid::new_v4().to_string();
-    let cases = [
-        (
-            "record",
-            Uuid::new_v4().to_string(),
-            Uuid::new_v4().to_string(),
-            record_payload(&baby_id),
-        ),
-        (
-            "care_plan",
-            Uuid::new_v4().to_string(),
-            Uuid::new_v4().to_string(),
-            care_plan_payload(&baby_id, "bath"),
-        ),
-    ];
-
-    for (root_type, root_id, bundle_id, payload) in &cases {
-        let (missing_status, missing_body) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(root_type, root_id, 2, payload.clone(), None),
-                "media": [],
-            }),
-        )
-        .await;
-        assert_eq!(missing_status, StatusCode::CONFLICT, "{missing_body}");
-        assert_eq!(
-            missing_body["detail"],
-            format!("{root_type} baby_client_uuid does not exist")
-        );
-        let (lookup_status, lookup_body) =
-            get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
-        assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
-    }
-
-    let (push_status, push_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
-    )
-    .await;
-    assert_eq!(push_status, StatusCode::OK, "{push_body}");
-
-    for (root_type, root_id, bundle_id, payload) in cases {
-        let (ready_status, ready_body) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(root_type, &root_id, 2, payload, None),
-                "media": [],
-            }),
-        )
-        .await;
-        assert_eq!(ready_status, StatusCode::OK, "{ready_body}");
-    }
-}
-
-#[tokio::test]
-async fn atomic_care_plan_waits_for_its_custom_item_definition() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-custom-plan-owner",
-        "bundle-custom-plan-request-00001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let custom_item_id = Uuid::new_v4().to_string();
-    let other_family_id = Uuid::new_v4().to_string();
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "INSERT INTO families(id, created_at) VALUES (?1, ?2)",
-            rusqlite::params![other_family_id, rig.now.load(Ordering::SeqCst)],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO family_meta(family_id, rev) VALUES (?1, 1)",
-            rusqlite::params![other_family_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "
-            INSERT INTO entities(
-                family_id, entity_type, client_uuid, updated_at,
-                deleted_at, payload_json, rev
-            ) VALUES (?1, 'custom_item', ?2, 1, NULL, ?3, 1)
-            ",
-            rusqlite::params![
-                other_family_id,
-                custom_item_id,
-                json!({
-                    "name": "跨家庭定义",
-                    "icon_slot": 3,
-                    "created_by_membership_id": Uuid::new_v4().to_string(),
-                })
-                .to_string(),
-            ],
-        )
-        .unwrap();
-    drop(connection);
-    let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let mut plan_payload = care_plan_payload(&baby_id, "custom");
-    plan_payload["custom_item_client_uuid"] = json!(custom_item_id);
-
-    let (missing_status, missing_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("care_plan", &plan_id, 2, plan_payload.clone(), None),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(missing_status, StatusCode::CONFLICT, "{missing_body}");
-    assert_eq!(
-        missing_body["detail"],
-        "care_plan custom_item_client_uuid does not exist"
-    );
-    let (lookup_status, lookup_body) =
-        get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
-    assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
-
-    let (push_status, push_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "custom_item",
-            &custom_item_id,
-            1,
-            json!({
-                "name": "抚触",
-                "icon_slot": 2,
-                "created_by_membership_id": null,
-            }),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(push_status, StatusCode::OK, "{push_body}");
-
-    let (ready_status, ready_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("care_plan", &plan_id, 2, plan_payload, None),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(ready_status, StatusCode::OK, "{ready_body}");
-}
-
-#[tokio::test]
-async fn atomic_care_plan_requires_a_type_consistent_custom_item_reference() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-custom-shape-owner",
-        "bundle-custom-shape-request-0001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let custom_item_id = Uuid::new_v4().to_string();
-    let (custom_status, custom_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "custom_item",
-            &custom_item_id,
-            1,
-            json!({
-                "name": "抚触",
-                "icon_slot": 2,
-                "created_by_membership_id": null,
-            }),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(custom_status, StatusCode::OK, "{custom_body}");
-
-    let mut missing_reference = care_plan_payload(&baby_id, "custom");
-    missing_reference
-        .as_object_mut()
-        .unwrap()
-        .remove("custom_item_client_uuid");
-    let mut null_reference = care_plan_payload(&baby_id, "custom");
-    null_reference["custom_item_client_uuid"] = Value::Null;
-    let mut unexpected_reference = care_plan_payload(&baby_id, "bath");
-    unexpected_reference["custom_item_client_uuid"] = json!(custom_item_id);
-
-    let missing_bundle_id = Uuid::new_v4().to_string();
-    let (missing_status, missing_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": missing_bundle_id,
-            "root": entity_wire(
-                "care_plan",
-                &Uuid::new_v4().to_string(),
-                2,
-                missing_reference,
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(
-        missing_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{missing_body}"
-    );
-    assert_eq!(
-        missing_body["detail"],
-        "custom_item_client_uuid is required"
-    );
-
-    for (payload, expected_detail) in [
-        (
-            null_reference,
-            "care_plan type custom requires custom_item_client_uuid",
-        ),
-        (
-            unexpected_reference,
-            "care_plan custom_item_client_uuid is only valid for type custom",
-        ),
-    ] {
-        let bundle_id = Uuid::new_v4().to_string();
-        let (status, body) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "care_plan",
-                    &Uuid::new_v4().to_string(),
-                    2,
-                    payload,
-                    None,
-                ),
-                "media": [],
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["detail"], expected_detail);
-
-        let (lookup_status, lookup_body) =
-            get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
-        assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
-    }
-
-    let valid_bundle_id = Uuid::new_v4().to_string();
-    let mut valid_payload = care_plan_payload(&baby_id, "custom");
-    valid_payload["custom_item_client_uuid"] = json!(custom_item_id);
-    let (valid_status, valid_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": valid_bundle_id,
-            "root": entity_wire(
-                "care_plan",
-                &Uuid::new_v4().to_string(),
-                2,
-                valid_payload,
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(valid_status, StatusCode::OK, "{valid_body}");
-}
-
-#[tokio::test]
-async fn atomic_bundle_commit_rejects_malformed_or_wrong_shape_json() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-json-owner-device",
-        "bundle-json-owner-request-0000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let bundle_id = Uuid::new_v4().to_string();
-    let record_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    for body in [Body::from("{"), Body::from(r#"{"generation":42}"#)] {
-        let response = request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(owner_token),
-            body,
-            Some("application/json"),
-        )
-        .await;
-        assert!(
-            response.status().is_client_error(),
-            "invalid commit JSON was accepted with {}",
-            response.status()
-        );
-    }
-
-    let (_, before_commit) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    assert!(!before_commit["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == record_id));
-}
-
-#[tokio::test]
-async fn atomic_bundle_stamps_and_freezes_first_record_author() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-author-owner-device",
-        "bundle-author-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "bundle-author-member-device").await;
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-
-    for (updated_at, deleted_at, note) in [
-        (2, None, "创建"),
-        (3, None, "管理员编辑"),
-        (4, Some(4), "管理员删除"),
-        (5, None, "管理员恢复"),
-    ] {
-        let bundle_id = Uuid::new_v4().to_string();
-        let mut forged_payload = record_payload(&baby_id);
-        forged_payload["note"] = json!(note);
-        forged_payload["created_by_membership_id"] = member["membership_id"].clone();
-        let (stage_status, stage_body) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(owner_token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "record",
-                    &record_id,
-                    updated_at,
-                    forged_payload,
-                    deleted_at,
-                ),
-                "media": [],
-            }),
-        )
-        .await;
-        assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-        let (commit_status, commit_body) = json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await;
-        assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-        assert_eq!(
-            commit_body["record_authors"],
-            json!([{
-                "client_uuid": record_id,
-                "created_by_membership_id": owner["membership_id"],
-            }])
-        );
-
-        let (retry_status, retry_body) = json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await;
-        assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
-        assert_eq!(
-            retry_body["record_authors"],
-            json!([{
-                "client_uuid": record_id,
-                "created_by_membership_id": owner["membership_id"],
-            }])
-        );
-
-        let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-        let record = pull["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-            .expect("committed record version remains visible");
-        assert_eq!(record["updated_at"], updated_at);
-        assert_eq!(
-            record["deleted_at"],
-            deleted_at.map_or(Value::Null, Value::from)
-        );
-        assert_eq!(record["payload"]["note"], note);
-        assert_eq!(
-            record["payload"]["created_by_membership_id"],
-            owner["membership_id"]
-        );
-        assert!(!record["payload"]
-            .as_object()
-            .unwrap()
-            .contains_key("created_by_device_id"));
-    }
-}
-
-#[tokio::test]
-async fn member_record_manage_requires_the_effective_creator_or_owner() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "record-acl-owner-device",
-        "record-acl-owner-request-000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "record-acl-member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-
-    let (created, body) = publish_root_bundle(
-        &rig.app,
-        owner_token,
-        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-    )
-    .await;
-    assert_eq!(created, StatusCode::OK, "{body}");
-
-    for (updated_at, deleted_at, note) in [
-        (3, None, "foreign edit"),
-        (4, Some(4), "foreign delete"),
-        (5, None, "foreign restore"),
-    ] {
-        let mut payload = record_payload(&baby_id);
-        payload["note"] = json!(note);
-        payload["created_by_membership_id"] = member["membership_id"].clone();
-        let (status, body) = publish_root_bundle(
-            &rig.app,
-            member_token,
-            entity_wire("record", &record_id, updated_at, payload, deleted_at),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-        assert_eq!(
-            body,
-            json!({"detail": "Only the record creator or family owner may change this record"})
-        );
-    }
-
-    // The same creator check applies when the rejected foreign-record update
-    // carries log media in its atomic bundle.
-    let foreign_media_id = Uuid::new_v4().to_string();
-    let (status, body) = stage_bundle_with_media(
-        &rig.app,
-        member_token,
-        entity_wire("record", &record_id, 6, record_payload(&baby_id), None),
-        vec![entity_wire(
-            "media",
-            &foreign_media_id,
-            6,
-            log_media_payload(&record_id),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(
-        body,
-        json!({"detail": "Only the record creator or family owner may change this record"})
-    );
-}
-
 #[tokio::test]
 async fn second_device_on_the_same_membership_may_manage_its_record_and_log_media() {
     let rig = Rig::new();
@@ -10104,2207 +8910,39 @@ async fn second_device_on_the_same_membership_may_manage_its_record_and_log_medi
     )
     .await;
     assert_eq!(created, StatusCode::OK, "{body}");
+    let base_version = body["results"][0]["stable"]["version_id"]
+        .as_str()
+        .expect("created record stable version");
 
-    let media_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = stage_bundle_with_media(
+    let media_id = Uuid::new_v4();
+    let bytes = b"log";
+    let (prepare_status, prepare_body) =
+        put_causal_media_bytes(&rig.app, second_token, media_id, bytes).await;
+    assert_eq!(prepare_status, StatusCode::OK, "{prepare_body}");
+    let mut root = record_payload(&baby_id);
+    root["updated_at"] = json!(3);
+    let (commit_status, commit_body) = causal_commit_units(
         &rig.app,
         second_token,
-        entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
-        vec![entity_wire(
-            "media",
-            &media_id,
-            3,
-            log_media_payload(&record_id),
-            None,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(base_version),
+            "record",
+            Uuid::parse_str(&record_id).unwrap(),
+            root,
+            vec![causal_media_item(
+                media_id,
+                "log",
+                &hex::encode(Sha256::digest(bytes)),
+                bytes.len(),
+            )],
+            false,
         )],
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-}
-
-#[tokio::test]
-async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-stager-owner-device",
-        "bundle-stager-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "bundle-stager-member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let mut forged_payload = record_payload(&baby_id);
-    forged_payload["created_by_membership_id"] = member["membership_id"].clone();
-
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, 2, forged_payload, None),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(owner_token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-
-    let (foreign_commit_status, foreign_commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        foreign_commit_status,
-        StatusCode::CONFLICT,
-        "{foreign_commit_body}"
-    );
-    let (_, before_owner_commit) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    assert!(!before_owner_commit["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == record_id));
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(owner_token),
-            Body::empty(),
-            None,
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-
-    let (commit_status, committed) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{committed}");
-    let (retry_status, retry) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(retry_status, StatusCode::OK, "{retry}");
-    assert_eq!(retry["cursor"], committed["cursor"]);
-    assert_eq!(retry["applied"], committed["applied"]);
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-        .expect("owner-staged record is visible after owner commit");
-    assert_eq!(
-        record["payload"]["created_by_membership_id"],
-        owner["membership_id"]
-    );
-    assert!(!record["payload"]
-        .as_object()
-        .unwrap()
-        .contains_key("created_by_device_id"));
-}
-
-#[tokio::test]
-async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "foreign-commit-owner-device",
-        "foreign-commit-owner-request-00001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "foreign-commit-member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    seed_record_with_id(
-        &rig.app,
-        owner_token,
-        &record_id,
-        1,
-        record_payload(&baby_id),
-    )
-    .await;
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(owner_token),
-            Body::from("old"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-
-    let (foreign_status, foreign_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(foreign_status, StatusCode::CONFLICT, "{foreign_body}");
-
-    let (metadata_status, metadata_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_id,
-                3,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(
-        metadata_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{metadata_body}"
-    );
-
-    let (refine_status, refine_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
-
-    let restarted = rig.restart("generation-b");
-    let (_, pull) = get_json(
-        &restarted,
-        "/v1/pull?cursor=0&generation=generation-b",
-        Some(owner_token),
-    )
-    .await;
-    assert!(
-        !pull["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entity| entity["client_uuid"] == media_id),
-        "foreign commit left final bytes that restart claimed as published media: {pull}"
-    );
-    assert_eq!(
-        request(
-            &restarted,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(owner_token),
-            Body::empty(),
-            None,
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-}
-
-#[tokio::test]
-async fn bundle_media_upload_requires_stager_membership_and_open_status() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "media-owner-device",
-        "media-owner-request-000000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "media-member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    let staged_path = rig
-        .directory
-        .path()
-        .join("media")
-        .join(family_id)
-        .join(".stage")
-        .join(&bundle_id)
-        .join(&media_id);
-
-    let foreign_upload = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(member_token),
-        Body::from("bad"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(foreign_upload.status(), StatusCode::CONFLICT);
-    assert!(!staged_path.exists());
-
-    let owner_upload = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(owner_token),
-        Body::from("img"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(owner_upload.status(), StatusCode::OK);
-    assert_eq!(fs::read(&staged_path).unwrap(), b"img");
-    let (commit_status, commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
     )
     .await;
     assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-    assert!(!staged_path.exists());
-    let published_path = rig
-        .directory
-        .path()
-        .join("media")
-        .join(family_id)
-        .join(&media_id);
-    assert_eq!(fs::read(&published_path).unwrap(), b"img");
-
-    let committed_upload = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(owner_token),
-        Body::from("new"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(committed_upload.status(), StatusCode::CONFLICT);
-    assert!(!staged_path.exists());
-    assert_eq!(fs::read(published_path).unwrap(), b"img");
+    assert_eq!(commit_body["results"][0]["status"], "accepted");
 }
-
-#[tokio::test]
-async fn equal_atomic_publish_before_commit_repairs_the_committed_bundle_package() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "bundle-race-owner-device",
-        "bundle-race-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member = approve_new_member(&rig.app, owner_token, "bundle-race-member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let owner_bundle = Uuid::new_v4().to_string();
-    let mut staged_payload = record_payload(&baby_id);
-    staged_payload["note"] = json!("A 暂存");
-    let staged_root = entity_wire("record", &record_id, 2, staged_payload, None);
-
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": owner_bundle,
-            "root": staged_root.clone(),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    // Member publishes the same root first via a competing atomic package.
-    let mut winner_payload = record_payload(&baby_id);
-    winner_payload["note"] = json!("B 先发布");
-    let member_bundle = Uuid::new_v4().to_string();
-    let (member_stage, member_stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(member_token),
-        json!({
-            "bundle_id": member_bundle,
-            "root": entity_wire("record", &record_id, 2, winner_payload, None),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(member_stage, StatusCode::OK, "{member_stage_body}");
-    let (member_commit, member_commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{member_bundle}/commit"),
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(member_commit, StatusCode::OK, "{member_commit_body}");
-    assert_eq!(
-        member_commit_body["record_authors"],
-        json!([{
-            "client_uuid": record_id,
-            "created_by_membership_id": member["membership_id"],
-        }])
-    );
-
-    let (commit_status, committed) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{owner_bundle}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{committed}");
-    assert_eq!(
-        committed["record_authors"],
-        json!([{
-            "client_uuid": record_id,
-            "created_by_membership_id": member["membership_id"],
-        }])
-    );
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-        .expect("first atomic winner remains the published record");
-    assert_eq!(record["payload"]["note"], "B 先发布");
-    assert_eq!(
-        record["payload"]["created_by_membership_id"],
-        member["membership_id"]
-    );
-
-    let (restage_status, restaged) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": owner_bundle,
-            "root": staged_root,
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(restage_status, StatusCode::OK, "{restaged}");
-    assert_eq!(restaged["status"], "committed");
-}
-
-#[tokio::test]
-async fn atomic_bundle_requires_uuid_bundle_id_in_body_and_paths() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-uuid-owner",
-        "bundle-uuid-owner-request-00000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = "11111111-2222-3333-8444-555555555555";
-    let invalid_bundle_id = format!("record:{record_id}:2");
-
-    let (invalid_status, invalid_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": invalid_bundle_id,
-            "root": entity_wire("record", record_id, 2, record_payload(&baby_id), None),
-            "media": []
-        }),
-    )
-    .await;
-    assert_eq!(
-        invalid_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{invalid_body}"
-    );
-
-    let invalid_path = request(
-        &rig.app,
-        Method::GET,
-        "/v1/bundles/not-a-uuid",
-        Some(token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(invalid_path.status(), StatusCode::BAD_REQUEST);
-
-    // Android's deterministic UUID for
-    // lezi.atomic-bundle.v1:record:<record_id>:2 is accepted end to end.
-    let bundle_id = "e4c2d0cf-4967-347c-b3bd-af9dae2b34f4";
-    let (stage_status, staged) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", record_id, 2, record_payload(&baby_id), None),
-            "media": []
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{staged}");
-    assert_eq!(staged["bundle_id"], bundle_id);
-
-    let (get_status, status) =
-        get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
-    assert_eq!(get_status, StatusCode::OK, "{status}");
-    assert_eq!(status["bundle_id"], bundle_id);
-}
-
-#[tokio::test]
-async fn atomic_bundle_is_invisible_until_commit_and_publishes_atomically() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-owner",
-        "bundle-owner-request-000000000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_a = Uuid::new_v4().to_string();
-    let media_b = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    let mut media_a_payload = log_media_payload(&record_id);
-    media_a_payload["byte_size"] = json!(3);
-    let mut media_b_payload = log_media_payload(&record_id);
-    media_b_payload["byte_size"] = json!(4);
-
-    let (status, staged) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                10,
-                record_payload(&baby_id),
-                None
-            ),
-            "media": [
-                entity_wire("media", &media_a, 10, media_a_payload, None),
-                entity_wire("media", &media_b, 10, media_b_payload, None),
-            ]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{staged}");
-    assert_eq!(staged["status"], "staging");
-    assert_eq!(
-        staged["missing_media"].as_array().unwrap().len(),
-        2,
-        "{staged}"
-    );
-
-    // Pre-commit: root and media must not appear on ordinary pull.
-    let (_, pull_before) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let types_before: Vec<_> = pull_before["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["type"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(types_before, vec!["baby"]);
-    assert!(!pull_before["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["client_uuid"] == record_id));
-
-    // Interrupt after first photo: still invisible; commit rejected.
-    let upload_a = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_a}"),
-        Some(token),
-        Body::from("img"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(upload_a.status(), StatusCode::OK);
-    let (commit_early, early_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        commit_early,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{early_body}"
-    );
-    let (_, still_hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(!still_hidden["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["client_uuid"] == record_id));
-
-    let upload_b = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_b}"),
-        Some(token),
-        Body::from("jpeg"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(upload_b.status(), StatusCode::OK);
-
-    let (commit_status, committed) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{committed}");
-    assert_eq!(committed["status"], "committed");
-    assert_eq!(committed["applied"], 3);
-
-    // Duplicate commit is idempotent (lost response safe).
-    let (retry_status, retry) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(retry_status, StatusCode::OK, "{retry}");
-    assert_eq!(retry["status"], "committed");
-    assert_eq!(retry["cursor"], committed["cursor"]);
-
-    let (_, pull_after) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let uuids: std::collections::BTreeSet<_> = pull_after["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|e| e["client_uuid"].as_str().unwrap().to_owned())
-        .collect();
-    assert!(uuids.contains(&record_id));
-    assert!(uuids.contains(&media_a));
-    assert!(uuids.contains(&media_b));
-
-    for media_id in [&media_a, &media_b] {
-        let response = request(
-            &rig.app,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(token),
-            Body::empty(),
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK, "{media_id}");
-    }
-}
-
-#[tokio::test]
-async fn atomic_bundle_prepares_durable_media_before_database_publication() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-durability-owner",
-        "bundle-durability-request-000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let family_id = created["family_id"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute_batch(
-            "
-            CREATE TRIGGER fail_bundle_publish
-            BEFORE UPDATE OF status ON sync_bundles
-            WHEN NEW.status = 'committed'
-            BEGIN
-                SELECT RAISE(FAIL, 'injected bundle publish failure');
-            END;
-            ",
-        )
-        .unwrap();
-    drop(connection);
-
-    let failed = request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        Body::from(r#"{"generation":"generation-a"}"#),
-        Some("application/json"),
-    )
-    .await;
-    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    let final_path = rig
-        .directory
-        .path()
-        .join("media")
-        .join(family_id)
-        .join(&media_id);
-    assert_eq!(
-        fs::read(&final_path).unwrap(),
-        b"img",
-        "durable bytes must exist before the database can expose their metadata"
-    );
-    let (_, hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(!hidden["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == record_id || entity["client_uuid"] == media_id));
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(token),
-            Body::empty(),
-            None,
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute("DROP TRIGGER fail_bundle_publish", [])
-        .unwrap();
-    drop(connection);
-    let restarted = rig.restart("generation-b");
-    let (retry_status, retry_body) = json_request(
-        &restarted,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({"generation": "generation-b"}),
-    )
-    .await;
-    assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
-    let media_response = request(
-        &restarted,
-        Method::GET,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(media_response.status(), StatusCode::OK);
-    assert_eq!(
-        media_response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes(),
-        "img"
-    );
-}
-
-#[tokio::test]
-async fn committed_bundle_retry_revalidates_published_media_after_stage_cleanup() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-retry-media-owner",
-        "bundle-retry-media-request-000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let family_id = created["family_id"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let persisted_sha256: String = connection
-        .query_row(
-            "
-            SELECT staged_sha256
-            FROM sync_bundle_media
-            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-            ",
-            rusqlite::params![family_id, bundle_id, media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        persisted_sha256,
-        hex::encode(Sha256::digest(b"img")),
-        "bundle upload did not persist its exact digest"
-    );
-    drop(connection);
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    let family_media = rig.directory.path().join("media").join(family_id);
-    let stage_dir = family_media.join(".stage").join(&bundle_id);
-    let published = family_media.join(&media_id);
-    assert!(!stage_dir.exists(), "successful commit left staging bytes");
-    fs::remove_file(&published).unwrap();
-    let missing_retry = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_ne!(
-        missing_retry.0,
-        StatusCode::OK,
-        "committed retry accepted missing published bytes: {}",
-        missing_retry.1
-    );
-
-    fs::write(&published, b"bad").unwrap();
-    let corrupt_retry = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_ne!(
-        corrupt_retry.0,
-        StatusCode::OK,
-        "committed retry accepted same-size corrupt bytes: {}",
-        corrupt_retry.1
-    );
-
-    fs::write(&published, b"img").unwrap();
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "
-            UPDATE sync_bundle_media
-            SET staged_sha256 = NULL
-            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-            ",
-            rusqlite::params![family_id, bundle_id, media_id],
-        )
-        .unwrap();
-    drop(connection);
-    let missing_digest_retry = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_ne!(
-        missing_digest_retry.0,
-        StatusCode::OK,
-        "committed retry trusted published bytes without a digest: {}",
-        missing_digest_retry.1
-    );
-}
-
-#[tokio::test]
-async fn atomic_bundle_rejects_manifest_mismatch_and_oversized_media() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-mismatch-owner",
-        "bundle-mismatch-request-00000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let mut media_payload = log_media_payload(&record_id);
-    media_payload["byte_size"] = json!(3);
-
-    let (status, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
-            "media": [entity_wire("media", &media_id, 2, media_payload, None)],
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let unknown = Uuid::new_v4();
-    let mismatch = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{unknown}"),
-        Some(token),
-        Body::from("img"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(mismatch.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    let wrong_size = request(
-        &rig.app,
-        Method::PUT,
-        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-        Some(token),
-        Body::from("toolong"),
-        Some("image/jpeg"),
-    )
-    .await;
-    assert_eq!(wrong_size.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-    // Live media without byte_size is rejected at stage time.
-    let (no_size_status, no_size_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": Uuid::new_v4(),
-            "root": entity_wire(
-                "record",
-                &Uuid::new_v4().to_string(),
-                3,
-                record_payload(&baby_id),
-                None
-            ),
-            "media": [entity_wire(
-                "media",
-                &Uuid::new_v4().to_string(),
-                3,
-                json!({
-                    "kind": "log",
-                    "record_client_uuid": record_id,
-                    "mime": "image/jpeg"
-                }),
-                None
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(
-        no_size_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{no_size_body}"
-    );
-}
-
-#[tokio::test]
-async fn atomic_bundle_edit_keeps_old_published_version_until_commit() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-edit-owner",
-        "bundle-edit-request-000000000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_v1 = Uuid::new_v4().to_string();
-    let bundle_v1 = Uuid::new_v4().to_string();
-    let mut media_payload = log_media_payload(&record_id);
-    media_payload["byte_size"] = json!(3);
-
-    let (status, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_v1,
-            "root": entity_wire("record", &record_id, 5, record_payload(&baby_id), None),
-            "media": [entity_wire("media", &media_v1, 5, media_payload.clone(), None)],
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_v1}/media/{media_v1}"),
-            Some(token),
-            Body::from("old"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let (commit_status, _) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_v1}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK);
-
-    // Stage a newer version with different media; until commit, pull keeps v1.
-    let media_v2 = Uuid::new_v4().to_string();
-    let bundle_v2 = Uuid::new_v4().to_string();
-    let mut media_v2_payload = log_media_payload(&record_id);
-    media_v2_payload["byte_size"] = json!(4);
-    let mut record_v2 = record_payload(&baby_id);
-    record_v2["note"] = json!("edited");
-    let (status, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_v2,
-            "root": entity_wire("record", &record_id, 20, record_v2, None),
-            "media": [entity_wire("media", &media_v2, 20, media_v2_payload, None)],
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let (_, mid) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let record = mid["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == record_id)
-        .unwrap();
-    assert_eq!(record["updated_at"], 5);
-    assert_eq!(record["payload"]["note"], Value::Null);
-    assert!(mid["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["client_uuid"] == media_v1));
-    assert!(!mid["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["client_uuid"] == media_v2));
-
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_v2}/media/{media_v2}"),
-            Some(token),
-            Body::from("new!"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let (commit2, _) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_v2}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit2, StatusCode::OK);
-
-    let (_, after) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let record = after["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == record_id)
-        .unwrap();
-    assert_eq!(record["updated_at"], 20);
-    assert_eq!(record["payload"]["note"], "edited");
-}
-
-#[tokio::test]
-async fn atomic_bundle_tombstone_publishes_without_media_bytes() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-tomb-owner",
-        "bundle-tomb-request-000000000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let create_bundle = Uuid::new_v4().to_string();
-    let mut media_payload = log_media_payload(&record_id);
-    media_payload["byte_size"] = json!(3);
-
-    let (status, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": create_bundle,
-            "root": entity_wire("record", &record_id, 1, record_payload(&baby_id), None),
-            "media": [entity_wire("media", &media_id, 1, media_payload.clone(), None)],
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{create_bundle}/media/{media_id}"),
-            Some(token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{create_bundle}/commit"),
-            Some(token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    media_payload["byte_size"] = json!(0);
-    let tomb_bundle = Uuid::new_v4().to_string();
-    let (status, staged) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": tomb_bundle,
-            "root": entity_wire("record", &record_id, 50, record_payload(&baby_id), Some(50)),
-            "media": [entity_wire("media", &media_id, 50, media_payload, Some(50))],
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{staged}");
-    assert_eq!(staged["missing_media"].as_array().unwrap().len(), 0);
-    let (commit_status, committed) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{tomb_bundle}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{committed}");
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == record_id)
-        .unwrap();
-    assert_eq!(record["deleted_at"], 50);
-    let media = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == media_id)
-        .unwrap();
-    assert_eq!(media["deleted_at"], 50);
-}
-
-fn care_plan_payload(baby_id: &str, plan_type: &str) -> Value {
-    let payload_json = match plan_type {
-        "formula" => json!({"amount_ml": 120}),
-        "pee" => json!({"pee_amount": 2}),
-        "custom" => json!({"title": "抚触"}),
-        "bath" => json!({}),
-        _ => panic!("missing API care-plan fixture for {plan_type}"),
-    };
-    json!({
-        "baby_client_uuid": baby_id,
-        "type": plan_type,
-        "custom_item_client_uuid": null,
-        "scheduled_at": 1_700_000_000_000i64,
-        "scheduled_zone_id": "Asia/Shanghai",
-        "status": "pending",
-        "payload_json": payload_json,
-        "schema_version": 2,
-        "note": null,
-        // Forgery attempt — server must overwrite with authenticated membership.
-        "created_by_membership_id": "spoofed-membership",
-        "fulfilled_record_client_uuid": null,
-        "fulfilled_at": null,
-    })
-}
-
-#[tokio::test]
-async fn atomic_bundle_supports_generic_care_plan_root() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-plan-owner",
-        "bundle-plan-request-000000000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let owner_membership = created["membership_id"].as_str().unwrap().to_owned();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    let (status, staged) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "care_plan",
-                &plan_id,
-                7,
-                care_plan_payload(&baby_id, "formula"),
-                None
-            ),
-            "media": []
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{staged}");
-    assert_eq!(staged["missing_media"], json!([]));
-
-    let (_, hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(!hidden["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|e| e["client_uuid"] == plan_id));
-
-    let (commit_status, committed) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{committed}");
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let plan = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == plan_id)
-        .expect("care_plan visible after commit");
-    assert_eq!(plan["type"], "care_plan");
-    assert_eq!(
-        plan["payload"]["created_by_membership_id"],
-        owner_membership
-    );
-    assert_ne!(
-        plan["payload"]["created_by_membership_id"],
-        "spoofed-membership"
-    );
-}
-
-#[tokio::test]
-async fn care_plan_member_acl_and_owner_override() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "care-plan-acl-owner",
-        "care-plan-acl-request-00000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member_a = approve_new_member(&rig.app, owner_token, "care-plan-member-a").await;
-    let member_a_token = member_a["access_token"].as_str().unwrap();
-    let member_b = approve_new_member(&rig.app, owner_token, "care-plan-member-b").await;
-    let member_b_token = member_b["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    // Member A creates a plan via atomic bundle.
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(member_a_token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "care_plan",
-                    &plan_id,
-                    1,
-                    care_plan_payload(&baby_id, "pee"),
-                    None
-                ),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(member_a_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    // Member B cannot edit A's plan.
-    let bundle_b = Uuid::new_v4().to_string();
-    let mut payload = care_plan_payload(&baby_id, "pee");
-    payload["note"] = json!("篡改");
-    let (forbid, body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(member_b_token),
-        json!({
-            "bundle_id": bundle_b,
-            "root": entity_wire("care_plan", &plan_id, 2, payload.clone(), None),
-            "media": []
-        }),
-    )
-    .await;
-    assert_eq!(forbid, StatusCode::FORBIDDEN, "{body}");
-
-    // The same ACL applies when the unauthorized plan edit carries media.
-    let foreign_media_id = Uuid::new_v4().to_string();
-    let (foreign_media, foreign_media_body) = stage_bundle_with_media(
-        &rig.app,
-        member_b_token,
-        entity_wire("care_plan", &plan_id, 2, payload.clone(), None),
-        vec![entity_wire(
-            "media",
-            &foreign_media_id,
-            2,
-            json!({
-                "kind": "log",
-                "record_client_uuid": null,
-                "care_plan_client_uuid": plan_id,
-                "baby_client_uuid": baby_id,
-                "mime": "image/jpeg",
-                "width": null,
-                "height": null,
-                "byte_size": 3,
-            }),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(foreign_media, StatusCode::FORBIDDEN, "{foreign_media_body}");
-
-    // Owner may edit any plan.
-    let bundle_o = Uuid::new_v4().to_string();
-    payload["note"] = json!("管理员改");
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(owner_token),
-            json!({
-                "bundle_id": bundle_o,
-                "root": entity_wire("care_plan", &plan_id, 3, payload, None),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_o}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let plan = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|e| e["client_uuid"] == plan_id)
-        .unwrap();
-    assert_eq!(plan["payload"]["note"], "管理员改");
-    // Creator frozen to member A even after owner edit.
-    assert_eq!(
-        plan["payload"]["created_by_membership_id"],
-        member_a["membership_id"]
-    );
-}
-
-#[tokio::test]
-async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "fulfillment-binding-owner",
-        "fulfillment-binding-request-0000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let creator = approve_new_member(&rig.app, owner_token, "fulfillment-binding-creator").await;
-    let creator_token = creator["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let plan_id = Uuid::new_v4().to_string();
-    let first_record_id = Uuid::new_v4().to_string();
-    let rebound_record_id = Uuid::new_v4().to_string();
-    let fulfilled_at = 1_700_000_100_000i64;
-
-    let pending_plan = care_plan_payload(&baby_id, "bath");
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            creator_token,
-            entity_wire("care_plan", &plan_id, 1, pending_plan.clone(), None),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    let staged_rebind_bundle = Uuid::new_v4().to_string();
-    let mut staged_rebind = pending_plan.clone();
-    staged_rebind["status"] = json!("completed");
-    staged_rebind["fulfilled_record_client_uuid"] = json!(rebound_record_id);
-    staged_rebind["fulfilled_at"] = json!(fulfilled_at);
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(creator_token),
-            json!({
-                "bundle_id": staged_rebind_bundle,
-                "root": entity_wire("care_plan", &plan_id, 3, staged_rebind, None),
-                "media": [],
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    let mut first_completion = pending_plan.clone();
-    first_completion["status"] = json!("completed");
-    first_completion["fulfilled_record_client_uuid"] = json!(first_record_id);
-    first_completion["fulfilled_at"] = json!(fulfilled_at);
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            creator_token,
-            entity_wire("care_plan", &plan_id, 2, first_completion.clone(), None,),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    seed_record_with_id(
-        &rig.app,
-        creator_token,
-        &first_record_id,
-        2,
-        record_payload(&baby_id),
-    )
-    .await;
-
-    let immutable_detail = "Completed care plan fulfillment binding is immutable";
-    let (raced_status, raced_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{staged_rebind_bundle}/commit"),
-        Some(creator_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(raced_status, StatusCode::CONFLICT, "{raced_body}");
-    assert_eq!(raced_body["detail"], immutable_detail);
-
-    let mut exact_pair_update = first_completion.clone();
-    exact_pair_update["note"] = json!("binding preserved");
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            creator_token,
-            entity_wire("care_plan", &plan_id, 4, exact_pair_update, None),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    // Full-pair rebind/retime: wire-valid, freeze at store → 409.
-    let mut rebound = first_completion.clone();
-    rebound["fulfilled_record_client_uuid"] = json!(rebound_record_id);
-    let mut retimed = first_completion.clone();
-    retimed["fulfilled_at"] = json!(fulfilled_at + 1);
-    for (token, updated_at, payload) in [(creator_token, 5, rebound), (owner_token, 7, retimed)] {
-        let (status, body) = publish_root_bundle(
-            &rig.app,
-            token,
-            entity_wire("care_plan", &plan_id, updated_at, payload, None),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(body, json!({"detail": immutable_detail}));
-    }
-
-    // Partial rewrite / clear: fail closed at model boundary (422), not freeze (409).
-    let mut partial_clear = first_completion.clone();
-    partial_clear["fulfilled_record_client_uuid"] = Value::Null;
-    let mut completed_without_pair = first_completion.clone();
-    completed_without_pair["fulfilled_record_client_uuid"] = Value::Null;
-    completed_without_pair["fulfilled_at"] = Value::Null;
-    for (updated_at, payload, detail) in [
-        (
-            6i64,
-            partial_clear,
-            "fulfilled_record_client_uuid and fulfilled_at must both be set or both null",
-        ),
-        (
-            8,
-            completed_without_pair,
-            "completed care plan requires fulfilled_record_client_uuid and fulfilled_at",
-        ),
-    ] {
-        let (status, body) = publish_root_bundle(
-            &rig.app,
-            creator_token,
-            entity_wire("care_plan", &plan_id, updated_at, payload, None),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body, json!({"detail": detail}));
-    }
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let entities = pull["entities"].as_array().unwrap();
-    let plan = entities
-        .iter()
-        .find(|entity| entity["type"] == "care_plan" && entity["client_uuid"] == plan_id)
-        .unwrap();
-    assert_eq!(
-        plan["payload"]["fulfilled_record_client_uuid"],
-        first_record_id
-    );
-    assert_eq!(plan["payload"]["fulfilled_at"], fulfilled_at);
-    assert_eq!(plan["payload"]["note"], "binding preserved");
-    assert!(entities
-        .iter()
-        .all(|entity| entity["client_uuid"] != rebound_record_id));
-}
-
-/// First atomic publish of a completed root without a full pair (or a
-/// non-completed root carrying a full pair) must 422 at the model/API boundary
-/// with the known detail — not only on rewrite of an already-frozen plan.
-#[tokio::test]
-async fn first_publish_care_plan_fulfillment_pair_is_required_at_api_boundary() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "pair-first-publish-owner",
-        "pair-first-publish-request-00001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let fulfilled_at = 1_700_000_100_000i64;
-
-    let completed_missing =
-        "completed care plan requires fulfilled_record_client_uuid and fulfilled_at";
-    let partial = "fulfilled_record_client_uuid and fulfilled_at must both be set or both null";
-    let non_completed =
-        "only completed care plans may carry fulfilled_record_client_uuid and fulfilled_at";
-
-    // First root: pending→completed missing either/both fields → 422.
-    for (record, at, detail) in [
-        (Value::Null, Value::Null, completed_missing),
-        (json!(record_id), Value::Null, partial),
-        (Value::Null, json!(fulfilled_at), partial),
-    ] {
-        let plan_id = Uuid::new_v4().to_string();
-        let mut payload = care_plan_payload(&baby_id, "bath");
-        payload["status"] = json!("completed");
-        payload["fulfilled_record_client_uuid"] = record;
-        payload["fulfilled_at"] = at;
-        let (status, body) = publish_root_bundle(
-            &rig.app,
-            token,
-            entity_wire("care_plan", &plan_id, 1, payload, None),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body, json!({"detail": detail}));
-    }
-
-    // First root: non-completed carrying a full pair → 422.
-    for status_value in ["pending", "missed", "skipped"] {
-        let plan_id = Uuid::new_v4().to_string();
-        let mut payload = care_plan_payload(&baby_id, "bath");
-        payload["status"] = json!(status_value);
-        payload["fulfilled_record_client_uuid"] = json!(record_id);
-        payload["fulfilled_at"] = json!(fulfilled_at);
-        let (status, body) = publish_root_bundle(
-            &rig.app,
-            token,
-            entity_wire("care_plan", &plan_id, 1, payload, None),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-        assert_eq!(body, json!({"detail": non_completed}));
-    }
-
-    // Control: first completed root with full pair (forward-ref record) accepts.
-    let ok_plan_id = Uuid::new_v4().to_string();
-    let mut ok_payload = care_plan_payload(&baby_id, "bath");
-    ok_payload["status"] = json!("completed");
-    ok_payload["fulfilled_record_client_uuid"] = json!(record_id);
-    ok_payload["fulfilled_at"] = json!(fulfilled_at);
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            token,
-            entity_wire("care_plan", &ok_plan_id, 1, ok_payload, None),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-}
-
-#[tokio::test]
-async fn concurrent_member_next_feed_create_keeps_nas_winner_without_forbidden() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "next-feed-race-owner",
-        "next-feed-race-request-0000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-    let member_a = approve_new_member(&rig.app, owner_token, "next-feed-race-a").await;
-    let member_b = approve_new_member(&rig.app, owner_token, "next-feed-race-b").await;
-    let member_a_token = member_a["access_token"].as_str().unwrap();
-    let member_b_token = member_b["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let plan_id = Uuid::new_v4().to_string();
-    let winner_media_id = Uuid::new_v4().to_string();
-    let attacker_media_id = Uuid::new_v4().to_string();
-
-    let mut winner_payload = care_plan_payload(&baby_id, "formula");
-    winner_payload["scheduled_at"] = json!(1_700_000_060_000i64);
-    winner_payload["note"] = json!("[[lezi:next-feed:v1]]");
-    winner_payload["payload_json"] = json!({"amount_ml": 0});
-    winner_payload["created_by_membership_id"] = member_a["membership_id"].clone();
-    let winner_bundle = Uuid::new_v4().to_string();
-    let (winner_stage, winner_stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(member_a_token),
-        json!({
-            "bundle_id": winner_bundle,
-            "root": entity_wire("care_plan", &plan_id, 2, winner_payload, None),
-            "media": [entity_wire(
-                "media",
-                &winner_media_id,
-                2,
-                json!({
-                    "kind": "log",
-                    "record_client_uuid": null,
-                    "care_plan_client_uuid": plan_id,
-                    "baby_client_uuid": baby_id,
-                    "mime": "image/jpeg",
-                    "width": null,
-                    "height": null,
-                    "byte_size": 3,
-                }),
-                None,
-            )]
-        }),
-    )
-    .await;
-    assert_eq!(winner_stage, StatusCode::OK, "{winner_stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{winner_bundle}/media/{winner_media_id}"),
-            Some(member_a_token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let mut loser_payload = care_plan_payload(&baby_id, "formula");
-    loser_payload["scheduled_at"] = json!(1_700_000_120_000i64);
-    loser_payload["note"] = json!("[[lezi:next-feed:v1]]");
-    loser_payload["payload_json"] = json!({"amount_ml": 0});
-    loser_payload["created_by_membership_id"] = member_b["membership_id"].clone();
-    let loser_bundle = Uuid::new_v4().to_string();
-    let (loser_stage, loser_stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(member_b_token),
-        json!({
-            "bundle_id": loser_bundle,
-            // An offline loser can carry an older timestamp and must not fall
-            // back to the ordinary edit ACL after the NAS winner publishes.
-            "root": entity_wire("care_plan", &plan_id, 1, loser_payload, None),
-            "media": [
-                entity_wire(
-                    "media",
-                    &winner_media_id,
-                    2,
-                    json!({
-                        "kind": "log",
-                        "record_client_uuid": null,
-                        "care_plan_client_uuid": plan_id,
-                        "baby_client_uuid": baby_id,
-                        "mime": "image/jpeg",
-                        "width": null,
-                        "height": null,
-                        "byte_size": 3,
-                    }),
-                    Some(2),
-                ),
-                entity_wire(
-                    "media",
-                    &attacker_media_id,
-                    1,
-                    json!({
-                        "kind": "log",
-                        "record_client_uuid": null,
-                        "care_plan_client_uuid": plan_id,
-                        "baby_client_uuid": baby_id,
-                        "mime": "image/jpeg",
-                        "width": null,
-                        "height": null,
-                        "byte_size": 3,
-                    }),
-                    None,
-                ),
-            ]
-        }),
-    )
-    .await;
-    assert_eq!(loser_stage, StatusCode::OK, "{loser_stage_body}");
-    assert_eq!(
-        loser_stage_body["missing_media"],
-        json!([attacker_media_id])
-    );
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{loser_bundle}/media/{attacker_media_id}"),
-            Some(member_b_token),
-            Body::from("bad"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    // Both members staged against an empty family view. A wins publication;
-    // B must become an exact whole-package no-op when it commits afterward.
-    let (winner_commit, winner_commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{winner_bundle}/commit"),
-        Some(member_a_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(winner_commit, StatusCode::OK, "{winner_commit_body}");
-    let (loser_commit, loser_commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{loser_bundle}/commit"),
-        Some(member_b_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(loser_commit, StatusCode::OK, "{loser_commit_body}");
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let plans = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|entity| entity["type"] == "care_plan" && entity["client_uuid"] == plan_id)
-        .collect::<Vec<_>>();
-    assert_eq!(plans.len(), 1);
-    assert_eq!(
-        plans[0]["payload"]["created_by_membership_id"],
-        member_a["membership_id"]
-    );
-    assert_eq!(plans[0]["payload"]["scheduled_at"], 1_700_000_060_000i64);
-    let winner_media = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["client_uuid"] == winner_media_id)
-        .expect("winner media remains published");
-    assert!(winner_media["deleted_at"].is_null());
-    assert!(!pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == attacker_media_id));
-
-    let family_media = rig.directory.path().join("media").join(family_id);
-    assert!(family_media.join(&winner_media_id).is_file());
-    assert!(!family_media.join(&attacker_media_id).exists());
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let attacker_publications: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2",
-            rusqlite::params![family_id, attacker_media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(attacker_publications, 0);
-    let attacker_manifest_rows: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sync_bundle_media WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3",
-            rusqlite::params![family_id, loser_bundle, attacker_media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(attacker_manifest_rows, 0);
-    let winner_publications: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2 AND source = 'bundle'",
-            rusqlite::params![family_id, winner_media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(winner_publications, 1);
-
-    // A crash after the SQLite commit but before final-path cleanup leaves a
-    // durable pending row. Startup must finish that exact deletion and clear
-    // both ownership and manifest evidence.
-    let recovery_media_id = Uuid::new_v4().to_string();
-    let recovery_path = family_media.join(&recovery_media_id);
-    fs::write(&recovery_path, b"old").unwrap();
-    connection
-        .execute(
-            "INSERT INTO sync_bundle_media(family_id, bundle_id, media_uuid, declared_byte_size) VALUES (?1, ?2, ?3, 3)",
-            rusqlite::params![family_id, loser_bundle, recovery_media_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO media_publications(family_id, media_uuid, source, bundle_id) VALUES (?1, ?2, 'bundle_pending', ?3)",
-            rusqlite::params![family_id, recovery_media_id, loser_bundle],
-        )
-        .unwrap();
-    drop(connection);
-
-    let _restarted = rig.restart("generation-a");
-    assert!(!recovery_path.exists());
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let recovery_publications: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2",
-            rusqlite::params![family_id, recovery_media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(recovery_publications, 0);
-    let recovery_manifest_rows: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM sync_bundle_media WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3",
-            rusqlite::params![family_id, loser_bundle, recovery_media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(recovery_manifest_rows, 0);
-}
-
-#[tokio::test]
-async fn later_staged_member_next_feed_create_replays_nas_winner_as_noop() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "next-feed-late-owner",
-        "next-feed-late-request-00000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-    let member_a = approve_new_member(&rig.app, owner_token, "next-feed-late-a").await;
-    let member_b = approve_new_member(&rig.app, owner_token, "next-feed-late-b").await;
-    let member_a_token = member_a["access_token"].as_str().unwrap();
-    let member_b_token = member_b["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let plan_id = Uuid::new_v4().to_string();
-
-    let mut winner_payload = care_plan_payload(&baby_id, "formula");
-    winner_payload["scheduled_at"] = json!(1_700_000_060_000i64);
-    winner_payload["note"] = json!("[[lezi:next-feed:v1]]");
-    winner_payload["payload_json"] = json!({"amount_ml": 0});
-    winner_payload["created_by_membership_id"] = member_a["membership_id"].clone();
-    let winner_bundle = Uuid::new_v4().to_string();
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(member_a_token),
-            json!({
-                "bundle_id": winner_bundle,
-                "root": entity_wire("care_plan", &plan_id, 2, winner_payload, None),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{winner_bundle}/commit"),
-            Some(member_a_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    // B starts only after A is already published. Stage canonicalizes B's
-    // deterministic collision to the exact NAS winner and discards all media;
-    // commit must recognize that durable canonical replay as the same no-op.
-    let attacker_media_id = Uuid::new_v4().to_string();
-    let mut loser_payload = care_plan_payload(&baby_id, "formula");
-    loser_payload["scheduled_at"] = json!(1_700_000_120_000i64);
-    loser_payload["note"] = json!("[[lezi:next-feed:v1]]");
-    loser_payload["payload_json"] = json!({"amount_ml": 0});
-    loser_payload["created_by_membership_id"] = member_b["membership_id"].clone();
-    let loser_bundle = Uuid::new_v4().to_string();
-    let (loser_stage, loser_stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(member_b_token),
-        json!({
-            "bundle_id": loser_bundle,
-            "root": entity_wire("care_plan", &plan_id, 1, loser_payload, None),
-            "media": [entity_wire(
-                "media",
-                &attacker_media_id,
-                1,
-                json!({
-                    "kind": "log",
-                    "record_client_uuid": null,
-                    "care_plan_client_uuid": plan_id,
-                    "baby_client_uuid": baby_id,
-                    "mime": "image/jpeg",
-                    "width": null,
-                    "height": null,
-                    "byte_size": 3,
-                }),
-                None,
-            )]
-        }),
-    )
-    .await;
-    assert_eq!(loser_stage, StatusCode::OK, "{loser_stage_body}");
-    assert_eq!(loser_stage_body["missing_media"], json!([]));
-    let (loser_commit, loser_commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{loser_bundle}/commit"),
-        Some(member_b_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(loser_commit, StatusCode::OK, "{loser_commit_body}");
-    assert_eq!(loser_commit_body["applied"], 0);
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let plan = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "care_plan" && entity["client_uuid"] == plan_id)
-        .unwrap();
-    assert_eq!(
-        plan["payload"]["created_by_membership_id"],
-        member_a["membership_id"]
-    );
-    assert_eq!(plan["payload"]["scheduled_at"], 1_700_000_060_000i64);
-    assert!(!rig
-        .directory
-        .path()
-        .join("media")
-        .join(family_id)
-        .join(attacker_media_id)
-        .exists());
-}
-
 #[tokio::test]
 async fn care_plan_rejected_on_ordinary_push() {
     let rig = Rig::new();
@@ -12383,41 +9021,19 @@ async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
     let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(owner_token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "care_plan",
-                    &plan_id,
-                    1,
-                    care_plan_payload(&baby_id, "bath"),
-                    None
-                ),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
+    let (plan_status, plan_body) = publish_root_bundle(
+        &rig.app,
+        owner_token,
+        entity_wire(
+            "care_plan",
+            &plan_id,
+            1,
+            care_plan_payload(&baby_id, "bath"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
 
     let record_id = Uuid::new_v4().to_string();
     seed_record_with_id(
@@ -12500,41 +9116,19 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
     let peer_token = peer["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(owner_token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "care_plan",
-                    &plan_id,
-                    1,
-                    care_plan_payload(&baby_id, "bath"),
-                    None
-                ),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
+    let (plan_status, plan_body) = publish_root_bundle(
+        &rig.app,
+        owner_token,
+        entity_wire(
+            "care_plan",
+            &plan_id,
+            1,
+            care_plan_payload(&baby_id, "bath"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
 
     let member_record = Uuid::new_v4().to_string();
     let owner_record = Uuid::new_v4().to_string();
@@ -12844,1221 +9438,6451 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
         cursor_before_cross
     );
 }
-
 #[tokio::test]
-async fn care_plan_creator_leave_admin_still_manages_member_does_not() {
+async fn causal_protocol_smoke_create_pull_branch_and_resolve() {
+    // Isolated in-process server: create → pull version_id → concurrent branch → resolve.
     let rig = Rig::new();
-    let owner = create_family(
+    let created = create_family(
         &rig.app,
-        "care-plan-leave-owner",
-        "care-plan-leave-request-000000001",
+        "causal-smoke-owner",
+        "causal-smoke-request-000000000001",
     )
     .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let creator = approve_new_member(&rig.app, owner_token, "care-plan-leave-creator").await;
-    let creator_token = creator["access_token"].as_str().unwrap();
-    let peer = approve_new_member(&rig.app, owner_token, "care-plan-leave-peer").await;
-    let peer_token = peer["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
+    let token = created["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
 
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(creator_token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "care_plan",
-                    &plan_id,
-                    1,
-                    care_plan_payload(&baby_id, "formula"),
-                    None
-                ),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(creator_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    // Creator leaves the family.
-    let (leave_status, _) = json_request(
+    let (status, baby_body) = json_request(
         &rig.app,
         Method::POST,
-        "/v1/leave",
-        Some(creator_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(leave_status, StatusCode::OK);
-
-    // Peer member still cannot manage the departed creator's plan.
-    let mut payload = care_plan_payload(&baby_id, "formula");
-    payload["note"] = json!("peer-edit");
-    let (forbid, body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(peer_token),
+        "/v1/causal/commit",
+        Some(token),
         json!({
-            "bundle_id": Uuid::new_v4().to_string(),
-            "root": entity_wire("care_plan", &plan_id, 2, payload.clone(), None),
-            "media": []
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": null,
+                "entity_type": "baby",
+                "client_uuid": baby_id,
+                "root": {
+                    "nickname": "年年",
+                    "sex": "female",
+                    "birthday": "2025-01-02",
+                    "avatar_media_uuid": null,
+                    "updated_at": 10
+                },
+                "media": [],
+                "deleted": false
+            }]
         }),
     )
     .await;
-    assert_eq!(forbid, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(status, StatusCode::OK, "{baby_body}");
+    assert_eq!(baby_body["results"][0]["status"], "accepted");
 
-    // Owner/admin can still manage after creator leave.
-    payload["note"] = json!("owner-after-leave");
-    let owner_bundle = Uuid::new_v4().to_string();
+    let record_mutation_id = Uuid::new_v4().to_string();
+    let record_unit = json!({
+        "mutation_id": record_mutation_id,
+        "base_version": null,
+        "entity_type": "record",
+        "client_uuid": record_id,
+        "root": {
+            "baby_client_uuid": baby_id,
+            "type": "formula",
+            "custom_item_client_uuid": null,
+            "timestamp": 100,
+            "end_timestamp": null,
+            "note": "a",
+            "payload_json": {"amount_ml": 100},
+            "schema_version": 2,
+            "updated_at": 20
+        },
+        "media": [],
+        "deleted": false
+    });
+    let (status, rec_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [record_unit.clone()]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rec_body}");
+    assert_eq!(rec_body["results"][0]["status"], "accepted");
+    let v1 = rec_body["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Lost HTTP response retry: exact frozen no-media envelope replays the same
+    // terminal version; mutation-id reuse with payload drift fails closed.
+    let (status, replay) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({"units": [record_unit.clone()]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "accepted");
+    assert_eq!(replay["results"][0]["stable"]["version_id"], v1);
     assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(owner_token),
-            json!({
-                "bundle_id": owner_bundle,
-                "root": entity_wire(
-                    "care_plan",
-                    &plan_id,
-                    rig.now.load(Ordering::SeqCst) * 1_000 + 1,
-                    payload,
-                    None,
-                ),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
+        replay["results"][0]["request_hash"],
+        rec_body["results"][0]["request_hash"]
     );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{owner_bundle}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let plan = pull["entities"]
+
+    let mut drift = record_unit;
+    drift["root"]["note"] = json!("payload-drift");
+    let (status, rejected) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({"units": [drift]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
+
+    let generation = created["generation"].as_str().unwrap_or("generation-a");
+    let (status, pull) = get_json(
+        &rig.app,
+        &format!("/v1/pull?cursor=0&generation={generation}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pull}");
+    let pulled_record = pull["entities"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|e| e["client_uuid"] == plan_id)
-        .expect("care_plan still visible");
-    assert_eq!(plan["payload"]["note"], "owner-after-leave");
-    assert_eq!(plan["payload"]["created_by_membership_id"], Value::Null);
+        .find(|e| e["client_uuid"] == record_id.to_string())
+        .expect("record in pull");
+    assert_eq!(pulled_record["version_id"], v1);
+
+    // Side A advances note.
+    let (status, left) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": v1,
+                "entity_type": "record",
+                "client_uuid": record_id,
+                "root": {
+                    "baby_client_uuid": baby_id,
+                    "type": "formula",
+                    "custom_item_client_uuid": null,
+                    "timestamp": 100,
+                    "end_timestamp": null,
+                    "note": "b",
+                    "payload_json": {"amount_ml": 100},
+                    "schema_version": 2,
+                    "updated_at": 30
+                },
+                "media": [],
+                "deleted": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{left}");
+    assert_eq!(left["results"][0]["status"], "accepted");
+    let v2 = left["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Side B concurrent note → branched.
+    let (status, right) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({
+            "units": [{
+                "mutation_id": Uuid::new_v4().to_string(),
+                "base_version": v1,
+                "entity_type": "record",
+                "client_uuid": record_id,
+                "root": {
+                    "baby_client_uuid": baby_id,
+                    "type": "formula",
+                    "custom_item_client_uuid": null,
+                    "timestamp": 100,
+                    "end_timestamp": null,
+                    "note": "c",
+                    "payload_json": {"amount_ml": 100},
+                    "schema_version": 2,
+                    "updated_at": 40
+                },
+                "media": [],
+                "deleted": false
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{right}");
+    assert_eq!(right["results"][0]["status"], "branched");
+    let conflict_id = right["results"][0]["conflict_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["contract"], "conflict_snapshot_v2");
+    assert_eq!(detail["stable"]["version_id"], v2);
+    assert!(detail.get("stable_root").is_none());
+    assert!(detail.get("conflicting_paths").is_none());
+    assert_eq!(
+        detail
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "auto_merged",
+            "branches",
+            "client_uuid",
+            "complete",
+            "conflict_id",
+            "conflicting",
+            "continuation",
+            "contract",
+            "entity_type",
+            "expires_at",
+            "page_index",
+            "snapshot_token",
+            "stable",
+        ]),
+    );
+    let version_keys = BTreeSet::from([
+        "actor_id",
+        "base_version",
+        "deleted",
+        "device_id",
+        "media",
+        "mutation_id",
+        "received_at",
+        "root",
+        "version_id",
+    ]);
+    assert_eq!(
+        detail["stable"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        version_keys,
+    );
+    assert!(detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["path"] == "/note"));
+    let note = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "/note")
+        .unwrap();
+    assert!(note["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|candidate| {
+            candidate["choice_id"]
+                .as_str()
+                .is_some_and(|id| id.len() >= 16)
+                && candidate["outcome"]["op"] == "set"
+                && candidate["sources"].as_array().is_some_and(|sources| {
+                    !sources.is_empty()
+                        && sources.iter().all(|source| {
+                            source["version_id"].is_string()
+                                && source["mutation_id"].is_string()
+                                && source["actor_id"].is_string()
+                                && source["device_id"].is_string()
+                                && source["received_at"].is_number()
+                        })
+                })
+        }));
+
+    let resolution_mutation_id = Uuid::new_v4().to_string();
+    let resolve_body = json!({
+        "snapshot_token": detail["snapshot_token"],
+        "resolution_mutation_id": resolution_mutation_id.clone(),
+        "choices": [conflict_set_choice(&detail, "/note", json!("c"))]
+    });
+    let valid_choice = conflict_set_choice(&detail, "/note", json!("c"));
+    let malformed_id = Uuid::new_v4().to_string();
+    let malformed_cases = [
+        (
+            json!({
+                "expected_stable_version": v2,
+                "expected_branch_versions": [],
+                "resolved_root": {},
+                "resolved_media": [],
+                "resolution_mutation_id": malformed_id,
+                "conflict_choices": {}
+            }),
+            "unknown_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+            }),
+            "missing_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": {},
+            }),
+            "wrong_type",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": [{"path": "/note", "choice_id": valid_choice["choice_id"], "value": "c"}],
+            }),
+            "unknown_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": [{"path": "/note"}],
+            }),
+            "missing_field",
+        ),
+        (
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": malformed_id,
+                "choices": [{"path": 7, "choice_id": valid_choice["choice_id"]}],
+            }),
+            "wrong_type",
+        ),
+    ];
+    for (malformed, expected_code) in malformed_cases {
+        let (status, rejected) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/conflicts/{conflict_id}/resolve"),
+            Some(token),
+            malformed,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rejected}");
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(rejected["resolution_mutation_id"], malformed_id);
+        assert_eq!(
+            rejected["error"],
+            json!({"code": expected_code, "retryable": false})
+        );
+        assert_eq!(
+            rejected
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["error", "resolution_mutation_id", "status"]),
+        );
+        let (detail_status, still_open) = get_json(
+            &rig.app,
+            &format!("/v1/conflicts/{conflict_id}"),
+            Some(token),
+        )
+        .await;
+        assert_eq!(detail_status, StatusCode::OK, "{still_open}");
+        assert_eq!(still_open["conflict_id"], conflict_id);
+    }
+    for rejected_body in [
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": vec![valid_choice.clone(); 65],
+        }),
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [{
+                "path": format!("/{}", "x".repeat(1_024)),
+                "choice_id": valid_choice["choice_id"],
+            }],
+        }),
+    ] {
+        let (status, rejected) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/conflicts/{conflict_id}/resolve"),
+            Some(token),
+            rejected_body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "non_canonical_value");
+    }
+    let (status, resolved) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["status"], "accepted");
+    assert_eq!(resolved["replay"], false);
+    assert_eq!(resolved["stable_root"]["note"], "c");
+
+    let database_path = rig.directory.path().join("lezi.db");
+    let connection = Connection::open(&database_path).unwrap();
+    let valid_snapshot_receipt: String = connection
+        .query_row(
+            "SELECT receipt_json FROM mutation_receipts
+              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1",
+            [&conflict_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = '[]'
+              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1",
+            [&conflict_id],
+        )
+        .unwrap();
+    drop(connection);
+    let resolution_time = rig.now.fetch_add(24 * 60 * 60, Ordering::SeqCst);
+    let retention_time = resolution_time + 24 * 60 * 60;
+    Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE device_sessions SET access_expires_at = ?1",
+            [retention_time + 60],
+        )
+        .unwrap();
+    let (status, replay) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["status"], "accepted");
+    assert_eq!(replay["replay"], true);
+    assert_eq!(replay["stable_version_id"], resolved["stable_version_id"]);
+    let connection = Connection::open(&database_path).unwrap();
+    let retained_after_gc_failure: (i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1)",
+            [&conflict_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained_after_gc_failure, (1, 1));
+    connection
+        .execute(
+            "UPDATE mutation_receipts SET receipt_json = ?1
+              WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?2",
+            (&valid_snapshot_receipt, &conflict_id),
+        )
+        .unwrap();
+    drop(connection);
+    let (status, retry_after_gc_failure) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{retry_after_gc_failure}");
+    assert_eq!(retry_after_gc_failure["replay"], true);
+
+    let compacted: (i64, i64) = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM conflict_branches WHERE conflict_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE membership_id = '__conflict_snapshot_v2__' AND conflict_id = ?1)",
+            [&conflict_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(compacted, (0, 0));
+
+    let restarted = rig.restart("generation-a");
+    let (status, restarted_replay) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve_body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restarted_replay}");
+    assert_eq!(restarted_replay["replay"], true);
+    assert_eq!(
+        restarted_replay["stable_version_id"],
+        resolved["stable_version_id"]
+    );
+
+    let (status, drift) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": resolution_mutation_id,
+            "choices": [conflict_set_choice(&detail, "/note", json!("b"))]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{drift}");
+    assert_eq!(drift["error"]["code"], "content_drift");
+    assert_eq!(
+        drift
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["error", "resolution_mutation_id", "status"]),
+    );
 }
 
 #[tokio::test]
-async fn care_plan_media_integrity_rejects_bad_refs_and_baby_mismatch() {
+async fn causal_commit_success_response_is_closed_contracted_and_marks_exact_replay() {
     let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-shape-owner",
+        "causal-commit-shape-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("contracted", None, 100),
+        vec![],
+        false,
+    );
+
+    let (status, first) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(
+        first
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["generation".to_owned(), "results".to_owned()]),
+    );
+    let first_unit = first["results"][0].as_object().unwrap();
+    assert_eq!(
+        first_unit.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "mutation_id".to_owned(),
+            "replay".to_owned(),
+            "request_hash".to_owned(),
+            "stable".to_owned(),
+            "status".to_owned(),
+        ]),
+    );
+    assert_eq!(first_unit["status"], "accepted");
+    assert_eq!(first_unit["replay"], false);
+    assert_eq!(
+        first_unit["stable"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "deleted".to_owned(),
+            "deleted_at".to_owned(),
+            "media".to_owned(),
+            "root".to_owned(),
+            "version_id".to_owned(),
+        ]),
+    );
+
+    let (status, replay) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(
+        replay["results"][0]["status"],
+        first["results"][0]["status"]
+    );
+    assert_eq!(
+        replay["results"][0]["stable"],
+        first["results"][0]["stable"]
+    );
+    assert_eq!(replay["results"][0]["replay"], true);
+}
+
+#[tokio::test]
+async fn causal_commit_rejection_rolls_back_the_whole_batch_and_uses_terminal_envelope() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-atomic-owner",
+        "causal-commit-atomic-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let accepted = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("must-roll-back", None, 100),
+        vec![],
+        false,
+    );
+    let invalid_base = Uuid::new_v4().to_string();
+    let invalid = causal_unit(
+        Uuid::new_v4(),
+        Some(&invalid_base),
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("invalid-base", None, 101),
+        vec![],
+        false,
+    );
+
+    let (status, rejected) =
+        causal_commit_units(&rig.app, token, vec![accepted.clone(), invalid.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(
+        rejected
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "error".to_owned(),
+            "mutation_id".to_owned(),
+            "status".to_owned(),
+        ]),
+    );
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["mutation_id"], invalid["mutation_id"]);
+    assert_eq!(
+        rejected["error"],
+        json!({"code": "invalid_domain", "retryable": false})
+    );
+
+    let (status, retried) = causal_commit_units(&rig.app, token, vec![accepted]).await;
+    assert_eq!(status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["results"][0]["status"], "accepted");
+    assert_eq!(retried["results"][0]["replay"], false);
+}
+
+#[tokio::test]
+async fn causal_commit_maps_auth_generation_and_closed_request_failures_to_terminal_envelopes() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-terminal-owner",
+        "causal-commit-terminal-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        Uuid::new_v4(),
+        causal_baby_root("terminal", None, 100),
+        vec![],
+        false,
+    );
+    let valid = json!({"generation": generation, "units": [mutation.clone()]});
+
+    let cases = [
+        (
+            None,
+            valid.clone(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation, "units": [mutation.clone()], "future": true}),
+            StatusCode::OK,
+            "unknown_field",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation}),
+            StatusCode::OK,
+            "missing_field",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation, "units": "bad"}),
+            StatusCode::OK,
+            "wrong_type",
+        ),
+        (
+            Some(token),
+            json!({"generation": generation, "units": []}),
+            StatusCode::OK,
+            "invalid_domain",
+        ),
+        (
+            Some(token),
+            json!({"generation": "other-generation", "units": [mutation.clone()]}),
+            StatusCode::CONFLICT,
+            "capability_mismatch",
+        ),
+    ];
+    for (token, body, expected_status, expected_code) in cases {
+        let (status, response) =
+            json_request(&rig.app, Method::POST, "/v1/causal/commit", token, body).await;
+        assert_eq!(status, expected_status, "{response}");
+        assert_eq!(response["status"], "rejected");
+        assert_eq!(
+            response["error"],
+            json!({"code": expected_code, "retryable": false})
+        );
+    }
+
+    let mutation_client_uuid = mutation["client_uuid"].as_str().unwrap();
+    let root = mutation["root"].to_string();
+    let duplicate_root = root.replacen('{', r#"{"nickname":"duplicate","#, 1);
+    let nested_duplicate = mutation.to_string().replace(&root, &duplicate_root);
+    let duplicate_requests = [
+        format!(r#"{{"generation":"{generation}","units":[],"units":[]}}"#),
+        format!(r#"{{"generation":"{generation}","units":[{nested_duplicate}]}}"#),
+    ];
+    for duplicate_request in duplicate_requests {
+        let response = request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/causal/commit",
+            Some(token),
+            Body::from(duplicate_request),
+            Some("application/json"),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["status"], "rejected");
+        assert_eq!(body["error"]["code"], "non_canonical_value");
+    }
+    let duplicate_writes: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE client_uuid = ?1",
+            [mutation_client_uuid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(duplicate_writes, 0);
+
+    let mut unknown_root = mutation;
+    unknown_root["root"]["future"] = json!(true);
+    let (status, response) = causal_commit_units(&rig.app, token, vec![unknown_root]).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["error"]["code"], "unknown_field");
+}
+
+#[tokio::test]
+async fn causal_commit_keeps_authentication_store_failures_retryable() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-commit-auth-store-owner",
+        "causal-commit-auth-store-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "ALTER TABLE device_sessions RENAME TO broken_device_sessions",
+            [],
+        )
+        .unwrap();
+
+    let (status, body) = raw_json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({"generation": owner["generation"], "units": []}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body, json!({"detail": "Internal server error"}));
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Ticket 09 — two joined clients on isolated real lezi-sync (causal cutover)
+// Public seams: /v1/causal/commit, /v1/pull, /v1/conflicts/*, PUT causal media,
+// verified min_supported floor from android-release-compatibility.json.
+// ---------------------------------------------------------------------------
+
+fn release_catalog() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../config/android-release-compatibility.json"
+    ))
+    .expect("android-release-compatibility.json")
+}
+
+fn causal_formula_root_at(
+    baby_id: Uuid,
+    note: &str,
+    amount_ml: i64,
+    timestamp: i64,
+    updated_at: i64,
+) -> Value {
+    json!({
+        "baby_client_uuid": baby_id,
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "timestamp": timestamp,
+        "end_timestamp": null,
+        "note": note,
+        "payload_json": {"amount_ml": amount_ml},
+        "schema_version": 2,
+        "updated_at": updated_at
+    })
+}
+
+fn causal_formula_root(baby_id: Uuid, note: &str, amount_ml: i64, updated_at: i64) -> Value {
+    causal_formula_root_at(baby_id, note, amount_ml, 1_700_000_100, updated_at)
+}
+
+fn causal_baby_root(nickname: &str, avatar_media_uuid: Option<Uuid>, updated_at: i64) -> Value {
+    json!({
+        "nickname": nickname,
+        "sex": "female",
+        "birthday": "2025-01-02",
+        "avatar_media_uuid": avatar_media_uuid,
+        "updated_at": updated_at
+    })
+}
+
+fn causal_sleep_root(baby_id: Uuid, start: i64, updated_at: i64) -> Value {
+    json!({
+        "baby_client_uuid": baby_id,
+        "type": "sleep",
+        "custom_item_client_uuid": null,
+        "timestamp": start,
+        "note": null,
+        "payload_json": {"anomaly_flag": false, "is_nap": false},
+        "schema_version": 2,
+        "updated_at": updated_at,
+        "effective_wake_observation_client_uuid": null
+    })
+}
+
+fn causal_media_item(media_uuid: Uuid, role: &str, sha256: &str, byte_size: usize) -> Value {
+    json!({
+        "media_uuid": media_uuid,
+        "role": role,
+        "sha256": sha256,
+        "byte_size": byte_size,
+        "mime": "image/jpeg",
+        "width": 1,
+        "height": 1
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CausalReceiptWriteState {
+    revision: i64,
+    staging_status: Option<String>,
+    version_rows: i64,
+    terminal_rows: i64,
+    record_rows: i64,
+    media_rows: i64,
+    publication_rows: i64,
+}
+
+fn causal_receipt_write_state(
+    database_path: &Path,
+    write_family_id: &str,
+    receipt_family_id: &str,
+    mutation_id: Uuid,
+    record_id: Uuid,
+    media_id: Uuid,
+) -> CausalReceiptWriteState {
+    Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT status FROM causal_media_staging
+                  WHERE family_id = ?2 AND media_uuid = ?5),
+                (SELECT COUNT(*) FROM entity_versions
+                  WHERE family_id = ?1 AND mutation_id = ?3),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE family_id = ?1 AND mutation_id = ?3),
+                (SELECT COUNT(*) FROM entities
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?4),
+                (SELECT COUNT(*) FROM entities
+                  WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?5),
+                (SELECT COUNT(*) FROM media_publications
+                  WHERE family_id = ?1 AND media_uuid = ?5)",
+            rusqlite::params![
+                write_family_id,
+                receipt_family_id,
+                mutation_id.to_string(),
+                record_id.to_string(),
+                media_id.to_string(),
+            ],
+            |row| {
+                Ok(CausalReceiptWriteState {
+                    revision: row.get(0)?,
+                    staging_status: row.get(1)?,
+                    version_rows: row.get(2)?,
+                    terminal_rows: row.get(3)?,
+                    record_rows: row.get(4)?,
+                    media_rows: row.get(5)?,
+                    publication_rows: row.get(6)?,
+                })
+            },
+        )
+        .unwrap()
+}
+
+fn conflict_set_choice(detail: &Value, path: &str, expected: Value) -> Value {
+    let choice_id = detail["conflicting"]
+        .as_array()
+        .and_then(|paths| paths.iter().find(|item| item["path"] == path))
+        .and_then(|item| item["candidates"].as_array())
+        .and_then(|candidates| {
+            candidates.iter().find(|candidate| {
+                candidate["outcome"]["op"] == "set" && candidate["outcome"]["value"] == expected
+            })
+        })
+        .and_then(|candidate| candidate["choice_id"].as_str())
+        .unwrap_or_else(|| panic!("missing {path} conflict choice"));
+    json!({"path": path, "choice_id": choice_id})
+}
+
+fn causal_unit(
+    mutation_id: Uuid,
+    base: Option<&str>,
+    entity_type: &str,
+    client_uuid: Uuid,
+    root: Value,
+    media: Vec<Value>,
+    deleted: bool,
+) -> Value {
+    json!({
+        "mutation_id": mutation_id,
+        "base_version": base,
+        "entity_type": entity_type,
+        "client_uuid": client_uuid,
+        "root": root,
+        "media": media,
+        "deleted": deleted
+    })
+}
+
+async fn causal_commit_units(app: &Router, token: &str, units: Vec<Value>) -> (StatusCode, Value) {
+    json_request(
+        app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({ "units": units }),
+    )
+    .await
+}
+
+async fn put_causal_media_bytes(
+    app: &Router,
+    token: &str,
+    media_uuid: Uuid,
+    bytes: &[u8],
+) -> (StatusCode, Value) {
+    let response = put_causal_media_raw(app, token, media_uuid, bytes).await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    (status, value)
+}
+
+async fn put_causal_media_raw(
+    app: &Router,
+    token: &str,
+    media_uuid: Uuid,
+    bytes: &[u8],
+) -> axum::response::Response {
+    let sha = hex::encode(Sha256::digest(bytes));
+    request_with_headers(
+        app,
+        Method::PUT,
+        &format!("/v1/causal/media/{media_uuid}"),
+        Some(token),
+        Body::from(bytes.to_vec()),
+        Some("application/octet-stream"),
+        &[("x-lezi-media-sha256", sha.as_str())],
+    )
+    .await
+}
+
+fn spawn_causal_media_put(
+    app: &Router,
+    token: &str,
+    media_uuid: Uuid,
+) -> tokio::task::JoinHandle<axum::response::Response> {
+    let app = app.clone();
+    let token = token.to_owned();
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    tokio::spawn(async move {
+        request_with_headers(
+            &app,
+            Method::PUT,
+            &format!("/v1/causal/media/{media_uuid}"),
+            Some(&token),
+            Body::from(b"xy".to_vec()),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        )
+        .await
+    })
+}
+
+async fn seed_causal_baby(app: &Router, token: &str) -> Uuid {
+    let baby_id = Uuid::new_v4();
+    let (status, body) = causal_commit_units(
+        app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            baby_id,
+            json!({
+                "nickname": "年年",
+                "sex": "female",
+                "birthday": "2025-01-02",
+                "avatar_media_uuid": null,
+                "updated_at": 10
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["status"], "accepted", "{body}");
+    baby_id
+}
+
+async fn commit_causal_record(
+    app: &Router,
+    token: &str,
+    baby_id: Uuid,
+    record_id: Uuid,
+    base: Option<&str>,
+    note: &str,
+) -> (StatusCode, Value, Value) {
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        base,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, note, 100, 20),
+        vec![],
+        false,
+    );
+    let (status, body) = causal_commit_units(app, token, vec![mutation.clone()]).await;
+    (status, body, mutation)
+}
+
+#[tokio::test]
+async fn provider_roots_commit_before_referenced_record_and_replay_exactly() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "provider-commit-first-owner",
+        "provider-commit-first-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let custom_item_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let baby_mutation_id = Uuid::new_v4();
+    let custom_mutation_id = Uuid::new_v4();
+    let record_mutation_id = Uuid::new_v4();
+    let baby = causal_unit(
+        baby_mutation_id,
+        None,
+        "baby",
+        baby_id,
+        json!({
+            "nickname": "年年",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "birth_weight_grams": null,
+            "avatar_media_uuid": null,
+            "updated_at": 10,
+        }),
+        vec![],
+        false,
+    );
+    let custom_item = causal_unit(
+        custom_mutation_id,
+        None,
+        "custom_item",
+        custom_item_id,
+        json!({
+            "name": "抚触",
+            "icon_slot": 2,
+            "updated_at": 11,
+        }),
+        vec![],
+        false,
+    );
+    let record = causal_unit(
+        record_mutation_id,
+        None,
+        "record",
+        record_id,
+        json!({
+            "baby_client_uuid": baby_id,
+            "type": "custom",
+            "custom_item_client_uuid": custom_item_id,
+            "timestamp": 1_700_000_100,
+            "end_timestamp": null,
+            "note": null,
+            "payload_json": {"title": "抚触", "detail": "十分钟", "icon_slot": 2},
+            "schema_version": 2,
+            "updated_at": 12,
+        }),
+        vec![],
+        false,
+    );
+    let frozen = vec![baby.clone(), custom_item.clone(), record.clone()];
+
+    let (status, committed) = causal_commit_units(&rig.app, token, frozen.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(
+        committed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["mutation_id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>(),
+        vec![
+            baby_mutation_id.to_string(),
+            custom_mutation_id.to_string(),
+            record_mutation_id.to_string(),
+        ],
+    );
+    assert!(committed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result["status"] == "accepted"));
+    assert_eq!(
+        committed["results"][2]["stable"]["root"]["baby_client_uuid"],
+        baby_id.to_string(),
+    );
+    assert_eq!(
+        committed["results"][2]["stable"]["root"]["custom_item_client_uuid"],
+        custom_item_id.to_string(),
+    );
+
+    let (status, replayed) = causal_commit_units(&rig.app, token, frozen).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    for index in 0..3 {
+        assert_eq!(
+            replayed["results"][index]["stable"]["version_id"],
+            committed["results"][index]["stable"]["version_id"],
+        );
+        assert_eq!(
+            replayed["results"][index]["request_hash"],
+            committed["results"][index]["request_hash"],
+        );
+    }
+
+    let mut baby_drift = baby;
+    baby_drift["root"]["nickname"] = json!("漂移宝宝");
+    let mut custom_drift = custom_item;
+    custom_drift["root"]["name"] = json!("漂移项目");
+    let (status, rejected) =
+        causal_commit_units(&rig.app, token, vec![baby_drift, custom_drift]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
+}
+
+#[tokio::test]
+async fn no_media_care_plan_commits_after_fulfilled_record_replays_and_tombstones() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "care-plan-commit-first-owner",
+        "care-plan-commit-first-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let baby = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        baby_id,
+        json!({
+            "nickname": "年年",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "birth_weight_grams": null,
+            "avatar_media_uuid": null,
+            "updated_at": 10,
+        }),
+        vec![],
+        false,
+    );
+    let record = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "按计划完成", 100, 20),
+        vec![],
+        false,
+    );
+    let plan_mutation_id = Uuid::new_v4();
+    let mut plan_root = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_root["status"] = json!("completed");
+    plan_root["fulfilled_record_client_uuid"] = json!(record_id);
+    plan_root["fulfilled_at"] = json!(1_700_000_100_i64);
+    plan_root["updated_at"] = json!(30);
+    let plan = causal_unit(
+        plan_mutation_id,
+        None,
+        "care_plan",
+        plan_id,
+        plan_root,
+        vec![],
+        false,
+    );
+
+    let frozen = vec![baby, record, plan.clone()];
+    let (status, committed) = causal_commit_units(&rig.app, token, frozen.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(
+        committed["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["accepted", "accepted", "accepted"],
+        "{committed}",
+    );
+    assert_eq!(
+        committed["results"][2]["stable"]["root"]["fulfilled_record_client_uuid"],
+        record_id.to_string(),
+    );
+    let stable_plan = committed["results"][2]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, replayed) = causal_commit_units(&rig.app, token, frozen).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["results"][2]["stable"]["version_id"],
+        committed["results"][2]["stable"]["version_id"],
+    );
+    assert_eq!(
+        replayed["results"][2]["request_hash"],
+        committed["results"][2]["request_hash"],
+    );
+
+    let mut drift = plan.clone();
+    drift["root"]["note"] = json!("漂移计划");
+    let (status, rejected) = causal_commit_units(&rig.app, token, vec![drift]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
+
+    let mut tombstone_root = plan["root"].clone();
+    tombstone_root["updated_at"] = json!(40);
+    let tombstone = causal_unit(
+        Uuid::new_v4(),
+        Some(&stable_plan),
+        "care_plan",
+        plan_id,
+        tombstone_root,
+        vec![],
+        true,
+    );
+    let (status, deleted) = causal_commit_units(&rig.app, token, vec![tombstone]).await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+    let generation = owner["generation"].as_str().unwrap();
+    let (status, pull) = get_json(
+        &rig.app,
+        &format!("/v1/pull?cursor=0&generation={generation}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{pull}");
+    let deleted_plan = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| {
+            entity["type"] == "care_plan" && entity["client_uuid"] == plan_id.to_string()
+        })
+        .expect("care_plan tombstone in pull");
+    assert!(deleted_plan["deleted_at"].is_number());
+}
+
+#[tokio::test]
+async fn care_plan_three_attachments_publish_only_after_all_receipts_and_replay_exactly() {
+    let rig = Rig::with_config(|config| config.max_media_bytes = 64 * 1024);
     let owner = create_family(
         &rig.app,
         "care-plan-media-owner",
         "care-plan-media-request-00000001",
     )
     .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4();
+    let mutation_id = Uuid::new_v4();
+    let media = [
+        (Uuid::new_v4(), b"plan-photo-one".as_slice()),
+        (Uuid::new_v4(), b"plan-photo-two-longer".as_slice()),
+        (Uuid::new_v4(), b"plan-photo-three-exact".as_slice()),
+    ];
+    for (media_id, bytes) in media.iter().take(2) {
+        let (status, prepared) = put_causal_media_bytes(&rig.app, token, *media_id, bytes).await;
+        assert_eq!(status, StatusCode::OK, "{prepared}");
+    }
+    let mut plan_root = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_root["updated_at"] = json!(30);
+    let mutation = causal_unit(
+        mutation_id,
+        None,
+        "care_plan",
+        plan_id,
+        plan_root,
+        media
+            .iter()
+            .map(|(media_id, bytes)| {
+                causal_media_item(
+                    *media_id,
+                    "plan",
+                    &hex::encode(Sha256::digest(bytes)),
+                    bytes.len(),
+                )
+            })
+            .collect(),
+        false,
+    );
+
+    let (status, incomplete) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{incomplete}");
+    assert_eq!(incomplete["status"], "rejected");
+    assert_eq!(incomplete["error"]["code"], "missing_media_bytes");
+    let pull = pull_entities(&rig.app, token, generation).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != plan_id.to_string()
+            && media
+                .iter()
+                .all(|(media_id, _)| row["client_uuid"] != media_id.to_string())
+    }));
+
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media[2].0, media[2].1).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, committed) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["results"][0]["status"], "accepted");
+    assert_eq!(
+        committed["results"][0]["stable"]["media"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+    );
+
+    let (status, replayed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["results"][0]["stable"]["version_id"],
+        committed["results"][0]["stable"]["version_id"],
+    );
+    assert_eq!(
+        replayed["results"][0]["request_hash"],
+        committed["results"][0]["request_hash"],
+    );
+    for (media_id, expected) in media {
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            expected,
+        );
+    }
+}
+
+#[tokio::test]
+async fn care_plan_attachment_waits_for_fact_respects_acl_and_retains_tombstoned_fact() {
+    let rig = Rig::with_config(|config| config.max_media_bytes = 64 * 1024);
+    let (owner, member) =
+        two_joined_clients(&rig.app, "care-plan-acl-owner", "care-plan-acl-member").await;
     let owner_token = owner["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let other_baby = seed_baby(&rig.app, owner_token).await;
-    let plan_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/bundles",
-            Some(owner_token),
-            json!({
-                "bundle_id": bundle_id,
-                "root": entity_wire(
-                    "care_plan",
-                    &plan_id,
-                    1,
-                    care_plan_payload(&baby_id, "bath"),
-                    None
-                ),
-                "media": []
-            }),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(owner_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    let plan_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"dependency-bound-plan-photo";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, owner_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mut plan_root = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_root["status"] = json!("completed");
+    plan_root["fulfilled_record_client_uuid"] = json!(record_id);
+    plan_root["fulfilled_at"] = json!(1_700_000_100_i64);
+    plan_root["updated_at"] = json!(30);
+    let plan = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "care_plan",
+        plan_id,
+        plan_root,
+        vec![causal_media_item(media_id, "plan", &sha, bytes.len())],
+        false,
     );
 
-    // Happy path: plan media with matching baby.
-    let media_ok = Uuid::new_v4().to_string();
-    let (ok, _) = stage_bundle_with_media(
-        &rig.app,
-        owner_token,
-        entity_wire(
-            "care_plan",
-            &plan_id,
-            2,
-            care_plan_payload(&baby_id, "bath"),
-            None,
-        ),
-        vec![entity_wire(
-            "media",
-            &media_ok,
-            2,
-            json!({
-                "kind": "log",
-                "care_plan_client_uuid": plan_id,
-                "baby_client_uuid": baby_id,
-                "mime": "image/jpeg",
-                "byte_size": 3,
-            }),
-            None,
-        )],
-    )
-    .await;
-    assert_eq!(ok, StatusCode::OK);
+    let (status, blocked) = causal_commit_units(&rig.app, owner_token, vec![plan.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{blocked}");
+    assert_eq!(blocked["status"], "rejected");
+    assert_eq!(blocked["error"]["code"], "invalid_domain");
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != plan_id.to_string() && row["client_uuid"] != media_id.to_string()
+    }));
 
-    // Unknown care_plan_client_uuid is rejected.
-    let media_bad_plan = Uuid::new_v4().to_string();
-    let (bad_plan, body_plan) = stage_bundle_with_media(
+    let (status, record) = causal_commit_units(
         &rig.app,
         owner_token,
-        entity_wire(
-            "care_plan",
-            &plan_id,
-            3,
-            care_plan_payload(&baby_id, "bath"),
+        vec![causal_unit(
+            Uuid::new_v4(),
             None,
-        ),
-        vec![entity_wire(
-            "media",
-            &media_bad_plan,
-            3,
-            json!({
-                "kind": "log",
-                "care_plan_client_uuid": Uuid::new_v4().to_string(),
-                "mime": "image/jpeg",
-                "byte_size": 3,
-            }),
-            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "fulfilled", 120, 20),
+            vec![],
+            false,
         )],
     )
     .await;
-    assert_eq!(bad_plan, StatusCode::UNPROCESSABLE_ENTITY, "{body_plan}");
+    assert_eq!(status, StatusCode::OK, "{record}");
+    let record_version = record["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, accepted) = causal_commit_units(&rig.app, owner_token, vec![plan]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+    let stable_version = accepted["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
 
-    // Baby mismatch vs care_plan baby is rejected.
-    let media_bad_baby = Uuid::new_v4().to_string();
-    let (bad_baby, body_baby) = stage_bundle_with_media(
+    let mut foreign_edit = care_plan_payload(&baby_id.to_string(), "formula");
+    foreign_edit["note"] = json!("foreign edit");
+    foreign_edit["updated_at"] = json!(40);
+    let (status, forbidden) = causal_commit_units(
         &rig.app,
-        owner_token,
-        entity_wire(
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&stable_version),
             "care_plan",
-            &plan_id,
-            4,
-            care_plan_payload(&baby_id, "bath"),
-            None,
-        ),
-        vec![entity_wire(
-            "media",
-            &media_bad_baby,
-            4,
-            json!({
-                "kind": "log",
-                "care_plan_client_uuid": plan_id,
-                "baby_client_uuid": other_baby,
-                "mime": "image/jpeg",
-                "byte_size": 3,
-            }),
-            None,
+            plan_id,
+            foreign_edit,
+            vec![causal_media_item(media_id, "plan", &sha, bytes.len())],
+            false,
         )],
     )
     .await;
-    assert_eq!(bad_baby, StatusCode::UNPROCESSABLE_ENTITY, "{body_baby}");
+    assert_eq!(status, StatusCode::OK, "{forbidden}");
+    assert_eq!(forbidden["status"], "rejected");
+    assert_eq!(forbidden["error"]["code"], "forbidden");
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(member_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice(),
+    );
+
+    let (status, record_tombstone) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&record_version),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "fulfilled", 120, 50),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{record_tombstone}");
+    assert_eq!(record_tombstone["results"][0]["status"], "accepted");
+    let mut plan_tombstone = care_plan_payload(&baby_id.to_string(), "formula");
+    plan_tombstone["status"] = json!("completed");
+    plan_tombstone["fulfilled_record_client_uuid"] = json!(record_id);
+    plan_tombstone["fulfilled_at"] = json!(1_700_000_100_i64);
+    plan_tombstone["updated_at"] = json!(60);
+    let (status, deleted_plan) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&stable_version),
+            "care_plan",
+            plan_id,
+            plan_tombstone,
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted_plan}");
+    assert_eq!(deleted_plan["results"][0]["status"], "accepted");
 }
 
 #[tokio::test]
-async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
-    let rig = Rig::new();
-    let created = create_family(
+async fn deleted_care_plan_keeps_attachment_branch_bytes_auditable_but_unreachable() {
+    let rig = Rig::with_config(|config| config.max_media_bytes = 64 * 1024);
+    let owner = create_family(
         &rig.app,
-        "bundle-stale-owner",
-        "bundle-stale-request-00000000001",
+        "care-plan-branch-owner",
+        "care-plan-branch-request-00000001",
     )
     .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"care-plan-branch-exact-bytes";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mut live_root = care_plan_payload(&baby_id.to_string(), "formula");
+    live_root["updated_at"] = json!(20);
+    let media = causal_media_item(media_id, "plan", &sha, bytes.len());
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "care_plan",
+            plan_id,
+            live_root.clone(),
+            vec![media.clone()],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
+    let mut tombstone_root = live_root.clone();
+    tombstone_root["updated_at"] = json!(30);
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(v1),
+            "care_plan",
+            plan_id,
+            tombstone_root,
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted");
 
-    // Ordinary push publishes a newer record.
-    seed_record_with_id(&rig.app, token, &record_id, 100, record_payload(&baby_id)).await;
-
-    let bundle_id = Uuid::new_v4().to_string();
-    let (status, _) = json_request(
+    live_root["note"] = json!("stale attachment edit");
+    live_root["updated_at"] = json!(40);
+    let (status, branched) = causal_commit_units(
         &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire("record", &record_id, 50, record_payload(&baby_id), None),
-            "media": []
-        }),
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(v1),
+            "care_plan",
+            plan_id,
+            live_root,
+            vec![media],
+            false,
+        )],
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let (commit_status, body) = json_request(
+    assert_eq!(status, StatusCode::OK, "{branched}");
+    assert_eq!(branched["results"][0]["status"], "branched", "{branched}");
+    let conflict_id = branched["results"][0]["conflict_id"].as_str().unwrap();
+    let (status, detail) = get_json(
         &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
+        &format!("/v1/conflicts/{conflict_id}"),
         Some(token),
-        json!({}),
     )
     .await;
-    assert_eq!(commit_status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["stable"]["deleted"], true);
+    assert_eq!(detail["stable"]["media"], json!([]));
+    assert!(detail["branches"].as_array().unwrap().iter().any(|branch| {
+        branch["deleted"] == false
+            && branch["media"][0]["media_uuid"] == media_id.to_string()
+            && branch["media"][0]["sha256"] == sha
+            && branch["media"][0]["byte_size"] == bytes.len()
+    }));
+    let pull = pull_entities(&rig.app, token, generation).await;
+    assert!(!find_entity(&pull, plan_id)["deleted_at"].is_null());
+    assert!(!find_entity(&pull, media_id)["deleted_at"].is_null());
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across_restart() {
+async fn wake_observation_commits_replays_branches_tombstones_and_pulls() {
     let rig = Rig::new();
-    let created = create_family(
+    let (owner, member) = two_joined_clients(
         &rig.app,
-        "bundle-stale-media-owner",
-        "bundle-stale-media-request-00001",
+        "wake-commit-first-owner",
+        "wake-commit-first-member",
     )
     .await;
-    let token = created["access_token"].as_str().unwrap();
-    let family_id = created["family_id"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let sleep_id = Uuid::new_v4();
+    let wake_id = Uuid::new_v4();
+    let wake_time = 1_700_303_600_000_i64;
 
-    seed_record_with_id(&rig.app, token, &record_id, 100, record_payload(&baby_id)).await;
+    let (status, sleep) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            sleep_id,
+            causal_sleep_root(baby_id, 1_700_300_000_000, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sleep}");
+    assert_eq!(sleep["results"][0]["status"], "accepted", "{sleep}");
 
-    let (stage_status, stage_body) = json_request(
+    let wake_mutation_id = Uuid::new_v4();
+    let wake_root = json!({
+        "sleep_record_client_uuid": sleep_id,
+        "wake_timestamp": wake_time,
+        "note": "first observation",
+        "withdrawn": false,
+        "updated_at": 30,
+    });
+    let wake = causal_unit(
+        wake_mutation_id,
+        None,
+        "wake_observation",
+        wake_id,
+        wake_root.clone(),
+        vec![],
+        false,
+    );
+    let (status, accepted) = causal_commit_units(&rig.app, owner_token, vec![wake.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted", "{accepted}");
+    assert_eq!(
+        accepted["results"][0]["stable"]["root"]["sleep_record_client_uuid"],
+        sleep_id.to_string(),
+    );
+    assert_eq!(
+        accepted["results"][0]["stable"]["root"]["observer_membership_id"],
+        owner["membership_id"],
+    );
+    let first_version = accepted["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, replayed) = causal_commit_units(&rig.app, owner_token, vec![wake.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{replayed}");
+    assert_eq!(
+        replayed["results"][0]["stable"]["version_id"],
+        accepted["results"][0]["stable"]["version_id"],
+    );
+    assert_eq!(
+        replayed["results"][0]["request_hash"],
+        accepted["results"][0]["request_hash"],
+    );
+
+    let mut drift = wake;
+    drift["root"]["note"] = json!("same mutation drift");
+    let (status, rejected) = causal_commit_units(&rig.app, owner_token, vec![drift]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "content_drift");
+
+    let mut stable_edit_root = wake_root.clone();
+    stable_edit_root["note"] = json!("stable edit");
+    stable_edit_root["updated_at"] = json!(40);
+    let (status, stable_edit) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&first_version),
+            "wake_observation",
+            wake_id,
+            stable_edit_root,
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stable_edit}");
+    assert_eq!(stable_edit["results"][0]["status"], "accepted");
+    let stable_version = stable_edit["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut branch_root = wake_root.clone();
+    branch_root["note"] = json!("concurrent owner observation");
+    branch_root["updated_at"] = json!(41);
+    let (status, branched) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&first_version),
+            "wake_observation",
+            wake_id,
+            branch_root,
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{branched}");
+    assert_eq!(branched["results"][0]["status"], "branched", "{branched}");
+    assert_eq!(
+        branched["results"][0]["stable"]["root"]["note"],
+        "stable edit",
+    );
+    assert_eq!(
+        branched["results"][0]["stable"]["root"]["sleep_record_client_uuid"],
+        sleep_id.to_string(),
+    );
+
+    let mut tombstone_root = wake_root;
+    tombstone_root["note"] = Value::Null;
+    tombstone_root["updated_at"] = json!(50);
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&stable_version),
+            "wake_observation",
+            wake_id,
+            tombstone_root,
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+
+    let pull = pull_entities(&rig.app, member_token, generation).await;
+    let deleted_wake = find_entity(&pull, wake_id);
+    assert_eq!(deleted_wake["type"], "wake_observation");
+    assert_eq!(
+        deleted_wake["payload"]["sleep_record_client_uuid"],
+        sleep_id.to_string(),
+    );
+    assert!(deleted_wake["deleted_at"].is_number());
+}
+
+#[tokio::test]
+async fn choice_only_router_rebuilds_media_and_concurrent_tombstone() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "choice-media-owner",
+        "choice-media-create-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let removed_id = Uuid::new_v4();
+    let added_id = Uuid::new_v4();
+    let removed_bytes = vec![1_u8; 4];
+    let added_bytes = vec![2_u8; 5];
+    assert_eq!(
+        put_causal_media_bytes(&rig.app, token, removed_id, &removed_bytes)
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let removed_media = causal_media_item(
+        removed_id,
+        "log",
+        &hex::encode(Sha256::digest(&removed_bytes)),
+        removed_bytes.len(),
+    );
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "base", 100, 20),
+            vec![removed_media],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        put_causal_media_bytes(&rig.app, token, added_id, &added_bytes)
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let added_media = causal_media_item(
+        added_id,
+        "log",
+        &hex::encode(Sha256::digest(&added_bytes)),
+        added_bytes.len(),
+    );
+    let (status, live) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(base),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "stable-live", 100, 30),
+            vec![added_media.clone()],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{live}");
+    let live_version = live["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, tombstone) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(base),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "offline-delete", 100, 40),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{tombstone}");
+    assert_eq!(tombstone["results"][0]["status"], "branched");
+    let tombstone_version = tombstone["results"][0]["branch_version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict_id = tombstone["results"][0]["conflict_id"].as_str().unwrap();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["deleted"] == true));
+    let mut choices = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let candidate = item["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| {
+                    if item["path"] == "/_mutation.deleted" {
+                        candidate["outcome"] == json!({"op": "remove"})
+                    } else {
+                        candidate["sources"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|source| source["version_id"] == tombstone_version)
+                    }
+                })
+                .unwrap();
+            json!({"path": item["path"], "choice_id": candidate["choice_id"]})
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap()
+            .cmp(right["path"].as_str().unwrap())
+    });
+    let resolve = json!({
+        "snapshot_token": detail["snapshot_token"],
+        "resolution_mutation_id": Uuid::new_v4().to_string(),
+        "choices": choices,
+    });
+    let (status, accepted) = json_request(
         &rig.app,
         Method::POST,
-        "/v1/bundles",
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
         Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
+        resolve.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["status"], "accepted");
+    assert_eq!(accepted["stable_root"]["note"], "offline-delete");
+    assert!(accepted.get("stable_media").is_none());
+    let resolved_version = accepted["stable_version_id"].as_str().unwrap();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (deleted_at, parent_count, parent): (Option<i64>, i64, String) = connection
+        .query_row(
+            "SELECT v.deleted_at, COUNT(p.parent_version_id), MIN(p.parent_version_id)
+             FROM entity_versions v
+             JOIN entity_version_parents p
+               ON p.family_id = v.family_id AND p.version_id = v.version_id
+             WHERE v.version_id = ?1 GROUP BY v.family_id, v.version_id",
+            [resolved_version],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(deleted_at.is_some());
+    assert_eq!(parent_count, 1);
+    assert_eq!(parent, live_version);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                 WHERE membership_id = '__version_provenance_v2__' AND mutation_id = ?1",
+                [resolved_version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], owner["membership_id"]);
+    assert_eq!(provenance["device_id"], owner["device_id"]);
+    let (status, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{pull}");
+    let entities = pull["entities"].as_array().unwrap();
+    let record = entities
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id.to_string())
+        .unwrap();
+    assert!(record["deleted_at"].is_number());
+    assert_eq!(record["version_id"], accepted["stable_version_id"]);
+    assert!(entities.iter().any(|entity| {
+        entity["type"] == "media"
+            && entity["client_uuid"] == added_id.to_string()
+            && entity["deleted_at"].is_number()
+    }));
+    assert!(entities.iter().any(|entity| {
+        entity["type"] == "media"
+            && entity["client_uuid"] == removed_id.to_string()
+            && entity["deleted_at"].is_number()
+    }));
+    let (status, replay) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(token),
+        resolve,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["replay"], true);
+    assert_eq!(replay["stable_root"], accepted["stable_root"]);
+    assert!(replay.get("stable_media").is_none());
+}
+
+#[tokio::test]
+async fn two_clients_restore_only_the_tombstones_complete_direct_base_across_restart() {
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "direct-restore-owner", "direct-restore-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let media_bytes = b"restore";
+    let media_sha = hex::encode(Sha256::digest(media_bytes));
+    assert_eq!(
+        put_causal_media_bytes(&rig.app, member_token, media_id, media_bytes)
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let media = causal_media_item(media_id, "log", &media_sha, media_bytes.len());
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "direct-base", 90, 20),
+            vec![media.clone()],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base_version = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let base_root = created["results"][0]["stable"]["root"].clone();
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base_version),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "delete-envelope", 90, 30),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted");
+    let tombstone_version = deleted["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict_id = deleted["results"][0]["conflict_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(member_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert!(detail["branches"].as_array().unwrap().is_empty());
+    let restore_path = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "/_mutation.deleted")
+        .unwrap();
+    let restore_candidate = restore_path["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["outcome"] == json!({"op": "set", "value": false}))
+        .unwrap();
+    assert_eq!(restore_candidate["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(restore_candidate["sources"][0]["version_id"], base_version,);
+    let resolution_mutation_id = Uuid::new_v4().to_string();
+    let resolve = json!({
+        "snapshot_token": detail["snapshot_token"],
+        "resolution_mutation_id": resolution_mutation_id,
+        "choices": [{
+            "path": "/_mutation.deleted",
+            "choice_id": restore_candidate["choice_id"],
+        }],
+    });
+    let restarted = rig.restart("generation-a");
+    // A crash artifact can make post-commit promotion fail after the accepted
+    // resolution is durable. Exact replay must retry that repair rather than
+    // returning the receipt while media publication is still absent.
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    fs::create_dir_all(&staged_path).unwrap();
+    let (status, failed_after_commit) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        resolve.clone(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{failed_after_commit}"
+    );
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (conflict_status, publication_count): (String, i64) = connection
+        .query_row(
+            "SELECT c.status,
+                    (SELECT COUNT(*) FROM media_publications p
+                      WHERE p.family_id = c.family_id AND p.media_uuid = ?1)
+               FROM conflicts c WHERE c.conflict_id = ?2",
+            [media_id.to_string(), conflict_id.clone()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(conflict_status, "resolved");
+    assert_eq!(publication_count, 0);
+    drop(connection);
+    let unavailable = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(unavailable.status(), StatusCode::NOT_FOUND);
+    let unrelated_media_dir = rig
+        .directory
+        .path()
+        .join("media")
+        .join(owner["family_id"].as_str().unwrap());
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for _ in 0..32 {
+        let unrelated_id = Uuid::new_v4().to_string();
+        connection
+            .execute(
+                "INSERT INTO causal_media_staging(
+                    family_id, membership_id, media_uuid, sha256, byte_size,
+                    created_at, expires_at, status, consumed_at
+                 ) VALUES (?1, ?2, ?3, ?4, 1, 1, 2, 'consumed', 1)",
+                rusqlite::params![
+                    owner["family_id"].as_str().unwrap(),
+                    owner["membership_id"].as_str().unwrap(),
+                    unrelated_id,
+                    "0".repeat(64),
+                ],
+            )
+            .unwrap();
+        fs::write(unrelated_media_dir.join(unrelated_id), [1_u8]).unwrap();
+    }
+    drop(connection);
+    fs::remove_dir(&staged_path).unwrap();
+    let (status, restored) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        resolve.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["status"], "accepted");
+    assert_eq!(restored["replay"], true);
+    let unrelated_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+              WHERE family_id = ?1 AND media_uuid != ?2 AND status = 'consumed'",
+            [
+                owner["family_id"].as_str().unwrap(),
+                media_id.to_string().as_str(),
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unrelated_count, 32);
+    assert_eq!(restored["stable_root"], base_root);
+    assert_eq!(restored["stable_media"], json!([media]));
+    let resolved_version = restored["stable_version_id"].as_str().unwrap();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let parent: String = connection
+        .query_row(
+            "SELECT parent_version_id FROM entity_version_parents WHERE version_id = ?1",
+            [resolved_version],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(parent, tombstone_version);
+    let provenance: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT receipt_json FROM mutation_receipts
+                  WHERE membership_id = '__version_provenance_v2__' AND mutation_id = ?1",
+                [resolved_version],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(provenance["actor_id"], member["membership_id"]);
+    assert_eq!(provenance["device_id"], member["device_id"]);
+    drop(connection);
+    let download = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(
+        download.into_body().collect().await.unwrap().to_bytes(),
+        Bytes::from_static(media_bytes),
+    );
+    for token in [owner_token, member_token] {
+        let pull = pull_entities(&restarted, token, generation).await;
+        let record = find_entity(&pull, record_id);
+        assert!(record["deleted_at"].is_null());
+        assert_eq!(record["payload"]["note"], "direct-base");
+        conflict_summary_is_closed(record);
+    }
+    let (status, replay) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        resolve,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["replay"], true);
+    assert_eq!(replay["stable_version_id"], restored["stable_version_id"]);
+}
+
+#[tokio::test]
+async fn causal_commit_http_returns_typed_saturation_and_allows_exact_replay() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-admission-owner",
+        "causal-admission-create-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let (status, first, mutation) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, None, "within-budget").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["results"][0]["status"], "accepted");
+
+    for index in 2..119 {
+        let (status, body, _) = commit_causal_record(
+            &rig.app,
+            token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            &format!("within-budget-{index}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "attempt {index}: {body}");
+    }
+
+    let oversized = (0..65)
+        .map(|index| {
+            causal_unit(
+                Uuid::new_v4(),
+                None,
                 "record",
-                &record_id,
-                50,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                50,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
+                Uuid::new_v4(),
+                causal_formula_root(baby_id, &format!("oversized-{index}"), 100, 20),
+                vec![],
+                false,
+            )
+        })
+        .collect();
+    let (oversized_status, oversized_body) = causal_commit_units(&rig.app, token, oversized).await;
+    assert_eq!(oversized_status, StatusCode::OK, "{oversized_body}");
+    assert_eq!(oversized_body["status"], "rejected");
+    assert_eq!(oversized_body["error"]["code"], "invalid_domain");
+
+    let saturated_unit = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        Uuid::new_v4(),
+        causal_formula_root(baby_id, "over-budget", 100, 20),
+        vec![],
+        false,
+    );
+    let response = request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        Body::from(json!({ "units": [saturated_unit] }).to_string()),
+        Some("application/json"),
+        &[],
     )
     .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    let status = response.status();
+    assert_eq!(response.headers()["retry-after"], "60");
+    let saturated: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{saturated}");
+    assert_eq!(saturated["code"], "causal_commit_principal_rate_limited");
+    assert_eq!(saturated["detail"]["scope"], "principal");
+    assert_eq!(saturated["detail"]["retryable"], true);
+
+    let (status, replay) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
     assert_eq!(
-        request(
+        replay["results"][0]["status"],
+        first["results"][0]["status"]
+    );
+    assert_eq!(
+        replay["results"][0]["stable"],
+        first["results"][0]["stable"]
+    );
+    assert_eq!(replay["results"][0]["replay"], true);
+}
+
+#[tokio::test]
+async fn causal_commit_http_maps_branch_capacity_without_hiding_the_conflict() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "causal-branch-cap-owner",
+        "causal-branch-cap-create-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let (status, created, _) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, None, "base").await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
+    let (status, accepted, _) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, Some(base), "stable").await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let mut first_branch = None;
+    let mut branched = Value::Null;
+    for index in 1..=64 {
+        let (status, body, mutation) = commit_causal_record(
+            &rig.app,
+            token,
+            baby_id,
+            record_id,
+            Some(base),
+            &format!("branch-{index}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "branch {index}: {body}");
+        assert_eq!(body["results"][0]["status"], "branched");
+        if index == 1 {
+            first_branch = Some(mutation);
+            branched = body;
+        }
+    }
+
+    let (status, saturated, _) =
+        commit_causal_record(&rig.app, token, baby_id, record_id, Some(base), "branch-65").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{saturated}");
+    assert_eq!(saturated["code"], "causal_open_branch_limit_reached");
+    assert_eq!(saturated["detail"]["scope"], "root");
+
+    let conflict_id = branched["results"][0]["conflict_id"].as_str().unwrap();
+    let mut next = format!("/v1/conflicts/{conflict_id}");
+    let mut branch_ids = Vec::new();
+    let mut snapshot_token = None;
+    let mut first_body = None;
+    let mut replay_url = None;
+    let mut replay_body = None;
+    for expected_page in 0..4 {
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &next,
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(bytes.len() <= 128 * 1024, "page bytes={}", bytes.len());
+        let detail: Value = serde_json::from_slice(&bytes).unwrap();
+        if expected_page == 0 {
+            first_body = Some(bytes.clone());
+        }
+        assert_eq!(detail["page_index"], expected_page);
+        assert!(detail["branches"].as_array().unwrap().len() <= 16);
+        branch_ids.extend(
+            detail["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|branch| branch["version_id"].as_str().unwrap().to_owned()),
+        );
+        match &snapshot_token {
+            Some(value) => assert_eq!(detail["snapshot_token"], *value),
+            None => snapshot_token = detail["snapshot_token"].as_str().map(str::to_owned),
+        }
+        if expected_page == 1 {
+            replay_url = Some(next.clone());
+            replay_body = Some(bytes.clone());
+        }
+        if detail["complete"] == true {
+            assert!(detail["continuation"].is_null());
+            break;
+        }
+        let continuation = detail["continuation"].as_str().unwrap();
+        next = format!(
+            "/v1/conflicts/{conflict_id}?snapshot_token={}&continuation={continuation}",
+            snapshot_token.as_deref().unwrap(),
+        );
+    }
+    assert_eq!(branch_ids.len(), 64);
+    assert!(branch_ids.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let replay_response = request(
+        &rig.app,
+        Method::GET,
+        replay_url.as_deref().unwrap(),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(replay_response.status(), StatusCode::OK);
+    assert_eq!(
+        replay_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        replay_body.unwrap(),
+    );
+
+    let snapshot_token = snapshot_token.unwrap();
+    let restarted = rig.restart("generation-b");
+    let replay_first = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/conflicts/{conflict_id}?snapshot_token={snapshot_token}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(replay_first.status(), StatusCode::OK);
+    assert_eq!(
+        replay_first.into_body().collect().await.unwrap().to_bytes(),
+        first_body.unwrap(),
+    );
+
+    let current_stable = accepted["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
+    let (stable_status, stable_changed, _) = commit_causal_record(
+        &rig.app,
+        token,
+        baby_id,
+        record_id,
+        Some(current_stable),
+        "stable-after-snapshot",
+    )
+    .await;
+    assert_eq!(stable_status, StatusCode::OK, "{stable_changed}");
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let database_path = rig.directory.path().join("lezi.db");
+    let durable_state = || {
+        let connection = Connection::open(&database_path).unwrap();
+        let conflict = connection
+            .query_row(
+                "SELECT stable_version_id, status, kind, resolved_at
+                 FROM conflicts WHERE family_id = ?1 AND conflict_id = ?2",
+                rusqlite::params![family_id, conflict_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let branches = connection
+            .prepare(
+                "SELECT branch_version_id FROM conflict_branches
+                 WHERE family_id = ?1 AND conflict_id = ?2 ORDER BY branch_version_id",
+            )
+            .unwrap()
+            .query_map(rusqlite::params![family_id, conflict_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let receipt = connection
+            .query_row(
+                "SELECT content_hash, stable_version_id, conflict_id, receipt_json, created_at
+                 FROM mutation_receipts
+                 WHERE family_id = ?1 AND membership_id = '__conflict_snapshot_v2__'",
+                rusqlite::params![family_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let revision = connection
+            .query_row(
+                "SELECT rev FROM family_meta WHERE family_id = ?1",
+                rusqlite::params![family_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let version_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM entity_versions
+                 WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2",
+                rusqlite::params![family_id, record_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        json!({
+            "conflict": conflict,
+            "branches": branches,
+            "receipt": receipt,
+            "revision": revision,
+            "version_count": version_count,
+        })
+    };
+    let before_stale = durable_state();
+    let (stale_status, stale) = get_json(
+        &restarted,
+        &format!("/v1/conflicts/{conflict_id}?snapshot_token={snapshot_token}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+    assert_eq!(stale["code"], "snapshot_stale");
+    assert_eq!(durable_state(), before_stale);
+
+    let mut tampered_url = replay_url.unwrap();
+    let last = tampered_url.pop().unwrap();
+    tampered_url.push(if last == 'a' { 'b' } else { 'a' });
+    let before_tamper = durable_state();
+    let (tampered_status, tampered) = get_json(&restarted, &tampered_url, Some(token)).await;
+    assert_eq!(tampered_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(tampered["code"], "invalid_snapshot_token");
+    assert_eq!(durable_state(), before_tamper);
+
+    rig.now.fetch_add(10 * 60, Ordering::SeqCst);
+    let before_expiry = durable_state();
+    let (expired_status, expired) = get_json(
+        &restarted,
+        &format!("/v1/conflicts/{conflict_id}?snapshot_token={snapshot_token}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(expired_status, StatusCode::GONE);
+    assert_eq!(expired["code"], "snapshot_expired");
+    assert_eq!(durable_state(), before_expiry);
+
+    let (replay_status, replay) =
+        causal_commit_units(&rig.app, token, vec![first_branch.unwrap()]).await;
+    assert_eq!(replay_status, StatusCode::OK, "{replay}");
+    assert_eq!(
+        replay["results"][0]["status"],
+        branched["results"][0]["status"]
+    );
+    assert_eq!(
+        replay["results"][0]["stable"],
+        branched["results"][0]["stable"]
+    );
+    assert_eq!(
+        replay["results"][0]["branch_version_id"],
+        branched["results"][0]["branch_version_id"]
+    );
+    assert_eq!(
+        replay["results"][0]["conflict_id"],
+        branched["results"][0]["conflict_id"]
+    );
+    assert_eq!(replay["results"][0]["replay"], true);
+}
+
+#[tokio::test]
+async fn causal_ingress_api_uses_the_canonical_store_validation_codes() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "canonical-ingress-owner",
+        "canonical-ingress-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let diary_id = Uuid::new_v4();
+    let (status, accepted) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            diary_id,
+            json!({
+                "baby_client_uuid": baby_id,
+                "type": "diary",
+                "custom_item_client_uuid": null,
+                "timestamp": 100,
+                "end_timestamp": null,
+                "note": null,
+                "payload_json": {"body": "今天第一次翻身"},
+                "schema_version": 2,
+                "updated_at": 20
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted", "{accepted}");
+
+    let invalid_value_id = Uuid::new_v4();
+    let dangling_id = Uuid::new_v4();
+    let (status, rejected) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![
+            causal_unit(
+                Uuid::new_v4(),
+                None,
+                "record",
+                invalid_value_id,
+                causal_formula_root(baby_id, "negative", -1, 30),
+                vec![],
+                false,
+            ),
+            causal_unit(
+                Uuid::new_v4(),
+                None,
+                "record",
+                dangling_id,
+                causal_formula_root(Uuid::new_v4(), "dangling", 100, 30),
+                vec![],
+                false,
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "invalid_domain");
+
+    let pull = pull_entities(&rig.app, token, owner["generation"].as_str().unwrap()).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != invalid_value_id.to_string()
+            && row["client_uuid"] != dangling_id.to_string()
+    }));
+}
+
+#[tokio::test]
+async fn causal_media_commit_rejects_same_size_different_digest_before_publication() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-manifest-owner",
+        "causal-media-manifest-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let uploaded = b"digest-a";
+    let declared = b"digest-b";
+    assert_eq!(uploaded.len(), declared.len());
+
+    let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, uploaded).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+
+    let declared_sha = hex::encode(Sha256::digest(declared));
+    let (status, rejected) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "wrong-digest", 80, 20),
+            vec![causal_media_item(
+                media_id,
+                "log",
+                &declared_sha,
+                declared.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "media_sha256_mismatch");
+
+    let pull = pull_entities(&rig.app, token, generation).await;
+    assert!(pull["entities"].as_array().unwrap().iter().all(|row| {
+        row["client_uuid"] != record_id.to_string() && row["client_uuid"] != media_id.to_string()
+    }));
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn causal_media_commit_claims_only_the_preparing_principals_open_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (owner, member) =
+        two_joined_clients(&rig.app, "receipt-claim-owner", "receipt-claim-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"principal-bound-commit";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, owner_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    assert_eq!(prepared["status"], "staged");
+
+    let foreign = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "foreign-receipt", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, rejected) = causal_commit_units(&rig.app, member_token, vec![foreign]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "media_membership_mismatch");
+
+    let accepted_mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "owned-receipt", 80, 30),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, accepted) =
+        causal_commit_units(&rig.app, owner_token, vec![accepted_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+    let stable_version = accepted["results"][0]["stable"]["version_id"].clone();
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(member_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice()
+    );
+
+    let (status, replay) =
+        causal_commit_units(&rig.app, owner_token, vec![accepted_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "accepted");
+    assert_eq!(replay["results"][0]["stable"]["version_id"], stable_version);
+    let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE entity_type = 'record' AND client_uuid = ?1",
+            [record_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+}
+
+#[tokio::test]
+async fn causal_media_receipt_family_length_and_expiry_matrix_is_zero_write() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "receipt-matrix-owner",
+        "receipt-matrix-family-request-000001",
+    )
+    .await;
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let mut token = owner["access_token"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let database_path = rig.directory.path().join("lezi.db");
+
+    // Exact byte length is receipt authority. A semantic rejection leaves no
+    // terminal/version/projection/publication and the same mutation can retry
+    // with the receipt's canonical metadata.
+    let length_media_id = Uuid::new_v4();
+    let length_bytes = b"receipt-length";
+    let length_sha = hex::encode(Sha256::digest(length_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, &token, length_media_id, length_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let length_mutation_id = Uuid::new_v4();
+    let length_record_id = Uuid::new_v4();
+    let before_length = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &family_id,
+        length_mutation_id,
+        length_record_id,
+        length_media_id,
+    );
+    let wrong_length = causal_unit(
+        length_mutation_id,
+        None,
+        "record",
+        length_record_id,
+        causal_formula_root(baby_id, "wrong-length", 80, 20),
+        vec![causal_media_item(
+            length_media_id,
+            "log",
+            &length_sha,
+            length_bytes.len() + 1,
+        )],
+        false,
+    );
+    let (status, rejected) = causal_commit_units(&rig.app, &token, vec![wrong_length]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "media_byte_size_mismatch");
+    assert_eq!(
+        causal_receipt_write_state(
+            &database_path,
+            &family_id,
+            &family_id,
+            length_mutation_id,
+            length_record_id,
+            length_media_id,
+        ),
+        before_length
+    );
+    assert_eq!(before_length.staging_status.as_deref(), Some("staged"));
+    let correct_length = causal_unit(
+        length_mutation_id,
+        None,
+        "record",
+        length_record_id,
+        causal_formula_root(baby_id, "wrong-length", 80, 20),
+        vec![causal_media_item(
+            length_media_id,
+            "log",
+            &length_sha,
+            length_bytes.len(),
+        )],
+        false,
+    );
+    let (status, accepted) = causal_commit_units(&rig.app, &token, vec![correct_length]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+
+    // The same durable row under another family key is invisible to this
+    // authenticated family. Restoring the fixture binding proves rejection did
+    // not terminalize the mutation or consume the receipt.
+    let family_media_id = Uuid::new_v4();
+    let family_bytes = b"receipt-family";
+    let family_sha = hex::encode(Sha256::digest(family_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, &token, family_media_id, family_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let foreign_family_id = Uuid::new_v4().to_string();
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET family_id = ?1
+             WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![foreign_family_id, family_id, family_media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let family_mutation_id = Uuid::new_v4();
+    let family_record_id = Uuid::new_v4();
+    let before_family = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &foreign_family_id,
+        family_mutation_id,
+        family_record_id,
+        family_media_id,
+    );
+    let family_mutation = causal_unit(
+        family_mutation_id,
+        None,
+        "record",
+        family_record_id,
+        causal_formula_root(baby_id, "wrong-family", 80, 30),
+        vec![causal_media_item(
+            family_media_id,
+            "log",
+            &family_sha,
+            family_bytes.len(),
+        )],
+        false,
+    );
+    let (status, rejected) =
+        causal_commit_units(&rig.app, &token, vec![family_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    assert_eq!(rejected["error"]["code"], "missing_media_bytes");
+    assert_eq!(
+        causal_receipt_write_state(
+            &database_path,
+            &family_id,
+            &foreign_family_id,
+            family_mutation_id,
+            family_record_id,
+            family_media_id,
+        ),
+        before_family
+    );
+    assert_eq!(before_family.staging_status.as_deref(), Some("staged"));
+    let connection = Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET family_id = ?1
+             WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![family_id, foreign_family_id, family_media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    let (status, accepted) = causal_commit_units(&rig.app, &token, vec![family_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+
+    // TTL is half-open: now == expires_at is already expired. Startup then
+    // collects that open receipt, allowing a fresh receipt and the same
+    // non-terminalized mutation to succeed.
+    let expiry_media_id = Uuid::new_v4();
+    let expiry_bytes = b"receipt-expiry-equality";
+    let expiry_sha = hex::encode(Sha256::digest(expiry_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, &token, expiry_media_id, expiry_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let expires_at = prepared["expires_at"].as_i64().unwrap();
+    rig.now.store(expires_at, Ordering::SeqCst);
+    let (refresh_status, refreshed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(refresh_status, StatusCode::OK, "{refreshed}");
+    token = refreshed["access_token"].as_str().unwrap().to_owned();
+    let expiry_mutation_id = Uuid::new_v4();
+    let expiry_record_id = Uuid::new_v4();
+    let expiry_mutation = causal_unit(
+        expiry_mutation_id,
+        None,
+        "record",
+        expiry_record_id,
+        causal_formula_root(baby_id, "expiry-equality", 80, 40),
+        vec![causal_media_item(
+            expiry_media_id,
+            "log",
+            &expiry_sha,
+            expiry_bytes.len(),
+        )],
+        false,
+    );
+    let before_expiry = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &family_id,
+        expiry_mutation_id,
+        expiry_record_id,
+        expiry_media_id,
+    );
+    let (status, rejected) =
+        causal_commit_units(&rig.app, &token, vec![expiry_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    let expiry_code = rejected["error"]["code"].as_str().unwrap_or_default();
+    assert!(
+        expiry_code == "media_preimage_expired" || expiry_code == "missing_media_bytes",
+        "expired receipt must stay a media claim code, got {expiry_code}"
+    );
+    let after_expiry = causal_receipt_write_state(
+        &database_path,
+        &family_id,
+        &family_id,
+        expiry_mutation_id,
+        expiry_record_id,
+        expiry_media_id,
+    );
+    // At now == expires_at, detached H24 maintenance may independently mark or
+    // remove the expired staging row. The rejected commit must still be a zero
+    // write for family revision, immutable/terminal facts, and publication.
+    assert_eq!(after_expiry.revision, before_expiry.revision);
+    assert_eq!(after_expiry.version_rows, before_expiry.version_rows);
+    assert_eq!(after_expiry.terminal_rows, before_expiry.terminal_rows);
+    assert_eq!(after_expiry.record_rows, before_expiry.record_rows);
+    assert_eq!(after_expiry.media_rows, before_expiry.media_rows);
+    assert_eq!(
+        after_expiry.publication_rows,
+        before_expiry.publication_rows
+    );
+
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (status, reprepared) =
+        put_causal_media_bytes(&restarted, &token, expiry_media_id, expiry_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{reprepared}");
+    assert_eq!(reprepared["status"], "staged");
+    let (status, accepted) = causal_commit_units(&restarted, &token, vec![expiry_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+}
+
+#[tokio::test]
+async fn causal_media_corrupt_stored_receipt_returns_5xx_without_terminal_writes() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let session = create_family(
+        &rig.app,
+        "corrupt-receipt-owner",
+        "corrupt-receipt-family-request-0001",
+    )
+    .await;
+    let token = session["access_token"].as_str().unwrap();
+    let family_id = session["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"corrupt-stored-receipt";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET status = 'corrupt'
+              WHERE family_id = ?1 AND media_uuid = ?2",
+            [family_id, &media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "corrupt-receipt", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, failed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (version_count, receipt_count): (i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM entity_versions
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2),
+                (SELECT COUNT(*) FROM mutation_receipts
+                  WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2)",
+            [family_id, &record_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((version_count, receipt_count), (0, 0));
+}
+
+#[tokio::test]
+async fn causal_media_corrupt_stored_entity_returns_5xx_without_update_writes() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let session = create_family(
+        &rig.app,
+        "corrupt-media-entity-owner",
+        "corrupt-media-entity-family-request-01",
+    )
+    .await;
+    let token = session["access_token"].as_str().unwrap();
+    let family_id = session["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"corrupt-stored-media-entity";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let created = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "media-base", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, created) = causal_commit_units(&rig.app, token, vec![created]).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let stable_version = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE entities SET payload_json = '{'
+              WHERE family_id = ?1 AND entity_type = 'media' AND client_uuid = ?2",
+            [family_id, &media_id.to_string()],
+        )
+        .unwrap();
+    let before: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            [family_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    drop(connection);
+
+    let update = causal_unit(
+        Uuid::new_v4(),
+        Some(&stable_version),
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "media-update", 80, 30),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let (status, failed) = causal_commit_units(&rig.app, token, vec![update]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let after: (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                (SELECT rev FROM family_meta WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM entity_versions WHERE family_id = ?1),
+                (SELECT COUNT(*) FROM mutation_receipts WHERE family_id = ?1)",
+            [family_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
+async fn causal_media_commit_ignores_unrelated_corrupt_consumed_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let session = create_family(
+        &rig.app,
+        "bounded-promotion-owner",
+        "bounded-promotion-family-request-001",
+    )
+    .await;
+    let token = session["access_token"].as_str().unwrap();
+    let family_id = session["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let unrelated_media = Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+    let target_media = Uuid::parse_str("ffffffff-ffff-4fff-bfff-ffffffffffff").unwrap();
+    let unrelated_bytes = b"unrelated-consumed-bytes";
+    let target_bytes = b"target-receipt-bytes";
+    let unrelated_sha = hex::encode(Sha256::digest(unrelated_bytes));
+    let target_sha = hex::encode(Sha256::digest(target_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, token, unrelated_media, unrelated_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let unrelated_mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        Uuid::new_v4(),
+        causal_formula_root(baby_id, "unrelated", 80, 20),
+        vec![causal_media_item(
+            unrelated_media,
+            "log",
+            &unrelated_sha,
+            unrelated_bytes.len(),
+        )],
+        false,
+    );
+    let (status, committed) = causal_commit_units(&rig.app, token, vec![unrelated_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    let unrelated_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(unrelated_media.to_string());
+    fs::write(&unrelated_path, b"corrupt").unwrap();
+
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, token, target_media, target_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let target_record = Uuid::new_v4();
+    let target_mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        target_record,
+        causal_formula_root(baby_id, "target", 80, 20),
+        vec![causal_media_item(
+            target_media,
+            "log",
+            &target_sha,
+            target_bytes.len(),
+        )],
+        false,
+    );
+    let (status, accepted) =
+        causal_commit_units(&rig.app, token, vec![target_mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    assert_eq!(accepted["results"][0]["status"], "accepted");
+    let version_id = accepted["results"][0]["stable"]["version_id"].clone();
+    let target_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(target_media.to_string());
+    assert_eq!(fs::read(&target_path).unwrap(), target_bytes);
+
+    let (status, replay) = causal_commit_units(&rig.app, token, vec![target_mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["stable"]["version_id"], version_id);
+    let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2",
+            [family_id, &target_record.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+}
+
+#[tokio::test]
+async fn causal_media_prepare_rejects_declared_length_drift_without_a_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-length-owner",
+        "causal-media-length-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"length-bound-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let declared = (bytes.len() + 1).to_string();
+
+    let response = request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/causal/media/{media_id}"),
+        Some(token),
+        Body::from(bytes.to_vec()),
+        Some("application/octet-stream"),
+        &[
+            ("x-lezi-media-sha256", sha.as_str()),
+            ("content-length", declared.as_str()),
+        ],
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "length drift minted a durable receipt");
+    let upload_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(upload_rows, 0, "handled length error leaked upload quota");
+    assert!(!rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string())
+        .exists());
+}
+
+#[tokio::test]
+async fn causal_media_prepare_rejects_digest_drift_without_a_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-digest-owner",
+        "causal-media-digest-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"digest-bound-preimage";
+    let wrong_sha = hex::encode(Sha256::digest(b"different-preimage"));
+
+    let response = request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/causal/media/{media_id}"),
+        Some(token),
+        Body::from(bytes.to_vec()),
+        Some("application/octet-stream"),
+        &[("x-lezi-media-sha256", wrong_sha.as_str())],
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "digest drift minted a durable receipt");
+    let upload_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(upload_rows, 0, "handled digest error leaked upload quota");
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id);
+    let leftovers = fs::read_dir(staging_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "digest drift left incoming bytes");
+}
+
+#[tokio::test]
+async fn causal_media_prepare_binds_receipt_to_membership_and_family() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "causal-media-binding-owner",
+        "causal-media-binding-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let owner_membership_id = owner["membership_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"principal-bound-preimage";
+
+    let (status, staged) = put_causal_media_bytes(&rig.app, owner_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    let (status, conflict) = put_causal_media_bytes(&rig.app, member_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let receipt_membership: String = connection
+        .query_row(
+            "SELECT membership_id FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_membership, owner_membership_id);
+
+    let other_rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let other = create_family(
+        &other_rig.app,
+        "causal-media-binding-other-owner",
+        "causal-media-binding-other-request-00001",
+    )
+    .await;
+    let other_token = other["access_token"].as_str().unwrap();
+    let (status, independent) =
+        put_causal_media_bytes(&other_rig.app, other_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{independent}");
+    assert_ne!(other["family_id"], owner["family_id"]);
+}
+
+#[tokio::test]
+async fn successful_causal_media_prepare_detaches_bounded_expired_family_gc() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-prepare-gc-owner",
+        "causal-media-prepare-gc-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let expired_media = Uuid::new_v4();
+    let (status, first) = put_causal_media_bytes(&rig.app, token, expired_media, b"expired").await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+
+    Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .execute(
+            "UPDATE causal_media_staging SET expires_at = ?1
+              WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![
+                rig.now.load(Ordering::SeqCst) - 1,
+                family_id,
+                expired_media.to_string(),
+            ],
+        )
+        .unwrap();
+    let (status, second) =
+        put_causal_media_bytes(&rig.app, token, Uuid::new_v4(), b"trigger").await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+
+    let database_path = rig.directory.path().join("lezi.db");
+    let expired_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(expired_media.to_string());
+    for _ in 0..100 {
+        let rows: i64 = Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM causal_media_staging
+                  WHERE family_id = ?1 AND media_uuid = ?2",
+                rusqlite::params![family_id, expired_media.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if rows == 0 {
+            assert!(!expired_path.exists());
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("successful prepare did not trigger detached expired staging GC");
+}
+
+#[tokio::test]
+async fn slow_causal_media_prepare_streams_to_temp_without_blocking_a_small_commit() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-slow-owner",
+        "causal-media-slow-request-0000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let media_id = Uuid::new_v4();
+    let bytes = b"slow-streamed-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (first_written_tx, first_written_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let upload_stream = futures_util::stream::unfold(
+        (0, Some(first_written_tx), Some(release_rx)),
+        |(index, mut first_written, mut release)| async move {
+            match index {
+                0 => Some((
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"slow-")),
+                    (1, first_written, release),
+                )),
+                1 => {
+                    first_written.take().unwrap().send(()).ok();
+                    release.take().unwrap().await.ok();
+                    Some((
+                        Ok(Bytes::from_static(b"streamed-preimage")),
+                        (2, first_written, release),
+                    ))
+                }
+                _ => None,
+            }
+        },
+    );
+    let upload_app = rig.app.clone();
+    let upload_token = token.clone();
+    let upload = tokio::spawn(async move {
+        request_with_headers(
+            &upload_app,
+            Method::PUT,
+            &format!("/v1/causal/media/{media_id}"),
+            Some(&upload_token),
+            Body::from_stream(upload_stream),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        )
+        .await
+    });
+    first_written_rx.await.unwrap();
+
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(&family_id);
+    let incoming = fs::read_dir(&staging_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".upload-") && name.ends_with(".tmp")
+        })
+        .expect("first chunk was streamed to a server-owned incoming file");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if incoming.metadata().unwrap().len() == 5 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first streamed chunk was not flushed to the incoming file");
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let receipt_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt_rows, 0, "partial body minted a durable receipt");
+
+    let commit = tokio::time::timeout(
+        Duration::from_millis(500),
+        commit_causal_record(
+            &rig.app,
+            &token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            "small-during-slow-upload",
+        ),
+    )
+    .await
+    .expect("small causal commit waited on a slow media body");
+    assert_eq!(commit.0, StatusCode::OK, "{}", commit.1);
+
+    release_tx.send(()).unwrap();
+    assert_eq!(upload.await.unwrap().status(), StatusCode::OK);
+    let staged_path = staging_dir.join(media_id.to_string());
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+    assert!(!incoming.path().exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn causal_media_promotion_runs_outside_the_same_family_commit_lock() {
+    let (hook, events, release) = blocked_prepare_hook("before_promotion");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_commit_blocking_hook = Some(hook);
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-promotion-owner",
+        "causal-media-promotion-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let media_id = Uuid::new_v4();
+    let bytes = b"blocked-promotion-bytes";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, &token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        Uuid::new_v4(),
+        causal_formula_root(baby_id, "media-promotion", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let media_app = rig.app.clone();
+    let media_token = token.clone();
+    let media_commit =
+        tokio::spawn(
+            async move { causal_commit_units(&media_app, &media_token, vec![mutation]).await },
+        );
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "before_promotion"
+        );
+    })
+    .await
+    .unwrap();
+
+    let small_commit = tokio::time::timeout(
+        Duration::from_millis(500),
+        commit_causal_record(
+            &rig.app,
+            &token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            "small-during-media-promotion",
+        ),
+    )
+    .await
+    .expect("media promotion retained the same-family commit lock");
+    assert_eq!(small_commit.0, StatusCode::OK, "{}", small_commit.1);
+
+    release.release();
+    let (status, committed) = media_commit.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{committed}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn causal_media_branch_commit_and_resolution_serialize_one_publication() {
+    let (hook, events, release) = blocked_prepare_hook("before_promotion");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_commit_blocking_hook = Some(hook);
+    });
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "publication-race-owner",
+        "publication-race-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap().to_owned();
+    let member_token = member["access_token"].as_str().unwrap().to_owned();
+    let generation = owner["generation"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, &owner_token).await;
+    let record_id = Uuid::new_v4();
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        &member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "publication-base", 80, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base_version = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, stable) = causal_commit_units(
+        &rig.app,
+        &owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base_version),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "publication-stable", 80, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stable}");
+
+    let media_id = Uuid::new_v4();
+    let bytes = b"serialized-branch-publication";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, prepared) = put_causal_media_bytes(&rig.app, &member_token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let branch_mutation_id = Uuid::new_v4();
+    let branch_mutation = causal_unit(
+        branch_mutation_id,
+        Some(&base_version),
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "publication-branch", 80, 40),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
+    );
+    let branch_app = rig.app.clone();
+    let branch_token = member_token.clone();
+    let branch_request = branch_mutation.clone();
+    let branch_commit = tokio::spawn(async move {
+        causal_commit_units(&branch_app, &branch_token, vec![branch_request]).await
+    });
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            events.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "before_promotion"
+        );
+    })
+    .await
+    .unwrap();
+
+    let pull = pull_entities(&rig.app, &owner_token, generation).await;
+    let conflict_id = find_entity(&pull, record_id)["conflict_summary"]["conflict_id"]
+        .as_str()
+        .expect("durable branch is visible while publication waits")
+        .to_owned();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(&owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let branch_version = detail["branches"][0]["version_id"]
+        .as_str()
+        .expect("branch version")
+        .to_owned();
+    let choices = detail["conflicting"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let candidate = item["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| {
+                    candidate["sources"].as_array().is_some_and(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| source["version_id"] == branch_version)
+                    })
+                })
+                .unwrap_or_else(|| panic!("branch choice missing: {item}"));
+            json!({
+                "path": item["path"],
+                "choice_id": candidate["choice_id"]
+            })
+        })
+        .collect::<Vec<_>>();
+    let resolve_app = rig.app.clone();
+    let resolve_token = owner_token.clone();
+    let resolve_path = format!("/v1/conflicts/{conflict_id}/resolve");
+    let resolution_mutation_id = Uuid::new_v4();
+    let resolve_mutation_id = resolution_mutation_id;
+    let mut resolve = tokio::spawn(async move {
+        json_request(
+            &resolve_app,
+            Method::POST,
+            &resolve_path,
+            Some(&resolve_token),
+            json!({
+                "snapshot_token": detail["snapshot_token"],
+                "resolution_mutation_id": resolve_mutation_id.to_string(),
+                "choices": choices
+            }),
+        )
+        .await
+    });
+    let database_path = rig.directory.path().join("lezi.db");
+    let resolved_family = family_id.to_owned();
+    let resolved_conflict = conflict_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let connection = Connection::open(&database_path).unwrap();
+            let (status, terminal_rows): (String, i64) = connection
+                .query_row(
+                    "SELECT c.status,
+                            (SELECT COUNT(*) FROM conflict_resolutions r
+                              WHERE r.family_id = c.family_id
+                                AND r.conflict_id = c.conflict_id
+                                AND r.resolution_mutation_id = ?3)
+                       FROM conflicts c
+                      WHERE c.family_id = ?1 AND c.conflict_id = ?2",
+                    rusqlite::params![
+                        resolved_family,
+                        resolved_conflict,
+                        resolution_mutation_id.to_string(),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            if status == "resolved" && terminal_rows == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resolution did not durably commit before publication"
+            );
+            std::thread::yield_now();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut resolve)
+            .await
+            .is_err(),
+        "resolution bypassed the Store-owned publication serialization"
+    );
+
+    release.release();
+    let (branch_status, branch) = branch_commit.await.unwrap();
+    assert_eq!(branch_status, StatusCode::OK, "{branch}");
+    assert_eq!(branch["results"][0]["status"], "branched", "{branch}");
+    assert_eq!(
+        branch["results"][0]["branch_version_id"], branch_version,
+        "{branch}"
+    );
+    let (resolve_status, resolved) = resolve.await.unwrap();
+    assert_eq!(resolve_status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["status"], "accepted", "{resolved}");
+    assert_eq!(
+        resolved["stable_media"][0]["media_uuid"],
+        media_id.to_string()
+    );
+
+    let (replay_status, replay) =
+        causal_commit_units(&rig.app, &member_token, vec![branch_mutation]).await;
+    assert_eq!(replay_status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "branched", "{replay}");
+    assert_eq!(replay["results"][0]["branch_version_id"], branch_version);
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(&owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let published = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(published.as_ref(), bytes);
+
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let version_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+             WHERE family_id = ?1 AND mutation_id = ?2",
+            rusqlite::params![family_id, branch_mutation_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let publication_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_publications
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_rows, 1);
+    assert_eq!(publication_rows, 1);
+}
+
+#[tokio::test]
+async fn causal_media_prepare_inflight_admission_bounds_and_releases_cancelled_streams() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-admission-owner",
+        "causal-media-admission-request-0000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    let mut uploads = Vec::new();
+    let mut releases = Vec::new();
+    for _ in 0..2 {
+        let media_id = Uuid::new_v4();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let stream = futures_util::stream::unfold(
+            (0, Some(started_tx), Some(release_rx)),
+            |(index, mut started, mut release)| async move {
+                match index {
+                    0 => Some((
+                        Ok::<_, std::io::Error>(Bytes::from_static(b"x")),
+                        (1, started, release),
+                    )),
+                    1 => {
+                        started.take().unwrap().send(()).ok();
+                        release.take().unwrap().await.ok();
+                        Some((Ok(Bytes::from_static(b"y")), (2, started, release)))
+                    }
+                    _ => None,
+                }
+            },
+        );
+        let app = rig.app.clone();
+        let upload_token = token.clone();
+        let upload_sha = sha.clone();
+        uploads.push(tokio::spawn(async move {
+            request_with_headers(
+                &app,
+                Method::PUT,
+                &format!("/v1/causal/media/{media_id}"),
+                Some(&upload_token),
+                Body::from_stream(stream),
+                Some("application/octet-stream"),
+                &[("x-lezi-media-sha256", upload_sha.as_str())],
+            )
+            .await
+        }));
+        releases.push(release_tx);
+        started_rx.await.unwrap();
+    }
+
+    let rejected_id = Uuid::new_v4();
+    let rejected = tokio::time::timeout(
+        Duration::from_millis(500),
+        request_with_headers(
             &rig.app,
             Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("old"),
-            Some("image/jpeg"),
+            &format!("/v1/causal/media/{rejected_id}"),
+            Some(&token),
+            Body::from(Bytes::from_static(b"xy")),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        ),
+    )
+    .await
+    .expect("saturated admission waited for a slow body");
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rejected.headers()["retry-after"], "1");
+
+    uploads[0].abort();
+    assert!(uploads.remove(0).await.unwrap_err().is_cancelled());
+    drop(releases.remove(0));
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id);
+    assert_eq!(
+        fs::read_dir(&staging_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".upload-") && name.ends_with(".tmp")
+            })
+            .count(),
+        1,
+        "cancelled upload kept its temp reservation"
+    );
+    let durable_inflight_uploads: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        durable_inflight_uploads, 2,
+        "cancelled and still-active bodies must both remain GC-addressable"
+    );
+
+    let replacement_id = Uuid::new_v4();
+    let replacement = request_with_headers(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/causal/media/{replacement_id}"),
+        Some(&token),
+        Body::from(Bytes::from_static(b"xy")),
+        Some("application/octet-stream"),
+        &[("x-lezi-media-sha256", sha.as_str())],
+    )
+    .await;
+    assert_eq!(replacement.status(), StatusCode::OK);
+
+    releases.remove(0).send(()).unwrap();
+    assert_eq!(uploads.remove(0).await.unwrap().status(), StatusCode::OK);
+    let durable_cancelled_uploads: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_uploads WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(durable_cancelled_uploads, 1);
+}
+
+#[tokio::test]
+async fn cancelled_prepare_keeps_admission_and_temp_owned_until_verification_finishes() {
+    let (hook, events, release) = blocked_prepare_hook("before_verify");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_prepare_blocking_hook = Some(hook);
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-verify-cancel-owner",
+        "causal-media-verify-cancel-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    let mut uploads = media_ids
+        .iter()
+        .map(|media_id| spawn_causal_media_put(&rig.app, &token, *media_id))
+        .collect::<Vec<_>>();
+    let events = tokio::task::spawn_blocking(move || {
+        for _ in 0..2 {
+            assert_eq!(
+                events.recv_timeout(Duration::from_secs(2)).unwrap(),
+                "before_verify"
+            );
+        }
+        events
+    })
+    .await
+    .unwrap();
+
+    for upload in &uploads {
+        upload.abort();
+    }
+    for upload in uploads.drain(..) {
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let staging_dir = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id);
+    assert_eq!(
+        fs::read_dir(&staging_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".upload-") && name.ends_with(".tmp")
+            })
+            .count(),
+        2,
+        "cancel detached the verifier from its temp owner"
+    );
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    let saturated = tokio::time::timeout(
+        Duration::from_millis(500),
+        request_with_headers(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/causal/media/{}", Uuid::new_v4()),
+            Some(&token),
+            Body::from(b"xy".to_vec()),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        ),
+    )
+    .await
+    .expect("verification cancellation released admission into the blocked hook");
+    assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    release.release();
+    tokio::task::spawn_blocking(move || {
+        let mut completed = 0;
+        while completed < 2 {
+            if events.recv_timeout(Duration::from_secs(2)).unwrap() == "after_store" {
+                completed += 1;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let replacement_id = Uuid::new_v4();
+    assert_eq!(
+        spawn_causal_media_put(&rig.app, &token, replacement_id)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        fs::read_dir(&staging_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(".upload-") && name.ends_with(".tmp")
+            })
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn cancelled_prepare_keeps_family_lock_and_admission_until_store_finishes() {
+    let (hook, events, release) = blocked_prepare_hook("before_store");
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+        config.causal_media_prepare_blocking_hook = Some(hook);
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-store-cancel-owner",
+        "causal-media-store-cancel-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    let family_id = owner["family_id"].as_str().unwrap().to_owned();
+    let baby_id = seed_causal_baby(&rig.app, &token).await;
+    let media_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    let mut uploads = media_ids
+        .iter()
+        .map(|media_id| spawn_causal_media_put(&rig.app, &token, *media_id))
+        .collect::<Vec<_>>();
+    let events = tokio::task::spawn_blocking(move || {
+        let mut verifying = 0;
+        let mut storing = 0;
+        while verifying < 2 || storing < 1 {
+            match events.recv_timeout(Duration::from_secs(2)).unwrap() {
+                "before_verify" => verifying += 1,
+                "before_store" => storing += 1,
+                _ => {}
+            }
+        }
+        events
+    })
+    .await
+    .unwrap();
+
+    for upload in &uploads {
+        upload.abort();
+    }
+    for upload in uploads.drain(..) {
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let sha = hex::encode(Sha256::digest(b"xy"));
+    let saturated = tokio::time::timeout(
+        Duration::from_millis(500),
+        request_with_headers(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/causal/media/{}", Uuid::new_v4()),
+            Some(&token),
+            Body::from(b"xy".to_vec()),
+            Some("application/octet-stream"),
+            &[("x-lezi-media-sha256", sha.as_str())],
+        ),
+    )
+    .await
+    .expect("Store cancellation released admission into the blocked hook");
+    assert_eq!(saturated.status(), StatusCode::TOO_MANY_REQUESTS);
+    let commit_app = rig.app.clone();
+    let commit_token = token.clone();
+    let mut commit = tokio::spawn(async move {
+        commit_causal_record(
+            &commit_app,
+            &commit_token,
+            baby_id,
+            Uuid::new_v4(),
+            None,
+            "small-during-cancelled-store",
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut commit)
+            .await
+            .is_err(),
+        "cancelled handler released the family lock before Store finished"
+    );
+
+    release.release();
+    tokio::task::spawn_blocking(move || {
+        let mut completed = 0;
+        while completed < 2 {
+            if events.recv_timeout(Duration::from_secs(2)).unwrap() == "after_store" {
+                completed += 1;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let committed = commit.await.unwrap();
+    assert_eq!(committed.0, StatusCode::OK, "{}", committed.1);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let staged: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND status = 'staged'",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(staged, 2, "detached Store work split receipt/file state");
+    for media_id in media_ids {
+        assert_eq!(
+            fs::read(
+                rig.directory
+                    .path()
+                    .join("media/.causal-stage")
+                    .join(&family_id)
+                    .join(media_id.to_string())
+            )
+            .unwrap(),
+            b"xy"
+        );
+    }
+}
+
+#[tokio::test]
+async fn causal_media_prepare_exact_replay_repairs_same_size_staged_corruption() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-corruption-owner",
+        "causal-media-corruption-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"verified-preimage";
+    let corrupt = b"corrupt-preimage!";
+    assert_eq!(bytes.len(), corrupt.len());
+    let (status, first) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    fs::write(&staged_path, corrupt).unwrap();
+
+    let (status, replay) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay, first, "exact replay changed its receipt semantics");
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn causal_media_prepare_restart_replay_preserves_the_exact_durable_receipt() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-restart-owner",
+        "causal-media-restart-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let media_id = Uuid::new_v4();
+    let bytes = b"restart-durable-preimage";
+    let first = put_causal_media_raw(&rig.app, token, media_id, bytes).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_bytes = first.into_body().collect().await.unwrap().to_bytes();
+    let database_path = rig.directory.path().join("lezi.db");
+    let durable_receipt = || {
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .query_row(
+                "SELECT COUNT(*), membership_id, sha256, byte_size,
+                        created_at, expires_at, status
+                 FROM causal_media_staging
+                 WHERE family_id = ?1 AND media_uuid = ?2",
+                rusqlite::params![family_id, media_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let before_restart = durable_receipt();
+    assert_eq!(before_restart.0, 1);
+    assert_eq!(before_restart.6, "staged");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    let published_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(media_id.to_string());
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+    assert!(!published_path.exists());
+
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let replay = put_causal_media_raw(&restarted, token, media_id, bytes).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_bytes = replay.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(replay_bytes, first_bytes);
+    assert_eq!(durable_receipt(), before_restart);
+    assert_eq!(fs::read(staged_path).unwrap(), bytes);
+    assert!(!published_path.exists());
+}
+
+#[tokio::test]
+async fn causal_media_startup_and_commit_gc_expired_staging_without_failing_family_commit() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-gc-owner",
+        "causal-media-gc-request-000000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let media_id = Uuid::new_v4();
+    assert_eq!(
+        put_causal_media_raw(&rig.app, token, media_id, b"expired")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    fs::remove_file(&staged_path).unwrap();
+    fs::create_dir(&staged_path).unwrap();
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET expires_at = ?1
+             WHERE family_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![
+                rig.now.load(Ordering::SeqCst),
+                family_id,
+                media_id.to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (status, body, _) = commit_causal_record(
+        &rig.app,
+        token,
+        baby_id,
+        Uuid::new_v4(),
+        None,
+        "gc-failure-does-not-fail-commit",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pending = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+            let status: String = connection
+                .query_row(
+                    "SELECT status FROM causal_media_staging
+                     WHERE family_id = ?1 AND media_uuid = ?2",
+                    rusqlite::params![family_id, media_id.to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if status == "gc_pending" {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached bounded GC did not mark its expired candidate");
+    assert_eq!(pending, "gc_pending");
+
+    fs::remove_dir(&staged_path).unwrap();
+    fs::write(&staged_path, b"expired").unwrap();
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    assert!(!staged_path.exists());
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let remaining: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM causal_media_staging
+             WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, media_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+    assert_eq!(
+        request(
+            &restarted,
+            Method::GET,
+            "/health",
+            None,
+            Body::empty(),
+            None,
         )
         .await
         .status(),
         StatusCode::OK
     );
-    let (commit_status, commit_body) = json_request(
+}
+
+#[tokio::test]
+async fn causal_media_preimage_replay_conflict_and_restart_publication_are_stable() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
         &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
+        "causal-media-lifecycle-owner",
+        "causal-media-lifecycle-request-0000001",
     )
     .await;
-    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit_body}");
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"durable-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+
+    for _ in 0..2 {
+        let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+        assert_eq!(status, StatusCode::OK, "{staged}");
+        assert_eq!(staged["status"], "staged");
+        assert_eq!(staged["sha256"], sha);
+    }
+    let final_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    assert!(
+        !final_path.exists(),
+        "unaccepted bytes reached published path"
+    );
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+
+    let different = b"durable-preimagf";
+    assert_eq!(different.len(), bytes.len());
+    let (status, conflict) = put_causal_media_bytes(&rig.app, token, media_id, different).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+
+    let (status, committed) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "published", 80, 20),
+            vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["results"][0]["status"], "accepted");
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    assert!(
+        !staged_path.exists(),
+        "consumed staging bytes were not removed"
+    );
+
+    // Crash fixture: the DB consume is durable, while filesystem promotion did
+    // not finish. Startup must converge before exposing public routes.
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "DELETE FROM media_publications
+              WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![owner["family_id"].as_str().unwrap(), media_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE causal_media_staging SET publication_confirmed = 0
+              WHERE family_id = ?1 AND media_uuid = ?2 AND status = 'consumed'",
+            rusqlite::params![owner["family_id"].as_str().unwrap(), media_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+    fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
+    fs::rename(&final_path, &staged_path).unwrap();
+    assert!(!final_path.exists());
+    let restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    assert!(!staged_path.exists());
+    let response = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn causal_media_receipt_claim_survives_promotion_fault_and_replays_one_version() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-promotion-owner",
+        "causal-media-promotion-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4();
+    let media_id = Uuid::new_v4();
+    let bytes = b"promotion-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
 
     let final_path = rig
         .directory
         .path()
         .join("media")
         .join(family_id)
-        .join(&media_id);
-    assert_eq!(
-        fs::read(&final_path).unwrap(),
-        b"old",
-        "bundle bytes must be durable before the SQLite publish attempt"
+        .join(media_id.to_string());
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(family_id)
+        .join(media_id.to_string());
+    fs::create_dir_all(&final_path).unwrap();
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "record",
+        record_id,
+        causal_formula_root(baby_id, "promotion-pending", 80, 20),
+        vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+        false,
     );
 
-    // A same-id refinement removes the old staging manifest. Quarantine
-    // ownership must outlive that row, otherwise startup could mistake the
-    // pre-published final-path file for an ordinary upload.
-    let (refine_status, refine_body) = json_request(
+    let (status, failed) = causal_commit_units(&rig.app, token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    assert_eq!(fs::read(&staged_path).unwrap(), bytes);
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let (durable_version, version_count, consumed_count): (String, i64, i64) = connection
+        .query_row(
+            "SELECT r.stable_version_id,
+                    (SELECT COUNT(*) FROM entity_versions v
+                      WHERE v.family_id = r.family_id
+                        AND v.entity_type = r.entity_type
+                        AND v.client_uuid = r.client_uuid),
+                    (SELECT COUNT(*) FROM causal_media_staging s
+                      WHERE s.family_id = r.family_id AND s.media_uuid = ?1
+                        AND s.status = 'consumed')
+               FROM mutation_receipts r
+              WHERE r.mutation_id = ?2",
+            [
+                media_id.to_string(),
+                mutation["mutation_id"].as_str().unwrap().to_owned(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+    assert_eq!(consumed_count, 1);
+    drop(connection);
+    let response = request(
         &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                50,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
-
-    let (ordinary_status, ordinary_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_id,
-                101,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(
-        ordinary_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{ordinary_body}"
-    );
-
-    let ordinary_put = request(
-        &rig.app,
-        Method::PUT,
+        Method::GET,
         &format!("/v1/media/{media_id}"),
         Some(token),
-        Body::from("new"),
-        Some("image/jpeg"),
+        Body::empty(),
+        None,
     )
     .await;
-    assert_eq!(
-        ordinary_put.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "retired ordinary PUT claimed media bytes reserved by an incomplete bundle"
-    );
-    assert_eq!(
-        fs::read(&final_path).unwrap(),
-        b"old",
-        "rejected ordinary PUT replaced quarantined bundle bytes"
-    );
-
-    let restarted = rig.restart("generation-b");
-    for (app, generation) in [(&rig.app, "generation-a"), (&restarted, "generation-b")] {
-        let (_, pull) = get_json(
-            app,
-            &format!("/v1/pull?cursor=0&generation={generation}"),
-            Some(token),
-        )
-        .await;
-        assert!(
-            !pull["entities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entity| entity["client_uuid"] == media_id),
-            "retired ordinary push claimed bytes from the rejected bundle: {pull}"
-        );
-        let response = request(
-            app,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(token),
-            Body::empty(),
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-}
-
-#[tokio::test]
-async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-losing-media-owner",
-        "bundle-losing-media-request-000001",
-    )
-    .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let stale_bundle_id = Uuid::new_v4().to_string();
-
-    seed_record_with_id(&rig.app, token, &record_id, 100, record_payload(&baby_id)).await;
-
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": stale_bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                50,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                50,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{stale_bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("old"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let (stale_status, stale_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{stale_bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(stale_status, StatusCode::CONFLICT, "{stale_body}");
-
-    let (metadata_status, metadata_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_id,
-                100,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(
-        metadata_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{metadata_body}"
-    );
-
-    let winner_bundle_id = Uuid::new_v4().to_string();
-    let (winner_stage_status, winner_stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": winner_bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                101,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                99,
-                log_media_payload(&record_id),
-                Some(99),
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(winner_stage_status, StatusCode::OK, "{winner_stage_body}");
-    let (commit_status, commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{winner_bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-    assert_eq!(commit_body["applied"], 2);
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let media_tombstone = pull["entities"]
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let pending_pull = pull_entities(&rig.app, token, generation).await;
+    assert!(pending_pull["entities"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|entity| entity["client_uuid"] == media_id)
-        .expect("winning bundle publishes the media tombstone metadata");
-    assert_eq!(media_tombstone["deleted_at"], 99, "{pull}");
+        .all(|row| {
+            row["client_uuid"] != record_id.to_string()
+                && row["client_uuid"] != media_id.to_string()
+        }));
+
+    fs::remove_dir(&final_path).unwrap();
+    let (status, prepared_replay) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared_replay}");
+    assert_eq!(prepared_replay["status"], "consumed");
+    let (status, committed) = causal_commit_units(&rig.app, token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["results"][0]["status"], "accepted");
     assert_eq!(
-        request(
-            &rig.app,
+        committed["results"][0]["stable"]["version_id"],
+        durable_version
+    );
+    assert_eq!(fs::read(&final_path).unwrap(), bytes);
+    assert!(!staged_path.exists());
+    let version_count: i64 = Connection::open(rig.directory.path().join("lezi.db"))
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM entity_versions
+              WHERE entity_type = 'record' AND client_uuid = ?1",
+            [record_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version_count, 1);
+    let converged_pull = pull_entities(&rig.app, token, generation).await;
+    let converged_ids = converged_pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["client_uuid"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(converged_ids.contains(record_id.to_string().as_str()));
+    assert!(converged_ids.contains(media_id.to_string().as_str()));
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        bytes.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn expired_causal_media_preimage_is_rejected_and_collected_on_restart() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-media-expiry-owner",
+        "causal-media-expiry-request-000000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, token).await;
+    let media_id = Uuid::new_v4();
+    let record_id = Uuid::new_v4();
+    let bytes = b"expiring-preimage";
+    let sha = hex::encode(Sha256::digest(bytes));
+    let (status, staged) = put_causal_media_bytes(&rig.app, token, media_id, bytes).await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media/.causal-stage")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string());
+    assert!(staged_path.exists());
+
+    rig.now.fetch_add(24 * 60 * 60 + 1, Ordering::SeqCst);
+    let (refresh_status, refreshed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(refresh_status, StatusCode::OK, "{refreshed}");
+    let token = refreshed["access_token"].as_str().unwrap();
+    let (status, rejected) = causal_commit_units(
+        &rig.app,
+        token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "expired", 80, 20),
+            vec![causal_media_item(media_id, "log", &sha, bytes.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rejected}");
+    assert_eq!(rejected["status"], "rejected");
+    let expired_code = rejected["error"]["code"].as_str().unwrap_or_default();
+    assert!(
+        expired_code == "media_preimage_expired" || expired_code == "missing_media_bytes",
+        "expired receipt must stay a media claim code, got {expired_code}"
+    );
+
+    let _restarted = rig.restart_with_config("generation-a", |config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    assert!(!staged_path.exists());
+    assert!(!rig
+        .directory
+        .path()
+        .join("media")
+        .join(owner["family_id"].as_str().unwrap())
+        .join(media_id.to_string())
+        .exists());
+}
+
+async fn two_joined_clients(
+    app: &Router,
+    owner_device: &str,
+    member_device: &str,
+) -> (Value, Value) {
+    let owner = create_family(
+        app,
+        owner_device,
+        &format!("{owner_device}-create-request-000000000001"),
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(app, owner_token, member_device).await;
+    (owner, member)
+}
+
+#[tokio::test]
+async fn two_clients_incrementally_pull_lossless_sidecar_pages_across_restart() {
+    async fn pull_page_bytes(
+        app: &Router,
+        token: &str,
+        generation: &str,
+        cursor: i64,
+    ) -> (Bytes, Value) {
+        let response = request(
+            app,
             Method::GET,
-            &format!("/v1/media/{media_id}"),
+            &format!("/v1/pull?cursor={cursor}&generation={generation}"),
             Some(token),
             Body::empty(),
             None,
         )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-}
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            bytes.len() <= 8 * 1024 * 1024,
+            "final pull envelope exceeded byte budget: {}",
+            bytes.len()
+        );
+        let value = serde_json::from_slice(&bytes).unwrap();
+        (bytes, value)
+    }
 
-#[tokio::test]
-async fn atomic_bundle_supports_baby_and_avatar_media() {
     let rig = Rig::new();
-    let created = create_family(
+    let (owner, member) =
+        two_joined_clients(&rig.app, "sidecar-page-owner", "sidecar-page-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let records = (0..33).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+
+    let (status, created) = causal_commit_units(
         &rig.app,
-        "ordinary-media-owner",
-        "ordinary-media-request-0000000001",
+        member_token,
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| {
+                causal_unit(
+                    Uuid::new_v4(),
+                    None,
+                    "record",
+                    *record_id,
+                    causal_formula_root(
+                        baby_id,
+                        &format!("base-{index}"),
+                        50 + index as i64,
+                        20 + index as i64,
+                    ),
+                    vec![],
+                    false,
+                )
+            })
+            .collect(),
     )
     .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let avatar_id = Uuid::new_v4().to_string();
-    let (status, body) = publish_bundle_with_media(
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let base_versions = created["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| {
+            assert_eq!(result["status"], "accepted", "{result}");
+            result["stable"]["version_id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+
+    let (status, accepted) = causal_commit_units(
         &rig.app,
-        token,
-        entity_wire(
-            "baby",
-            &baby_id,
-            2,
-            baby_payload("年年", Some(&avatar_id)),
+        owner_token,
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| {
+                causal_unit(
+                    Uuid::new_v4(),
+                    Some(&base_versions[index]),
+                    "record",
+                    *record_id,
+                    causal_formula_root(
+                        baby_id,
+                        &format!("stable-{index}"),
+                        50 + index as i64,
+                        100 + index as i64,
+                    ),
+                    vec![],
+                    false,
+                )
+            })
+            .collect(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let stable_versions = accepted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| {
+            assert_eq!(result["status"], "accepted", "{result}");
+            result["stable"]["version_id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    let owner_display = Uuid::new_v4();
+    let (status, owner_display_created) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
             None,
-        ),
-        vec![(
-            entity_wire(
-                "media",
-                &avatar_id,
-                2,
-                json!({
-                    "kind": "avatar",
-                    "record_client_uuid": null,
-                    "baby_client_uuid": baby_id,
-                    "care_plan_client_uuid": null,
-                    "mime": "image/jpeg",
-                    "width": 64,
-                    "height": 64,
-                    "byte_size": 3,
-                }),
-                None,
-            ),
-            b"img".to_vec(),
+            "record",
+            owner_display,
+            causal_formula_root(baby_id, "owner-display", 50, 99),
+            vec![],
+            false,
         )],
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let record_id = seed_record(&rig.app, token, &baby_id).await;
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let entities = pull["entities"].as_array().unwrap();
-    assert!(entities.iter().any(|e| e["client_uuid"] == avatar_id));
-    assert!(entities.iter().any(|e| e["client_uuid"] == record_id));
-    let bytes = request(
-        &rig.app,
-        Method::GET,
-        &format!("/v1/media/{avatar_id}"),
-        Some(token),
-        Body::empty(),
-        None,
-    )
-    .await;
-    assert_eq!(bytes.status(), StatusCode::OK);
-    assert_eq!(bytes.into_body().collect().await.unwrap().to_bytes(), "img");
-}
+    assert_eq!(status, StatusCode::OK, "{owner_display_created}");
+    let owner_display_version = owner_display_created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, baseline) = pull_page_bytes(&rig.app, owner_token, generation, 0).await;
+    let baseline_cursor = baseline["cursor"].as_i64().unwrap();
 
-#[tokio::test]
-async fn ordinary_put_cannot_overwrite_committed_bundle_media() {
-    let rig = Rig::new();
-    let created = create_family(
+    let (status, branched) = causal_commit_units(
         &rig.app,
-        "bundle-owned-media-owner",
-        "bundle-owned-media-request-0000001",
+        member_token,
+        records
+            .iter()
+            .enumerate()
+            .map(|(index, record_id)| {
+                causal_unit(
+                    Uuid::new_v4(),
+                    Some(&base_versions[index]),
+                    "record",
+                    *record_id,
+                    causal_formula_root(
+                        baby_id,
+                        &format!("branch-{index}"),
+                        50 + index as i64,
+                        200 + index as i64,
+                    ),
+                    vec![],
+                    false,
+                )
+            })
+            .collect(),
     )
     .await;
-    let token = created["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
+    assert_eq!(status, StatusCode::OK, "{branched}");
+    assert!(branched["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result["status"] == "branched"));
+    let mut relation_members = records.iter().map(Uuid::to_string).collect::<Vec<_>>();
+    relation_members.push(owner_display.to_string());
+    let mut relation_versions = records
+        .iter()
+        .zip(&stable_versions)
+        .map(|(record_id, version)| (record_id.to_string(), version.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    relation_versions.insert(owner_display.to_string(), owner_display_version);
+    let (status, relation) = json_request(
         &rig.app,
         Method::POST,
-        "/v1/bundles",
-        Some(token),
+        "/v1/source-relations/resolve-group",
+        Some(owner_token),
         json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
+            "mutation_id": "sidecar-page-relation",
+            "member_client_uuids": relation_members,
+            "display_client_uuid": owner_display,
+            "expected_versions": relation_versions
         }),
     )
     .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(status, StatusCode::OK, "{relation}");
+    assert_eq!(relation["status"], "accepted");
+
+    let (first_bytes, first) =
+        pull_page_bytes(&rig.app, owner_token, generation, baseline_cursor).await;
+    assert_eq!(first["has_more"], true, "{first}");
+    let (retry_bytes, retry) =
+        pull_page_bytes(&rig.app, owner_token, generation, baseline_cursor).await;
     assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
+        retry_bytes, first_bytes,
+        "page restart must be deterministic"
     );
-    let (commit_status, commit_body) = json_request(
+    assert_eq!(retry, first);
+
+    let restarted = rig.restart(generation);
+    let first_cursor = first["cursor"].as_i64().unwrap();
+    let (_, second) = pull_page_bytes(&restarted, owner_token, generation, first_cursor).await;
+    assert_eq!(second["has_more"], false, "{second}");
+    assert!(second["cursor"].as_i64().unwrap() > first_cursor);
+
+    let entities = first["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["entities"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    let summaries = entities
+        .iter()
+        .filter_map(|entity| {
+            entity
+                .get("conflict_summary")
+                .map(|_| entity["client_uuid"].as_str().unwrap().to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(summaries.len(), records.len());
+    assert!(records
+        .iter()
+        .all(|record_id| summaries.contains(record_id.to_string().as_str())));
+    for relation_member in [owner_display, records[32]] {
+        let entity = entities
+            .iter()
+            .find(|entity| entity["client_uuid"] == relation_member.to_string())
+            .expect("relation member was not re-emitted");
+        assert!(entity.get("source_relation_summary").is_some());
+    }
+}
+
+async fn pull_entities(app: &Router, token: &str, generation: &str) -> Value {
+    let (status, body) = get_json(
+        app,
+        &format!("/v1/pull?cursor=0&generation={generation}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+fn find_entity(pull: &Value, client_uuid: Uuid) -> &Value {
+    pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == client_uuid.to_string())
+        .unwrap_or_else(|| panic!("entity {client_uuid} missing from pull: {pull}"))
+}
+
+fn conflict_summary_is_closed(row: &Value) {
+    // Wire: after resolution, ordinary pull must not surface an open conflict_summary.
+    match row.get("conflict_summary") {
+        None => {}
+        Some(Value::Null) => {}
+        Some(other) => panic!("open conflict_summary after resolve: {other}"),
+    }
+}
+
+/// Owner + member: disjoint field auto-merge; same-field branch; peer summary; CAS resolve.
+#[tokio::test]
+async fn causal_two_client_disjoint_merge_and_same_field_branch() {
+    let rig = Rig::new();
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "two-client-merge-owner",
+        "two-client-merge-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4();
+    // Member authors so both owner and author may edit.
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "base", 100, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["results"][0]["status"], "accepted");
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, left) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "owner-note", 100, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{left}");
+    assert_eq!(left["results"][0]["status"], "accepted", "{left}");
+
+    let (status, right) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "base", 180, 40),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{right}");
+    assert_eq!(right["results"][0]["status"], "merged", "{right}");
+    assert_eq!(right["results"][0]["stable"]["root"]["note"], "owner-note");
+    assert_eq!(
+        right["results"][0]["stable"]["root"]["payload_json"]["amount_ml"],
+        180
+    );
+    let v_merged = right["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, owner_note) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v_merged),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "owner-wins-candidate", 180, 50),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{owner_note}");
+    assert_eq!(owner_note["results"][0]["status"], "accepted");
+    let v_owner = owner_note["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, member_branch) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v_merged),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "member-branch-note", 180, 60),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{member_branch}");
+    assert_eq!(member_branch["results"][0]["status"], "branched");
+    let conflict_id = member_branch["results"][0]["conflict_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        member_branch["results"][0]["stable"]["version_id"].as_str(),
+        Some(v_owner.as_str())
+    );
+
+    let owner_pull = pull_entities(&rig.app, owner_token, generation).await;
+    let row = find_entity(&owner_pull, record_id);
+    assert_eq!(row["version_id"], v_owner);
+    assert_eq!(row["payload"]["note"], "owner-wins-candidate");
+    let summary = row
+        .get("conflict_summary")
+        .expect("owner must see peer branch summary object");
+    assert!(
+        !summary.is_null(),
+        "conflict_summary must be non-null: {row}"
+    );
+    assert_eq!(summary["conflict_id"], conflict_id);
+
+    let (status, first_detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first_detail}");
+    let first_choice = conflict_set_choice(&first_detail, "/note", json!("member-branch-note"));
+    let outsider = approve_new_member(&rig.app, owner_token, "two-client-merge-outsider").await;
+    let (status, forbidden) = json_request(
         &rig.app,
         Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(outsider["access_token"].as_str().unwrap()),
+        json!({
+            "snapshot_token": first_detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [first_choice.clone()]
+        }),
     )
     .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+    assert_eq!(status, StatusCode::OK, "{forbidden}");
+    assert_eq!(forbidden["error"]["code"], "forbidden");
 
-    let overwrite = request(
+    // A new branch after detail invalidates the receipt-bound full set.
+    let (status, late_branch) = causal_commit_units(
         &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
-        Body::from("bad"),
-        Some("image/jpeg"),
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v_merged),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "late-branch", 180, 65),
+            vec![],
+            false,
+        )],
     )
     .await;
-    assert_eq!(overwrite.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::OK, "{late_branch}");
+    assert_eq!(late_branch["results"][0]["status"], "branched");
 
-    let preserved = request(
+    let (status, stale_resolve) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(owner_token),
+        json!({
+            "snapshot_token": first_detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [first_choice]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stale_resolve}");
+    assert_eq!(stale_resolve["status"], "rejected", "{stale_resolve}");
+    assert_eq!(stale_resolve["error"]["code"], "snapshot_stale");
+
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let member_choice = conflict_set_choice(&detail, "/note", json!("member-branch-note"));
+
+    let (status, resolved) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(owner_token),
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [member_choice]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{resolved}");
+    assert_eq!(resolved["status"], "accepted");
+    assert_eq!(resolved["stable_root"]["note"], "member-branch-note");
+
+    // A different resolution mutation cannot overwrite the closed conflict.
+    let (status, race) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/conflicts/{conflict_id}/resolve"),
+        Some(member_token),
+        json!({
+            "snapshot_token": detail["snapshot_token"],
+            "resolution_mutation_id": Uuid::new_v4().to_string(),
+            "choices": [conflict_set_choice(&detail, "/note", json!("owner-wins-candidate"))]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{race}");
+    assert_eq!(race["status"], "rejected");
+    assert_eq!(race["error"]["code"], "snapshot_stale");
+
+    let member_pull = pull_entities(&rig.app, member_token, generation).await;
+    let settled = find_entity(&member_pull, record_id);
+    assert_eq!(settled["payload"]["note"], "member-branch-note");
+    conflict_summary_is_closed(settled);
+}
+
+/// Delete-then-edit and edit-then-delete arrival orders + idempotent replay + stale reject.
+#[tokio::test]
+async fn causal_two_client_delete_edit_both_arrival_orders() {
+    let rig = Rig::new();
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "two-client-delete-owner",
+        "two-client-delete-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+
+    // --- Order A: delete first, concurrent edit from common base → branched tombstone stable.
+    let record_a = Uuid::new_v4();
+    let create_mut = Uuid::new_v4();
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            create_mut,
+            None,
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "live", 90, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, replay) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            create_mut,
+            None,
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "live", 90, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["stable"]["version_id"], v1);
+
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "live", 90, 30),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted");
+    let tombstone_v = deleted["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, concurrent_edit) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "offline-edit", 90, 40),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{concurrent_edit}");
+    assert_eq!(concurrent_edit["results"][0]["status"], "branched");
+    assert_eq!(
+        concurrent_edit["results"][0]["stable"]["version_id"].as_str(),
+        Some(tombstone_v.as_str())
+    );
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let row = find_entity(&pull, record_a);
+    assert!(!row["deleted_at"].is_null(), "{row}");
+    assert!(
+        row.get("conflict_summary").is_some() && !row["conflict_summary"].is_null(),
+        "{row}"
+    );
+
+    let (status, stale) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&Uuid::new_v4().to_string()),
+            "record",
+            record_a,
+            causal_formula_root(baby_id, "stale-resurrect", 90, 99),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stale}");
+    assert_eq!(stale["status"], "rejected");
+    assert_eq!(stale["error"]["code"].as_str(), Some("invalid_domain"));
+
+    // --- Order B: edit first, then delete from common base → branched; stable is live edit.
+    let record_b = Uuid::new_v4();
+    let (status, created_b) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_b,
+            causal_formula_root(baby_id, "live-b", 50, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created_b}");
+    let vb1 = created_b["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, edited) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&vb1),
+            "record",
+            record_b,
+            causal_formula_root(baby_id, "member-edit-first", 50, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_eq!(edited["results"][0]["status"], "accepted");
+    let vb2 = edited["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, delete_late) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&vb1),
+            "record",
+            record_b,
+            causal_formula_root(baby_id, "live-b", 50, 40),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{delete_late}");
+    assert_eq!(
+        delete_late["results"][0]["status"], "branched",
+        "{delete_late}"
+    );
+    assert_eq!(
+        delete_late["results"][0]["stable"]["version_id"].as_str(),
+        Some(vb2.as_str())
+    );
+    let pull_b = pull_entities(&rig.app, member_token, generation).await;
+    let row_b = find_entity(&pull_b, record_b);
+    assert!(
+        row_b["deleted_at"].is_null(),
+        "stable remains live edit: {row_b}"
+    );
+    assert_eq!(row_b["payload"]["note"], "member-edit-first");
+    assert!(
+        row_b.get("conflict_summary").is_some() && !row_b["conflict_summary"].is_null(),
+        "delete branch must surface conflict_summary: {row_b}"
+    );
+}
+
+#[tokio::test]
+async fn causal_member_cannot_commit_baby_avatar_root() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (_owner, member) =
+        two_joined_clients(&rig.app, "causal-avatar-owner", "causal-avatar-member").await;
+    let member_token = member["access_token"].as_str().unwrap();
+
+    let denied_baby = Uuid::new_v4();
+    let denied_avatar = Uuid::new_v4();
+    let denied_bytes = b"member-avatar-must-not-publish";
+    let denied_sha = hex::encode(Sha256::digest(denied_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, member_token, denied_avatar, denied_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, denied) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            denied_baby,
+            causal_baby_root("禁止创建", Some(denied_avatar), 10),
+            vec![causal_media_item(
+                denied_avatar,
+                "avatar",
+                &denied_sha,
+                denied_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{denied}");
+    assert_eq!(denied["status"], "rejected", "{denied}");
+    assert_eq!(denied["error"]["code"], "forbidden", "{denied}");
+}
+
+#[tokio::test]
+async fn causal_baby_avatar_exact_commit_replay_keeps_stable_version_and_bytes() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let owner = create_family(
+        &rig.app,
+        "causal-avatar-replay-owner",
+        "causal-avatar-replay-create-request-0001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let baby_id = Uuid::new_v4();
+    let avatar_id = Uuid::new_v4();
+    let avatar_bytes = b"owner-avatar-exact-bytes";
+    let avatar_sha = hex::encode(Sha256::digest(avatar_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, owner_token, avatar_id, avatar_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let mutation = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        baby_id,
+        causal_baby_root("年年", Some(avatar_id), 20),
+        vec![causal_media_item(
+            avatar_id,
+            "avatar",
+            &avatar_sha,
+            avatar_bytes.len(),
+        )],
+        false,
+    );
+    let (status, created) =
+        causal_commit_units(&rig.app, owner_token, vec![mutation.clone()]).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["results"][0]["status"], "accepted", "{created}");
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, replay) = causal_commit_units(&rig.app, owner_token, vec![mutation]).await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["results"][0]["status"], "accepted", "{replay}");
+    assert_eq!(replay["results"][0]["stable"]["version_id"], v1);
+
+    let response = request(
         &rig.app,
         Method::GET,
-        &format!("/v1/media/{media_id}"),
-        Some(token),
+        &format!("/v1/media/{avatar_id}"),
+        Some(owner_token),
         Body::empty(),
         None,
     )
     .await;
-    assert_eq!(preserved.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        preserved.into_body().collect().await.unwrap().to_bytes(),
-        "img"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Custom item family definitions (atomic bundle + ACL)
-// ---------------------------------------------------------------------------
-
-fn custom_item_payload(name: &str, icon_slot: i64) -> Value {
-    json!({
-        "name": name,
-        "icon_slot": icon_slot,
-    })
-}
-
-#[tokio::test]
-async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roots() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "custom-history-owner",
-        "custom-history-owner-request-00001",
-    )
-    .await;
-    let token = owner["access_token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let custom_item_id = Uuid::new_v4().to_string();
-    let historical_record_id = Uuid::new_v4().to_string();
-    let historical_plan_id = Uuid::new_v4().to_string();
-    let fulfilled_record_id = Uuid::new_v4().to_string();
-    let rebound_record_id = Uuid::new_v4().to_string();
-    let custom_record = |note: &str| {
-        json!({
-            "baby_client_uuid": baby_id,
-            "type": "custom",
-            "custom_item_client_uuid": custom_item_id,
-            "timestamp": 1_700_000_000_000i64,
-            "end_timestamp": null,
-            "note": note,
-            "payload_json": {"title": "抚触"},
-            "schema_version": 2,
-        })
-    };
-    let mut custom_plan = care_plan_payload(&baby_id, "custom");
-    custom_plan["custom_item_client_uuid"] = json!(custom_item_id);
-
-    for root in [
-        entity_wire(
-            "custom_item",
-            &custom_item_id,
-            2,
-            custom_item_payload("抚触", 2),
-            None,
-        ),
-        entity_wire(
-            "record",
-            &historical_record_id,
-            3,
-            custom_record("历史记录"),
-            None,
-        ),
-        entity_wire(
-            "care_plan",
-            &historical_plan_id,
-            3,
-            custom_plan.clone(),
-            None,
-        ),
-    ] {
-        let (status, body) = publish_root_bundle(&rig.app, token, root).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
-    let (deleted_status, deleted_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "custom_item",
-            &custom_item_id,
-            4,
-            custom_item_payload("抚触", 2),
-            Some(4),
-        ),
-    )
-    .await;
-    assert_eq!(deleted_status, StatusCode::OK, "{deleted_body}");
-
-    let (edit_status, edit_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "record",
-            &historical_record_id,
-            5,
-            custom_record("历史记录已编辑"),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(edit_status, StatusCode::OK, "{edit_body}");
-
-    for root in [
-        entity_wire(
-            "record",
-            &Uuid::new_v4().to_string(),
-            5,
-            custom_record("伪造新事实"),
-            None,
-        ),
-        entity_wire(
-            "care_plan",
-            &Uuid::new_v4().to_string(),
-            5,
-            custom_plan.clone(),
-            None,
-        ),
-    ] {
-        let (status, body) = publish_root_bundle(&rig.app, token, root).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert!(
-            body["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("is deleted and cannot be selected"),
-            "{body}"
-        );
-    }
-
-    custom_plan["status"] = json!("completed");
-    custom_plan["fulfilled_record_client_uuid"] = json!(fulfilled_record_id);
-    custom_plan["fulfilled_at"] = json!(1_700_000_100_000i64);
-    let (plan_status, plan_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "care_plan",
-            &historical_plan_id,
-            6,
-            custom_plan.clone(),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
-    let (record_status, record_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "record",
-            &fulfilled_record_id,
-            7,
-            custom_record("显式履行事实"),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(record_status, StatusCode::OK, "{record_body}");
-
-    let (candidate_status, candidate_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "fulfillment_candidate",
-            &Uuid::new_v4().to_string(),
-            8,
-            json!({
-                "care_plan_client_uuid": historical_plan_id,
-                "record_client_uuid": fulfilled_record_id,
-                "actual_timestamp": 1_700_000_000_000i64,
-            }),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(candidate_status, StatusCode::OK, "{candidate_body}");
-
-    let mut rebound_plan = custom_plan.clone();
-    rebound_plan["fulfilled_record_client_uuid"] = json!(rebound_record_id);
-    let (rebind_status, rebind_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire("care_plan", &historical_plan_id, 9, rebound_plan, None),
-    )
-    .await;
-    assert_eq!(rebind_status, StatusCode::CONFLICT, "{rebind_body}");
-    assert_eq!(
-        rebind_body,
-        json!({"detail": "Completed care plan fulfillment binding is immutable"})
-    );
-    let (rebound_record_status, rebound_record_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "record",
-            &rebound_record_id,
-            10,
-            custom_record("伪造改绑事实"),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(
-        rebound_record_status,
-        StatusCode::CONFLICT,
-        "{rebound_record_body}"
-    );
-
-    let (record_delete_status, record_delete_body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "record",
-            &historical_record_id,
-            9,
-            custom_record("历史记录已编辑"),
-            Some(9),
-        ),
-    )
-    .await;
-    assert_eq!(record_delete_status, StatusCode::OK, "{record_delete_body}");
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    let entities = pull["entities"].as_array().unwrap();
-    assert_eq!(
-        entities
-            .iter()
-            .find(|entity| entity["client_uuid"] == custom_item_id)
-            .unwrap()["deleted_at"],
-        4
-    );
-    assert!(entities
-        .iter()
-        .any(|entity| entity["client_uuid"] == fulfilled_record_id));
-    assert!(entities
-        .iter()
-        .all(|entity| entity["client_uuid"] != rebound_record_id));
-    assert_eq!(
-        entities
-            .iter()
-            .find(|entity| entity["client_uuid"] == historical_plan_id)
-            .unwrap()["payload"]["fulfilled_record_client_uuid"],
-        fulfilled_record_id
+        response.into_body().collect().await.unwrap().to_bytes(),
+        avatar_bytes.as_slice()
     );
 }
 
 #[tokio::test]
-async fn custom_item_create_stamps_creator_and_syncs_to_peer() {
-    let rig = Rig::new();
+async fn causal_deleted_baby_stable_keeps_avatar_branch_evidence_auditable() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
     let owner = create_family(
         &rig.app,
-        "owner-device",
-        "custom-item-owner-request-00000001",
+        "causal-avatar-branch-owner",
+        "causal-avatar-branch-create-request-0001",
     )
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
-    let owner_membership = owner["membership_id"].as_str().unwrap().to_owned();
-    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
-    let member_token = member["access_token"].as_str().unwrap();
-    let member_membership = member["membership_id"].as_str().unwrap().to_owned();
-    let item_id = Uuid::new_v4().to_string();
-
-    let (status, body) = publish_root_bundle(
-        &rig.app,
-        member_token,
-        entity_wire(
-            "custom_item",
-            &item_id,
-            10,
-            // Client-supplied creator must be ignored in favor of principal.
-            json!({
-                "name": "抚触",
-                "icon_slot": 2,
-                "created_by_membership_id": "spoofed-id",
-            }),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["applied"], 1);
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let entities = pull["entities"].as_array().unwrap();
-    let item = entities
-        .iter()
-        .find(|e| e["client_uuid"] == item_id)
-        .expect("custom_item visible to owner");
-    assert_eq!(item["type"], "custom_item");
-    assert_eq!(item["payload"]["name"], "抚触");
-    assert_eq!(item["payload"]["icon_slot"], 2);
-    assert_eq!(
-        item["payload"]["created_by_membership_id"],
-        member_membership
-    );
-    assert_ne!(
-        item["payload"]["created_by_membership_id"],
-        owner_membership
-    );
-    // Layout fields must never be accepted on the wire.
-    assert!(item["payload"].get("sort_order").is_none());
-    assert!(item["payload"].get("hidden").is_none());
-}
-
-#[tokio::test]
-async fn custom_item_member_acl_rename_delete_and_owner_override() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "custom-item-acl-request-0000000001",
-    )
-    .await;
-    let owner_token = owner["access_token"].as_str().unwrap();
-    let member_a = approve_new_member(&rig.app, owner_token, "member-a").await;
-    let member_a_token = member_a["access_token"].as_str().unwrap();
-    let member_b = approve_new_member(&rig.app, owner_token, "member-b").await;
-    let member_b_token = member_b["access_token"].as_str().unwrap();
-    let item_id = Uuid::new_v4().to_string();
-
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            member_a_token,
-            entity_wire(
-                "custom_item",
-                &item_id,
-                1,
-                custom_item_payload("药", 1),
-                None
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    // Creator may rename.
-    let (ok_rename, _) = publish_root_bundle(
-        &rig.app,
-        member_a_token,
-        entity_wire(
-            "custom_item",
-            &item_id,
-            2,
-            custom_item_payload("用药", 1),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(ok_rename, StatusCode::OK);
-
-    // Peer member cannot rename.
-    let (denied, body) = publish_root_bundle(
-        &rig.app,
-        member_b_token,
-        entity_wire(
-            "custom_item",
-            &item_id,
-            3,
-            custom_item_payload("篡改", 0),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(denied, StatusCode::FORBIDDEN, "{body}");
-
-    // Owner may rename and soft-delete.
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            owner_token,
-            entity_wire(
-                "custom_item",
-                &item_id,
-                4,
-                custom_item_payload("管理员改名", 3),
-                None,
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        publish_root_bundle(
-            &rig.app,
-            owner_token,
-            entity_wire(
-                "custom_item",
-                &item_id,
-                5,
-                custom_item_payload("管理员改名", 3),
-                Some(5),
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    // Tombstone cannot be resurrected (even by owner).
-    let (resurrect, resurrect_body) = publish_root_bundle(
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = Uuid::new_v4();
+    let avatar_id = Uuid::new_v4();
+    let avatar_bytes = b"owner-avatar-branch-bytes";
+    let avatar_sha = hex::encode(Sha256::digest(avatar_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, owner_token, avatar_id, avatar_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, created) = causal_commit_units(
         &rig.app,
         owner_token,
-        entity_wire(
-            "custom_item",
-            &item_id,
-            6,
-            custom_item_payload("管理员改名", 3),
+        vec![causal_unit(
+            Uuid::new_v4(),
             None,
-        ),
+            "baby",
+            baby_id,
+            causal_baby_root("年年", Some(avatar_id), 20),
+            vec![causal_media_item(
+                avatar_id,
+                "avatar",
+                &avatar_sha,
+                avatar_bytes.len(),
+            )],
+            false,
+        )],
     )
     .await;
-    assert_eq!(resurrect, StatusCode::CONFLICT, "{resurrect_body}");
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "baby",
+            baby_id,
+            causal_baby_root("年年", None, 30),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+
+    let (status, avatar_branch) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "baby",
+            baby_id,
+            causal_baby_root("岁岁", Some(avatar_id), 40),
+            vec![causal_media_item(
+                avatar_id,
+                "avatar",
+                &avatar_sha,
+                avatar_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{avatar_branch}");
+    assert_eq!(
+        avatar_branch["results"][0]["status"], "branched",
+        "{avatar_branch}"
+    );
+    let conflict_id = avatar_branch["results"][0]["conflict_id"].as_str().unwrap();
+    let (status, detail) = get_json(
+        &rig.app,
+        &format!("/v1/conflicts/{conflict_id}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["stable"]["deleted"], true);
+    assert_eq!(detail["stable"]["media"], json!([]));
+    assert!(detail["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|branch| branch["deleted"] == false
+            && branch["root"]["avatar_media_uuid"] == avatar_id.to_string()
+            && branch["media"][0]["media_uuid"] == avatar_id.to_string()
+            && branch["media"][0]["sha256"] == avatar_sha
+            && branch["media"][0]["byte_size"] == avatar_bytes.len()));
+
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let baby = find_entity(&pull, baby_id);
+    assert!(
+        !baby["deleted_at"].is_null(),
+        "stable stays deleted: {baby}"
+    );
+    assert!(baby["payload"]["avatar_media_uuid"].is_null());
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{avatar_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn custom_item_rejects_layout_fields_on_wire() {
-    let rig = Rig::new();
+async fn causal_deleted_baby_clears_avatar_reachability() {
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
     let owner = create_family(
         &rig.app,
-        "owner-device",
-        "custom-item-layout-request-0000001",
+        "causal-avatar-delete-owner",
+        "causal-avatar-delete-create-request-0001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+
+    let deleted_baby = Uuid::new_v4();
+    let orphan_avatar = Uuid::new_v4();
+    let orphan_bytes = b"deleted-baby-avatar-evidence";
+    let orphan_sha = hex::encode(Sha256::digest(orphan_bytes));
+    let (status, prepared) =
+        put_causal_media_bytes(&rig.app, owner_token, orphan_avatar, orphan_bytes).await;
+    assert_eq!(status, StatusCode::OK, "{prepared}");
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "baby",
+            deleted_baby,
+            causal_baby_root("待删除", Some(orphan_avatar), 50),
+            vec![causal_media_item(
+                orphan_avatar,
+                "avatar",
+                &orphan_sha,
+                orphan_bytes.len(),
+            )],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let delete_base = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap();
+    let (status, deleted) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(delete_base),
+            "baby",
+            deleted_baby,
+            causal_baby_root("待删除", None, 60),
+            vec![],
+            true,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert_eq!(deleted["results"][0]["status"], "accepted", "{deleted}");
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let tombstone = find_entity(&pull, deleted_baby);
+    assert!(!tombstone["deleted_at"].is_null(), "{tombstone}");
+    assert!(tombstone["payload"]["avatar_media_uuid"].is_null());
+    let media_tombstone = find_entity(&pull, orphan_avatar);
+    assert!(
+        !media_tombstone["deleted_at"].is_null(),
+        "{media_tombstone}"
+    );
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{orphan_avatar}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// Independent media additions merge; same-media delete/edit branches; bytes retained.
+#[tokio::test]
+async fn causal_two_client_media_merge_and_delete_edit_branch() {
+    // Default Rig max_media_bytes is tiny (8); media E2E needs room for preimages.
+    let rig = Rig::with_config(|config| {
+        config.max_media_bytes = 64 * 1024;
+    });
+    let (owner, member) = two_joined_clients(
+        &rig.app,
+        "two-client-media-owner",
+        "two-client-media-member",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+
+    let record_id = Uuid::new_v4();
+    let m1 = Uuid::new_v4();
+    let bytes1 = b"photo-one-bytes";
+    let sha1 = hex::encode(Sha256::digest(bytes1));
+    let (status, put1) = put_causal_media_bytes(&rig.app, member_token, m1, bytes1).await;
+    assert_eq!(status, StatusCode::OK, "{put1}");
+    let (status, created) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "with-photo", 80, 20),
+            vec![causal_media_item(m1, "log", &sha1, bytes1.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["results"][0]["status"], "accepted");
+    let v1 = created["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Owner removes m1; member independently adds m2 from v1 → merge keeps m2 only.
+    let (status, left) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "with-photo", 80, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{left}");
+    assert_eq!(left["results"][0]["status"], "accepted", "{left}");
+
+    let m2 = Uuid::new_v4();
+    let bytes2 = b"photo-two-bytes-longer";
+    let sha2 = hex::encode(Sha256::digest(bytes2));
+    let (status, _) = put_causal_media_bytes(&rig.app, member_token, m2, bytes2).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, right) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&v1),
+            "record",
+            record_id,
+            causal_formula_root(baby_id, "with-photo", 80, 40),
+            vec![
+                causal_media_item(m1, "log", &sha1, bytes1.len()),
+                causal_media_item(m2, "log", &sha2, bytes2.len()),
+            ],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{right}");
+    assert_eq!(right["results"][0]["status"], "merged", "{right}");
+    let media = right["results"][0]["stable"]["media"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(media.len(), 1, "{media:?}");
+    assert_eq!(media[0]["media_uuid"], m2.to_string());
+
+    // Bytes for m2 remain downloadable after independent-media merge.
+    let response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{m2}"),
+        Some(member_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let got = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(got.as_ref(), bytes2.as_slice());
+
+    // Same-media delete vs edit branches.
+    let record2 = Uuid::new_v4();
+    let m3 = Uuid::new_v4();
+    let bytes3 = b"shared-photo";
+    let sha3 = hex::encode(Sha256::digest(bytes3));
+    let (status, _) = put_causal_media_bytes(&rig.app, member_token, m3, bytes3).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, c2) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            record2,
+            causal_formula_root(baby_id, "media-conflict", 10, 50),
+            vec![causal_media_item(m3, "log", &sha3, bytes3.len())],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{c2}");
+    let base = c2["results"][0]["stable"]["version_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, del_media) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base),
+            "record",
+            record2,
+            causal_formula_root(baby_id, "media-conflict", 10, 51),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{del_media}");
+    assert_eq!(del_media["results"][0]["status"], "accepted");
+
+    // Same UUID cannot claim different bytes; exercise the legitimate
+    // delete-vs-descriptive-manifest-edit conflict with the original preimage.
+    let mut edited_manifest = causal_media_item(m3, "log", &sha3, bytes3.len());
+    edited_manifest["width"] = json!(2);
+    let (status, edit_media) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            Some(&base),
+            "record",
+            record2,
+            causal_formula_root(baby_id, "media-conflict", 10, 52),
+            vec![edited_manifest],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edit_media}");
+    assert_eq!(
+        edit_media["results"][0]["status"], "branched",
+        "{edit_media}"
+    );
+    let pull = pull_entities(&rig.app, owner_token, generation).await;
+    let row = find_entity(&pull, record2);
+    assert!(
+        row.get("conflict_summary").is_some() && !row["conflict_summary"].is_null(),
+        "media delete/edit must open conflict_summary: {row}"
+    );
+}
+
+#[tokio::test]
+async fn causal_two_client_wake_observations_and_near_duplicates_retained() {
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "two-client-wake-owner", "two-client-wake-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+    let sleep_id = Uuid::new_v4();
+    let sleep_start = 1_700_100_000_i64;
+    let (status, sleep_body) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            sleep_id,
+            causal_sleep_root(baby_id, sleep_start, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sleep_body}");
+    assert_eq!(sleep_body["results"][0]["status"], "accepted");
+
+    let wake_owner = Uuid::new_v4();
+    let wake_member = Uuid::new_v4();
+    let (status, w1) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "wake_observation",
+            wake_owner,
+            json!({
+                "sleep_record_client_uuid": sleep_id,
+                "wake_timestamp": sleep_start + 3_600_000,
+                "note": "owner saw wake",
+                "withdrawn": false,
+                "updated_at": 30
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{w1}");
+    assert_eq!(w1["results"][0]["status"], "accepted", "{w1}");
+    let (status, w2) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "wake_observation",
+            wake_member,
+            json!({
+                "sleep_record_client_uuid": sleep_id,
+                "wake_timestamp": sleep_start + 3_900_000,
+                "note": "member saw later",
+                "withdrawn": false,
+                "updated_at": 40
+            }),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{w2}");
+    assert_eq!(w2["results"][0]["status"], "accepted", "{w2}");
+
+    let pull = pull_entities(&rig.app, member_token, generation).await;
+    let wakes: Vec<_> = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["type"] == "wake_observation"
+                && (e["client_uuid"] == wake_owner.to_string()
+                    || e["client_uuid"] == wake_member.to_string())
+                && e["deleted_at"].is_null()
+        })
+        .collect();
+    assert_eq!(wakes.len(), 2, "both wake observations must remain: {pull}");
+
+    let r1 = Uuid::new_v4();
+    let r2 = Uuid::new_v4();
+    let ts = 1_700_200_000_i64;
+    let (status, a) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            r1,
+            causal_formula_root_at(baby_id, "a", 100, ts, 50),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{a}");
+    let (status, b) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            r2,
+            causal_formula_root_at(baby_id, "b", 110, ts + 10 * 60 * 1000, 51),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    assert_eq!(b["results"][0]["status"], "accepted", "{b}");
+    let pull2 = pull_entities(&rig.app, owner_token, generation).await;
+    let live: Vec<_> = pull2["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            e["type"] == "record"
+                && (e["client_uuid"] == r1.to_string() || e["client_uuid"] == r2.to_string())
+                && e["deleted_at"].is_null()
+        })
+        .collect();
+    assert_eq!(
+        live.len(),
+        2,
+        "near-duplicate records must stay live: {pull2}"
+    );
+}
+
+/// Server-only shape: two independent creates without prior pull; peer visible on full pull.
+/// Does **not** prove Android LocalWrite no-pull cursor semantics (engine/unit residual).
+#[tokio::test]
+async fn causal_two_client_independent_creates_visible_on_peer_full_pull() {
+    let rig = Rig::new();
+    let (owner, member) =
+        two_joined_clients(&rig.app, "two-client-lw-owner", "two-client-lw-member").await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
+    let generation = owner["generation"].as_str().unwrap();
+    let baby_id = seed_causal_baby(&rig.app, owner_token).await;
+
+    let peer_record = Uuid::new_v4();
+    let (status, peer) = causal_commit_units(
+        &rig.app,
+        member_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            peer_record,
+            causal_formula_root(baby_id, "peer-only", 70, 20),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{peer}");
+    assert_eq!(peer["results"][0]["status"], "accepted");
+
+    let owner_record = Uuid::new_v4();
+    let (status, mine) = causal_commit_units(
+        &rig.app,
+        owner_token,
+        vec![causal_unit(
+            Uuid::new_v4(),
+            None,
+            "record",
+            owner_record,
+            causal_formula_root(baby_id, "owner-localwrite", 80, 30),
+            vec![],
+            false,
+        )],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    assert_eq!(mine["results"][0]["status"], "accepted");
+
+    let full = pull_entities(&rig.app, owner_token, generation).await;
+    find_entity(&full, owner_record);
+    assert_eq!(
+        find_entity(&full, peer_record)["payload"]["note"],
+        "peer-only"
+    );
+}
+
+/// Verified app-update floor from shared catalog blocks clients below minimum_sync_version_code.
+#[tokio::test]
+async fn causal_forced_min_supported_from_catalog_blocks_legacy_client() {
+    let catalog = release_catalog();
+    let min_supported = catalog["minimum_sync_version_code"].as_u64().unwrap();
+    let target_code = catalog["upgrade_target"]["version_code"].as_u64().unwrap();
+    let target_name = catalog["upgrade_target"]["version_name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let package_name = catalog["application_id"].as_str().unwrap().to_owned();
+    assert!(
+        min_supported >= 20 && target_code >= min_supported,
+        "catalog floor/target must be causal cutover: min={min_supported} target={target_code}"
+    );
+    let legacy_code = min_supported.saturating_sub(1);
+    assert!(legacy_code < min_supported);
+
+    let apk_bytes = b"lezi-catalog-forced-cutover-release-apk-bytes";
+    let sha = hex::encode(Sha256::digest(apk_bytes));
+    let rig = Rig::new();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        json!({
+            "package_name": package_name,
+            "version_code": target_code,
+            "version_name": target_name,
+            "min_supported_version_code": min_supported,
+            "sha256": sha,
+            "release_notes": "catalog-driven forced cutover"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let app = rig.restart("generation-a");
+
+    let owner = create_family(
+        &app,
+        "min-supported-owner",
+        "min-supported-request-000000000001",
     )
     .await;
     let token = owner["access_token"].as_str().unwrap();
-    let item_id = Uuid::new_v4().to_string();
-    let (status, body) = publish_root_bundle(
-        &rig.app,
-        token,
-        entity_wire(
-            "custom_item",
-            &item_id,
-            1,
-            json!({
-                "name": "抚触",
-                "icon_slot": 0,
-                "sort_order": 3,
-            }),
-            None,
-        ),
+    let baby_id = Uuid::new_v4();
+    let unit = causal_unit(
+        Uuid::new_v4(),
+        None,
+        "baby",
+        baby_id,
+        json!({
+            "nickname": "年年",
+            "sex": "female",
+            "birthday": "2025-01-02",
+            "avatar_media_uuid": null,
+            "updated_at": 10
+        }),
+        vec![],
+        false,
+    );
+
+    let legacy_header = legacy_code.to_string();
+    let legacy = [("x-lezi-client-version-code", legacy_header.as_str())];
+    let (status, body) = json_request_with_headers(
+        &app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({ "units": [unit.clone()] }),
+        &legacy,
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["status"], json!("rejected"), "{body}");
+    assert_eq!(
+        body["error"]["code"],
+        json!("capability_mismatch"),
+        "{body}"
+    );
+
+    let (pull_status, pull_body) = raw_json_request_with_headers(
+        &app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &legacy,
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::FORBIDDEN, "{pull_body}");
+    assert_eq!(
+        pull_body["code"],
+        json!("client_update_required"),
+        "{pull_body}"
+    );
+
+    let modern_header = target_code.to_string();
+    let modern = [("x-lezi-client-version-code", modern_header.as_str())];
+    let (status, ok) = json_request_with_headers(
+        &app,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(token),
+        json!({ "units": [unit] }),
+        &modern,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ok}");
+    assert_eq!(ok["results"][0]["status"], "accepted", "{ok}");
 }

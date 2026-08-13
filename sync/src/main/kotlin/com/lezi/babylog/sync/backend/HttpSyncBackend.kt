@@ -1,5 +1,11 @@
 package com.lezi.babylog.sync.backend
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest
+import com.lezi.babylog.sync.conflict.ConflictSnapshotPaging
+import com.lezi.babylog.sync.conflict.FetchedConflictSnapshotPage
+import com.lezi.babylog.sync.conflict.toConflictSnapshot
+import com.lezi.babylog.sync.conflict.ConflictSnapshotValidation
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -11,6 +17,7 @@ import java.net.URLEncoder
 import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.GZIPInputStream
 import javax.inject.Inject
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +42,9 @@ import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.backend.retry.SyncRetryAttemptContext
+import com.lezi.babylog.sync.backend.retry.SyncRetryBudgetExceededException
+import com.lezi.babylog.sync.backend.retry.SyncRetryOperation
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.session.SyncPreferences
@@ -52,13 +62,10 @@ internal const val MEMBER_REQUEST_VIEW_HEADER = "X-Lezi-Member-Request-View"
 internal const val OPEN_MEMBER_REQUEST_VIEW = "open-v1"
 private val REFRESH_REQUEST_ID_PATTERN = Regex("[A-Za-z0-9_-]{32,128}")
 internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
-private const val MAX_RECONCILE_UNITS = 64
-private const val MAX_RECONCILE_MEDIA_ENTITIES = 8
 internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
 /** Self-hosted release APK download bound (full package, not media). */
 internal const val MAX_SYNC_APP_UPDATE_APK_BYTES = 100 * 1024 * 1024
 private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
-private const val MILLIS_PER_SECOND = 1_000L
 private const val DEFAULT_UPLOAD_WRITE_STALL_TIMEOUT_MILLIS = 30_000L
 /** Attached on authenticated family requests so the server can gate minSupported later. */
 internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"
@@ -74,6 +81,17 @@ internal fun interface TrustedEndpointResolver {
 private object DefaultSyncHttpConnectionFactory : SyncHttpConnectionFactory {
     override fun open(url: URL): HttpURLConnection = url.openConnection() as HttpURLConnection
 }
+
+private data class JsonTransportResponse(
+    val json: JsonObject,
+    val encodedBytes: Int,
+)
+
+private data class BoundedHttpResponse(
+    val code: Int,
+    val bytes: ByteArray,
+    val retryAfterHeader: String?,
+)
 
 class HttpSyncBackend internal constructor(
     private val connectionFactory: SyncHttpConnectionFactory,
@@ -624,168 +642,304 @@ class HttpSyncBackend internal constructor(
         },
     ).toMemberClaimResult()
 
-    override suspend fun pull(session: SyncSession): PullResult {
+    override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult {
         session.requireCurrentReplicaTransport()
+        require(page.pageIndex in 0 until page.budget.maxPages) {
+            "普通 pull page_index 超出协商上限"
+        }
         val generation = URLEncoder.encode(session.pullGeneration, Charsets.UTF_8.name())
-        val json = get(
-            session.baseUrl,
-            "/v1/pull?cursor=${session.pullCursor}&generation=$generation",
-            session.accessToken,
+        val json = requestPullJson(
+            base = session.baseUrl,
+            path = "/v1/pull?cursor=${session.pullCursor}&generation=$generation" +
+                "&page_index=${page.pageIndex}",
+            token = session.accessToken,
+            page = page,
         )
-        return PullResult(
-            entities = json.entities("pull"),
+        val entities = json.entities("pull")
+        val result = PullResult(
+            entities = entities,
             cursor = json.requiredLong("cursor", "pull"),
             generation = json.requiredNonBlankString("generation", "pull"),
             hasMore = requireNotNull(json["has_more"]?.jsonPrimitive?.booleanOrNull) {
                 "pull 响应缺少 has_more"
             },
+            pageIndex = json.requiredInt("page_index", "pull"),
             familyName = json.pullFamilyName(),
         )
+        json.requireExactKeys(
+            setOf("entities", "cursor", "generation", "page_index", "has_more", "family_name"),
+            "pull",
+        )
+        return result.requireValidPage(page)
     }
 
-    override suspend fun reconcile(
-        session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult {
-        session.requireCurrentReplicaTransport()
-        require(units.isNotEmpty() && units.size <= MAX_RECONCILE_UNITS) {
-            "家庭权威裁决批次必须包含 1..$MAX_RECONCILE_UNITS 个原子单元"
+    /**
+     * Last health/setup capabilities observed by this backend. Null until the first
+     * successful probe — fail closed (no causal publish) rather than assume the wire.
+     */
+    @Volatile
+    private var lastAdvertisedCapabilities: Set<String>? = null
+
+    override fun supportsCausalWire(): Boolean {
+        val caps = lastAdvertisedCapabilities ?: return false
+        return caps.containsAll(REQUIRED_CAUSAL_WIRE_CAPABILITIES)
+    }
+
+    override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake {
+        val json = try {
+            requestJson(
+                base = session.baseUrl,
+                path = "/v1/sync/handshake",
+                method = "POST",
+                token = session.accessToken,
+                body = buildJsonObject {
+                    put("protocol_version", AUTHENTICATED_SYNC_PROTOCOL_VERSION)
+                    put("required_capabilities", buildJsonArray {
+                        REQUIRED_CAUSAL_WIRE_CAPABILITIES.sorted().forEach {
+                            add(JsonPrimitive(it))
+                        }
+                    })
+                },
+                retryOperation = SyncRetryOperation.Handshake,
+            )
+        } catch (failure: SyncHttpException) {
+            if (failure.statusCode != 401) {
+                runCatching { decodeSyncHandshakeFailure(failure) }
+                    .getOrNull()
+                    ?.let { throw it }
+            }
+            throw failure
         }
-        val expected = units.associateBy { it.root.type to it.root.clientUuid }
-        require(expected.size == units.size) { "家庭权威裁决请求 key 必须唯一" }
-        val response = post(
+        val result = decodeAuthenticatedSyncHandshake(json)
+        lastAdvertisedCapabilities = result.capabilities
+        return result
+    }
+
+    override suspend fun causalCommit(
+        session: SyncSession,
+        units: List<CausalMutationUnit>,
+    ): CausalCommitBatchResult {
+        val posted = try {
+            postCausalBatch(
+                session,
+                "/v1/causal/commit",
+                units,
+                SyncRetryOperation.Commit,
+            )
+        } catch (failure: SyncHttpException) {
+            val terminal = runCatching {
+                Json.parseToJsonElement(failure.responseBody).jsonObject
+            }.getOrNull() ?: throw failure
+            terminal.throwIfCausalCommitRejected("/v1/causal/commit")
+            throw failure
+        }
+        posted.response.throwIfCausalCommitRejected("/v1/causal/commit")
+        return decodeCausalProof(session, posted.response) {
+            parseCausalCommitBatchResult(posted, session, "/v1/causal/commit")
+        }
+    }
+
+    override suspend fun declareSourceRelation(
+        session: SyncSession,
+        request: SourceRelationDeclareRequest,
+    ): SourceRelationResult {
+        session.requireCurrentReplicaTransport()
+        val body = buildJsonObject {
+            put("mutation_id", request.mutationId)
+            put("record_client_uuid", request.recordClientUuid)
+            put("equivalent_to_client_uuid", request.equivalentToClientUuid)
+            put("expected_record_version", request.expectedRecordVersion)
+            put("expected_other_version", request.expectedOtherVersion)
+        }
+        val json = post(
             session.baseUrl,
-            "/v1/reconcile",
+            "/v1/source-relations/declare",
             session.accessToken,
-            buildJsonObject {
+            body,
+        )
+        return json.toSourceRelationResult("source relation declare")
+    }
+
+    override suspend fun resolveSourceRelationGroup(
+        session: SyncSession,
+        request: SourceRelationResolveGroupRequest,
+    ): SourceRelationResult {
+        session.requireCurrentReplicaTransport()
+        val body = buildJsonObject {
+            put("mutation_id", request.mutationId)
+            put(
+                "member_client_uuids",
+                buildJsonArray {
+                    request.memberClientUuids.sorted().forEach { uuid ->
+                        add(JsonPrimitive(uuid))
+                    }
+                },
+            )
+            put("display_client_uuid", request.displayClientUuid)
+            put(
+                "expected_versions",
+                buildJsonObject {
+                    request.expectedVersions.toSortedMap().forEach { (uuid, version) ->
+                        put(uuid, JsonPrimitive(version))
+                    }
+                },
+            )
+        }
+        val json = post(
+            session.baseUrl,
+            "/v1/source-relations/resolve-group",
+            session.accessToken,
+            body,
+        )
+        return json.toSourceRelationResult("source relation resolve-group")
+    }
+
+    override suspend fun fetchConflictSnapshotPage(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictSnapshotPageRequest,
+    ): FetchedConflictSnapshotPage {
+        session.requireCurrentReplicaTransport()
+        val id = conflictId.trim()
+        require(id.isNotEmpty()) { "conflict_id 无效" }
+        val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
+        val query = when (request) {
+            ConflictSnapshotPageRequest.First -> ""
+            is ConflictSnapshotPageRequest.Continuation -> {
+                ConflictSnapshotValidation.requireRuntimeToken(
+                    request.snapshotToken,
+                    "conflict detail request.snapshot_token",
+                )
+                ConflictSnapshotValidation.requireRuntimeToken(
+                    request.continuation,
+                    "conflict detail request.continuation",
+                )
+                val token = URLEncoder.encode(request.snapshotToken, Charsets.UTF_8.name())
+                val continuation = URLEncoder.encode(request.continuation, Charsets.UTF_8.name())
+                "?snapshot_token=$token&continuation=$continuation"
+            }
+        }
+        val response = requestJsonWithEvidence(
+            base = session.baseUrl,
+            path = "/v1/conflicts/$encoded$query",
+            method = "GET",
+            token = session.accessToken,
+            body = null,
+            successLimitBytes = ConflictSnapshotPaging.MAX_ENCODED_PAGE_BYTES,
+            successResponseKind = "冲突详情页",
+            retryOperation = SyncRetryOperation.ConflictDetail,
+        )
+        val snapshot = response.json.toConflictSnapshot("conflict snapshot").also { snapshot ->
+            require(snapshot.conflictId == id) { "conflict snapshot.conflict_id 与请求不一致" }
+        }
+        return FetchedConflictSnapshotPage(snapshot, response.encodedBytes)
+    }
+
+    override suspend fun resolveConflict(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictResolveRequest,
+    ): ConflictResolveResult {
+        session.requireCurrentReplicaTransport()
+        val id = conflictId.trim()
+        require(id.isNotEmpty()) { "conflict_id 无效" }
+        ConflictSnapshotValidation.requireResolutionChoices(
+            snapshotToken = request.snapshotToken,
+            resolutionMutationId = request.resolutionMutationId,
+            choices = request.choices.map { it.path to it.choiceId },
+            context = "conflict resolve request",
+        )
+        val encoded = URLEncoder.encode(id, Charsets.UTF_8.name())
+        val body = buildJsonObject {
+            put("snapshot_token", request.snapshotToken)
+            put("resolution_mutation_id", request.resolutionMutationId)
+            put(
+                "choices",
+                buildJsonArray {
+                    request.choices.forEach { choice ->
+                        add(
+                            buildJsonObject {
+                                put("path", choice.path)
+                                put("choice_id", choice.choiceId)
+                            },
+                        )
+                    }
+                },
+            )
+        }
+        val json = requestJson(
+            base = session.baseUrl,
+            path = "/v1/conflicts/$encoded/resolve",
+            method = "POST",
+            token = session.accessToken,
+            body = body,
+            retryOperation = SyncRetryOperation.Resolution,
+        )
+        return json.toConflictResolveResult("conflict resolve").also { result ->
+            val responseMutationId = when (result) {
+                is ConflictResolveResult.Accepted -> result.resolutionMutationId
+                is ConflictResolveResult.Rejected -> result.resolutionMutationId
+            }
+            require(responseMutationId == null || responseMutationId == request.resolutionMutationId) {
+                "conflict resolve.resolution_mutation_id 与请求不一致"
+            }
+        }
+    }
+
+    override suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ): CausalMediaPreimageReceipt {
+        session.requireCurrentReplicaTransport()
+        require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "因果媒体 sha256 无效"
+        }
+        val response = requestJsonStream(
+            base = session.baseUrl,
+            path = "/v1/causal/media/$mediaUuid",
+            method = "PUT",
+            token = session.accessToken,
+            source = source,
+            extraHeaders = mapOf(
+                "X-Lezi-Media-Sha256" to sha256,
+            ),
+            retryOperation = SyncRetryOperation.MediaPrepare,
+        )
+        return response.toCausalMediaPreimageReceipt(mediaUuid, sha256, source.contentLength)
+    }
+
+    private suspend fun postCausalBatch(
+        session: SyncSession,
+        path: String,
+        units: List<CausalMutationUnit>,
+        retryOperation: SyncRetryOperation? = null,
+    ): PostedCausalBatch {
+        session.requireCurrentReplicaTransport()
+        require(units.isNotEmpty() && units.size <= MAX_CAUSAL_UNITS) {
+            "因果同步批次必须包含 1..$MAX_CAUSAL_UNITS 个原子单元"
+        }
+        val expectedKeys = units.map { it.entityType to it.clientUuid }.toSet()
+        require(expectedKeys.size == units.size) { "因果同步请求 key 必须唯一" }
+        val expectedByMutation = units.associateBy(CausalMutationUnit::mutationId)
+        require(expectedByMutation.size == units.size) { "因果同步 mutation_id 必须唯一" }
+        val response = requestJson(
+            base = session.baseUrl,
+            path = path,
+            method = "POST",
+            token = session.accessToken,
+            body = buildJsonObject {
                 put("generation", session.pullGeneration)
                 put("units", buildJsonArray {
                     units.forEach { unit ->
-                        add(buildJsonObject {
-                            put("content_hash", unit.contentHash)
-                            put("root", unit.root.toJson())
-                            put("media", buildJsonArray {
-                                unit.media.forEach { add(it.toJson()) }
-                            })
-                        })
+                        add(unit.toCausalJson())
                     }
                 })
             },
+            retryOperation = retryOperation,
         )
-        return try {
-            val generation = response.requiredNonBlankString("generation", "reconcile")
-            require(generation == session.pullGeneration) {
-                "家庭服务器在权威裁决期间变更了同步代际"
-            }
-            val cursor = response.requiredLong("cursor", "reconcile")
-            require(cursor >= session.pullCursor) {
-                "家庭服务器权威裁决游标早于本机已拉取检查点"
-            }
-            val results = response.requiredArray("results", "reconcile").mapIndexed { index, item ->
-                val value = item as? JsonObject
-                    ?: throw IllegalArgumentException("reconcile.results[$index] 不是对象")
-                val context = "reconcile.results[$index]"
-                val type = value.requiredNonBlankString("entity_type", context)
-                val clientUuid = value.requiredNonBlankString("client_uuid", context)
-                val disposition = when (value.requiredString("disposition", context)) {
-                    "confirmed" -> AuthorityDisposition.Confirmed
-                    "publish" -> AuthorityDisposition.Publish
-                    "adopt_remote" -> AuthorityDisposition.AdoptRemote
-                    "remote_absent_rejected" -> AuthorityDisposition.RemoteAbsentRejected
-                    "retry_authority" -> AuthorityDisposition.RetryAuthority
-                    else -> throw IllegalArgumentException("$context.disposition 无效")
-                }
-                val remoteRoot = when (val root = value["remote_root"]) {
-                    null, JsonNull -> null
-                    is JsonObject -> root.toSyncEntity("$context.remote_root")
-                    else -> throw IllegalArgumentException("$context.remote_root 无效")
-                }
-                val remoteMedia = value.requiredArray("remote_media", context)
-                    .mapIndexed { mediaIndex, media ->
-                        (media as? JsonObject)?.toSyncEntity(
-                            "$context.remote_media[$mediaIndex]",
-                        ) ?: throw IllegalArgumentException(
-                            "$context.remote_media[$mediaIndex] 不是对象",
-                        )
-                    }
-                validateAuthorityRemoteMedia(remoteRoot, remoteMedia, context)
-                if (disposition == AuthorityDisposition.AdoptRemote) {
-                    require(remoteRoot?.type == type && remoteRoot.clientUuid == clientUuid) {
-                        "$context adopt_remote 缺少匹配的 canonical root"
-                    }
-                }
-                AuthorityResult(
-                    type = type,
-                    clientUuid = clientUuid,
-                    requestContentHash = value.requiredNonBlankString(
-                        "request_content_hash",
-                        context,
-                    ),
-                    disposition = disposition,
-                    reason = value.requiredNonBlankString("reason", context),
-                    remoteContentHash = value.optionalString("remote_content_hash", context),
-                    remoteRoot = remoteRoot,
-                    remoteMedia = remoteMedia,
-                )
-            }
-            val grouped = results.groupBy { it.type to it.clientUuid }
-            require(grouped.keys == expected.keys && grouped.values.all { it.size == 1 }) {
-                "家庭服务器权威裁决响应不完整、重复或包含多余 key"
-            }
-            results.forEach { result ->
-                val expectedUnit = expected.getValue(result.type to result.clientUuid)
-                require(
-                    expectedUnit.contentHash == result.requestContentHash,
-                ) {
-                    "家庭服务器权威裁决响应不匹配冻结内容"
-                }
-                when (result.disposition) {
-                    AuthorityDisposition.Confirmed -> {
-                        require(
-                            result.remoteRoot?.authorityEquivalentTo(expectedUnit.root) == true,
-                        ) {
-                            "家庭服务器 confirmed 未返回匹配的 canonical root"
-                        }
-                        require(
-                            result.remoteMedia.sortedBy(SyncEntity::clientUuid)
-                                .zip(expectedUnit.media.sortedBy(SyncEntity::clientUuid))
-                                .let { pairs ->
-                                    pairs.size == expectedUnit.media.size &&
-                                        pairs.size == result.remoteMedia.size &&
-                                        pairs.all { (remote, frozen) ->
-                                            remote.authorityEquivalentTo(frozen)
-                                        }
-                                },
-                        ) {
-                            "家庭服务器 confirmed 未返回完整的 canonical media manifest"
-                        }
-                        require(!result.remoteContentHash.isNullOrBlank()) {
-                            "家庭服务器 confirmed 未证明 canonical content hash"
-                        }
-                    }
-                    AuthorityDisposition.AdoptRemote -> require(
-                        !result.remoteContentHash.isNullOrBlank(),
-                    ) {
-                        "家庭服务器 adopt_remote 未证明 canonical content hash"
-                    }
-                    AuthorityDisposition.Publish,
-                    AuthorityDisposition.RemoteAbsentRejected,
-                    AuthorityDisposition.RetryAuthority,
-                    -> Unit
-                }
-            }
-            ReconcileResult(
-                generation = generation,
-                cursor = cursor,
-                results = results,
-            )
-        } catch (error: IllegalArgumentException) {
-            val serverGeneration = response["generation"]?.jsonPrimitive?.contentOrNull
-                ?.trim()
-                ?.takeIf(String::isNotEmpty)
-                ?: session.pullGeneration
-            throw AuthorityProofException(serverGeneration, error)
-        }
+        return PostedCausalBatch(response, expectedKeys, expectedByMutation)
     }
 
     override suspend fun updateMyDisplayName(
@@ -916,9 +1070,10 @@ class HttpSyncBackend internal constructor(
         )
     }
 
-    override suspend fun members(session: SyncSession): List<FamilyMember> {
+    override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot {
         val json = get(session.baseUrl, "/v1/family/members", session.accessToken)
-        return json.requiredArray("members", "members").mapIndexed { index, memberElement ->
+        json.requireExactKeys(setOf("directory_generation", "members"), "members")
+        val members = json.requiredArray("members", "members").mapIndexed { index, memberElement ->
             val member = memberElement as? JsonObject
                 ?: throw IllegalArgumentException("members[$index] 不是对象")
             val devices = member["devices"]?.let { deviceElement ->
@@ -963,8 +1118,18 @@ class HttpSyncBackend internal constructor(
                     "members[$index]",
                 ),
                 devices = devices,
+                lastSyncAtEpochSeconds = member.optionalNullableLong(
+                    "last_sync_at",
+                    "members[$index]",
+                ),
             )
         }
+        val generation = json.requiredNonBlankString("directory_generation", "members")
+        require(SHA256_HEX_PATTERN.matches(generation)) { "members.directory_generation 无效" }
+        return FamilyMemberDirectorySnapshot(
+            generation = generation,
+            members = members,
+        )
     }
 
     private fun JsonObject.toPendingMemberRenameRequest(
@@ -1073,22 +1238,6 @@ class HttpSyncBackend internal constructor(
         return post(session.baseUrl, "/v1/bundles", session.accessToken, body).toBundleStageStatus()
     }
 
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus {
-        val json = requestJsonStream(
-            session.baseUrl,
-            "/v1/bundles/$bundleId/media/$clientUuid",
-            "PUT",
-            session.accessToken,
-            source,
-        )
-        return json.toBundleStageStatus()
-    }
-
     override suspend fun commitBundle(
         session: SyncSession,
         bundleId: String,
@@ -1161,10 +1310,69 @@ class HttpSyncBackend internal constructor(
         body: JsonObject?,
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
-    ): JsonObject {
+        retryOperation: SyncRetryOperation? = null,
+    ): JsonObject = requestJsonWithEvidence(
+        base = base,
+        path = path,
+        method = method,
+        token = token,
+        body = body,
+        extraHeaders = extraHeaders,
+        trustedEndpoint = trustedEndpoint,
+        retryOperation = retryOperation,
+    ).json
+
+    private suspend fun requestPullJson(
+        base: String,
+        path: String,
+        token: String,
+        page: PullPageRequest,
+    ): JsonObject = requestJsonWithEvidence(
+        base = base,
+        path = path,
+        method = "GET",
+        token = token,
+        body = null,
+        extraHeaders = mapOf("Accept-Encoding" to page.encoding.wireName),
+        successLimitBytes = page.budget.maxEncodedBytes,
+        successResponseKind = "pull encoded JSON",
+        retryOperation = SyncRetryOperation.Pull,
+        pullPage = page,
+    ).json
+
+    private suspend fun requestJsonWithEvidence(
+        base: String,
+        path: String,
+        method: String,
+        token: String?,
+        body: JsonObject?,
+        extraHeaders: Map<String, String> = emptyMap(),
+        trustedEndpoint: TrustedEndpointProfile? = null,
+        successLimitBytes: Int = MAX_SYNC_JSON_RESPONSE_BYTES,
+        successResponseKind: String = "JSON",
+        retryOperation: SyncRetryOperation? = null,
+        pullPage: PullPageRequest? = null,
+    ): JsonTransportResponse {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
-            val connection = open(base, path, method, token, extraHeaders, resolvedEndpoint)
+            val retryAttempt = currentCoroutineContext()[SyncRetryAttemptContext]
+                ?.takeIf { it.operation == retryOperation }
+            val remainingMillis = retryAttempt?.remainingMillis()?.also {
+                if (it <= 0) throw SyncRetryBudgetExceededException(requireNotNull(retryOperation))
+            }
+            val connection = open(
+                base,
+                path,
+                method,
+                token,
+                extraHeaders,
+                resolvedEndpoint,
+                retryOperation,
+                remainingMillis,
+            )
+            val deadlineWatchdog = remainingMillis?.let {
+                RetryDeadlineDisconnectWatchdog(connection, it)
+            }
             try {
                 if (body != null) {
                     connection.doOutput = true
@@ -1173,8 +1381,35 @@ class HttpSyncBackend internal constructor(
                         it.write(body.toString())
                     }
                 }
-                readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
+                val (code, bytes, retryAfterHeader) = readBoundedBody(
+                    connection = connection,
+                    successLimitBytes = successLimitBytes,
+                    successResponseKind = successResponseKind,
+                )
+                val decodedBytes = if (code in 200..299 && pullPage != null) {
+                    decodePullBody(
+                        encoded = bytes,
+                        contentEncoding = connection.getHeaderField("Content-Encoding"),
+                        page = pullPage,
+                    )
+                } else {
+                    bytes
+                }
+                val text = decodedBytes.toString(Charsets.UTF_8)
+                if (code !in 200..299) {
+                    throw SyncHttpException(
+                        statusCode = code,
+                        responseBody = text,
+                        retryAfterHeader = retryAfterHeader,
+                    )
+                }
+                require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
+                JsonTransportResponse(
+                    json = Json.parseToJsonElement(text).jsonObject,
+                    encodedBytes = bytes.size,
+                )
             } finally {
+                deadlineWatchdog?.close()
                 connection.disconnect()
             }
         }
@@ -1206,13 +1441,17 @@ class HttpSyncBackend internal constructor(
                     )
                     connection.outputStream.use { it.write(body) }
                 }
-                val (code, bytes) = readBoundedBody(
+                val (code, bytes, retryAfterHeader) = readBoundedBody(
                     connection = connection,
                     successLimitBytes = successLimitBytes,
                     successResponseKind = successResponseKind,
                 )
                 if (code !in 200..299) {
-                    throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
+                    throw SyncHttpException(
+                        code,
+                        bytes.toString(Charsets.UTF_8),
+                        retryAfterHeader,
+                    )
                 }
                 bytes
             } finally {
@@ -1221,7 +1460,7 @@ class HttpSyncBackend internal constructor(
         }
     }
 
-    /** PUT binary body, parse JSON success response (bundle stage status). */
+    /** PUT binary body, parse JSON success response (bundle stage / causal preimage). */
     private suspend fun requestJsonStream(
         base: String,
         path: String,
@@ -1229,13 +1468,32 @@ class HttpSyncBackend internal constructor(
         token: String,
         source: SyncMediaUploadSource,
         trustedEndpoint: TrustedEndpointProfile? = null,
+        extraHeaders: Map<String, String> = emptyMap(),
+        retryOperation: SyncRetryOperation? = null,
     ): JsonObject {
         val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
             require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
                 "待上传媒体大小超出支持范围"
             }
-            val connection = open(base, path, method, token, trustedEndpoint = resolvedEndpoint)
+            val retryAttempt = currentCoroutineContext()[SyncRetryAttemptContext]
+                ?.takeIf { it.operation == retryOperation }
+            val remainingMillis = retryAttempt?.remainingMillis()?.also {
+                if (it <= 0) throw SyncRetryBudgetExceededException(requireNotNull(retryOperation))
+            }
+            val connection = open(
+                base,
+                path,
+                method,
+                token,
+                extraHeaders = extraHeaders,
+                trustedEndpoint = resolvedEndpoint,
+                retryOperation = retryOperation,
+                remainingMillis = remainingMillis,
+            )
+            val deadlineWatchdog = remainingMillis?.let {
+                RetryDeadlineDisconnectWatchdog(connection, it)
+            }
             try {
                 connection.doOutput = true
                 connection.setRequestProperty(
@@ -1276,16 +1534,19 @@ class HttpSyncBackend internal constructor(
                 } finally {
                     writeWatchdog.close()
                 }
-                val (code, bytes) = readBoundedBody(
+                val (code, bytes, retryAfterHeader) = readBoundedBody(
                     connection = connection,
                     successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
                     successResponseKind = "JSON",
                 )
                 val text = bytes.toString(Charsets.UTF_8)
-                if (code !in 200..299) throw SyncHttpException(code, text)
+                if (code !in 200..299) {
+                    throw SyncHttpException(code, text, retryAfterHeader)
+                }
                 require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
                 Json.parseToJsonElement(text).jsonObject
             } finally {
+                deadlineWatchdog?.close()
                 connection.disconnect()
             }
         }
@@ -1298,6 +1559,8 @@ class HttpSyncBackend internal constructor(
         token: String?,
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
+        retryOperation: SyncRetryOperation? = null,
+        remainingMillis: Long? = null,
     ): HttpURLConnection =
         connectionFactory.open(URL("${base.trimEnd('/')}$path")).apply {
             trustedEndpoint?.spkiSha256?.let { pin ->
@@ -1307,8 +1570,14 @@ class HttpSyncBackend internal constructor(
                 sslSocketFactory = pinnedSslContext(pin).socketFactory
             }
             requestMethod = method
-            connectTimeout = 8_000
-            readTimeout = 8_000
+            connectTimeout = boundedHttpTimeout(
+                retryOperation?.budget?.connectTimeoutMillis ?: 8_000,
+                remainingMillis,
+            )
+            readTimeout = boundedHttpTimeout(
+                retryOperation?.budget?.responseTimeoutMillis ?: 8_000,
+                remainingMillis,
+            )
             useCaches = false
             instanceFollowRedirects = false
             if (!token.isNullOrBlank()) {
@@ -1324,24 +1593,13 @@ class HttpSyncBackend internal constructor(
             extraHeaders.forEach(::setRequestProperty)
         }
 
-    private fun readResponse(connection: HttpURLConnection): String {
-        val (code, bytes) = readBoundedBody(
-            connection = connection,
-            successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
-            successResponseKind = "JSON",
-        )
-        val text = bytes.toString(Charsets.UTF_8)
-        if (code !in 200..299) throw SyncHttpException(code, text)
-        require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
-        return text
-    }
-
     private fun readBoundedBody(
         connection: HttpURLConnection,
         successLimitBytes: Int,
         successResponseKind: String,
-    ): Pair<Int, ByteArray> {
+    ): BoundedHttpResponse {
         val code = connection.responseCode
+        val retryAfterHeader = connection.getHeaderField("Retry-After")
         val success = code in 200..299
         val limitBytes = if (success) successLimitBytes else MAX_SYNC_ERROR_RESPONSE_BYTES
         val responseKind = if (success) successResponseKind else "错误"
@@ -1357,7 +1615,78 @@ class HttpSyncBackend internal constructor(
                 declaredBytes = declaredBytes,
             )
         } ?: byteArrayOf()
-        return code to bytes
+        return BoundedHttpResponse(code, bytes, retryAfterHeader)
+    }
+}
+
+private fun decodePullBody(
+    encoded: ByteArray,
+    contentEncoding: String?,
+    page: PullPageRequest,
+): ByteArray {
+    val normalizedEncoding = contentEncoding?.trim()?.lowercase().orEmpty()
+    val stream = when (page.encoding) {
+        PullResponseEncoding.Identity -> {
+            require(normalizedEncoding.isEmpty() || normalizedEncoding == "identity") {
+                "pull Content-Encoding 与协商 identity 不一致"
+            }
+            ByteArrayInputStream(encoded)
+        }
+        PullResponseEncoding.Gzip -> {
+            require(normalizedEncoding == "gzip") {
+                "pull Content-Encoding 与协商 gzip 不一致"
+            }
+            try {
+                GZIPInputStream(ByteArrayInputStream(encoded))
+            } catch (error: IOException) {
+                throw IllegalArgumentException("pull gzip 截断或损坏", error)
+            }
+        }
+    }
+    return try {
+        stream.use {
+            it.readBytesUpTo(
+                limitBytes = page.budget.maxDecodedBytes,
+                responseKind = "pull decoded JSON",
+                declaredBytes = encoded.size.toLong(),
+            )
+        }
+    } catch (error: SyncResponseTooLargeException) {
+        throw error
+    } catch (error: IOException) {
+        throw IllegalArgumentException("pull gzip 截断或损坏", error)
+    }
+}
+
+private fun boundedHttpTimeout(configuredMillis: Int, remainingMillis: Long?): Int {
+    if (remainingMillis == null) return configuredMillis
+    require(remainingMillis > 0) { "同步重试剩余预算必须大于 0" }
+    return minOf(configuredMillis.toLong(), remainingMillis, Int.MAX_VALUE.toLong())
+        .toInt()
+        .coerceAtLeast(1)
+}
+
+/** Disconnects blocking HttpURLConnection I/O at the retry owner's elapsed deadline. */
+private class RetryDeadlineDisconnectWatchdog(
+    private val connection: HttpURLConnection,
+    timeoutMillis: Long,
+) : AutoCloseable {
+    private val active = AtomicBoolean(true)
+    private val timer = Timer("lezi-sync-retry-deadline", true)
+    private val task = object : TimerTask() {
+        override fun run() {
+            if (active.compareAndSet(true, false)) connection.disconnect()
+        }
+    }
+
+    init {
+        require(timeoutMillis > 0)
+        timer.schedule(task, timeoutMillis)
+    }
+
+    override fun close() {
+        if (active.compareAndSet(true, false)) task.cancel()
+        timer.cancel()
     }
 }
 
@@ -1470,13 +1799,6 @@ private fun SyncEntity.toJson() = buildJsonObject {
     deletedAt?.let { put("deleted_at", it) }
 }
 
-private fun SyncEntity.authorityEquivalentTo(other: SyncEntity): Boolean =
-    type == other.type &&
-        clientUuid == other.clientUuid &&
-        updatedAt == other.updatedAt &&
-        deletedAt == other.deletedAt &&
-        Json.parseToJsonElement(payloadJson) == Json.parseToJsonElement(other.payloadJson)
-
 private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     type = requiredNonBlankString("type", context),
     clientUuid = requiredNonBlankString("client_uuid", context),
@@ -1485,89 +1807,441 @@ private fun JsonObject.toSyncEntity(context: String): SyncEntity = SyncEntity(
     updatedAt = requiredLong("updated_at", context),
     deletedAt = requiredNullableLong("deleted_at", context),
     rev = (get("rev") as? JsonPrimitive)?.longOrNull ?: 0,
+    versionId = optionalNonBlankString("version_id", context),
+    conflictSummary = optionalConflictSummary(context),
+    sourceRelationSummary = optionalSourceRelationSummary(context),
 )
-
-private fun validateAuthorityRemoteMedia(
-    root: SyncEntity?,
-    media: List<SyncEntity>,
-    context: String,
-) {
-    require(media.size <= MAX_RECONCILE_MEDIA_ENTITIES) {
-        "$context.remote_media 超过原子清单上限"
-    }
-    require(media.map(SyncEntity::clientUuid).toSet().size == media.size) {
-        "$context.remote_media 包含重复 client_uuid"
-    }
-    if (root == null) {
-        require(media.isEmpty()) { "$context 缺少 remote_root 时不得携带 remote_media" }
-        return
-    }
-    if (root.type in setOf("custom_item", "fulfillment_candidate")) {
-        require(media.isEmpty()) { "$context 的 ${root.type} 根不得携带媒体" }
-        return
-    }
-    val rootPayload = Json.parseToJsonElement(root.payloadJson).jsonObject
-    val rootBaby = rootPayload.authorityOptionalString("baby_client_uuid", context)
-    val selectedAvatar = if (root.type == "baby") {
-        rootPayload.authorityOptionalString("avatar_media_uuid", context)
-    } else {
-        null
-    }
-    media.forEachIndexed { index, entity ->
-        val mediaContext = "$context.remote_media[$index]"
-        require(entity.type == "media") { "$mediaContext.type 必须是 media" }
-        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        val kind = payload.authorityOptionalString("kind", mediaContext)
-        val record = payload.authorityOptionalString("record_client_uuid", mediaContext)
-        val baby = payload.authorityOptionalString("baby_client_uuid", mediaContext)
-        val carePlan = payload.authorityOptionalString("care_plan_client_uuid", mediaContext)
-        val matches = when (root.type) {
-            "record" -> kind == "log" && record == root.clientUuid && carePlan == null &&
-                (baby == null || baby == rootBaby)
-            "care_plan" -> kind == "log" && carePlan == root.clientUuid && record == null &&
-                (baby == null || baby == rootBaby)
-            "baby" -> kind == "avatar" && baby == root.clientUuid && record == null &&
-                carePlan == null
-            else -> false
-        }
-        require(matches) { "$mediaContext 不属于对应的 canonical root" }
-    }
-    if (root.type == "baby") {
-        val liveAvatarUuids = media
-            .filter { it.deletedAt == null }
-            .mapTo(mutableSetOf(), SyncEntity::clientUuid)
-        require(liveAvatarUuids == setOfNotNull(selectedAvatar)) {
-            "$context 的 live avatar manifest 与 avatar_media_uuid 不一致"
-        }
-    }
-}
-
-private fun JsonObject.authorityOptionalString(key: String, context: String): String? =
-    when (val value = get(key)) {
-        null, JsonNull -> null
-        is JsonPrimitive -> value.contentOrNull?.also {
-            require(value.isString && it.isNotBlank()) { "$context.$key 无效" }
-        }
-        else -> throw IllegalArgumentException("$context.$key 无效")
-    }
 
 private fun JsonObject.entities(context: String): List<SyncEntity> =
     requiredArray("entities", context).mapIndexed { index, element ->
         val value = element as? JsonObject
             ?: throw IllegalArgumentException("$context.entities[$index] 不是对象")
+        val entityContext = "$context.entities[$index]"
         SyncEntity(
-            type = value.requiredNonBlankString("type", "$context.entities[$index]"),
-            clientUuid = value.requiredNonBlankString(
-                "client_uuid",
-                "$context.entities[$index]",
-            ),
+            type = value.requiredNonBlankString("type", entityContext),
+            clientUuid = value.requiredNonBlankString("client_uuid", entityContext),
             payloadJson = (value["payload"] as? JsonObject)?.toString()
-                ?: throw IllegalArgumentException("$context.entities[$index].payload 缺失或无效"),
-            updatedAt = value.requiredLong("updated_at", "$context.entities[$index]"),
-            deletedAt = value.requiredNullableLong("deleted_at", "$context.entities[$index]"),
-            rev = value.requiredLong("rev", "$context.entities[$index]"),
+                ?: throw IllegalArgumentException("$entityContext.payload 缺失或无效"),
+            updatedAt = value.requiredLong("updated_at", entityContext),
+            deletedAt = value.requiredNullableLong("deleted_at", entityContext),
+            rev = value.requiredLong("rev", entityContext),
+            versionId = value.optionalNonBlankString("version_id", entityContext),
+            conflictSummary = value.optionalConflictSummary(entityContext),
+            sourceRelationSummary = value.optionalSourceRelationSummary(entityContext),
         )
     }
+
+internal const val MAX_CAUSAL_UNITS = 64
+
+private fun CausalMutationUnit.toCausalJson(): JsonObject = buildJsonObject {
+    put("mutation_id", mutationId)
+    if (baseVersion == null) {
+        put("base_version", JsonNull)
+    } else {
+        put("base_version", baseVersion)
+    }
+    put("entity_type", entityType)
+    put("client_uuid", clientUuid)
+    put(
+        "root",
+        Json.parseToJsonElement(rootJson).jsonObject,
+    )
+    put(
+        "media",
+        buildJsonArray {
+            media.sortedBy(CausalMediaItem::mediaUuid).forEach { item ->
+                add(item.toJson())
+            }
+        },
+    )
+    put("deleted", deleted)
+}
+
+private fun CausalMediaItem.toJson(): JsonObject = buildJsonObject {
+    put("media_uuid", mediaUuid)
+    put("role", role)
+    put("sha256", sha256)
+    put("byte_size", byteSize)
+    put("mime", mime)
+    if (width == null) put("width", JsonNull) else put("width", width)
+    if (height == null) put("height", JsonNull) else put("height", height)
+}
+
+private data class PostedCausalBatch(
+    val response: JsonObject,
+    val expectedKeys: Set<Pair<String, String>>,
+    val expectedByMutation: Map<String, CausalMutationUnit>,
+)
+
+private inline fun <T> decodeCausalProof(
+    session: SyncSession,
+    response: JsonObject,
+    decode: () -> T,
+): T = try {
+    decode()
+} catch (error: IllegalArgumentException) {
+    val serverGeneration = response["generation"]?.jsonPrimitive?.contentOrNull
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: session.pullGeneration
+    throw AuthorityProofException(serverGeneration, error)
+}
+
+private fun parseCausalCommitBatchResult(
+    posted: PostedCausalBatch,
+    session: SyncSession,
+    context: String,
+): CausalCommitBatchResult {
+    val response = posted.response
+    val generation = response.requiredNonBlankString("generation", context)
+    require(generation == session.pullGeneration) {
+        "家庭服务器在因果同步期间变更了同步代际"
+    }
+    response.requireExactKeys(setOf("generation", "results"), context)
+    val results = response.requiredArray("results", context).mapIndexed { index, item ->
+        val value = item as? JsonObject
+            ?: throw IllegalArgumentException("$context.results[$index] 不是对象")
+        value.toCausalCommitUnitResult("$context.results[$index]")
+    }
+    validateCausalResultBinding(results, posted, context)
+    return CausalCommitBatchResult(generation, results)
+}
+
+private fun validateCausalResultBinding(
+    results: List<CausalCommitUnitResult>,
+    posted: PostedCausalBatch,
+    context: String,
+) {
+    val byMutation = results.groupBy(CausalCommitUnitResult::mutationId)
+    require(byMutation.keys == posted.expectedByMutation.keys && byMutation.values.all { it.size == 1 }) {
+        "家庭服务器因果响应 mutation_id 不完整、重复或包含多余 key"
+    }
+    require(results.map(CausalCommitUnitResult::mutationId) == posted.expectedByMutation.keys.toList()) {
+        "家庭服务器因果响应顺序与请求不一致"
+    }
+    val byKey = results.groupBy { result ->
+        val unit = posted.expectedByMutation.getValue(result.mutationId)
+        unit.entityType to unit.clientUuid
+    }
+    require(byKey.keys == posted.expectedKeys && byKey.values.all { it.size == 1 }) {
+        "家庭服务器因果响应 key 不完整、重复或包含多余 key"
+    }
+}
+
+private fun JsonObject.toCausalCommitUnitResult(
+    context: String,
+): CausalCommitUnitResult {
+    val status = requiredNonBlankString("status", context)
+    require(status in setOf(CausalCommitStatus.ACCEPTED, CausalCommitStatus.MERGED, CausalCommitStatus.BRANCHED)) {
+        "$context 未知因果 commit status: $status"
+    }
+    val expected = mutableSetOf("status", "mutation_id", "request_hash", "replay", "stable")
+    if (status == CausalCommitStatus.BRANCHED) {
+        expected += "branch_version_id"
+        expected += "conflict_id"
+    } else if ("conflict_id" in keys) {
+        expected += "conflict_id"
+    }
+    requireExactKeys(expected, context)
+    val stable = get("stable") as? JsonObject
+        ?: throw IllegalArgumentException("$context.stable 不是对象")
+    stable.requireExactKeys(setOf("version_id", "root", "media", "deleted", "deleted_at"), "$context.stable")
+    val root = stable["root"] as? JsonObject
+        ?: throw IllegalArgumentException("$context.stable.root 不是对象")
+    val media = (stable["media"] as? JsonArray)?.mapIndexed { index, element ->
+        (element as? JsonObject)?.toCausalMediaItem("$context.stable.media[$index]")
+            ?: throw IllegalArgumentException("$context.stable.media[$index] 不是对象")
+    } ?: throw IllegalArgumentException("$context.stable.media 不是数组")
+    val deleted = stable.requiredBoolean("deleted", "$context.stable")
+    val deletedAt = stable.requiredNullableLong("deleted_at", "$context.stable")
+    require(deleted == (deletedAt != null)) { "$context.stable delete evidence 不一致" }
+    return CausalCommitUnitResult(
+        status = status,
+        mutationId = requiredNonBlankString("mutation_id", context),
+        requestHash = requiredNonBlankString("request_hash", context),
+        stableVersionId = stable.requiredNonBlankString("version_id", "$context.stable"),
+        stableRootJson = root.toString(),
+        stableMedia = media,
+        stableDeleted = deleted,
+        stableDeletedAt = deletedAt,
+        replay = requiredBoolean("replay", context),
+        branchVersionId = optionalNonBlankString("branch_version_id", context),
+        conflictId = optionalNonBlankString("conflict_id", context),
+    )
+}
+
+private fun JsonObject.throwIfCausalCommitRejected(context: String) {
+    if (get("status")?.jsonPrimitive?.contentOrNull != "rejected") return
+    requireExactKeys(
+        if ("mutation_id" in this) setOf("status", "mutation_id", "error") else setOf("status", "error"),
+        context,
+    )
+    val error = get("error") as? JsonObject
+        ?: throw IllegalArgumentException("$context.error 不是对象")
+    error.requireExactKeys(setOf("code", "retryable"), "$context.error")
+    require(!error.requiredBoolean("retryable", "$context.error")) {
+        "$context terminal rejection 不得标记 retryable"
+    }
+    val code = error.requiredNonBlankString("code", "$context.error")
+    require(code in CAUSAL_COMMIT_TERMINAL_CODES) {
+        "$context terminal rejection code 未冻结: $code"
+    }
+    throw CausalCommitRejectedException(
+        mutationId = optionalNonBlankString("mutation_id", context),
+        code = code,
+    )
+}
+
+private val CAUSAL_COMMIT_TERMINAL_CODES = setOf(
+    "unknown_field",
+    "missing_field",
+    "wrong_type",
+    "non_canonical_value",
+    "invalid_domain",
+    "content_drift",
+    "unauthenticated",
+    "forbidden",
+    "capability_mismatch",
+    "not_ready",
+    "invalid_snapshot_token",
+    "snapshot_expired",
+    "snapshot_stale",
+    "invalid_choice",
+    "duplicate_choice",
+    "incomplete_choices",
+    "missing_restore_base",
+    "incomplete_restore_base",
+    "missing_restore_media",
+    "cas_mismatch",
+    "media_preimage_expired",
+    "media_membership_mismatch",
+    "media_sha256_mismatch",
+    "media_byte_size_mismatch",
+    "missing_media_bytes",
+    "media_uuid_conflict",
+)
+
+private fun JsonObject.toCausalMediaItem(context: String): CausalMediaItem = CausalMediaItem(
+    mediaUuid = requiredNonBlankString("media_uuid", context),
+    role = requiredNonBlankString("role", context),
+    sha256 = requiredNonBlankString("sha256", context),
+    byteSize = requiredLong("byte_size", context),
+    mime = requiredNonBlankString("mime", context),
+    width = requiredNullableLong("width", context),
+    height = requiredNullableLong("height", context),
+)
+
+private fun JsonObject.toCausalMediaPreimageReceipt(
+    expectedMediaUuid: String,
+    expectedSha256: String,
+    expectedByteSize: Long,
+): CausalMediaPreimageReceipt {
+    val context = "causal media preimage"
+    requireExactKeys(
+        setOf("media_uuid", "status", "byte_size", "sha256", "expires_at"),
+        context,
+    )
+    val receipt = CausalMediaPreimageReceipt(
+        mediaUuid = requiredNonBlankString("media_uuid", context),
+        status = requiredNonBlankString("status", context),
+        byteSize = requiredLong("byte_size", context),
+        sha256 = requiredNonBlankString("sha256", context),
+        expiresAtEpochSeconds = requiredLong("expires_at", context),
+    )
+    require(receipt.mediaUuid == expectedMediaUuid) { "$context.media_uuid 与请求不一致" }
+    require(receipt.status == "staged" || receipt.status == "consumed") {
+        "$context.status 无效"
+    }
+    require(receipt.byteSize == expectedByteSize && receipt.byteSize > 0L) {
+        "$context.byte_size 与请求不一致"
+    }
+    require(receipt.sha256 == expectedSha256) { "$context.sha256 与请求不一致" }
+    require(receipt.expiresAtEpochSeconds > 0L) { "$context.expires_at 无效" }
+    return receipt
+}
+
+private fun JsonObject.optionalNonBlankString(key: String, context: String): String? =
+    when (val value = get(key)) {
+        null, JsonNull -> null
+        is JsonPrimitive -> value.contentOrNull?.trim()?.takeIf(String::isNotEmpty).also {
+            require(value.isString) { "$context.$key 无效" }
+        }
+        else -> throw IllegalArgumentException("$context.$key 无效")
+    }
+
+private fun JsonObject.optionalConflictSummary(context: String): PullConflictSummary? {
+    val raw = get("conflict_summary") ?: return null
+    if (raw is JsonNull) return null
+    val value = raw as? JsonObject
+        ?: throw IllegalArgumentException("$context.conflict_summary 不是对象")
+    val summaryContext = "$context.conflict_summary"
+    val branchIds = when (val branches = value["branch_version_ids"]) {
+        null -> throw IllegalArgumentException("$summaryContext.branch_version_ids 缺失")
+        JsonNull -> emptyList()
+        is JsonArray -> branches.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException(
+                    "$summaryContext.branch_version_ids[$index] 无效",
+                )
+        }
+        else -> throw IllegalArgumentException("$summaryContext.branch_version_ids 无效")
+    }
+    return PullConflictSummary(
+        conflictId = value.requiredNonBlankString("conflict_id", summaryContext),
+        entityType = value.requiredNonBlankString("entity_type", summaryContext),
+        clientUuid = value.requiredNonBlankString("client_uuid", summaryContext),
+        stableVersionId = value.requiredNonBlankString("stable_version_id", summaryContext),
+        branchVersionIds = branchIds,
+    )
+}
+
+private fun JsonObject.optionalSourceRelationSummary(context: String): PullSourceRelationSummary? {
+    val raw = get("source_relation_summary") ?: return null
+    if (raw is JsonNull) return null
+    val value = raw as? JsonObject
+        ?: throw IllegalArgumentException("$context.source_relation_summary 不是对象")
+    val summaryContext = "$context.source_relation_summary"
+    val role = value.requiredNonBlankString("role", summaryContext)
+    require(role == "display" || role == "source") {
+        "$summaryContext.role 必须是 display 或 source"
+    }
+    val peers = when (val peerRaw = value["peer_ids"]) {
+        null -> emptyList()
+        JsonNull -> emptyList()
+        is JsonArray -> peerRaw.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$summaryContext.peer_ids[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$summaryContext.peer_ids 无效")
+    }
+    return PullSourceRelationSummary(
+        relationId = value.requiredNonBlankString("relation_id", summaryContext),
+        role = role,
+        peerIds = peers,
+    )
+}
+
+/** Wire §8.2 closed resolution terminal: accepted or rejected. */
+private fun JsonObject.toConflictResolveResult(context: String): ConflictResolveResult {
+    val status = requiredNonBlankString("status", context)
+    return when (status) {
+        "accepted" -> {
+            val required = setOf(
+                "status",
+                "resolution_mutation_id",
+                "stable_version_id",
+                "stable_root",
+                "replay",
+            )
+            val allowed = required + "stable_media"
+            require(keys.containsAll(required) && keys.all(allowed::contains)) {
+                "$context accepted keys 非 closed shape"
+            }
+            val resolutionMutationId = requiredNonBlankString(
+                "resolution_mutation_id",
+                context,
+            )
+            val stableVersionId = requiredNonBlankString("stable_version_id", context)
+            val stableRoot = when (val root = get("stable_root")) {
+                is JsonObject -> root.toString()
+                else -> throw IllegalArgumentException("$context.stable_root 无效")
+            }
+            val media = when (val raw = get("stable_media")) {
+                null -> emptyList()
+                is JsonArray -> raw.mapIndexed { index, element ->
+                    (element as? JsonObject)
+                        ?.toConflictAcceptedMedia("$context.stable_media[$index]")
+                        ?: throw IllegalArgumentException(
+                            "$context.stable_media[$index] 不是对象",
+                        )
+                }
+                else -> throw IllegalArgumentException("$context.stable_media 无效")
+            }
+            ConflictResolveResult.Accepted(
+                stableVersionId = stableVersionId,
+                resolutionMutationId = resolutionMutationId,
+                stableRootJson = stableRoot,
+                stableMedia = media,
+                replay = requiredBoolean("replay", context),
+            )
+        }
+        "rejected" -> {
+            require(keys == setOf("status", "error") ||
+                keys == setOf("status", "resolution_mutation_id", "error")) {
+                "$context rejected keys 非 closed shape"
+            }
+            val error = get("error") as? JsonObject
+                ?: throw IllegalArgumentException("$context.error 无效")
+            require(error.keys == setOf("code", "retryable")) {
+                "$context.error keys 非 closed shape"
+            }
+            val code = error.requiredNonBlankString("code", "$context.error")
+            require(code in CONFLICT_TERMINAL_REJECTION_CODES) {
+                "$context.error.code 非 closed value: $code"
+            }
+            val retryable = error.requiredBoolean("retryable", "$context.error")
+            require(!retryable) { "$context.error.retryable 必须为 false" }
+            ConflictResolveResult.Rejected(
+                code = code,
+                resolutionMutationId = optionalNonBlankString(
+                    "resolution_mutation_id",
+                    context,
+                ),
+                retryable = retryable,
+            )
+        }
+        else -> throw IllegalArgumentException("$context.status 无效: $status")
+    }
+}
+
+private fun JsonObject.toConflictAcceptedMedia(context: String): CausalMediaItem {
+    require(keys == setOf("media_uuid", "role", "sha256", "byte_size", "mime", "width", "height")) {
+        "$context keys 非 closed shape"
+    }
+    return toCausalMediaItem(context)
+}
+
+private fun JsonObject.optionalLong(key: String, context: String): Long? =
+    when (val value = get(key)) {
+        null, JsonNull -> null
+        is JsonPrimitive -> value.longOrNull
+            ?: throw IllegalArgumentException("$context.$key 无效")
+        else -> throw IllegalArgumentException("$context.$key 无效")
+    }
+
+private fun JsonObject.toSourceRelationResult(context: String): SourceRelationResult {
+    val status = requiredNonBlankString("status", context)
+    val sources = when (val raw = get("source_client_uuids")) {
+        null, JsonNull -> emptyList()
+        is JsonArray -> raw.mapIndexed { index, element ->
+            (element as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.source_client_uuids[$index] 无效")
+        }
+        else -> throw IllegalArgumentException("$context.source_client_uuids 无效")
+    }
+    val latest = when (val raw = get("latest_versions")) {
+        null, JsonNull -> emptyMap()
+        is JsonObject -> raw.mapValues { (_, v) ->
+            (v as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: throw IllegalArgumentException("$context.latest_versions 值无效")
+        }
+        else -> throw IllegalArgumentException("$context.latest_versions 无效")
+    }
+    val mediaRetained = when (val raw = get("media_retained")) {
+        null, JsonNull -> null
+        is JsonPrimitive -> raw.booleanOrNull
+        else -> throw IllegalArgumentException("$context.media_retained 无效")
+    }
+    return SourceRelationResult(
+        status = status,
+        relationId = optionalNonBlankString("relation_id", context),
+        displayClientUuid = optionalNonBlankString("display_client_uuid", context),
+        sourceClientUuids = sources,
+        mediaRetained = mediaRetained,
+        code = optionalNonBlankString("code", context),
+        latestVersions = latest,
+    )
+}
 
 private fun JsonObject.recordAuthors(): List<CanonicalRecordAuthor> =
     requiredArray("record_authors", "sync response").mapIndexed { index, element ->
@@ -1740,6 +2414,10 @@ private fun JsonObject.requiredArray(key: String, context: String): JsonArray =
     get(key) as? JsonArray
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
 
+private fun JsonObject.requiredObject(key: String, context: String): JsonObject =
+    get(key) as? JsonObject
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+
 private fun JsonObject.requiredString(key: String, context: String): String {
     val primitive = get(key) as? JsonPrimitive
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
@@ -1752,18 +2430,19 @@ private fun JsonObject.requiredNonBlankString(key: String, context: String): Str
         require(it.isNotEmpty()) { "$context 响应 $key 为空" }
     }
 
-private fun JsonObject.optionalString(key: String, context: String): String? =
-    when (val value = get(key)) {
-        null, JsonNull -> null
-        is JsonPrimitive -> value.contentOrNull?.also {
-            require(value.isString && it.isNotBlank()) { "$context.$key 无效" }
-        }
-        else -> throw IllegalArgumentException("$context.$key 无效")
-    }
-
-private fun JsonObject.requiredLong(key: String, context: String): Long =
-    get(key)?.jsonPrimitive?.longOrNull
+private fun JsonObject.requiredLong(key: String, context: String): Long {
+    val primitive = get(key) as? JsonPrimitive
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+    require(!primitive.isString) { "$context 响应 $key 必须是数字" }
+    return primitive.longOrNull
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+}
+
+private fun JsonObject.requiredInt(key: String, context: String): Int {
+    val value = requiredLong(key, context)
+    require(value in Int.MIN_VALUE..Int.MAX_VALUE) { "$context 响应 $key 超出 Int 范围" }
+    return value.toInt()
+}
 
 private fun JsonObject.toAppUpdateMetadata(): AppUpdateMetadata {
     val context = "app-update"
@@ -1789,9 +2468,13 @@ private fun JsonObject.toAppUpdateMetadata(): AppUpdateMetadata {
     )
 }
 
-private fun JsonObject.requiredBoolean(key: String, context: String): Boolean =
-    get(key)?.jsonPrimitive?.booleanOrNull
+private fun JsonObject.requiredBoolean(key: String, context: String): Boolean {
+    val primitive = get(key) as? JsonPrimitive
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+    require(!primitive.isString) { "$context 响应 $key 必须是布尔值" }
+    return primitive.booleanOrNull
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+}
 
 private fun JsonObject.requiredNullableString(key: String, context: String): String? {
     require(key in this) { "$context 响应缺少 $key" }
@@ -1815,6 +2498,17 @@ private fun JsonObject.requiredNullableLong(key: String, context: String): Long?
     }
 }
 
+/** Additive field: missing or null → null. */
+private fun JsonObject.optionalNullableLong(key: String, context: String): Long? {
+    if (key !in this) return null
+    return when (val value = get(key)) {
+        null, JsonNull -> null
+        is JsonPrimitive -> value.longOrNull
+            ?: throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
+        else -> throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
+    }
+}
+
 private fun JsonObject.requiredStringArray(key: String, context: String): List<String> =
     requiredArray(key, context).mapIndexed { index, element ->
         val value = element as? JsonPrimitive
@@ -1828,6 +2522,7 @@ private fun JsonObject.requiredStringArray(key: String, context: String): List<S
 internal class SyncHttpException(
     val statusCode: Int,
     val responseBody: String = "",
+    val retryAfterHeader: String? = null,
 ) : IllegalStateException(formatSyncHttpFailure(statusCode, responseBody))
 
 /**
@@ -1864,6 +2559,169 @@ internal fun syncHttpCodeOrNull(responseBody: String): String? {
             ?.takeIf(String::isNotEmpty)
             ?.take(64)
     }.getOrNull()
+}
+
+internal fun decodeSyncHandshakeFailure(failure: SyncHttpException): SyncHandshakeRejectedException {
+    val root = runCatching { Json.parseToJsonElement(failure.responseBody).jsonObject }
+        .getOrElse { throw failure }
+    root.requireExactKeys(setOf("status", "error"), "sync_handshake rejection")
+    require(root.requiredString("status", "sync_handshake rejection") == "rejected") {
+        "sync_handshake rejection.status 无效"
+    }
+    val error = root.requiredObject("error", "sync_handshake rejection")
+    error.requireExactKeys(setOf("code", "retryable"), "sync_handshake rejection.error")
+    require(!error.requiredBoolean("retryable", "sync_handshake rejection.error")) {
+        "sync_handshake rejection.error.retryable 必须为 false"
+    }
+    val code = error.requiredString("code", "sync_handshake rejection.error")
+    val expectedStatus = when (code) {
+        "capability_mismatch" -> 409
+        "not_ready" -> 503
+        else -> throw failure
+    }
+    require(failure.statusCode == expectedStatus) {
+        "sync_handshake rejection HTTP/code 映射无效"
+    }
+    return SyncHandshakeRejectedException(code)
+}
+
+internal fun decodeAuthenticatedSyncHandshake(json: JsonObject): AuthenticatedSyncHandshake {
+    val context = "sync_handshake"
+    json.requireExactKeys(
+        setOf(
+            "protocol_version",
+            "server_version",
+            "ready",
+            "capabilities",
+            "principal",
+            "directory_generation",
+            "limits",
+            "compression",
+            "retry_hints",
+        ),
+        context,
+    )
+    require(json.requiredInt("protocol_version", context) == AUTHENTICATED_SYNC_PROTOCOL_VERSION) {
+        "$context.protocol_version 无效"
+    }
+    require(json.requiredBoolean("ready", context)) { "$context.ready 必须为 true" }
+    val serverVersion = json.requiredNonBlankString("server_version", context)
+    require(serverVersion.length <= 64) { "$context.server_version 过长" }
+    val capabilities = json.requiredUniqueStringSet("capabilities", context, maxItems = 64)
+    require(capabilities == REQUIRED_CAUSAL_WIRE_CAPABILITIES) {
+        "$context.capabilities 必须精确匹配 source causal 能力"
+    }
+    val principal = json.requiredObject("principal", context).also {
+        it.requireExactKeys(setOf("membership_id", "device_id", "role"), "$context.principal")
+    }
+    val limits = json.requiredObject("limits", context).also {
+        it.requireExactKeys(
+            setOf(
+                "pull_page_max_entities",
+                "pull_page_max_encoded_bytes",
+                "pull_page_max_decoded_bytes",
+                "pull_max_pages",
+                "commit_batch_max_units",
+                "media_max_bytes",
+            ),
+            "$context.limits",
+        )
+    }
+    val pullLimit = limits.requiredInt("pull_page_max_entities", "$context.limits")
+    val pullEncodedLimit = limits.requiredInt("pull_page_max_encoded_bytes", "$context.limits")
+    val pullDecodedLimit = limits.requiredInt("pull_page_max_decoded_bytes", "$context.limits")
+    val pullMaxPages = limits.requiredInt("pull_max_pages", "$context.limits")
+    val commitLimit = limits.requiredInt("commit_batch_max_units", "$context.limits")
+    val mediaLimit = limits.requiredLong("media_max_bytes", "$context.limits")
+    require(pullLimit in 1..200) { "$context.limits.pull_page_max_entities 无效" }
+    require(pullEncodedLimit in 1..FROZEN_PULL_PAGE_BUDGET.maxEncodedBytes) {
+        "$context.limits.pull_page_max_encoded_bytes 无效"
+    }
+    require(pullDecodedLimit in 1..FROZEN_PULL_PAGE_BUDGET.maxDecodedBytes) {
+        "$context.limits.pull_page_max_decoded_bytes 无效"
+    }
+    require(pullEncodedLimit >= pullDecodedLimit) {
+        "$context.limits pull encoded 上限不得小于 decoded 上限"
+    }
+    require(pullMaxPages in 1..FROZEN_PULL_PAGE_BUDGET.maxPages) {
+        "$context.limits.pull_max_pages 无效"
+    }
+    require(commitLimit in 1..64) { "$context.limits.commit_batch_max_units 无效" }
+    require(mediaLimit in 1..MAX_SYNC_MEDIA_RESPONSE_BYTES.toLong()) {
+        "$context.limits.media_max_bytes 无效"
+    }
+    val compression = json.requiredObject("compression", context).also {
+        it.requireExactKeys(setOf("pull_response"), "$context.compression")
+    }
+    val pullCompression = compression.requiredUniqueStringSet(
+        "pull_response",
+        "$context.compression",
+        maxItems = 2,
+    )
+    require(pullCompression == setOf("gzip", "identity")) {
+        "$context.compression.pull_response 无效"
+    }
+    val retryHints = json.requiredObject("retry_hints", context).also {
+        it.requireExactKeys(setOf("retry_after"), "$context.retry_hints")
+    }
+    require(retryHints.requiredBoolean("retry_after", "$context.retry_hints")) {
+        "$context.retry_hints.retry_after 必须为 true"
+    }
+    val directoryGeneration = json.requiredNonBlankString("directory_generation", context)
+    require(SHA256_HEX_PATTERN.matches(directoryGeneration)) {
+        "$context.directory_generation 无效"
+    }
+    return AuthenticatedSyncHandshake(
+        protocolVersion = AUTHENTICATED_SYNC_PROTOCOL_VERSION,
+        serverVersion = serverVersion,
+        ready = true,
+        capabilities = capabilities,
+        principal = SyncHandshakePrincipal(
+            membershipId = principal.requiredNonBlankString("membership_id", "$context.principal"),
+            deviceId = principal.requiredNonBlankString("device_id", "$context.principal"),
+            role = when (principal.requiredString("role", "$context.principal")) {
+                "owner" -> FamilyRole.Owner
+                "member" -> FamilyRole.Member
+                else -> throw IllegalArgumentException("$context.principal.role 无效")
+            },
+        ),
+        directoryGeneration = directoryGeneration,
+        limits = SyncHandshakeLimits(
+            pullPageMaxEntities = pullLimit,
+            pullPageMaxEncodedBytes = pullEncodedLimit,
+            pullPageMaxDecodedBytes = pullDecodedLimit,
+            pullMaxPages = pullMaxPages,
+            commitBatchMaxUnits = commitLimit,
+            mediaMaxBytes = mediaLimit,
+        ),
+        compression = SyncHandshakeCompression(pullCompression),
+        retryHints = SyncHandshakeRetryHints(retryAfter = true),
+    )
+}
+
+private val SHA256_HEX_PATTERN = Regex("[0-9a-f]{64}")
+
+private fun JsonObject.requireExactKeys(expected: Set<String>, context: String) {
+    require(keys == expected) { "$context keys 无效" }
+}
+
+private fun JsonObject.requiredUniqueStringSet(
+    key: String,
+    context: String,
+    maxItems: Int,
+): Set<String> {
+    val values = requiredArray(key, context).mapIndexed { index, value ->
+        val string = (value as? JsonPrimitive)?.contentOrNull?.trim()
+            ?: throw IllegalArgumentException("$context.$key[$index] 无效")
+        require((value as JsonPrimitive).isString && string.isNotEmpty() && string.length <= 64) {
+            "$context.$key[$index] 无效"
+        }
+        string
+    }
+    require(values.size in 1..maxItems && values.distinct().size == values.size) {
+        "$context.$key 重复或越界"
+    }
+    return values.toSet()
 }
 
 internal class SyncResponseTooLargeException(

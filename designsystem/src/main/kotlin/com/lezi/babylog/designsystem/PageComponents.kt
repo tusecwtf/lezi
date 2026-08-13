@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -69,37 +70,48 @@ fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
     )
 }
 
-/** Shared 68dp detail-page chrome aligned with the main and brand headers. */
+/**
+ * Shared 68dp detail-page chrome aligned with the main and brand headers.
+ * Full-screen routes hide the root Scaffold top bar, so this bar must own
+ * [statusBarsPadding] itself — same pattern as [LeziTopBarContainer].
+ */
 @Composable
 fun LeziDetailTopBar(
     title: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    applyStatusBarsPadding: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
-    Row(
-        modifier = modifier
+    Column(
+        modifier
             .fillMaxWidth()
-            .height(LeziSpacing.TopBarHeight)
             .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = LeziThemeExt.density.topBarHorizontal),
-        verticalAlignment = Alignment.CenterVertically,
+            .then(if (applyStatusBarsPadding) Modifier.statusBarsPadding() else Modifier),
     ) {
-        LeziIconButton(
-            onClick = onBack,
-            contentDescription = "返回",
-            modifier = Modifier.size(LeziSpacing.TopBarAction),
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(LeziSpacing.TopBarHeight)
+                .padding(horizontal = LeziThemeExt.density.topBarHorizontal),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+            LeziIconButton(
+                onClick = onBack,
+                contentDescription = "返回",
+                modifier = Modifier.size(LeziSpacing.TopBarAction),
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                title,
+                style = LeziTypography.TitleSm,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+            )
+            actions()
         }
-        Spacer(Modifier.width(8.dp))
-        Text(
-            title,
-            style = LeziTypography.TitleSm,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-        )
-        actions()
     }
 }
 
@@ -199,7 +211,7 @@ fun PageHero(
     Column(
         modifier
             .fillMaxWidth()
-            .padding(top = 10.dp, bottom = 4.dp),
+            .padding(top = LeziSpacing.Xs, bottom = LeziSpacing.Xxs),
     ) {
         Row(
             Modifier.fillMaxWidth(),

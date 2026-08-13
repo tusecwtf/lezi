@@ -7,15 +7,63 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-use super::{Store, StoreError};
+use super::{CausalAdmissionConfig, Store, StoreError};
+use crate::rate_limit::{RateLimitConfig, RateLimiter};
 
 /// Current SQLite `PRAGMA user_version` / schema contract version.
 /// Offline migration inventory couples to this constant (must not drift).
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 11;
+///
+/// v13 adds the reverse media-reachability index and durable per-family media
+/// GC progress. Runtime still opens only the exact current shape (no in-place
+/// upgrade); historical v3/v11 migration remains frozen at schema 12.
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 13;
+
+/// Mutable atomic roots that participate in the causal version graph.
+/// Single source of truth for versioned types; must match CHECK fragments in
+/// [`CURRENT_SCHEMA_SQL`] (`VERSIONED_ENTITY_TYPES_SQL`).
+pub(crate) const VERSIONED_ENTITY_TYPES: &[&str] = &[
+    "baby",
+    "record",
+    "care_plan",
+    "custom_item",
+    "wake_observation",
+];
+
+/// SQL `IN (...)` list body for versioned entity types (kept next to the const).
+/// Referenced by schema shape tests so CHECK fragments cannot drift silently.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const VERSIONED_ENTITY_TYPES_SQL: &str =
+    "'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'";
+
+#[cfg(test)]
+mod versioned_types_alignment {
+    use super::{CURRENT_SCHEMA_SQL, VERSIONED_ENTITY_TYPES, VERSIONED_ENTITY_TYPES_SQL};
+
+    #[test]
+    fn versioned_types_sql_matches_const_and_schema_checks() {
+        let joined = VERSIONED_ENTITY_TYPES
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(joined, VERSIONED_ENTITY_TYPES_SQL);
+        // entity_versions / stable_heads / receipts / conflicts all share the fragment.
+        assert!(CURRENT_SCHEMA_SQL.contains(VERSIONED_ENTITY_TYPES_SQL));
+        assert_eq!(
+            CURRENT_SCHEMA_SQL
+                .matches(VERSIONED_ENTITY_TYPES_SQL)
+                .count(),
+            4,
+            "expected CHECK fragment on versions, heads, receipts, conflicts"
+        );
+    }
+}
+
 pub(crate) const CURRENT_SCHEMA_SQL: &str = "
     CREATE TABLE families (
         id TEXT PRIMARY KEY,
@@ -149,7 +197,10 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
 
     CREATE TABLE entities (
         family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-        entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'media', 'care_plan', 'custom_item',
+            'fulfillment_candidate', 'wake_observation'
+        )),
         client_uuid TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         deleted_at INTEGER,
@@ -200,6 +251,255 @@ pub(crate) const CURRENT_SCHEMA_SQL: &str = "
             CHECK(source IN ('ordinary', 'bundle_pending', 'bundle')),
         bundle_id TEXT,
         PRIMARY KEY (family_id, media_uuid)
+    );
+
+    -- Causal media bytes are durable preimages until a successful causal
+    -- transaction consumes their exact manifest. Open rows use the staging
+    -- path; consumed rows use the published path. gc_pending preserves
+    -- consumed_at so crash recovery can finish deleting the correct object.
+    CREATE TABLE causal_media_staging (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        membership_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+            'writing', 'staged', 'consumed', 'gc_pending'
+        )),
+        consumed_at INTEGER,
+        publication_confirmed INTEGER NOT NULL DEFAULT 0
+            CHECK(publication_confirmed IN (0, 1)),
+        PRIMARY KEY (family_id, media_uuid)
+    );
+    CREATE INDEX causal_media_staging_quota
+        ON causal_media_staging(family_id, membership_id, status, expires_at);
+    CREATE INDEX causal_media_staging_recovery
+        ON causal_media_staging(status, publication_confirmed, family_id, media_uuid);
+
+    -- Durable keyset progress for bounded staging and upload-orphan sweeps.
+    -- This state is maintenance metadata and never advances the family rev.
+    CREATE TABLE causal_media_gc_state (
+        family_id TEXT PRIMARY KEY,
+        staging_after_family_id TEXT NOT NULL DEFAULT '',
+        staging_after_media_uuid TEXT NOT NULL DEFAULT '',
+        orphan_after_family_id TEXT NOT NULL DEFAULT '',
+        orphan_after_sequence INTEGER NOT NULL DEFAULT 0
+            CHECK(orphan_after_sequence >= 0),
+        next_upload_sequence INTEGER NOT NULL DEFAULT 1
+            CHECK(next_upload_sequence > 0)
+    );
+
+    -- Every streamed upload receives a durable sequence before its temporary
+    -- object is created. GC can therefore inspect/retry exact orphan paths by
+    -- keyset instead of depending on filesystem directory iteration order.
+    CREATE TABLE causal_media_uploads (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL CHECK(sequence > 0),
+        membership_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, sequence)
+    );
+    CREATE INDEX causal_media_uploads_active
+        ON causal_media_uploads(family_id, expires_at, sequence);
+
+    -- Causal: immutable root versions (stable projection remains `entities`).
+    CREATE TABLE entity_versions (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        version_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        mutation_id TEXT,
+        origin TEXT NOT NULL CHECK(origin IN (
+            'migration_base', 'accepted', 'merged', 'branched', 'resolved'
+        )),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, version_id)
+    );
+    CREATE INDEX entity_versions_root
+        ON entity_versions(family_id, entity_type, client_uuid);
+
+    CREATE TABLE entity_version_parents (
+        family_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        parent_version_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, version_id, parent_version_id),
+        FOREIGN KEY (family_id, version_id)
+            REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, parent_version_id)
+            REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE entity_version_media (
+        family_id TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        media_payload_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        PRIMARY KEY (family_id, version_id, media_uuid),
+        FOREIGN KEY (family_id, version_id)
+            REFERENCES entity_versions(family_id, version_id) ON DELETE CASCADE
+    );
+    CREATE INDEX entity_version_media_by_media
+        ON entity_version_media(family_id, media_uuid, version_id);
+
+    -- O(1) stable head; ordinary pull does not join full version history.
+    CREATE TABLE entity_stable_heads (
+        family_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, entity_type, client_uuid),
+        FOREIGN KEY (family_id, entity_type, client_uuid)
+            REFERENCES entities(family_id, entity_type, client_uuid) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+
+    -- mutation_id unique at family / principal / atomic-root boundary.
+    CREATE TABLE mutation_receipts (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        membership_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        mutation_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('accepted', 'merged', 'branched')),
+        stable_version_id TEXT,
+        branch_version_id TEXT,
+        conflict_id TEXT,
+        receipt_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, membership_id, entity_type, client_uuid, mutation_id)
+    );
+    CREATE INDEX mutation_receipts_lookup
+        ON mutation_receipts(family_id, membership_id, mutation_id);
+
+    CREATE TABLE conflicts (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        conflict_id TEXT NOT NULL,
+        entity_type TEXT NOT NULL CHECK(entity_type IN (
+            'baby', 'record', 'care_plan', 'custom_item', 'wake_observation'
+        )),
+        client_uuid TEXT NOT NULL,
+        base_version_id TEXT,
+        stable_version_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('open', 'resolved')),
+        kind TEXT NOT NULL CHECK(kind IN ('concurrent', 'tombstone_restore')),
+        created_at INTEGER NOT NULL,
+        resolved_at INTEGER,
+        PRIMARY KEY (family_id, conflict_id),
+        FOREIGN KEY (family_id, stable_version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+    CREATE INDEX conflicts_root
+        ON conflicts(family_id, entity_type, client_uuid, status);
+
+    CREATE TABLE conflict_branches (
+        family_id TEXT NOT NULL,
+        conflict_id TEXT NOT NULL,
+        branch_version_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, conflict_id, branch_version_id),
+        FOREIGN KEY (family_id, conflict_id)
+            REFERENCES conflicts(family_id, conflict_id) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, branch_version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+
+    CREATE TABLE conflict_resolutions (
+        family_id TEXT NOT NULL,
+        conflict_id TEXT NOT NULL,
+        resolution_mutation_id TEXT NOT NULL,
+        resolver_membership_id TEXT NOT NULL,
+        expected_stable_version_id TEXT NOT NULL,
+        expected_branch_versions_json TEXT NOT NULL,
+        conflict_choices_json TEXT NOT NULL,
+        resolved_version_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, conflict_id, resolution_mutation_id),
+        FOREIGN KEY (family_id, conflict_id)
+            REFERENCES conflicts(family_id, conflict_id) ON DELETE CASCADE,
+        FOREIGN KEY (family_id, resolved_version_id)
+            REFERENCES entity_versions(family_id, version_id)
+    );
+
+    -- Source relations are not ordinary record tombstones (independent reason).
+    CREATE TABLE source_relations (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        relation_id TEXT NOT NULL,
+        display_client_uuid TEXT NOT NULL,
+        media_retained INTEGER NOT NULL CHECK(media_retained = 1),
+        reason TEXT NOT NULL CHECK(reason IN (
+            'author_declare', 'owner_group_resolve'
+        )),
+        mutation_id TEXT NOT NULL,
+        created_by_membership_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, relation_id)
+    );
+
+    CREATE TABLE source_relation_mutation_receipts (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        mutation_id TEXT NOT NULL,
+        request_kind TEXT NOT NULL CHECK(request_kind IN (
+            'author_declare', 'owner_group_resolve'
+        )),
+        request_fingerprint TEXT NOT NULL,
+        receipt_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, mutation_id)
+    );
+
+    CREATE TABLE source_relation_record_eligibility (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        record_client_uuid TEXT NOT NULL,
+        baby_client_uuid TEXT NOT NULL,
+        record_type TEXT NOT NULL,
+        record_timestamp INTEGER NOT NULL,
+        author_membership_id TEXT NOT NULL,
+        PRIMARY KEY (family_id, record_client_uuid)
+    );
+    CREATE INDEX source_relation_eligibility_window
+        ON source_relation_record_eligibility(
+            family_id, baby_client_uuid, record_type,
+            record_timestamp, record_client_uuid
+        );
+
+    CREATE TABLE source_relation_members (
+        family_id TEXT NOT NULL,
+        relation_id TEXT NOT NULL,
+        record_client_uuid TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('display', 'source')),
+        PRIMARY KEY (family_id, relation_id, record_client_uuid),
+        UNIQUE (family_id, record_client_uuid),
+        FOREIGN KEY (family_id, relation_id)
+            REFERENCES source_relations(family_id, relation_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE source_relation_declarations (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        mutation_id TEXT NOT NULL,
+        record_client_uuid TEXT NOT NULL,
+        equivalent_to_client_uuid TEXT NOT NULL,
+        expected_record_version TEXT NOT NULL,
+        expected_other_version TEXT NOT NULL,
+        author_membership_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'consumed', 'superseded')),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (family_id, mutation_id)
     );
 ";
 
@@ -273,11 +573,83 @@ impl Store {
         inspect_schema(&connection).map(|_| ())
     }
 
+    #[cfg(test)]
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, StoreError> {
+        Self::open_configured(
+            database_path,
+            CausalAdmissionConfig::default(),
+            Arc::from(b"lezi-sync-test-snapshot-key".as_slice()),
+            false,
+        )
+    }
+
+    pub(crate) fn open_with_snapshot_key(
+        database_path: impl Into<PathBuf>,
+        snapshot_receipt_key: &[u8],
+    ) -> Result<Self, StoreError> {
+        Self::open_configured(
+            database_path,
+            CausalAdmissionConfig::default(),
+            Arc::from(snapshot_receipt_key),
+            false,
+        )
+    }
+
+    pub(crate) fn open_read_only_with_snapshot_key(
+        database_path: impl Into<PathBuf>,
+        snapshot_receipt_key: &[u8],
+    ) -> Result<Self, StoreError> {
+        Self::open_configured(
+            database_path,
+            CausalAdmissionConfig::default(),
+            Arc::from(snapshot_receipt_key),
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_causal_admission(
+        database_path: impl Into<PathBuf>,
+        admission: CausalAdmissionConfig,
+    ) -> Result<Self, StoreError> {
+        Self::open_configured(
+            database_path,
+            admission,
+            Arc::from(b"lezi-sync-test-snapshot-key".as_slice()),
+            false,
+        )
+    }
+
+    fn open_configured(
+        database_path: impl Into<PathBuf>,
+        admission: CausalAdmissionConfig,
+        snapshot_receipt_key: Arc<[u8]>,
+        read_only: bool,
+    ) -> Result<Self, StoreError> {
+        let admission = admission.validate()?;
         let store = Self {
             database_path: database_path.into(),
+            read_only,
+            snapshot_receipt_key,
+            causal_commit_limiter: Arc::new(RateLimiter::new_with_group_limit(
+                RateLimitConfig {
+                    max_attempts: admission.principal_commit_limit,
+                    window_seconds: admission.window_seconds,
+                },
+                admission.family_commit_limit,
+            )),
+            max_open_causal_branches_per_root: admission.max_open_branches_per_root,
+            causal_media_publication_locks: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            causal_media_gc_in_flight: Arc::new(std::sync::Mutex::new(
+                std::collections::BTreeSet::new(),
+            )),
         };
         Self::preflight_existing_schema(&store.database_path)?;
+        if read_only {
+            return Ok(store);
+        }
         if let Some(parent) = store.database_path.parent() {
             fs::create_dir_all(parent)?;
             crate::secure_directory(parent)?;

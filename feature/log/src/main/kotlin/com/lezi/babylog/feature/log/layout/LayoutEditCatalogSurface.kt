@@ -365,8 +365,7 @@ internal fun LayoutEditCatalogSurface(
             // Local-only deleted section remains a clear, bounded drop zone.
             val trashHot = drag?.currentTarget == LayoutDropTarget.LocalDeleted
             val localDeletedDescription =
-                "本机已删除，${deleted.size} 项。这里只隐藏本机入口，不删除历史记录或自定义项目。" +
-                    "可对项目使用恢复操作或长按拖出，恢复到所属类别末尾；不会自动回填常用槽。"
+                LayoutEditPresentation.localDeletedDescription(deleted.size)
             Column(
                 Modifier
                     .fillMaxWidth()
@@ -401,15 +400,15 @@ internal fun LayoutEditCatalogSurface(
                     .semantics {
                         contentDescription = localDeletedDescription
                         stateDescription = if (trashHot) {
-                            "松开后仅在本机隐藏，并清空常用槽引用"
+                            LayoutEditPresentation.localDeletedHoverHelper
                         } else {
-                            "可逆的本机隐藏区"
+                            LayoutEditPresentation.localDeletedIdleState
                         }
                     },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 RecordCatalogSectionHeading(
-                    title = "本机已删除 · ${deleted.size} 项",
+                    title = LayoutEditPresentation.localDeletedHeading(deleted.size),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("layout_edit_local_deleted_heading"),
@@ -417,9 +416,9 @@ internal fun LayoutEditCatalogSurface(
                 Spacer(Modifier.height(LeziSpacing.Xxs))
                 Text(
                     text = if (trashHot) {
-                        "松开后仅在本机隐藏，并清空常用槽引用"
+                        LayoutEditPresentation.localDeletedHoverHelper
                     } else {
-                        "仅在本机隐藏 · 使用操作或拖出恢复"
+                        LayoutEditPresentation.localDeletedHelper
                     },
                     style = LeziTypography.Meta,
                     color = if (trashHot) {
@@ -438,7 +437,7 @@ internal fun LayoutEditCatalogSurface(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "暂无已隐藏项目",
+                            LayoutEditPresentation.localDeletedEmpty,
                             style = LeziTypography.Meta,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -457,7 +456,7 @@ internal fun LayoutEditCatalogSurface(
                             showAddCell = false,
                             onAddClick = {},
                             contentDescriptionForKey = { key ->
-                                "${labels[key] ?: key}，本机已隐藏"
+                                "${labels[key] ?: key}，已收起"
                             },
                             itemModifier = { key ->
                                 val dragging = drag?.source == LayoutDragSource.LocalDeleted(key)
@@ -500,7 +499,7 @@ internal fun LayoutEditCatalogSurface(
                                     .testTag("layout_edit_deleted_$key")
                                     .semantics(mergeDescendants = true) {
                                         stateDescription =
-                                            "本机已隐藏，可恢复到${sectionTitle}末尾"
+                                            "已收起，可恢复到${sectionTitle}末尾"
                                     }
                                     .then(
                                         if (dragging) Modifier.alpha(0.25f) else Modifier,
@@ -544,6 +543,7 @@ private fun LayoutCatalogGrid(
                         colorRole = LeziRecordColorRole.Care,
                         contentDescription = "管理自定义记录项目",
                         isAdd = true,
+                        transparentContainer = true,
                         modifier = Modifier
                             .weight(1f)
                             .clickable(onClick = onAddClick)
@@ -558,6 +558,7 @@ private fun LayoutCatalogGrid(
                         customIconSlot = visual?.customIconSlot,
                         colorRole = visual?.colorRole ?: LeziRecordColorRole.Care,
                         contentDescription = contentDescriptionForKey(key),
+                        transparentContainer = true,
                         modifier = Modifier
                             .weight(1f)
                             .then(itemModifier(key)),

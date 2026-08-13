@@ -48,4 +48,18 @@ class LayoutEditPresentationTest {
         assertTrue(LayoutEditPresentation.catalogSections.all { it.title.isNotBlank() })
         assertTrue(LayoutEditPresentation.showsLocalDeletedHeading)
     }
+
+    @Test
+    fun localDeletedCopyUsesRestoreLanguageWithoutDeleteJargon() {
+        assertEquals("已收起 · 0 项", LayoutEditPresentation.localDeletedHeading(0))
+        assertEquals("使用操作或拖出恢复", LayoutEditPresentation.localDeletedHelper)
+        assertEquals("松开后收起，并清空常用槽", LayoutEditPresentation.localDeletedHoverHelper)
+        assertEquals("暂无收起项目", LayoutEditPresentation.localDeletedEmpty)
+        assertEquals("收起", LayoutEditPresentation.hideAction)
+        assertEquals("已收起", LayoutEditPresentation.undoMovedToDeleted)
+        assertFalse(LayoutEditPresentation.localDeletedHeading(2).contains("本机已删除"))
+        assertFalse(LayoutEditPresentation.localDeletedHelper.contains("仅在本机隐藏"))
+        assertFalse(LayoutEditPresentation.localDeletedDescription(1).contains("本机已删除"))
+        assertTrue(LayoutEditPresentation.localDeletedDescription(1).contains("拖出恢复"))
+    }
 }

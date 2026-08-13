@@ -45,6 +45,7 @@ class ForceShellSessionRecoveryTest {
         val url = requireNotNull(lanInviteApkDownloadUrl("192.168.50.4"))
         val copy = forcedUpdateLanInviteGuidance(url)
         assertThat(copy).contains("8767")
+        assertThat(copy).contains("原地升级会保留本机数据与家庭配置")
         assertThat(copy).contains(url)
         assertThat(copy).contains("无家庭 API")
         assertThat(forcedUpdateSessionRecoveryLabel()).isEqualTo("重新登录家庭")

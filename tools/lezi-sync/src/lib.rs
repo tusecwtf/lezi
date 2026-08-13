@@ -5,6 +5,7 @@ mod model;
 pub(crate) mod offline_migrate;
 mod rate_limit;
 mod readiness;
+mod restore_locks;
 mod store;
 
 /// Ops entry for `lezi-sync offline-migrate …` (ticket 05).
@@ -26,9 +27,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::DefaultBodyLimit;
-use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::header::{AUTHORIZATION, RETRY_AFTER, WWW_AUTHENTICATE};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
+use axum::middleware::{from_fn, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -47,9 +49,10 @@ use rand::RngCore;
 pub use rate_limit::RateLimitConfig;
 use rate_limit::RateLimiter;
 use readiness::{readiness, CachedReadiness};
+use restore_locks::RestoreLockPool;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use store::{Principal, Store, StoreError};
+use store::{CausalCommitSaturation, Principal, Store, StoreError};
 use tokio::sync::Mutex;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -59,12 +62,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
 pub const DEFAULT_MEMBER_REQUEST_RATE_LIMIT: u32 = 10;
-pub const DEFAULT_RECONCILE_RATE_LIMIT: u32 = 120;
 pub const DEFAULT_MEMBER_REQUEST_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_PENDING_MEMBER_REQUESTS: usize = 32;
 pub const MEMBER_LOGIN_GRANT_TTL_SECONDS: i64 = 10 * 60;
 pub(crate) const OPEN_STAGING_BUNDLE_TTL_SECONDS: i64 = 24 * 60 * 60;
 const HTTP_REQUEST_TIMEOUT_SECONDS: u64 = 5 * 60;
+const CAUSAL_MEDIA_GC_MAINTENANCE_INTERVAL_SECONDS: u64 = 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 /// Advertised on `/health` so clients can refuse metadata-first fallbacks.
 pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
@@ -72,7 +75,20 @@ pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 /// to servers that accept and canonicalize it.
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
 pub const CAPABILITY_DISASTER_RESTORE: &str = "device_disaster_restore_v1";
-pub const CAPABILITY_AUTHORITATIVE_RECONCILE: &str = "authoritative_reconcile_v1";
+pub const CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT: &str = "validated_deferred_fulfillment_v1";
+/// Complete 0.4.0 commit-first/conflict-v2 generation.
+pub const CAPABILITY_CAUSAL_SYNC_V2: &str = "causal_sync_v2";
+/// Capabilities exposed by health after the complete generation is activated.
+pub const HEALTH_CAPABILITIES: &[&str] = &[
+    CAPABILITY_ATOMIC_BUNDLE,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+    CAPABILITY_DISASTER_RESTORE,
+    CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
+    CAPABILITY_CAUSAL_SYNC_V2,
+];
+pub const SOURCE_SYNC_HANDSHAKE_CAPABILITIES: &[&str] = &[CAPABILITY_CAUSAL_SYNC_V2];
+/// 0.4.0 causal generation requires the code 21 APK before server activation.
+const PROTOCOL_CUTOVER_CLIENT_VERSION_CODE: u64 = 21;
 pub(crate) const PROVISIONING_LOCK_KEY: &str = "__server_provisioning__";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
 pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
@@ -86,6 +102,8 @@ pub(crate) const SERVER_SECRET_BYTES: usize = 32;
 pub(crate) const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const PULL_PAGE_MAX_ENCODED_BYTES: usize = 9 * 1024 * 1024;
+pub(crate) const PULL_MAX_PAGES: usize = 500;
 pub(crate) const PULL_ENTITY_TARGET_BYTES: usize = PULL_PAGE_TARGET_BYTES / 3;
 const BOOTSTRAP_SECRET_HEADER: HeaderName = HeaderName::from_static("x-lezi-bootstrap-secret");
 /// Integer versionCode from authenticated clients; used to gate minSupported on sync paths.
@@ -103,9 +121,6 @@ pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub version: String,
     pub max_media_bytes: usize,
-    /// Serialized `/v1/reconcile` response ceiling. Public for isolated
-    /// protocol tests; production uses the fail-closed 2 MiB default.
-    pub max_reconcile_response_bytes: usize,
     pub server_secret: Option<Vec<u8>>,
     pub generation: Option<String>,
     /// When set (non-empty), POST /v1/family/create requires matching
@@ -114,7 +129,6 @@ pub struct ServerConfig {
     pub bootstrap_secret: Option<String>,
     pub create_rate_limit: RateLimitConfig,
     pub member_request_rate_limit: RateLimitConfig,
-    pub reconcile_rate_limit: RateLimitConfig,
     pub member_request_ttl_hours: u16,
     pub max_pending_member_requests: usize,
     /// Deploy-readable app-update metadata JSON (`app-update.json` by default).
@@ -123,8 +137,23 @@ pub struct ServerConfig {
     /// Deploy-readable release APK (`app-release.apk` by default).
     /// When unset, defaults to `{data_dir}/app-release.apk`.
     pub app_update_apk_path: Option<PathBuf>,
+    /// Production 0.3.9 startup requires a verified forced-update channel
+    /// before it can expose the new protocol generation/capability. Direct
+    /// constructors keep this false for isolated protocol tests and local dev.
+    pub require_protocol_cutover_release: bool,
     /// Optional LAN-only HTTP origin that serves the first-install APK page.
     pub lan_apk_download_origin: Option<String>,
+    /// Blocks the public sync API while a schema cutover validates the newly
+    /// activated database. Only health/readiness and the separate LAN installer stay available.
+    pub maintenance_read_only: bool,
+    /// Deterministic cancellation seam for isolated causal-media tests.
+    #[doc(hidden)]
+    pub causal_media_prepare_blocking_hook:
+        Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    /// Deterministic publication seam for isolated causal-media commit tests.
+    #[doc(hidden)]
+    pub causal_media_commit_blocking_hook:
+        Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
     clock: Clock,
 }
 
@@ -134,7 +163,6 @@ impl ServerConfig {
             data_dir: data_dir.into(),
             version: VERSION.to_owned(),
             max_media_bytes: DEFAULT_MAX_MEDIA_BYTES,
-            max_reconcile_response_bytes: 2 * 1024 * 1024,
             server_secret: None,
             generation: None,
             bootstrap_secret: None,
@@ -146,15 +174,15 @@ impl ServerConfig {
                 max_attempts: DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
                 window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
             },
-            reconcile_rate_limit: RateLimitConfig {
-                max_attempts: DEFAULT_RECONCILE_RATE_LIMIT,
-                window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
-            },
             member_request_ttl_hours: DEFAULT_MEMBER_REQUEST_TTL_HOURS,
             max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
             app_update_metadata_path: None,
             app_update_apk_path: None,
+            require_protocol_cutover_release: false,
             lan_apk_download_origin: None,
+            maintenance_read_only: false,
+            causal_media_prepare_blocking_hook: None,
+            causal_media_commit_blocking_hook: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -180,8 +208,6 @@ impl ServerConfig {
             "LEZI_MEMBER_REQUEST_RATE_LIMIT",
             DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
         )?;
-        config.reconcile_rate_limit.max_attempts =
-            parse_env("LEZI_RECONCILE_RATE_LIMIT", DEFAULT_RECONCILE_RATE_LIMIT)?;
         config.member_request_ttl_hours = parse_env(
             "LEZI_MEMBER_REQUEST_TTL_HOURS",
             DEFAULT_MEMBER_REQUEST_TTL_HOURS,
@@ -196,6 +222,8 @@ impl ServerConfig {
         config.app_update_apk_path = std::env::var_os("LEZI_APP_UPDATE_APK_PATH")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
+        config.require_protocol_cutover_release = true;
+        config.maintenance_read_only = config.data_dir.join(".schema-cutover-read-only").is_file();
         config.lan_apk_download_origin = match std::env::var("LEZI_LAN_APK_DOWNLOAD_ORIGIN") {
             Ok(value) if !value.is_empty() => Some(value),
             Ok(_) | Err(std::env::VarError::NotPresent) => None,
@@ -207,7 +235,6 @@ impl ServerConfig {
         )?;
         config.create_rate_limit.window_seconds = window;
         config.member_request_rate_limit.window_seconds = window;
-        config.reconcile_rate_limit.window_seconds = window;
         config.validate()?;
         Ok(config)
     }
@@ -221,18 +248,13 @@ impl ServerConfig {
         if self.max_media_bytes == 0 {
             return Err("LEZI_MAX_MEDIA_BYTES must be greater than zero".to_owned());
         }
-        if self.max_reconcile_response_bytes == 0 {
-            return Err("max_reconcile_response_bytes must be greater than zero".to_owned());
-        }
         if self.create_rate_limit.max_attempts == 0
             || self.member_request_rate_limit.max_attempts == 0
-            || self.reconcile_rate_limit.max_attempts == 0
         {
             return Err("rate limit max_attempts must be greater than zero".to_owned());
         }
         if self.create_rate_limit.window_seconds <= 0
             || self.member_request_rate_limit.window_seconds <= 0
-            || self.reconcile_rate_limit.window_seconds <= 0
         {
             return Err("LEZI_RATE_LIMIT_WINDOW_SECONDS must be greater than zero".to_owned());
         }
@@ -287,17 +309,17 @@ struct AppState {
     media_root: PathBuf,
     version: String,
     max_media_bytes: usize,
-    max_reconcile_response_bytes: usize,
     signing_secret: Arc<Vec<u8>>,
     generation: String,
     clock: Clock,
     family_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    causal_media_upload_admission: media::CausalMediaUploadAdmission,
+    restore_locks: RestoreLockPool,
     bootstrap_secret: Option<Arc<str>>,
     owner_root_fingerprint: Option<Arc<str>>,
     create_limiter: Arc<RateLimiter>,
     root_auth_limiter: Arc<RateLimiter>,
     member_request_limiter: Arc<RateLimiter>,
-    reconcile_limiter: Arc<RateLimiter>,
     member_request_ttl_seconds: i64,
     max_pending_member_requests: usize,
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
@@ -305,6 +327,9 @@ struct AppState {
     app_update_apk_path: PathBuf,
     app_update_cache: Arc<app_update::AppUpdateCache>,
     lan_apk_landing_url: Option<Arc<str>>,
+    causal_media_prepare_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    causal_media_commit_blocking_hook: Option<Arc<dyn Fn(&'static str) + Send + Sync + 'static>>,
+    maintenance_read_only: bool,
 }
 
 impl AppState {
@@ -318,6 +343,64 @@ impl AppState {
 
     fn now(&self) -> i64 {
         (self.clock)()
+    }
+
+    fn schedule_causal_media_gc_for_family(self: &Arc<Self>, family_id: String) {
+        let Some(gc_lease) = self.store.try_begin_causal_media_gc(&family_id) else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            let media_gc = run_blocking(move || {
+                let _gc_lease = gc_lease;
+                state
+                    .store
+                    .gc_causal_media_for_family(&family_id, state.now())
+                    .map(|_| ())
+                    .map_err(ApiError::from)
+            })
+            .await;
+            if let Err(error) = media_gc {
+                tracing::warn!(?error, "bounded causal media GC sweep failed");
+            }
+        });
+    }
+
+    fn start_causal_media_gc_maintenance(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = Arc::downgrade(self);
+        runtime.spawn(async move {
+            let start = tokio::time::Instant::now()
+                + Duration::from_secs(CAUSAL_MEDIA_GC_MAINTENANCE_INTERVAL_SECONDS);
+            let mut interval = tokio::time::interval_at(
+                start,
+                Duration::from_secs(CAUSAL_MEDIA_GC_MAINTENANCE_INTERVAL_SECONDS),
+            );
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                let Some(gc_lease) = state.store.try_begin_causal_media_gc("") else {
+                    continue;
+                };
+                let media_gc = run_blocking(move || {
+                    let _gc_lease = gc_lease;
+                    state
+                        .store
+                        .gc_causal_media(state.now())
+                        .map(|_| ())
+                        .map_err(ApiError::from)
+                })
+                .await;
+                if let Err(error) = media_gc {
+                    tracing::warn!(?error, "periodic bounded causal media GC sweep failed");
+                }
+            }
+        });
     }
 
     fn owner_tokens(
@@ -510,11 +593,72 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
         );
     }
-    let store = Store::open(database_path)?;
-    store.reconcile_owner_root_fingerprint((config.clock)(), owner_root_fingerprint.as_deref())?;
-    let restore_family_ids = disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
-    media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
-    media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
+    let store = if config.maintenance_read_only {
+        Store::open_read_only_with_snapshot_key(database_path, &signing_secret)?
+    } else {
+        Store::open_with_snapshot_key(database_path, &signing_secret)?
+    };
+    if !config.maintenance_read_only {
+        store.reconcile_owner_root_fingerprint(
+            (config.clock)(),
+            owner_root_fingerprint.as_deref(),
+        )?;
+        let restore_family_ids =
+            disaster_restore::prepare_startup(&config.data_dir, (config.clock)())?;
+        media::collect_orphan_family_media(&store, &media_root, &restore_family_ids)?;
+        media::retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
+        // Complete any causal DB-accepted publication before the authority graph is
+        // validated or public routes can observe it, then durably collect one
+        // bounded media batch without discarding live/version-referenced bytes.
+        store.promote_consumed_causal_media()?;
+        store.gc_causal_media((config.clock)())?;
+        store.gc_conflict_metadata((config.clock)())?;
+    }
+    let validation_media_root = media_root.clone();
+    let validation = store
+        .validate_authority_graph(
+            config.max_media_bytes,
+            move |family_id, media_id, expected_size| {
+                let path = validation_media_root.join(family_id).join(media_id);
+                let metadata = match fs::symlink_metadata(path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(StoreError::Io(error)),
+                };
+                Ok(metadata.file_type().is_file()
+                    && metadata.len() > 0
+                    && usize::try_from(metadata.len()) == Ok(expected_size))
+            },
+        )
+        .map_err(|error| {
+            match &error {
+                StoreError::AuthorityGraphInvalid {
+                    reason_code,
+                    entity_type,
+                    client_uuid,
+                    rev,
+                } => tracing::error!(
+                    reason_code,
+                    entity_type,
+                    client_uuid,
+                    rev,
+                    "family authority graph validation failed"
+                ),
+                _ => tracing::error!(
+                    reason_code = "authority_graph_storage_failure",
+                    detail = %error,
+                    "family authority graph validation failed"
+                ),
+            }
+            error
+        })?;
+    tracing::info!(
+        family_count = validation.family_count,
+        entity_count = validation.entity_count,
+        deferred_fulfillment_count = validation.deferred_fulfillment_count,
+        capability = CAPABILITY_VALIDATED_DEFERRED_FULFILLMENT,
+        "family authority graph validation completed"
+    );
     let app_update_metadata_path = config
         .app_update_metadata_path
         .unwrap_or_else(|| config.data_dir.join("app-update.json"));
@@ -522,7 +666,31 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         .app_update_apk_path
         .unwrap_or_else(|| config.data_dir.join("app-release.apk"));
     let app_update_cache = Arc::new(app_update::AppUpdateCache::default());
-    if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {
+    if config.require_protocol_cutover_release {
+        let verified = app_update_cache
+            .load_verified(&app_update_metadata_path, &app_update_apk_path)
+            .inspect_err(|error| {
+                tracing::error!(
+                    reason_code = "protocol_cutover_release_unverified",
+                    detail = %error.detail,
+                    "protocol cutover refused without a verified app-update channel"
+                );
+            })?;
+        if verified.version_code < PROTOCOL_CUTOVER_CLIENT_VERSION_CODE
+            || verified.min_supported_version_code < PROTOCOL_CUTOVER_CLIENT_VERSION_CODE
+        {
+            tracing::error!(
+                reason_code = "protocol_cutover_release_floor_too_low",
+                version_code = verified.version_code,
+                min_supported_version_code = verified.min_supported_version_code,
+                required_version_code = PROTOCOL_CUTOVER_CLIENT_VERSION_CODE,
+                "protocol cutover refused before the forced-update floor"
+            );
+            return Err(ApiError::internal(
+                "protocol cutover release channel does not enforce version code 21",
+            ));
+        }
+    } else if app_update_metadata_path.is_file() && app_update_apk_path.is_file() {
         if let Err(error) =
             app_update_cache.load_verified(&app_update_metadata_path, &app_update_apk_path)
         {
@@ -541,18 +709,18 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         media_root,
         version: config.version,
         max_media_bytes: config.max_media_bytes,
-        max_reconcile_response_bytes: config.max_reconcile_response_bytes,
         signing_secret: Arc::new(signing_secret),
         generation: config.generation.unwrap_or_else(secure_generation),
         clock: config.clock,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
+        causal_media_upload_admission: media::CausalMediaUploadAdmission::default(),
+        restore_locks: RestoreLockPool::default(),
         bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
         owner_root_fingerprint: owner_root_fingerprint
             .map(|value| Arc::from(value.into_boxed_str())),
         create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
         root_auth_limiter: Arc::new(RateLimiter::new(root_auth_rate_limit)),
         member_request_limiter: Arc::new(RateLimiter::new(config.member_request_rate_limit)),
-        reconcile_limiter: Arc::new(RateLimiter::new(config.reconcile_rate_limit)),
         member_request_ttl_seconds: i64::from(config.member_request_ttl_hours) * 60 * 60,
         max_pending_member_requests: config.max_pending_member_requests,
         readiness_cache: Arc::new(Mutex::new(None)),
@@ -560,9 +728,16 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         app_update_apk_path,
         app_update_cache,
         lan_apk_landing_url,
+        causal_media_prepare_blocking_hook: config.causal_media_prepare_blocking_hook,
+        causal_media_commit_blocking_hook: config.causal_media_commit_blocking_hook,
+        maintenance_read_only: config.maintenance_read_only,
     };
+    let maintenance_read_only = config.maintenance_read_only;
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     let state = Arc::new(state);
+    if !maintenance_read_only {
+        state.start_causal_media_gc_maintenance();
+    }
     let public = Router::new()
         .route("/health", get(health::health))
         .route("/ready", get(readiness))
@@ -633,6 +808,7 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             post(identity::claim_member_login_grant),
         )
         .route("/v1/session/refresh", post(identity::refresh_session))
+        .route("/v1/sync/handshake", post(sync::authenticated_handshake))
         .route(
             "/v1/family/members",
             get(list_family_members).post(add_family_member),
@@ -673,17 +849,30 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
         .route("/v1/family/delete", post(identity::delete_family))
         .route("/v1/push", post(sync::retired_ordinary_push))
         .route("/v1/pull", get(sync::pull_entities))
-        .route("/v1/reconcile", post(sync::reconcile_entities))
+        .route("/v1/causal/commit", post(sync::causal_commit))
+        .route(
+            "/v1/causal/media/{client_uuid}",
+            put(media::put_causal_media_preimage),
+        )
+        .route("/v1/conflicts/{conflict_id}", get(sync::conflict_detail))
+        .route(
+            "/v1/conflicts/{conflict_id}/resolve",
+            post(sync::resolve_conflict),
+        )
+        .route(
+            "/v1/source-relations/declare",
+            post(sync::declare_source_relation),
+        )
+        .route(
+            "/v1/source-relations/resolve-group",
+            post(sync::resolve_source_relation_group),
+        )
         .route(
             "/v1/media/{client_uuid}",
             put(media::retired_ordinary_media_upload).get(media::get_media),
         )
         .route("/v1/bundles", post(media::stage_bundle))
         .route("/v1/bundles/{bundle_id}", get(media::get_bundle))
-        .route(
-            "/v1/bundles/{bundle_id}/media/{client_uuid}",
-            put(media::put_bundle_media),
-        )
         .route("/v1/bundles/{bundle_id}/commit", post(media::commit_bundle))
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TimeoutLayer::with_status_code(
@@ -691,6 +880,19 @@ pub fn build_server_apps(config: ServerConfig) -> Result<ServerApps, ApiError> {
             Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECONDS),
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(from_fn(move |request: Request, next: Next| async move {
+            let maintenance_probe = matches!(request.uri().path(), "/health" | "/ready")
+                && matches!(*request.method(), Method::GET | Method::HEAD);
+            if maintenance_read_only && !maintenance_probe {
+                return ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Schema cutover validation is in progress; writes are temporarily disabled",
+                )
+                .with_code("schema_cutover_read_only")
+                .into_response();
+            }
+            next.run(request).await
+        }))
         .with_state(state.clone());
     let lan_apk_download = state.lan_apk_landing_url.is_some().then(|| {
         Router::new()
@@ -914,9 +1116,22 @@ fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
 }
 
 fn derive_token(secret: &[u8], message: &str) -> String {
+    derive_token_bytes(secret, message.as_bytes())
+}
+
+fn derive_token_bytes(secret: &[u8], message: &[u8]) -> String {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
-    mac.update(message.as_bytes());
+    mac.update(message);
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+pub(crate) fn derive_framed_token(secret: &[u8], domain: &str, parts: &[&str]) -> String {
+    let mut message = Vec::new();
+    for part in std::iter::once(domain).chain(parts.iter().copied()) {
+        message.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        message.extend_from_slice(part.as_bytes());
+    }
+    derive_token_bytes(secret, &message)
 }
 
 /// Keyed fingerprint of the deployment root password.
@@ -1126,6 +1341,7 @@ pub struct ApiError {
     detail: Value,
     authenticate: bool,
     code: Option<&'static str>,
+    retry_after_seconds: Option<u64>,
 }
 
 impl ApiError {
@@ -1135,11 +1351,8 @@ impl ApiError {
             detail: detail.into(),
             authenticate: false,
             code: None,
+            retry_after_seconds: None,
         }
-    }
-
-    fn bad_request(detail: impl Into<Value>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, detail)
     }
 
     fn unauthorized() -> Self {
@@ -1148,6 +1361,7 @@ impl ApiError {
             detail: Value::String("Invalid or revoked token".to_owned()),
             authenticate: true,
             code: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -1157,6 +1371,7 @@ impl ApiError {
             detail: detail.into(),
             authenticate: false,
             code: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -1166,6 +1381,7 @@ impl ApiError {
             detail: detail.into(),
             authenticate: true,
             code: Some(code),
+            retry_after_seconds: None,
         }
     }
 
@@ -1180,11 +1396,49 @@ impl ApiError {
             detail: detail.into(),
             authenticate: false,
             code: Some(CLIENT_UPDATE_REQUIRED_CODE),
+            retry_after_seconds: None,
         }
     }
 
     fn too_many_requests(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::TOO_MANY_REQUESTS, detail)
+    }
+
+    fn causal_commit_saturated(saturation: CausalCommitSaturation) -> Self {
+        tracing::warn!(
+            reason_code = saturation.code(),
+            scope = saturation.scope(),
+            "causal commit admission saturated"
+        );
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            detail: json!({
+                "scope": saturation.scope(),
+                "retryable": true,
+            }),
+            authenticate: false,
+            code: Some(saturation.code()),
+            retry_after_seconds: Some(DEFAULT_RATE_LIMIT_WINDOW_SECONDS as u64),
+        }
+    }
+
+    fn causal_media_prepare_saturated(scope: &'static str) -> Self {
+        let code = match scope {
+            "principal" => "causal_media_prepare_principal_saturated",
+            "family" => "causal_media_prepare_family_saturated",
+            _ => "causal_media_prepare_saturated",
+        };
+        tracing::warn!(reason_code = code, scope, "causal media prepare saturated");
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            detail: json!({
+                "scope": scope,
+                "retryable": true,
+            }),
+            authenticate: false,
+            code: Some(code),
+            retry_after_seconds: Some(1),
+        }
     }
 
     fn not_found(detail: impl Into<Value>) -> Self {
@@ -1203,6 +1457,11 @@ impl ApiError {
         Self::new(StatusCode::GONE, detail)
     }
 
+    fn with_code(mut self, code: &'static str) -> Self {
+        self.code = Some(code);
+        self
+    }
+
     pub(crate) fn unprocessable(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)
     }
@@ -1211,12 +1470,16 @@ impl ApiError {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, detail)
     }
 
-    fn request_timeout(detail: impl Into<Value>) -> Self {
-        Self::new(StatusCode::REQUEST_TIMEOUT, detail)
-    }
-
     pub(crate) fn internal(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, detail)
+    }
+
+    pub(crate) fn is_authentication_terminal(&self) -> bool {
+        self.status == StatusCode::UNAUTHORIZED
+    }
+
+    pub(crate) fn is_client_update_terminal(&self) -> bool {
+        self.status == StatusCode::FORBIDDEN && self.code == Some(CLIENT_UPDATE_REQUIRED_CODE)
     }
 }
 
@@ -1231,6 +1494,13 @@ impl IntoResponse for ApiError {
             response
                 .headers_mut()
                 .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        if let Some(seconds) = self.retry_after_seconds {
+            response.headers_mut().insert(
+                RETRY_AFTER,
+                HeaderValue::from_str(&seconds.to_string())
+                    .expect("retry-after seconds are a valid header"),
+            );
         }
         response
     }
@@ -1260,6 +1530,10 @@ mod tests {
         let token = derive_token(&secret, "session:abc:device");
         assert_eq!(token, derive_token(&secret, "session:abc:device"));
         assert_ne!(token, derive_token(&secret, "session:abc:other-device"));
+        assert_ne!(
+            derive_framed_token(&secret, "snapshot", &["ab", "c"]),
+            derive_framed_token(&secret, "snapshot", &["a", "bc"]),
+        );
     }
 
     #[test]
@@ -1327,7 +1601,7 @@ mod tests {
         connection
             .execute_batch(
                 "
-                PRAGMA user_version = 12;
+                PRAGMA user_version = 13;
                 CREATE TABLE future_sentinel(value TEXT NOT NULL);
                 ",
             )

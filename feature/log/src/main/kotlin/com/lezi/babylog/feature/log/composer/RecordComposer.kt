@@ -433,6 +433,11 @@ fun RecordComposerHost(
                     } else {
                         vm::importPhotos
                     },
+                    onImportCapturedPhoto = if (handoffBusy) {
+                        { _, done -> done(false) }
+                    } else {
+                        vm::importCapturedPhoto
+                    },
                     onRemovePhoto = if (handoffBusy) {
                         { }
                     } else {

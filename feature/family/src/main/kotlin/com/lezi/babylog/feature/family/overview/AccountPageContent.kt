@@ -27,6 +27,7 @@ internal data class AccountFamilySectionActions(
     val connect: () -> Unit = {},
     val openOptionalAppUpdate: (AppUpdateMetadata) -> Unit = {},
     val dismissOptionalAppUpdate: (versionCode: Int) -> Unit = {},
+    val openConflictInbox: () -> Unit = {},
 )
 
 internal data class AccountBottomActions(
@@ -70,6 +71,7 @@ internal fun AccountPageContent(
             onConnectFamily = familyActions.connect,
             onOpenOptionalAppUpdate = familyActions.openOptionalAppUpdate,
             onDismissOptionalAppUpdate = familyActions.dismissOptionalAppUpdate,
+            onOpenConflictInbox = familyActions.openConflictInbox,
         )
         FamilyOverview(
             ui = overview,

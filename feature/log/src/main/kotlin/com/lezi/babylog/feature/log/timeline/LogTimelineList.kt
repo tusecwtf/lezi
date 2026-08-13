@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -48,14 +49,17 @@ import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.designsystem.TransientShallowSyncStatus
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.SwipeEditDeleteRow
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
+import com.lezi.babylog.designsystem.TimelinePanGesture
 import com.lezi.babylog.designsystem.LeziTextButton
 import com.lezi.babylog.domain.carelog.DayChartCategory
+import com.lezi.babylog.domain.carelog.DuplicateGroupAction
 import com.lezi.babylog.domain.carelog.formatClock
 import com.lezi.babylog.domain.carelog.relativeTimeLabel
 import com.lezi.babylog.sync.localCarePlanPublishDetail
@@ -83,16 +87,6 @@ internal class LogTimelineListState {
 internal fun rememberLogTimelineListState(): LogTimelineListState =
     remember { LogTimelineListState() }
 
-/** Data-driven spec for the warm-mode summary metric cards (one per record type). */
-private data class SummaryMetricSpec(
-    val type: RecordType,
-    val tone: LeziTone,
-    val label: String,
-    val value: String,
-    /** Spoken form used by the selection accessibility label. */
-    val spokenValue: String,
-)
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun LogTimelineList(
@@ -113,17 +107,22 @@ internal fun LogTimelineList(
     timelineViewportStart: Int,
     timelineViewportDuration: Int,
     timelineAxis: ThreeDayTimelineAxis,
-    onTimelineViewportStartChange: (Int) -> Unit,
+    onTimelinePan: (TimelinePanGesture) -> Unit,
+    onTimelinePanEnd: () -> Unit,
+    onTimelinePanCancel: () -> Unit,
     filteredTimelineRecords: List<Record>,
     onGoToday: () -> Unit,
     onRefresh: () -> Unit,
     onOpenComposer: (RecordComposerRequest) -> Unit,
     onRequestDelete: (ListDeleteTarget) -> Unit,
     onOpenPublishChrome: (PublishChromeTarget) -> Unit,
+    onOpenCausalDetails: (Record) -> Unit,
+    onDuplicateAction: (DuplicateGroupAction) -> Unit,
     onSkipCarePlan: (Long, (Result<String>) -> Unit) -> Unit,
     onMessage: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val collapsedDuplicateGroups = remember { mutableStateListOf<String>() }
     fun openEditFromSwipe(request: RecordComposerRequest) {
         managementState.collapseSwipeRows()
         onOpenComposer(request)
@@ -184,114 +183,51 @@ internal fun LogTimelineList(
                 Column(
                     Modifier.padding(horizontal = pageHorizontal),
                 ) {
-                    Text(
+                    TransientShallowSyncStatus(
                         text = state.shallowSyncLine.text,
-                        style = LeziTypography.Meta,
-                        color = if (
-                            state.shallowSyncLine.state in setOf(
-                                ShallowSyncState.Error,
-                                ShallowSyncState.ReauthRequired,
-                            )
-                        ) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier
-                            .testTag("log_shallow_sync_status")
-                            .padding(bottom = LeziSpacing.Sm),
+                        isError = state.shallowSyncLine.state in setOf(
+                            ShallowSyncState.Error,
+                            ShallowSyncState.ReauthRequired,
+                        ),
+                        isUserRefreshing = state.refreshing,
+                        contentTestTag = "log_shallow_sync_status",
+                    )
+                    val daySummaryColumns = logDaySummaryColumns(
+                        state.summary,
+                        state.summaryBounds,
                     )
                     if (journal) {
                         RecordSummaryStrip(
-                            values = listOf(
+                            values = daySummaryColumns.map { column ->
                                 RecordSummaryValue(
-                                    RecordType.FORMULA,
-                                    "${state.summary.feedMl}",
-                                    "奶ml",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.NURSING,
-                                    logDaySummaryDuration(state.summary.nursingMinutes),
-                                    "母乳",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.SLEEP,
-                                    logDaySummaryDuration(state.summary.sleepMinutes),
-                                    "睡眠",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.PEE,
-                                    "${state.summary.peeCount}",
-                                    "尿",
-                                ),
-                                RecordSummaryValue(
-                                    RecordType.POOP,
-                                    "${state.summary.poopCount}",
-                                    "便",
-                                ),
-                            ),
+                                    column.type,
+                                    column.compactValue,
+                                    column.compactLabel,
+                                )
+                            },
                             selectedType = selectedSummaryType,
                             selectableTypes = selectableSummaryTypes,
                             onSelect = onSelectSummary,
                         )
                     } else {
-                        val summaryMetrics = listOf(
-                            SummaryMetricSpec(
-                                type = RecordType.FORMULA,
-                                tone = LeziTone.Blue,
-                                label = "奶量",
-                                value = "${state.summary.feedMl}ml",
-                                spokenValue = "奶量 ${state.summary.feedMl}毫升",
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.NURSING,
-                                tone = LeziTone.Blue,
-                                label = "母乳",
-                                value = logDaySummaryDuration(state.summary.nursingMinutes),
-                                spokenValue =
-                                    logDaySummaryNursingSpoken(state.summary.nursingMinutes),
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.SLEEP,
-                                tone = LeziTone.Yellow,
-                                label = "睡眠",
-                                value = logDaySummaryDuration(state.summary.sleepMinutes),
-                                spokenValue =
-                                    logDaySummarySleepSpoken(state.summary.sleepMinutes),
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.PEE,
-                                tone = LeziTone.Cream,
-                                label = "尿尿",
-                                value = "${state.summary.peeCount}次",
-                                spokenValue = "尿尿 ${state.summary.peeCount}次",
-                            ),
-                            SummaryMetricSpec(
-                                type = RecordType.POOP,
-                                tone = LeziTone.Neutral,
-                                label = "便便",
-                                value = "${state.summary.poopCount}次",
-                                spokenValue = "便便 ${state.summary.poopCount}次",
-                            ),
-                        )
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                         ) {
-                            summaryMetrics.forEach { spec ->
-                                val selected = selectedSummaryType == spec.type
+                            daySummaryColumns.forEach { column ->
+                                val selected = selectedSummaryType == column.type
                                 SummaryMetric(
-                                    value = spec.value,
-                                    label = spec.label,
-                                    tone = spec.tone,
+                                    value = column.value,
+                                    label = column.label,
+                                    tone = column.tone,
                                     modifier = Modifier.weight(1f),
-                                    icon = { RecordTypeIcon(spec.type) },
+                                    icon = { RecordTypeIcon(column.type) },
                                     selected = selected,
-                                    selectionLabel = "${spec.spokenValue}，${
+                                    selectionLabel = "${column.spokenValue}，${
                                         if (selected) "已筛选" else "点按筛选"
                                     }",
-                                    onClick = if (spec.type in selectableSummaryTypes) {
-                                        { onSelectSummary(spec.type) }
+                                    onClick = if (column.type in selectableSummaryTypes) {
+                                        { onSelectSummary(column.type) }
                                     } else {
                                         null
                                     },
@@ -302,27 +238,28 @@ internal fun LogTimelineList(
                 }
             }
 
-            // ViewModel already gates this on the D−1 / D / D+1 rail-record union.
-            if (state.showDayChart) {
-                item {
-                    TimelineRailCard(
-                        sleep = state.sleepLanes,
-                        feed = state.feedLanes,
-                        care = state.careLanes,
-                        recordCount = state.records.size,
-                        nowContentMinute = nowContentMinute,
-                        selectedCategoryKey = dayChartFilter?.name,
-                        onCategorySelect = onSelectDayChartCategory,
-                        legend = dayChartLegend,
-                        viewportStartMinutes = timelineViewportStart,
-                        viewportDurationMinutes = timelineViewportDuration,
-                        windowGeometry = timelineAxis.windowGeometry,
-                        hourLabels = timelineAxis.hourLabels(),
-                        onViewportStartChange = onTimelineViewportStartChange,
-                        titleSecondary = "时间轴",
-                        modifier = Modifier.padding(horizontal = pageHorizontal),
-                    )
-                }
+            item {
+                TimelineRailCard(
+                    sleep = state.sleepLanes,
+                    feed = state.feedLanes,
+                    care = state.careLanes,
+                    recordCount = state.records.size,
+                    nowContentMinute = nowContentMinute,
+                    selectedCategoryKey = dayChartFilter?.name,
+                    onCategorySelect = onSelectDayChartCategory,
+                    legend = dayChartLegend,
+                    viewportStartMinutes = timelineViewportStart,
+                    viewportDurationMinutes = timelineViewportDuration,
+                    windowGeometry = timelineAxis.windowGeometry,
+                    hourLabels = timelineAxis.hourLabels(),
+                    onHorizontalPan = onTimelinePan,
+                    onPanEnd = onTimelinePanEnd,
+                    onPanCancel = onTimelinePanCancel,
+                    titleSecondary = "时间轴",
+                    modifier = Modifier
+                        .padding(horizontal = pageHorizontal)
+                        .testTag("log_timeline_rail"),
+                )
             }
 
             if (state.day != today) {
@@ -519,7 +456,41 @@ internal fun LogTimelineList(
                 }
             }
 
-            if (state.loading || state.records.isEmpty()) {
+            val filteredUuids = filteredTimelineRecords.mapTo(hashSetOf(), Record::clientUuid)
+            val visibleDuplicateGroups = state.openDuplicateGroups.filter { group ->
+                group.memberClientUuids.any { it in filteredUuids }
+            }
+            items(visibleDuplicateGroups, key = { "duplicate-group-${it.groupId}" }) { group ->
+                DuplicateGroupCard(
+                    group = group,
+                    recordsByUuid = state.records.associateBy(Record::clientUuid),
+                    recordRowsById = state.recordMetadata,
+                    currentMembershipId = state.currentMembershipId,
+                    isOwner = state.familyOwner,
+                    expanded = group.groupId !in collapsedDuplicateGroups,
+                    onToggle = {
+                        if (group.groupId in collapsedDuplicateGroups) {
+                            collapsedDuplicateGroups.remove(group.groupId)
+                        } else {
+                            collapsedDuplicateGroups.add(group.groupId)
+                        }
+                    },
+                    onAction = onDuplicateAction,
+                    modifier = Modifier.padding(horizontal = pageHorizontal),
+                )
+            }
+
+            val collapsedMemberUuids = visibleDuplicateGroups
+                .filter { it.groupId in collapsedDuplicateGroups }
+                .flatMapTo(hashSetOf()) { it.memberClientUuids }
+            val displayedTimelineRecords = filteredTimelineRecords.filter {
+                it.clientUuid !in collapsedMemberUuids
+            }
+
+            if (
+                state.loading ||
+                (displayedTimelineRecords.isEmpty() && visibleDuplicateGroups.isEmpty())
+            ) {
                 item(key = "records_phase", contentType = "records_phase") {
                     Crossfade(
                         targetState = state.loading,
@@ -537,20 +508,20 @@ internal fun LogTimelineList(
                                     .testTag("log_records_loading"),
                             )
                         } else {
-                            // Empty day: ring mark + quiet color via StateKind.Empty — not a spinner.
+                            val emptyState = timelineRecordsEmptyState(dayChartFilter)
                             StateContainer(
                                 kind = StateKind.Empty,
-                                title = "还没有记录",
-                                message = "点下方快捷入口添加第一条记录",
+                                title = emptyState.title,
+                                message = emptyState.message,
                                 modifier = Modifier
                                     .padding(horizontal = pageHorizontal)
-                                    .testTag("log_records_empty"),
+                                    .testTag(emptyState.testTag),
                             )
                         }
                     }
                 }
             } else {
-                items(filteredTimelineRecords, key = { it.id }) { record ->
+                items(displayedTimelineRecords, key = { it.id }) { record ->
                     val title = record.displayLabel()
                     val recordMetadata = state.recordMetadata[record.id]
                     val recordCapabilities = recordMetadata?.capabilities
@@ -564,6 +535,9 @@ internal fun LogTimelineList(
                         familyJoined = state.familyJoined,
                         lastSyncFailed = state.lastSyncFailed,
                     )
+                    // Prefer conflict summary chrome; sleep provisional/overlap badges otherwise.
+                    val sleepBadge = recordMetadata?.sleepEndBadge
+                    val conflictBadge = recordMetadata?.conflictSummaryLabel
                     val recordRowId = "record-${record.id}"
                     val recordRevealed = managementState.revealedSwipeRowId == recordRowId
                     val editRecordAction = {
@@ -597,18 +571,28 @@ internal fun LogTimelineList(
                             summary = timelineRecordSummary(
                                 recordSummaryLine(record),
                                 state.uploaderLabels[record.id],
-                                publishLabel,
+                                listOfNotNull(sleepBadge, conflictBadge, publishLabel)
+                                    .distinct()
+                                    .joinToString(" · ")
+                                    .takeIf { it.isNotBlank() },
                             ),
                             relative = relativeTimeLabel(record.timestamp, nowMs),
                             tone = record.type.presentationTone(),
+                            // Anomaly is payload-only. Projected null end means open SleepStart,
+                            // not a broken/anomalous closed wake interval.
                             anomaly =
-                                (record.payload.payload as? SleepPayload)?.anomaly == true ||
-                                    (record.type == RecordType.SLEEP &&
-                                        record.endTimestamp == null),
+                                (record.payload.payload as? SleepPayload)?.anomaly == true,
                             leading = { RecordTypeIcon(record.type) },
                             onClick = {
                                 if (recordRevealed) {
                                     managementState.collapseSwipeRows()
+                                } else if (
+                                    recordMetadata?.conflictSummaryLabel != null ||
+                                    recordMetadata?.sleepInterval?.isOverlapPending == true ||
+                                    recordMetadata?.wakeObservations?.isNotEmpty() == true
+                                ) {
+                                    managementState.collapseSwipeRows()
+                                    onOpenCausalDetails(record)
                                 } else if (publishLabel != null) {
                                     managementState.collapseSwipeRows()
                                     onOpenPublishChrome(

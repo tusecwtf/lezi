@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.media.SyncMediaUploadSource
 import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.session.SyncPreferences
@@ -37,16 +36,14 @@ internal class RefreshingSyncBackend(
 ) : SyncBackend by delegate {
     private val sessionMutex = Mutex()
 
-    override suspend fun pull(session: SyncSession): PullResult =
-        authenticated(session, delegate::pull)
+    override suspend fun pull(session: SyncSession, page: PullPageRequest): PullResult =
+        authenticated(session) { delegate.pull(it, page) }
 
-    override suspend fun reconcile(
-        session: SyncSession,
-        units: List<ReconcileUnitDraft>,
-    ): ReconcileResult = authenticated(session) { delegate.reconcile(it, units) }
+    override suspend fun authenticatedHandshake(session: SyncSession): AuthenticatedSyncHandshake =
+        authenticated(session, delegate::authenticatedHandshake)
 
-    override suspend fun members(session: SyncSession): List<FamilyMember> =
-        authenticated(session, delegate::members)
+    override suspend fun memberDirectory(session: SyncSession): FamilyMemberDirectorySnapshot =
+        authenticated(session, delegate::memberDirectory)
 
     override suspend fun pendingMemberLogins(
         session: SyncSession,
@@ -145,19 +142,48 @@ internal class RefreshingSyncBackend(
         draft: AtomicBundleDraft,
     ): BundleStageStatus = authenticated(session) { delegate.stageBundle(it, draft) }
 
-    override suspend fun putBundleMedia(
-        session: SyncSession,
-        bundleId: String,
-        clientUuid: String,
-        source: SyncMediaUploadSource,
-    ): BundleStageStatus = authenticated(session) {
-        delegate.putBundleMedia(it, bundleId, clientUuid, source)
-    }
-
     override suspend fun commitBundle(
         session: SyncSession,
         bundleId: String,
     ): BundleCommitResult = authenticated(session) { delegate.commitBundle(it, bundleId) }
+
+    override fun supportsCausalWire(): Boolean = delegate.supportsCausalWire()
+
+    override suspend fun causalCommit(
+        session: SyncSession,
+        units: List<com.lezi.babylog.sync.backend.CausalMutationUnit>,
+    ) = authenticated(session) { delegate.causalCommit(it, units) }
+
+    override suspend fun putCausalMediaPreimage(
+        session: SyncSession,
+        mediaUuid: String,
+        source: com.lezi.babylog.sync.media.SyncMediaUploadSource,
+        sha256: String,
+    ) = authenticated(session) {
+        delegate.putCausalMediaPreimage(it, mediaUuid, source, sha256)
+    }
+
+    override suspend fun fetchConflictSnapshotPage(
+        session: SyncSession,
+        conflictId: String,
+        request: com.lezi.babylog.sync.conflict.ConflictSnapshotPageRequest,
+    ) = authenticated(session) { delegate.fetchConflictSnapshotPage(it, conflictId, request) }
+
+    override suspend fun resolveConflict(
+        session: SyncSession,
+        conflictId: String,
+        request: ConflictResolveRequest,
+    ) = authenticated(session) { delegate.resolveConflict(it, conflictId, request) }
+
+    override suspend fun declareSourceRelation(
+        session: SyncSession,
+        request: SourceRelationDeclareRequest,
+    ) = authenticated(session) { delegate.declareSourceRelation(it, request) }
+
+    override suspend fun resolveSourceRelationGroup(
+        session: SyncSession,
+        request: SourceRelationResolveGroupRequest,
+    ) = authenticated(session) { delegate.resolveSourceRelationGroup(it, request) }
 
     private suspend fun <T> authenticated(
         requested: SyncSession,

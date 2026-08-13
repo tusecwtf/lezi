@@ -7,10 +7,7 @@ import org.junit.Test
 
 /**
  * Ticket 11 — widget chrome spacing/type align with Lezi tokens within Glance limits.
- *
- * Source-level CareWidget/config consumption is owned by designsystem
- * [com.lezi.babylog.designsystem.WeakSurfacesContractTest] so product tests do not
- * reimplement [com.lezi.babylog.designsystem.DesignsystemSourceFixtures] path walk.
+ * Public token map only (no product source-string scans).
  */
 class WidgetChromeTest {
 

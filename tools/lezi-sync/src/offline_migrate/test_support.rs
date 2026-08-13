@@ -3,6 +3,7 @@
 //! Used by `migrator`, `media`, and `cli` unit tests so schema-seed helpers stay aligned.
 
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use rusqlite::{params, Connection};
 
@@ -16,6 +17,21 @@ pub(crate) const FIXTURE_FAMILY_ID: &str = "fam-1";
 pub(crate) const FIXTURE_OWNER_MEMBERSHIP: &str = "mem-owner";
 pub(crate) const FIXTURE_MEMBER_MEMBERSHIP: &str = "mem-member";
 pub(crate) const FIXTURE_BABY_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+pub(crate) fn generate_test_tls_identity(tls: &Path) {
+    let status = Command::new("openssl")
+        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes"])
+        .arg("-keyout")
+        .arg(tls.join("server.key"))
+        .arg("-out")
+        .arg(tls.join("server.crt"))
+        .args(["-days", "2", "-subj", "/CN=127.0.0.1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("openssl");
+    assert!(status.success());
+}
 
 pub(crate) fn open_v3_fixture(path: &Path) -> Connection {
     let conn = Connection::open(path).unwrap();

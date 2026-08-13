@@ -25,7 +25,7 @@ These five labels are the shared contract with `cutover_step_labels()` / CLI hel
 1. stop live container
 2. confirm dual backup (local copy-out + NAS-side)
 3. copy-back upgraded out/ to NAS data bind
-4. start current TLS deploy (CD)
+4. start schema-12-compatible TLS deploy (CD)
 5. health/ready by actual protocol
 
 Full numbered form used by help/script headers:
@@ -33,7 +33,7 @@ Full numbered form used by help/script headers:
 - `1. stop live container`
 - `2. confirm dual backup (local copy-out + NAS-side)`
 - `3. copy-back upgraded out/ to NAS data bind`
-- `4. start current TLS deploy (CD)`
+- `4. start schema-12-compatible TLS deploy (CD)`
 - `5. health/ready by actual protocol`
 
 ## Default control plane
@@ -47,7 +47,7 @@ Full numbered form used by help/script headers:
 | Pre-TLS drift probe | `http://192.168.50.4:8765/health` (plaintext may still answer until cutover) |
 | TLS SAN host | `LEZI_TLS_HOST=192.168.50.4` |
 | Container / compose project | `lezi-sync` / `lezi` |
-| Expected migrated schema | `PRAGMA user_version` = current `DATABASE_SCHEMA_VERSION` (11) |
+| Expected migrated schema | frozen legacy target `PRAGMA user_version=12` (independent of live current) |
 | Data bind uid | `10001:10001` (container user; must own `lezi.db` after copy-back) |
 
 Override only via env (`NAS_SSH`, `NAS_SSH_PORT`, `LEZI_DATA_HOST_PATH`, `LEZI_TLS_HOST`, …).
@@ -60,10 +60,10 @@ From tickets 01–05 (local only):
 2. Dry-run: `lezi-sync offline-migrate dry-run --in "$BACKUP_DIR"` (password flag or `LEZI_MIGRATE_NEW_ROOT_PASSWORD`).
 3. Migrate: `lezi-sync offline-migrate migrate --in "$BACKUP_DIR" --out "$OUT_DIR"`.
 4. Validate: `lezi-sync offline-migrate validate --out "$OUT_DIR"` → `validate ok`.
-5. CD package ready on the dev machine (`./build-image.sh`; default push creates a fresh package). Explicit `LEZI_SKIP_PACKAGE=1` reuse is permitted only after current helper/inventory/hash and actual pinned APK signer re-attestation. **Do not** run `push-and-deploy` until the operator confirms the replace window.
+5. This is a frozen schema-12 legacy runbook. H29's schema-13 path is the dedicated `schema-cutover.sh`; never copy a schema-13 output with these legacy steps. H30 isolated rollback rehearsal and release ticket 09 confirmation remain required before a family-NAS window.
 6. Record the **migration-time new root password** — it becomes `LEZI_BOOTSTRAP_SECRET` after cutover. The pre-cutover container secret is **void** for owner re-login (`OwnerReauth::NewRootPasswordAtMigration`).
 
-`out/` must be copy-back-ready: current-schema `lezi.db` (full preflight shape, not version alone), regenerated `server.secret` (≥32 bytes), media authority files as migrated, **no** residual `lezi.db-wal` / `-shm` / `-journal`. **`tls/` is not required inside `out/`** (`AbsentOrCreateAtCutover`); only the explicitly confirmed cutover sets `LEZI_ALLOW_TLS_BOOTSTRAP=1` so `remote-deploy` / `init-tls.sh` may create the first identity under the data bind.
+`out/` must be copy-back-ready: frozen legacy schema-12 `lezi.db` (full exact-shape validation, not version alone), regenerated `server.secret` (≥32 bytes), media authority files as migrated, **no** residual `lezi.db-wal` / `-shm` / `-journal`. **`tls/` is not required inside `out/`** (`AbsentOrCreateAtCutover`); only the explicitly confirmed cutover sets `LEZI_ALLOW_TLS_BOOTSTRAP=1` so a schema-12-compatible `remote-deploy` / `init-tls.sh` may create the first identity under the data bind.
 
 ## Step 0 — Capture pre-cutover image + encrypted start state (required for rollback)
 
@@ -205,7 +205,7 @@ Script behavior (fail-closed):
 - Requires confirm env flags + (live) `LEZI_NAS_BACKUP_PATH`.
 - Requires `sqlite3` (no “warn and continue”).
 - Runs `lezi-sync offline-migrate validate --out` (full preflight shape + secret), not only `PRAGMA user_version`.
-- Proves `user_version` equals shipped current schema (11); override needs `LEZI_ALLOW_USER_VERSION_OVERRIDE=1`.
+- Proves `user_version` equals the shipped frozen legacy target (12); override needs `LEZI_ALLOW_USER_VERSION_OVERRIDE=1`.
 - Refuses residual out/ WAL/SHM/journal.
 - Live transport is **rsync only** (scp refused — no merge leftovers / stale WAL).
 - Remote: container absent probe; NAS backup v3 probe.
@@ -215,9 +215,11 @@ Script behavior (fail-closed):
 
 Never copy the **backup’s** old `server.secret` over the migrated secret. Never treat unvalidated `out/` as live data.
 
-## Step 4 — Start current TLS deploy (CD)
+## Step 4 — Start the attested schema-12-compatible TLS deploy (CD)
 
 Requires **explicit operator confirmation** (family may briefly lose sync; protocol may move HTTP→HTTPS).
+If the selected image requires schema 13, stop before copy-back: this legacy flow does not implement
+11/12→13, and a v12 bind must never be handed to a schema-13-only binary.
 
 ### Mandatory bootstrap secret (cutover-specific)
 
@@ -236,9 +238,13 @@ export LEZI_FORWARD_BOOTSTRAP_SECRET=1
 export LEZI_ALLOW_SECRET_RESEED=1
 # The migrated out/ tree has no TLS identity; authorize exactly this first generation.
 export LEZI_ALLOW_TLS_BOOTSTRAP=1
+# Independently attested selected image accepts exact schema 12.
+export LEZI_NAS_PACKAGE_DIR=/absolute/path/to/prebuilt/lezi-sync-<version>-nas
+export LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID=sha256:<attested-config-digest>
+export LEZI_SKIP_PACKAGE=1
 # NEVER: leave unset hoping remote-deploy inherits the old container
 # NEVER: export the pre-cutover container LEZI_BOOTSTRAP_SECRET
-# After cutover: unset all four variables so ordinary CD validates live + persistent and cannot reseed/generate.
+# After cutover: unset all seven variables listed above so ordinary CD cannot reuse cutover secrets, flags, or package pins.
 ```
 
 From `tools/lezi-sync` on the dev machine (after confirm):
@@ -248,11 +254,12 @@ export LEZI_BOOTSTRAP_SECRET='…migration-time new root password…'
 export LEZI_FORWARD_BOOTSTRAP_SECRET=1
 export LEZI_ALLOW_SECRET_RESEED=1
 export LEZI_ALLOW_TLS_BOOTSTRAP=1
-./build-image.sh
+export LEZI_NAS_PACKAGE_DIR=/absolute/path/to/prebuilt/lezi-sync-<version>-nas
+export LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID=sha256:<attested-config-digest>
+export LEZI_SKIP_PACKAGE=1
 ./deploy/push-and-deploy.sh
-# Or, only if dist/ embeds the intended image plus current guarded helpers and valid SHA256SUMS:
-# LEZI_SKIP_PACKAGE=1 ./deploy/push-and-deploy.sh
-# After green health: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET LEZI_ALLOW_SECRET_RESEED LEZI_ALLOW_TLS_BOOTSTRAP
+# Push revalidates the package, local image and exact image_id; it must not rebuild here.
+# After green health: unset LEZI_BOOTSTRAP_SECRET LEZI_FORWARD_BOOTSTRAP_SECRET LEZI_ALLOW_SECRET_RESEED LEZI_ALLOW_TLS_BOOTSTRAP LEZI_NAS_PACKAGE_DIR LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID LEZI_SKIP_PACKAGE
 ```
 
 `push-and-deploy.sh` sends `LEZI_BOOTSTRAP_SECRET` over SSH **stdin** (not argv) only when both

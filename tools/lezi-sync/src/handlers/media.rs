@@ -6,15 +6,14 @@
 //! - [`collect_orphan_family_media`] / [`retry_committed_pending_bundle_media_cleanup`]
 //!   — startup cleanup on the media root, invoked from `build_apps` (not HTTP)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path as AxumPath, Request, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
@@ -22,21 +21,347 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::model::{BundleCommitRequest, BundleStageRequest};
-use crate::store::{CommittedPendingBundleMedia, Store, StoreError};
+use crate::store::{
+    CausalMediaStagingLimits, CommittedPendingBundleMedia, Store, StoreError,
+    VerifiedCausalMediaPreimage, DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS,
+};
 use crate::{
     authenticate, json_body, require_supported_client, run_blocking, secure_directory, secure_file,
-    sync_directory, write_private_file, ApiError, AppState, MAX_ENTITY_FUTURE_SKEW_MILLIS,
+    sync_directory, ApiError, AppState, MAX_ENTITY_FUTURE_SKEW_MILLIS,
     OPEN_STAGING_BUNDLE_TTL_SECONDS,
 };
+
+const MAX_CAUSAL_MEDIA_UPLOADS_PER_MEMBERSHIP: usize = 2;
+const MAX_CAUSAL_MEDIA_UPLOADS_PER_FAMILY: usize = 8;
+
+#[derive(Clone, Default)]
+pub(crate) struct CausalMediaUploadAdmission {
+    active: Arc<StdMutex<CausalMediaUploadCounts>>,
+}
+
+#[derive(Default)]
+struct CausalMediaUploadCounts {
+    families: HashMap<String, usize>,
+    memberships: HashMap<(String, String), usize>,
+}
+
+struct CausalMediaUploadReservation {
+    admission: CausalMediaUploadAdmission,
+    family_id: String,
+    membership_id: String,
+}
+
+impl CausalMediaUploadAdmission {
+    fn reserve(
+        &self,
+        family_id: &str,
+        membership_id: &str,
+    ) -> Result<CausalMediaUploadReservation, ApiError> {
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| ApiError::internal("causal media upload admission is unavailable"))?;
+        let membership_key = (family_id.to_owned(), membership_id.to_owned());
+        if active
+            .memberships
+            .get(&membership_key)
+            .copied()
+            .unwrap_or(0)
+            >= MAX_CAUSAL_MEDIA_UPLOADS_PER_MEMBERSHIP
+        {
+            return Err(ApiError::causal_media_prepare_saturated("principal"));
+        }
+        if active.families.get(family_id).copied().unwrap_or(0)
+            >= MAX_CAUSAL_MEDIA_UPLOADS_PER_FAMILY
+        {
+            return Err(ApiError::causal_media_prepare_saturated("family"));
+        }
+        *active.memberships.entry(membership_key).or_default() += 1;
+        *active.families.entry(family_id.to_owned()).or_default() += 1;
+        Ok(CausalMediaUploadReservation {
+            admission: self.clone(),
+            family_id: family_id.to_owned(),
+            membership_id: membership_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for CausalMediaUploadReservation {
+    fn drop(&mut self) {
+        let mut active = self
+            .admission
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let membership_key = (self.family_id.clone(), self.membership_id.clone());
+        decrement_upload_count(&mut active.memberships, &membership_key);
+        decrement_upload_count(&mut active.families, &self.family_id);
+    }
+}
+
+fn decrement_upload_count<K: std::hash::Hash + Eq + Clone>(
+    counts: &mut HashMap<K, usize>,
+    key: &K,
+) {
+    if let Some(count) = counts.get_mut(key) {
+        *count -= 1;
+        if *count == 0 {
+            counts.remove(key);
+        }
+    }
+}
 
 /// HTTP route entrypoint — domain-path assembly from crate root.
 pub(crate) async fn retired_ordinary_media_upload() -> Result<Json<Value>, ApiError> {
     Err(ApiError::unprocessable(
         "ordinary media upload is retired; upload media through an atomic bundle",
     ))
+}
+
+/// Stage manifest-bound bytes outside the published media path for causal commit.
+/// The Store owns durable identity/quota/TTL/replay state; accepted/branched bytes
+/// are promoted only after their causal SQLite transaction commits.
+pub(crate) async fn put_causal_media_preimage(
+    State(state): State<Arc<AppState>>,
+    AxumPath(client_uuid): AxumPath<Uuid>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Json<crate::store::CausalMediaStageStatus>, ApiError> {
+    let principal = authenticate(&state, &headers).await?;
+    require_supported_client(&state, &headers).await?;
+    let expected_sha = headers
+        .get("x-lezi-media-sha256")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')))
+        .ok_or_else(|| ApiError::unprocessable("X-Lezi-Media-Sha256 required (64 lowercase hex)"))?
+        .to_owned();
+    let declared_length = headers
+        .get(CONTENT_LENGTH)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .filter(|length| *length > 0 && *length <= state.max_media_bytes)
+                .ok_or_else(|| ApiError::unprocessable("Content-Length is invalid"))
+        })
+        .transpose()?;
+    let upload_reservation = state
+        .causal_media_upload_admission
+        .reserve(&principal.family_id, &principal.membership_id)?;
+    let store = state.store.clone();
+    let reservation_principal = principal.clone();
+    let reservation_media_uuid = client_uuid.to_string();
+    let reservation_now = state.now();
+    let durable_reservation = run_blocking(move || {
+        store
+            .reserve_causal_media_upload(
+                &reservation_principal,
+                &reservation_media_uuid,
+                reservation_now,
+            )
+            .map_err(map_causal_media_staging_error)
+    })
+    .await?;
+    let incoming_path = durable_reservation.path().to_owned();
+    let incoming =
+        match stream_causal_media_preimage(body, incoming_path, state.max_media_bytes).await {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                abort_causal_media_upload(
+                    state.store.clone(),
+                    principal.family_id.clone(),
+                    durable_reservation.sequence(),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+    if declared_length.is_some_and(|declared| declared != incoming.byte_size) {
+        abort_causal_media_upload(
+            state.store.clone(),
+            principal.family_id.clone(),
+            durable_reservation.sequence(),
+        )
+        .await?;
+        return Err(ApiError::unprocessable(
+            "media body length does not match Content-Length",
+        ));
+    }
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let store = state.store.clone();
+    let now = state.now();
+    let limits = CausalMediaStagingLimits {
+        max_file_bytes: state.max_media_bytes,
+        ..DEFAULT_CAUSAL_MEDIA_STAGING_LIMITS
+    };
+    let blocking_hook = state.causal_media_prepare_blocking_hook.clone();
+    let upload_sequence = durable_reservation.sequence();
+    let gc_family_id = principal.family_id.clone();
+    let status = run_blocking(move || {
+        let _upload_reservation = upload_reservation;
+        let outcome = (|| {
+            if let Some(hook) = &blocking_hook {
+                hook("before_verify");
+            }
+            let verified = VerifiedCausalMediaPreimage::verify(
+                incoming.path().to_owned(),
+                &expected_sha,
+                limits.max_file_bytes,
+            )
+            .map_err(|error| match error {
+                StoreError::CausalMediaPreimageConflict => {
+                    ApiError::unprocessable("media body sha256 does not match X-Lezi-Media-Sha256")
+                }
+                other => map_causal_media_staging_error(other),
+            })?;
+            let _family_guard = family_lock.blocking_lock_owned();
+            if let Some(hook) = &blocking_hook {
+                hook("before_store");
+            }
+            store
+                .stage_verified_causal_media_preimage(
+                    &principal,
+                    &client_uuid.to_string(),
+                    &verified,
+                    now,
+                    limits,
+                )
+                .map_err(map_causal_media_staging_error)
+        })();
+        match outcome {
+            Ok(status) => {
+                store
+                    .complete_causal_media_upload(&principal.family_id, upload_sequence)
+                    .map_err(map_causal_media_staging_error)?;
+                if let Some(hook) = &blocking_hook {
+                    hook("after_store");
+                }
+                Ok(status)
+            }
+            Err(error) => {
+                store
+                    .abort_causal_media_upload(&principal.family_id, upload_sequence)
+                    .map_err(map_causal_media_staging_error)?;
+                Err(error)
+            }
+        }
+    })
+    .await?;
+    state.schedule_causal_media_gc_for_family(gc_family_id);
+    Ok(Json(status))
+}
+
+async fn abort_causal_media_upload(
+    store: Store,
+    family_id: String,
+    sequence: i64,
+) -> Result<(), ApiError> {
+    run_blocking(move || {
+        store
+            .abort_causal_media_upload(&family_id, sequence)
+            .map_err(map_causal_media_staging_error)
+    })
+    .await
+}
+
+struct IncomingCausalMedia {
+    path: PathBuf,
+    byte_size: usize,
+}
+
+struct IncomingFileGuard {
+    path: Option<PathBuf>,
+}
+
+impl IncomingFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("incoming path is present")
+    }
+
+    fn keep(mut self) -> PathBuf {
+        self.path.take().expect("incoming path is present")
+    }
+}
+
+impl Drop for IncomingFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+impl IncomingCausalMedia {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for IncomingCausalMedia {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+async fn stream_causal_media_preimage(
+    body: Body,
+    path: PathBuf,
+    max_media_bytes: usize,
+) -> Result<IncomingCausalMedia, ApiError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ApiError::internal("causal media staging path has no parent"))?
+        .to_owned();
+    let created_parent = parent.clone();
+    run_blocking(move || {
+        fs::create_dir_all(&created_parent)?;
+        secure_directory(&created_parent)?;
+        Ok(())
+    })
+    .await?;
+
+    let incoming = IncomingFileGuard::new(path);
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(incoming.path())
+        .await?;
+    let mut stream = body.into_data_stream();
+    let mut byte_size = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ApiError::unprocessable("media body is unreadable"))?;
+        byte_size = byte_size
+            .checked_add(chunk.len())
+            .filter(|size| *size <= max_media_bytes)
+            .ok_or_else(|| ApiError::unprocessable("media body is too large"))?;
+        file.write_all(&chunk).await?;
+    }
+    if byte_size == 0 {
+        return Err(ApiError::unprocessable("media body must be non-empty"));
+    }
+    file.sync_all().await?;
+    drop(file);
+    let secured_path = incoming.path().to_owned();
+    run_blocking(move || {
+        secure_file(&secured_path)?;
+        sync_directory(&parent)?;
+        Ok(())
+    })
+    .await?;
+    Ok(IncomingCausalMedia {
+        path: incoming.keep(),
+        byte_size,
+    })
 }
 
 pub(crate) async fn get_media(
@@ -152,136 +477,6 @@ pub(crate) async fn get_bundle(
         .ok_or_else(|| ApiError::not_found("Bundle not found"))
 }
 
-pub(crate) async fn put_bundle_media(
-    State(state): State<Arc<AppState>>,
-    AxumPath((bundle_id, client_uuid)): AxumPath<(Uuid, Uuid)>,
-    request: Request,
-) -> Result<Json<crate::store::BundleStageStatus>, ApiError> {
-    let principal = authenticate(&state, request.headers()).await?;
-    require_supported_client(&state, request.headers()).await?;
-    if let Some(length) = request.headers().get(CONTENT_LENGTH) {
-        let length = length
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(|| ApiError::bad_request("Invalid Content-Length"))?;
-        if length > state.max_media_bytes {
-            return Err(ApiError::payload_too_large("Media is too large"));
-        }
-    }
-
-    let max_media_bytes = state.max_media_bytes;
-    let content = tokio::time::timeout(Duration::from_secs(120), async move {
-        let mut content = Vec::new();
-        let mut stream = request.into_body().into_data_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
-            if content.len() + chunk.len() > max_media_bytes {
-                return Err(ApiError::payload_too_large("Media is too large"));
-            }
-            content.extend_from_slice(&chunk);
-        }
-        Ok::<_, ApiError>(content)
-    })
-    .await
-    .map_err(|_| ApiError::request_timeout("Media upload body timed out"))??;
-    if content.is_empty() {
-        return Err(ApiError::unprocessable("Media body must not be empty"));
-    }
-
-    // Never hold the per-family serialization lock while awaiting an
-    // untrusted request body. Once bounded bytes are complete, re-read the
-    // current bundle manifest under the lock before touching disk or SQLite.
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let store = state.store.clone();
-    let family_id = principal.family_id.clone();
-    let bundle_key = bundle_id.to_string();
-    let bundle = run_blocking(move || Ok(store.load_bundle(&family_id, &bundle_key)?))
-        .await?
-        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
-    if bundle.status != "staging" {
-        return Err(ApiError::conflict(
-            "committed bundle does not accept staged media",
-        ));
-    }
-    if bundle.staged_membership_id != principal.membership_id {
-        return Err(ApiError::conflict(
-            "bundle belongs to another family membership",
-        ));
-    }
-    let media_entity = bundle
-        .media
-        .iter()
-        .find(|entity| entity.client_uuid == client_uuid.to_string())
-        .ok_or_else(|| ApiError::unprocessable("media is not listed in the bundle manifest"))?;
-    if media_entity.deleted_at.is_some() {
-        return Err(ApiError::unprocessable(
-            "tombstone media does not accept bytes",
-        ));
-    }
-    if media_entity
-        .payload
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .is_some_and(|kind| kind == "avatar")
-        && principal.role != "owner"
-    {
-        return Err(ApiError::forbidden("Only owner may change avatar"));
-    }
-    if let Some(declared) = media_entity
-        .payload
-        .get("byte_size")
-        .and_then(|value| value.as_u64())
-        .and_then(|size| usize::try_from(size).ok())
-    {
-        if declared != content.len() {
-            return Err(ApiError::unprocessable(
-                "Media body size does not match declared byte_size",
-            ));
-        }
-    }
-
-    let blocking_state = state.clone();
-    let status = run_blocking(move || {
-        let path =
-            blocking_state.bundle_media_path(&principal.family_id, &bundle_id, &client_uuid)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-            secure_directory(parent)?;
-        }
-        write_private_file(&path, &content)?;
-        let staged_sha256 = hex::encode(Sha256::digest(&content));
-
-        match blocking_state.store.mark_bundle_media_staged(
-            &principal,
-            &bundle_id.to_string(),
-            &client_uuid.to_string(),
-            content.len(),
-            &staged_sha256,
-            blocking_state.now(),
-        ) {
-            Ok(value) => Ok(value),
-            Err(StoreError::BundleMediaNotInManifest) => Err(ApiError::unprocessable(
-                "media is not listed in the bundle manifest",
-            )),
-            Err(StoreError::BundleMediaIncomplete) => Err(ApiError::unprocessable(
-                "Media body size does not match declared byte_size",
-            )),
-            Err(StoreError::BundleMediaUploadClosed) => Err(ApiError::conflict(
-                "committed bundle does not accept staged media",
-            )),
-            Err(StoreError::BundleMembershipMismatch) => Err(ApiError::conflict(
-                "bundle belongs to another family membership",
-            )),
-            Err(StoreError::BundleNotFound) => Err(ApiError::not_found("Bundle not found")),
-            Err(error) => Err(error.into()),
-        }
-    })
-    .await?;
-    Ok(Json(status))
-}
-
 pub(crate) async fn commit_bundle(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -363,6 +558,33 @@ pub(crate) async fn commit_bundle(
                 staged_publications.push((media_uuid.clone(), media_id, staged_path));
             }
             media_ready.insert(media_uuid.clone(), digest.is_some());
+        }
+
+        for (media_uuid, integrity) in state
+            .store
+            .deferred_fulfillment_media_integrity_for_bundle(
+                &principal.family_id,
+                &bundle_id.to_string(),
+            )?
+        {
+            let media_id = Uuid::parse_str(&media_uuid)
+                .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
+            let final_path = state.media_path(&principal.family_id, media_id)?;
+            let digest = integrity
+                .staged_sha256
+                .as_deref()
+                .and_then(|expected_sha256| {
+                    media_file_integrity_sha256(
+                        &final_path,
+                        integrity.declared_byte_size,
+                        Some(expected_sha256),
+                        &media_uuid,
+                    )
+                });
+            if digest.is_some() {
+                sync_published_media_file(&final_path)?;
+            }
+            media_ready.insert(media_uuid, digest.is_some());
         }
 
         // Validate the complete staging manifest before the first final-path
@@ -909,6 +1131,9 @@ fn map_bundle_policy_store_error(error: StoreError) -> Result<StoreError, ApiErr
         StoreError::CustomItemTombstoneResurrection => Err(ApiError::conflict(
             "Deleted custom item cannot be resurrected",
         )),
+        StoreError::RecordTombstoneResurrection => Err(ApiError::conflict(
+            "Deleted care record cannot be resurrected",
+        )),
         StoreError::ImmutableMediaAssociation => Err(ApiError::conflict(
             "Media kind and association are immutable",
         )),
@@ -940,6 +1165,24 @@ fn map_stage_bundle_store_error(error: StoreError) -> ApiError {
     }
 }
 
+fn map_causal_media_staging_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::CausalMediaPreimageConflict => {
+            ApiError::conflict("causal media uuid already has different durable bytes")
+        }
+        StoreError::CausalMediaMembershipMismatch => {
+            ApiError::conflict("causal media preimage belongs to another family membership")
+        }
+        StoreError::CausalMediaStagingQuota(kind) => {
+            ApiError::unprocessable(format!("causal media staging quota exceeded: {kind}",))
+        }
+        StoreError::InvalidCausalMediaStaging => {
+            ApiError::unprocessable("causal media preimage is invalid")
+        }
+        other => other.into(),
+    }
+}
+
 fn map_commit_bundle_store_error(error: StoreError) -> ApiError {
     match map_bundle_policy_store_error(error) {
         Err(api) => api,
@@ -949,6 +1192,9 @@ fn map_commit_bundle_store_error(error: StoreError) -> ApiError {
         Ok(StoreError::BundleRootNotNewer) => {
             ApiError::conflict("bundle root is not newer than the published version")
         }
+        Ok(StoreError::LegacyBundleCausalRootUnsupported(_)) => ApiError::conflict(
+            "legacy bundle cannot advance a causal mutable root; use causal commit",
+        ),
         Ok(StoreError::BundleMembershipMismatch) => {
             ApiError::conflict("bundle belongs to another family membership")
         }
@@ -965,6 +1211,31 @@ mod tests {
     use super::*;
     use crate::write_private_file;
     use axum::http::StatusCode;
+
+    #[test]
+    fn causal_media_upload_admission_bounds_family_and_releases_reservations() {
+        let admission = CausalMediaUploadAdmission::default();
+        let family_id = "11111111-2222-4333-8444-555555555555";
+        let reservations = (0..MAX_CAUSAL_MEDIA_UPLOADS_PER_FAMILY)
+            .map(|index| {
+                admission
+                    .reserve(family_id, &format!("membership-{index}"))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let saturated = match admission.reserve(family_id, "membership-over-family-limit") {
+            Err(error) => error,
+            Ok(_) => panic!("family upload admission exceeded its bound"),
+        };
+        assert_eq!(saturated.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(saturated.detail["scope"], "family");
+
+        drop(reservations);
+        admission
+            .reserve(family_id, "membership-after-release")
+            .unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

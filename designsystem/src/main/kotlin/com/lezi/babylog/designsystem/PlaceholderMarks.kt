@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
@@ -36,15 +37,22 @@ internal fun LeziStateMark(
     kind: StateKind,
     color: Color,
     modifier: Modifier = Modifier,
-    markSize: Dp = 30.dp,
+    markSize: Dp = LeziIconSize.State,
 ) {
     Canvas(modifier.size(markSize)) {
         val strokeWidth = 2.4.dp.toPx()
         when (kind) {
+            // Dashed ring — must not read as CircularProgressIndicator's solid track.
             StateKind.Empty -> drawCircle(
                 color = color,
                 radius = (size.minDimension - strokeWidth) / 2f,
-                style = Stroke(width = strokeWidth),
+                style = Stroke(
+                    width = strokeWidth,
+                    pathEffect = PathEffect.dashPathEffect(
+                        floatArrayOf(strokeWidth * 2.4f, strokeWidth * 1.8f),
+                        0f,
+                    ),
+                ),
             )
             StateKind.Error -> {
                 val w = size.width

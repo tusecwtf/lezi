@@ -254,7 +254,7 @@ class FreshDatabaseTest {
         }.exceptionOrNull()
 
         assertNotNull(failure)
-        assertTrue(failure!!.message.orEmpty().contains("migration from 23 to 26"))
+        assertTrue(failure!!.message.orEmpty().contains("migration from 23 to 27"))
         database!!.close()
         database = null
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->

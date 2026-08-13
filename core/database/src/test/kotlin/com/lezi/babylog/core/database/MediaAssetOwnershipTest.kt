@@ -40,15 +40,31 @@ class MediaAssetOwnershipTest {
         ).isInstanceOf(IllegalArgumentException::class.java)
     }
 
+    @Test
+    fun wakeMediaRequiresOnlyAWakeObservationOwner() {
+        val ownerless = runCatching {
+            media(kind = "wake")
+        }.exceptionOrNull()
+        val recordOwned = runCatching {
+            media(kind = "wake", wakeObservationId = 9, recordId = 1)
+        }.exceptionOrNull()
+
+        assertThat(ownerless).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(recordOwned).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(media(kind = "wake", wakeObservationId = 9).wakeObservationId).isEqualTo(9)
+    }
+
     private fun media(
         kind: String,
         recordId: Long? = null,
         carePlanId: Long? = null,
         babyId: Long? = null,
+        wakeObservationId: Long? = null,
     ) = MediaAssetEntity(
         recordId = recordId,
         carePlanId = carePlanId,
-        clientUuid = "media-$kind-$recordId-$carePlanId-$babyId",
+        wakeObservationId = wakeObservationId,
+        clientUuid = "media-$kind-$recordId-$carePlanId-$babyId-$wakeObservationId",
         kind = kind,
         babyId = babyId,
         localUri = "media/path",

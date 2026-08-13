@@ -40,30 +40,6 @@ fun normalizeBabySex(raw: String?): String? {
     }
 }
 
-data class Family(
-    val id: Long = 0,
-    val ownerUserId: Long,
-    val createdAt: Long,
-)
-
-data class LocalUser(
-    val id: Long = 0,
-    val displayName: String? = null,
-    val deviceId: String,
-    val createdAt: Long,
-)
-
-enum class MemberRole { OWNER, MEMBER }
-enum class MemberStatus { ACTIVE, REVOKED }
-
-data class Membership(
-    val familyId: Long,
-    val userId: Long,
-    val role: MemberRole,
-    val status: MemberStatus,
-    val joinedAt: Long,
-)
-
 /**
  * Device-local evidence for whether a family has atomically received a root revision.
  * Media upload receipts are deliberately excluded from this state.
@@ -108,6 +84,13 @@ data class Record(
     val createdByMembershipId: String = "",
     /** Device-local receipt for the last atomically published root revision. */
     val familyPublishedUpdatedAt: Long? = null,
+    /**
+     * Open causal conflict handle for this root (pull summary / local branched receipt).
+     * Null when there is no unresolved conflict. Distinct from [syncDirty] pending publish.
+     */
+    val openConflictId: String? = null,
+    /** Effective WakeObservation for sleep; null when unconfirmed or non-sleep. */
+    val effectiveWakeObservationClientUuid: String? = null,
 ) {
     val payload: RecordPayloadDocument
         get() = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)

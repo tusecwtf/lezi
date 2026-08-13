@@ -115,7 +115,7 @@ class LayoutUndoDeviceTest {
         composeRule.runOnIdle { candidate = second }
 
         composeRule.onNodeWithText("已清空常用槽").assertDoesNotExist()
-        composeRule.onNodeWithText("已移入本机已删除").fetchSemanticsNode()
+        composeRule.onNodeWithText(LayoutEditPresentation.undoMovedToDeleted).fetchSemanticsNode()
         val done = composeRule.onNodeWithTag("layout_edit_done")
         done.performSemanticsAction(SemanticsActions.RequestFocus)
         done.performKeyInput { pressKey(Key.Tab) }

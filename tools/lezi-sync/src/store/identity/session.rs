@@ -1,17 +1,111 @@
 //! Create-family, owner login, sessions, and device listings.
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::model::normalized_device_name_key;
 
 use super::super::{
-    ActiveDevice, ActiveMembership, CreateFamilyInput, CreatedDeviceSession, Principal, Store,
-    StoreError,
+    ActiveDevice, ActiveMembership, CreateFamilyInput, CreatedDeviceSession,
+    FamilyDirectorySnapshot, Principal, Store, StoreError,
 };
 use super::{active_device_name_conflicts, ACCESS_TOKEN_TTL_SECONDS};
 
 impl Store {
+    /// Stable family-directory generation for authenticated sync handshakes.
+    ///
+    /// Authentication touches `last_used_at` on every request, so the digest
+    /// intentionally covers only directory identity/display structure. A
+    /// caller that needs fresh activity timestamps uses the explicit member
+    /// directory refresh command.
+    pub fn family_directory_snapshot(
+        &self,
+        family_id: &str,
+        viewer_membership_id: &str,
+        viewer_is_owner: bool,
+    ) -> Result<FamilyDirectorySnapshot, StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"lezi-family-directory-v1\0");
+        let memberships = {
+            let mut statement = transaction.prepare(
+                "
+                SELECT role, display_name, membership_id
+                FROM memberships
+                WHERE family_id = ?1 AND left_at IS NULL
+                ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END,
+                         membership_id COLLATE BINARY
+                ",
+            )?;
+            let rows = statement.query_map(params![family_id], |row| {
+                Ok(ActiveMembership {
+                    role: row.get(0)?,
+                    display_name: row.get(1)?,
+                    membership_id: row.get(2)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for membership in &memberships {
+            hash_directory_field(&mut hasher, b'm', &membership.membership_id);
+            hash_directory_field(&mut hasher, b'r', &membership.role);
+            hash_directory_field(&mut hasher, b'n', &membership.display_name);
+        }
+        #[cfg(test)]
+        family_directory_test_hook::checkpoint(family_id, 1);
+        let all_devices = {
+            let mut statement = transaction.prepare(
+                "
+                SELECT devices.device_id, devices.membership_id,
+                       devices.device_name, devices.last_used_at
+                FROM devices
+                JOIN memberships ON memberships.membership_id = devices.membership_id
+                WHERE memberships.family_id = ?1
+                  AND memberships.left_at IS NULL
+                  AND devices.status = 'active'
+                ORDER BY devices.device_id COLLATE BINARY
+                ",
+            )?;
+            let rows = statement.query_map(params![family_id], |row| {
+                Ok(ActiveDevice {
+                    device_id: row.get(0)?,
+                    membership_id: row.get(1)?,
+                    device_name: row.get(2)?,
+                    last_used_at: row.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for device in &all_devices {
+            hash_directory_field(&mut hasher, b'd', &device.device_id);
+            hash_directory_field(&mut hasher, b'm', &device.membership_id);
+            hash_directory_field(&mut hasher, b'n', &device.device_name);
+        }
+        #[cfg(test)]
+        family_directory_test_hook::checkpoint(family_id, 2);
+        let mut last_sync_by_membership = std::collections::HashMap::new();
+        for device in &all_devices {
+            last_sync_by_membership
+                .entry(device.membership_id.clone())
+                .and_modify(|current: &mut i64| *current = (*current).max(device.last_used_at))
+                .or_insert(device.last_used_at);
+        }
+        let visible_devices = all_devices
+            .into_iter()
+            .filter(|device| viewer_is_owner || device.membership_id == viewer_membership_id)
+            .collect();
+        let snapshot = FamilyDirectorySnapshot {
+            generation: hex::encode(hasher.finalize()),
+            memberships,
+            visible_devices,
+            last_sync_by_membership,
+        };
+        transaction.commit()?;
+        Ok(snapshot)
+    }
+
     pub fn create_family<F>(
         &self,
         input: CreateFamilyInput<'_>,
@@ -602,12 +696,35 @@ impl Store {
             // state it presents the current token with the same id. Exact
             // derived-hash equality proves this is the already completed
             // handoff, so return it without a second history row, generation
-            // increment, expiry extension, or replay revocation.
+            // increment, or replay revocation. If access has since expired
+            // (common after a long crash window or stuck request id past the
+            // 15-minute TTL), extend expiry in place: reusing the same
+            // deterministic tokens is still the one accepted handoff, and
+            // returning an already-expired access token makes the post-refresh
+            // authenticate step fail closed with HTTP 500.
             if refresh_request_id.is_some()
                 && presented_hash == new_refresh_hash
                 && current_access_hash == new_access_hash
                 && current_refresh_hash == new_refresh_hash
             {
+                let access_expires_at = if current_access_expires_at > now {
+                    current_access_expires_at
+                } else {
+                    let extended = now + ACCESS_TOKEN_TTL_SECONDS;
+                    transaction.execute(
+                        "
+                    UPDATE device_sessions
+                    SET access_expires_at = ?1
+                    WHERE session_id = ?2
+                    ",
+                        params![extended, session_id],
+                    )?;
+                    transaction.execute(
+                        "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
+                        params![now, device_id],
+                    )?;
+                    extended
+                };
                 transaction.commit()?;
                 return Ok(CreatedDeviceSession {
                     family_id,
@@ -615,7 +732,7 @@ impl Store {
                     device_id,
                     session_id,
                     access_token: new_access_token,
-                    access_expires_at: current_access_expires_at,
+                    access_expires_at,
                     refresh_token: new_refresh_token,
                     family_name,
                 });
@@ -741,7 +858,7 @@ impl Store {
                 membership_id,
                 device_id,
                 session_id,
-                access_expires_at,
+                current_access_expires_at,
                 current_access_hash,
                 current_refresh_hash,
             )) = replay
@@ -750,6 +867,25 @@ impl Store {
                 if crate::hash_secret(&access_token) == current_access_hash
                     && crate::hash_secret(&refresh_token) == current_refresh_hash
                 {
+                    let access_expires_at = if current_access_expires_at > now {
+                        current_access_expires_at
+                    } else {
+                        let extended = now + ACCESS_TOKEN_TTL_SECONDS;
+                        transaction.execute(
+                            "
+                        UPDATE device_sessions
+                        SET access_expires_at = ?1
+                        WHERE session_id = ?2
+                        ",
+                            params![extended, session_id],
+                        )?;
+                        transaction.execute(
+                            "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
+                            params![now, device_id],
+                        )?;
+                        extended
+                    };
+                    transaction.commit()?;
                     return Ok(CreatedDeviceSession {
                         family_id,
                         membership_id,
@@ -917,5 +1053,102 @@ impl Store {
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+}
+
+fn hash_directory_field(hasher: &mut Sha256, tag: u8, value: &str) {
+    hasher.update([tag]);
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+#[cfg(test)]
+pub(in crate::store) mod family_directory_test_hook {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct State {
+        entered: usize,
+        released: usize,
+    }
+
+    struct Hook {
+        state: Mutex<State>,
+        changed: Condvar,
+    }
+
+    fn hooks() -> &'static Mutex<HashMap<String, Arc<Hook>>> {
+        static HOOKS: OnceLock<Mutex<HashMap<String, Arc<Hook>>>> = OnceLock::new();
+        HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub(in crate::store) struct Control {
+        family_id: String,
+        hook: Arc<Hook>,
+    }
+
+    pub(in crate::store) fn install(family_id: &str) -> Control {
+        let hook = Arc::new(Hook {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+        });
+        let previous = hooks()
+            .lock()
+            .unwrap()
+            .insert(family_id.to_owned(), hook.clone());
+        assert!(
+            previous.is_none(),
+            "family directory hook already installed"
+        );
+        Control {
+            family_id: family_id.to_owned(),
+            hook,
+        }
+    }
+
+    pub(super) fn checkpoint(family_id: &str, phase: usize) {
+        let hook = hooks().lock().unwrap().get(family_id).cloned();
+        let Some(hook) = hook else { return };
+        let mut state = hook.state.lock().unwrap();
+        state.entered = state.entered.max(phase);
+        hook.changed.notify_all();
+        while state.released < phase {
+            state = hook.changed.wait(state).unwrap();
+        }
+    }
+
+    impl Control {
+        pub(in crate::store) fn wait_entered(&self, phase: usize) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut state = self.hook.state.lock().unwrap();
+            while state.entered < phase {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "directory snapshot checkpoint timed out"
+                );
+                let (next, timeout) = self.hook.changed.wait_timeout(state, remaining).unwrap();
+                assert!(
+                    !timeout.timed_out(),
+                    "directory snapshot checkpoint timed out"
+                );
+                state = next;
+            }
+        }
+
+        pub(in crate::store) fn release(&self, phase: usize) {
+            let mut state = self.hook.state.lock().unwrap();
+            state.released = state.released.max(phase);
+            self.hook.changed.notify_all();
+        }
+    }
+
+    impl Drop for Control {
+        fn drop(&mut self) {
+            self.release(usize::MAX);
+            hooks().lock().unwrap().remove(&self.family_id);
+        }
     }
 }

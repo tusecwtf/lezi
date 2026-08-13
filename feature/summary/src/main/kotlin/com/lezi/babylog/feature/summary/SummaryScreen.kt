@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
@@ -71,6 +72,7 @@ import com.lezi.babylog.designsystem.PageHero
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.TransientShallowSyncStatus
 import com.lezi.babylog.designsystem.leziMotionMillis
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.carelog.WeekSummary
@@ -90,6 +92,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -113,18 +116,36 @@ data class ChartWindowTotals(
     val daySleepSegments: Int = 0,
     val dayPee: Int = 0,
     val dayPoop: Int = 0,
+    val dayFeedMlLabel: String? = null,
+    val dayFeedCountLabel: String? = null,
+    val dayNursingMinLabel: String? = null,
+    val daySleepMinLabel: String? = null,
+    val daySleepSegmentsLabel: String? = null,
+    val dayPeeLabel: String? = null,
+    val dayPoopLabel: String? = null,
+    val dayDiaperLabel: String? = null,
 ) {
     val dayDiaper: Int get() = dayPee + dayPoop
 }
 
 data class SummaryTotals(
     val feedMl: Int = 0,
+    val feedMlMin: Int = feedMl,
+    val feedMlMax: Int = feedMl,
     val nursingMin: Long = 0,
+    val nursingMinMin: Long = nursingMin,
+    val nursingMinMax: Long = nursingMin,
     val feedCount: Int = 0,
+    val feedCountMin: Int = feedCount,
+    val feedCountMax: Int = feedCount,
     val sleepMin: Long = 0,
     val sleepSegments: Int = 0,
     val pee: Int = 0,
+    val peeMin: Int = pee,
+    val peeMax: Int = pee,
     val poop: Int = 0,
+    val poopMin: Int = poop,
+    val poopMax: Int = poop,
     val tempAvg: Double? = null,
     val tempDays: Int = 0,
     val dayValuesFeed: List<Float> = emptyList(),
@@ -136,6 +157,16 @@ data class SummaryTotals(
     val dayValuesTemp: List<Float> = emptyList(),
     val feedTimeBuckets: List<Float> = List(4) { 0f },
     val chartWindows: ChartWindowTotals = ChartWindowTotals(),
+    /** True when unresolved suspected-duplicate groups make totals a range. */
+    val hasDuplicateUncertainty: Boolean = false,
+    val feedMlLabel: String? = null,
+    val feedCountLabel: String? = null,
+    val nursingMinLabel: String? = null,
+    val sleepMinLabel: String? = null,
+    val sleepSegmentsLabel: String? = null,
+    val peeLabel: String? = null,
+    val poopLabel: String? = null,
+    val diaperLabel: String? = null,
 )
 
 data class SummaryUi(
@@ -230,10 +261,14 @@ class SummaryViewModel @Inject constructor(
             )
             careLog.observeRecords(
                 babyId = baby.id,
-                startDayInclusive = queryStart,
-                endDayExclusive = queryEnd,
+                // The projection owns the exact instant ±30-minute halo. This
+                // date-level DAO overfetch guarantees both halo edges across DST.
+                startDayInclusive = queryStart.minusDays(1),
+                endDayExclusive = queryEnd.plusDays(1),
                 zone = zone,
-            ).map { records ->
+            ).combine(careLog.observeSourceRoleClientUuids()) { records, sourceRoles ->
+                records to sourceRoles
+            }.mapLatest { (records, sourceRoles) ->
                 SummaryAggregationRequest(
                     records = records,
                     range = selectedRange,
@@ -243,6 +278,7 @@ class SummaryViewModel @Inject constructor(
                     comparePrevWeek = preferences.comparePrevWeek,
                     babyName = baby.nickname,
                     zone = zone,
+                    sourceRoleClientUuids = sourceRoles,
                 )
             }.calculateLatest(aggregationEngine)
         }
@@ -368,20 +404,14 @@ private fun SummaryContent(
                     title = "汇总",
                 )
 
-                Text(
-                    shallowSyncStatus.text,
-                    style = LeziTypography.Meta,
-                    color = if (
-                        shallowSyncStatus.state in setOf(
-                            ShallowSyncState.Error,
-                            ShallowSyncState.ReauthRequired,
-                        )
-                    ) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.testTag("summary_shallow_sync_status"),
+                TransientShallowSyncStatus(
+                    text = shallowSyncStatus.text,
+                    isError = shallowSyncStatus.state in setOf(
+                        ShallowSyncState.Error,
+                        ShallowSyncState.ReauthRequired,
+                    ),
+                    isUserRefreshing = isRefreshing,
+                    contentTestTag = "summary_shallow_sync_status",
                 )
 
                 LeziRangeTabs(
@@ -407,25 +437,39 @@ private fun SummaryContent(
                         verticalArrangement = Arrangement.spacedBy(density.sectionGap),
                     ) {
                         val windows = t.chartWindows
+                        SummaryDuplicateBoundsNotice(
+                            visible = t.hasDuplicateUncertainty,
+                            contentPadding = chartCardPad,
+                        )
+                        val sleepMetric = splitSummaryKpiAmount(
+                            windows.daySleepMinLabel
+                                ?: formatRecordDuration(windows.daySleepMin),
+                        )
                         SummaryKpiStrip(
-                            feedValue = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
-                                "0次"
-                            } else {
-                                "${windows.dayFeedCount}次"
-                            },
-                            feedDetail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
+                            feedAmount = windows.dayFeedCountLabel
+                                ?: "${windows.dayFeedCount}",
+                            feedUnit = "次",
+                            feedDetail = listOfNotNull(
+                                windows.dayFeedMlLabel?.let { "奶量 $it" },
+                                windows.dayNursingMinLabel?.let { "母乳 $it 分钟" },
+                            ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                                ?: if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
                                 "当日暂无详情"
                             } else {
                                 formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
                             },
-                            sleepValue = formatRecordDuration(windows.daySleepMin),
-                            sleepDetail = if (windows.daySleepSegments == 0) {
+                            sleepAmount = sleepMetric.first,
+                            sleepUnit = sleepMetric.second,
+                            sleepDetail = windows.daySleepSegmentsLabel?.let { "当日 $it 段" }
+                                ?: if (windows.daySleepSegments == 0) {
                                 "当日 0 段"
                             } else {
                                 "当日 ${windows.daySleepSegments} 段"
                             },
-                            diaperValue = "${windows.dayDiaper}",
-                            diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
+                            diaperAmount = windows.dayDiaperLabel ?: "${windows.dayDiaper}",
+                            diaperUnit = "次",
+                            diaperDetail = "尿 ${windows.dayPeeLabel ?: windows.dayPee} · " +
+                                "便 ${windows.dayPoopLabel ?: windows.dayPoop}",
                         )
 
                         if (range == SummaryRange.Week && ui.comparePrevWeek) {
@@ -463,18 +507,31 @@ private fun SummaryContent(
                         }
 
                         val feedChartTotal = when (range) {
-                            SummaryRange.Day ->
-                                formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
-                            SummaryRange.Week, SummaryRange.Month ->
-                                formatFeedWindowTotal(t.feedMl, t.nursingMin)
+                            SummaryRange.Day -> listOfNotNull(
+                                windows.dayFeedMlLabel?.let { "奶量 $it" },
+                                windows.dayNursingMinLabel?.let { "母乳 $it 分钟" },
+                            ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                                ?: formatFeedWindowTotal(
+                                    windows.dayFeedMl,
+                                    windows.dayNursingMin,
+                                )
+                            SummaryRange.Week, SummaryRange.Month -> listOfNotNull(
+                                t.feedMlLabel?.let { "奶量 $it" },
+                                t.nursingMinLabel?.let { "母乳 $it" },
+                            ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                                ?: formatFeedWindowTotal(t.feedMl, t.nursingMin)
                         }
                         val sleepChartTotal = when (range) {
-                            SummaryRange.Day -> formatRecordDuration(windows.daySleepMin)
-                            SummaryRange.Week, SummaryRange.Month -> formatRecordDuration(t.sleepMin)
+                            SummaryRange.Day -> windows.daySleepMinLabel
+                                ?: formatRecordDuration(windows.daySleepMin)
+                            SummaryRange.Week, SummaryRange.Month -> t.sleepMinLabel
+                                ?: formatRecordDuration(t.sleepMin)
                         }
                         val diaperChartTotal = when (range) {
-                            SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
-                            SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
+                            SummaryRange.Day -> windows.dayDiaperLabel
+                                ?: formatDiaperTotal(windows.dayPee, windows.dayPoop)
+                            SummaryRange.Week, SummaryRange.Month -> t.diaperLabel
+                                ?: formatDiaperTotal(t.pee, t.poop)
                         }
                         val chartTotalScope = when (range) {
                             SummaryRange.Day -> "当日"
@@ -581,20 +638,30 @@ private fun SummaryContent(
     }
 }
 
+private data class SummaryKpiSpec(
+    val title: String,
+    val amount: String,
+    val unit: String,
+    val detail: String,
+)
+
 @Composable
 private fun SummaryKpiStrip(
-    feedValue: String,
+    feedAmount: String,
+    feedUnit: String,
     feedDetail: String,
-    sleepValue: String,
+    sleepAmount: String,
+    sleepUnit: String,
     sleepDetail: String,
-    diaperValue: String,
+    diaperAmount: String,
+    diaperUnit: String,
     diaperDetail: String,
 ) {
     val journal = LeziThemeExt.isJournal
     val cells = listOf(
-        Triple("喂养", feedValue, feedDetail),
-        Triple("睡眠", sleepValue, sleepDetail),
-        Triple("尿布", diaperValue, diaperDetail),
+        SummaryKpiSpec("喂养", feedAmount, feedUnit, feedDetail),
+        SummaryKpiSpec("睡眠", sleepAmount, sleepUnit, sleepDetail),
+        SummaryKpiSpec("尿布", diaperAmount, diaperUnit, diaperDetail),
     )
     if (journal) {
         LeziSurfacePanel(
@@ -607,16 +674,14 @@ private fun SummaryKpiStrip(
                     .fillMaxWidth()
                     .height(IntrinsicSize.Min),
             ) {
-                cells.forEachIndexed { index, (title, value, detail) ->
+                cells.forEachIndexed { index, spec ->
                     KpiCell(
-                        title = title,
-                        value = value,
-                        detail = detail,
+                        spec = spec,
                         modifier = Modifier
                             .weight(1f)
                             .heightIn(min = 74.dp)
                             .padding(horizontal = LeziSpacing.Xs, vertical = LeziSpacing.Sm),
-                        valueStyle = LeziTypography.Metric.copy(fontSize = 20.sp),
+                        valueStyle = LeziTypography.MetricSm,
                         detailStyle = LeziTypography.Micro,
                     )
                     if (index < cells.lastIndex) {
@@ -632,15 +697,18 @@ private fun SummaryKpiStrip(
         }
     } else {
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min),
             horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+            verticalAlignment = Alignment.Top,
         ) {
-            cells.forEach { (title, value, detail) ->
+            cells.forEach { spec ->
                 CompactMetricCard(
-                    title = title,
-                    value = value,
-                    detail = detail,
-                    modifier = Modifier.weight(1f),
+                    spec = spec,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(),
                 )
             }
         }
@@ -649,9 +717,7 @@ private fun SummaryKpiStrip(
 
 @Composable
 private fun CompactMetricCard(
-    title: String,
-    value: String,
-    detail: String,
+    spec: SummaryKpiSpec,
     modifier: Modifier = Modifier,
 ) {
     LeziCard(
@@ -659,40 +725,92 @@ private fun CompactMetricCard(
         contentPadding = PaddingValues(LeziThemeExt.density.cardPad),
     ) {
         KpiCell(
-            title = title,
-            value = value,
-            detail = detail,
-            valueStyle = LeziTypography.Metric.copy(fontSize = 22.sp),
-            detailStyle = LeziTypography.Meta.copy(fontSize = 11.sp),
+            spec = spec,
+            valueStyle = LeziTypography.Metric,
+            detailStyle = LeziTypography.Eyebrow,
         )
     }
 }
 
 @Composable
 private fun KpiCell(
-    title: String,
-    value: String,
-    detail: String,
+    spec: SummaryKpiSpec,
     modifier: Modifier = Modifier,
     valueStyle: TextStyle = LeziTypography.Metric,
     detailStyle: TextStyle = LeziTypography.Meta,
 ) {
-    Column(modifier) {
-        Text(title, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val density = LocalDensity.current
+    val titleHeight = with(density) { LeziTypography.Meta.lineHeight.toDp() }
+    val valueHeight = with(density) { valueStyle.lineHeight.toDp() }
+    val detailHeight = with(density) { detailStyle.lineHeight.toDp() }
+    Column(modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(titleHeight),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                spec.title,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         Spacer(Modifier.height(LeziSpacing.Xxs))
-        Text(
-            value,
-            style = valueStyle,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            detail,
-            style = detailStyle,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-        )
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(valueHeight),
+            contentAlignment = Alignment.BottomStart,
+        ) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    spec.amount,
+                    modifier = Modifier.alignByBaseline(),
+                    style = valueStyle,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (spec.unit.isNotEmpty()) {
+                    Text(
+                        spec.unit,
+                        modifier = Modifier
+                            .alignByBaseline()
+                            .padding(start = LeziSpacing.Xxs),
+                        style = LeziTypography.Label,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(LeziSpacing.Xxs))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(detailHeight),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                spec.detail,
+                style = detailStyle,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Peel a trailing unit so KPI numerals share one baseline across cards. */
+internal fun splitSummaryKpiAmount(raw: String): Pair<String, String> {
+    val last = raw.lastOrNull() ?: return raw to ""
+    return if (last == '次' || last == 'm' || last == 'h') {
+        raw.dropLast(1) to last.toString()
+    } else {
+        raw to ""
     }
 }
 
@@ -1271,4 +1389,24 @@ private fun formatFeedWindowTotal(feedMl: Int, nursingMin: Long): String {
 private fun formatDiaperTotal(pee: Int, poop: Int): String {
     val total = pee + poop
     return "${total}次（尿$pee · 便$poop）"
+}
+
+@Composable
+internal fun SummaryDuplicateBoundsNotice(
+    visible: Boolean,
+    contentPadding: PaddingValues = PaddingValues(LeziSpacing.Md),
+) {
+    if (!visible) return
+    LeziSurfacePanel(
+        Modifier
+            .fillMaxWidth()
+            .testTag("summary_duplicate_bounds"),
+        contentPadding = contentPadding,
+    ) {
+        Text("疑似重复尚未确认", style = LeziTypography.TitleSm)
+        Text(
+            "以下指标按全部合法解释显示下界–上界，不会暗选某一来源。",
+            style = LeziTypography.Meta,
+        )
+    }
 }

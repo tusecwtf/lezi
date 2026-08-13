@@ -19,21 +19,29 @@ Route handlers 按职责落在 crate-private 模块，**不**扩大
 | `src/members.rs` | 家庭成员与设备管理路由（既有内聚，不回并） |
 | `src/readiness.rs` | `/ready` 与 readiness 缓存 |
 | `src/store/{mod,schema,identity/*,pull,media,bundles}.rs` | SQLite 持久化；单一 `Store` 事务 façade；identity 再按 session/login/membership_admin/anonymize 分区；bundle 行与 LWW 加载器在 `bundles` |
-| `src/offline_migrate/` | 离线 v3→current 维护工具（非 live HTTP API；不并入 runtime store） |
+| `src/offline_migrate/` | 显式 schema 11/12→13 copy-out 维护工具（非 live HTTP API；不并入 runtime store） |
 
 HTTPS `/v1/*` 合同只对成员登录 grant 增加可选 `landing_url`；新的 8767 HTTP
 只有 `/join` 和 `/download/lezi.apk`。本 README 不宣称 live NAS 已验证。
 
 ## 数据目录合同
 
-服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=11`。空数据目录、
-不存在的 `lezi.db` 或零字节空库会初始化为当前 v11 schema；已有数据目录只有在
-`user_version=11` 且表、索引、约束完全匹配当前 schema 时才允许重启并保留数据。
+服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=13`
+（`DATABASE_SCHEMA_VERSION`）。空数据目录、不存在的 `lezi.db` 或零字节空库会初始化为
+**当前 v13 schema**；已有数据目录只有在 `user_version=13` 且表、索引、约束完全匹配
+当前 schema 时才允许重启并保留数据。
+历史 v3/v11→12 实现仍冻结为审计历史；当前 CLI 的 11/12→13 mapping 由 H28 独立拥有，
+不得让历史 migrator 跟随 current schema 漂移。
 
-任何非空旧版本、未来版本、或声称 v11 但形状不匹配的数据库都在只读预检阶段
+任何非空旧版本、未来版本、或声称 current 但形状不匹配的数据库都在只读预检阶段
 fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
-改变数据根或数据库权限。旧版本数据不是受支持的日常部署输入；部署时必须选择新的空数据根
-（历史 v3 仅允许维护窗前的离线 `offline-migrate` + 已授权切割，见下文与 ADR-0013）。
+改变数据根或数据库权限。旧版本数据不是受支持的日常部署输入；部署时必须选择新的空数据根。
+历史源仅允许维护窗前的离线 `offline-migrate` 准备（见下文与 ADR-0013）：
+
+| 源 `user_version` | 行为 |
+|---|---|
+| **11** | exact-shape copy-out → schema 13；保留 identity/session/token hashes、secret、TLS 与事实 |
+| **12** | exact-shape copy-out → schema 13；保留 versions/branches/conflicts/media 与全部身份 |
 
 ```text
 $LEZI_DATA_DIR/
@@ -44,10 +52,12 @@ $LEZI_DATA_DIR/
 │   ├── server.crt
 │   └── server.key
 └── media/
+    ├── .causal-stage/{family_uuid}/{media_uuid}
     └── {family_uuid}/{media_uuid}
 ```
 
-启动时服务只清理 `media/` 下名称为 UUID、且 SQLite 已无对应家庭的孤儿目录。
+启动时服务先恢复 SQLite 已接受的 causal media promotion，再清理过期/无 metadata 的
+`.causal-stage` preimage；普通 `media/` 下名称为 UUID、且 SQLite 已无对应家庭的孤儿目录也会清理。
 非 UUID 运维目录、仍存在的家庭目录和符号链接不会被启动清理触碰。
 
 ## NAS / Docker Compose
@@ -191,12 +201,16 @@ docker buildx build \
 | `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | 唯一 Owner 根密码；create、Owner 登录/接管要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
 | `LEZI_MEMBER_REQUEST_RATE_LIMIT` | `10` | 每个来源地址每窗口的成员申请上限 |
-| `LEZI_RECONCILE_RATE_LIMIT` | `120` | 每个家庭成员设备每窗口的权威对账请求上限 |
 | `LEZI_MEMBER_REQUEST_TTL_HOURS` | `24` | 成员申请有效期；当前协议固定为 24 |
 | `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多开放的 pending + approved-unclaimed 成员申请数 |
 | `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/成员申请/权威对账限流窗口秒数 |
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
+
+Causal commit 另有固定、非环境可调的 fail-closed admission：60 秒内每个
+`(family_id, membership_id)` 120 次、每 family 1,200 次，并限制每个 causal root 最多 64 个
+durable open branches。精确 receipt replay 不重复计费；饱和统一返回不含家庭内容的 typed 429。
+这些进程内 rate 窗口在服务重启时清空，branch 上限则由 SQLite durable branch 计数继续执行。
 
 8765 只监听 HTTPS。容器内另有仅 loopback 可见的 readiness HTTP 8766
 供 `HEALTHCHECK` 使用，不映射到宿主。可选 LAN HTTP 8767 只提供 `/join` 和
@@ -266,9 +280,9 @@ secret 的 request/status/cancel/claim 外，接口都要求
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
-| GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle","record_membership_author"]}`，不访问 DB/文件系统 |
+| GET | `/health` | 廉价进程存活检查，正常返回 `ok`、`version` 与完整协议能力（含 `validated_deferred_fulfillment_v1`），不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（`trusted_https_endpoint_v1`、`device_sessions_v1`、`membership_devices_v1`、`atomic_bundle`、`record_membership_author`）与 `family_state:empty\|configured`，维护中返回无正文 503 |
+| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（包括灾备、因果提交与已验证延迟履约能力）与 `family_state:empty\|configured`，维护中返回无正文 503 |
 | POST | `/v1/family/create` | 仅空服务器可用；根密码幂等创建唯一家庭、Owner membership、首台 Device 与 DeviceSession |
 | POST | `/v1/owner/login` | configured 家庭用根密码幂等新增一个 Device 到唯一 Owner membership；旧 Owner Device 不受影响 |
 | POST | `/v1/owner/takeover` | 明确接管：原子撤销全部旧 Owner DeviceSession 后为当前 Device 签发 session；Member session 不受影响 |
@@ -305,6 +319,14 @@ secret 的 request/status/cancel/claim 外，接口都要求
 | PUT | `/v1/bundles/{id}/media/{uuid}` | 原子包媒体字节暂存 |
 | POST | `/v1/bundles/{id}/commit` | 单事务发布完整包（幂等） |
 | GET | `/v1/bundles/{id}` | 查询 staging/committed 与 missing_media |
+
+灾难恢复的 manifest/media/status/cancel/commit 共享恢复专用的 batch-keyed lease。该 lease
+只在请求持有或等待 journal 临界区时保留强引用，最后一个 holder/waiter 离开即回收；随机合法
+UUID 请求不会扩大普通 family lock 表或留下 durable process key。owned guard 随实际 blocking
+task 活到 I/O 完成，HTTP future 取消不能提前解锁。新 batch 在 journal 旁保存只含 token hash 的
+私有 auth envelope；错误凭证访问已有、损坏或合法但不存在的 batch 均返回相同 `401`，正确凭证
+仍看到真实 protocol/storage 错误。运行时只在锁外枚举过期候选，删除前逐 batch 取得同一 lease
+并重读 journal；缺 journal 的目录只在 Router 开放前清理。普通 family/provisioning 互斥继续使用原锁。
 
 服务每次启动生成新的 `generation`。客户端在发现 generation 变化或 cursor
 领先时执行既有 `full_resync` 契约。Record 使用 `baby_client_uuid` 跨设备关联；
@@ -424,45 +446,54 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 - PUT 以临时文件写入并同步文件，原子替换后再同步父目录，确保成功响应前 rename
   已进入文件系统持久化边界。
 
+### Causal media preimage
+
+`PUT /v1/causal/media/{uuid}` 只写入 `media/.causal-stage/`，并在 SQLite 持久绑定
+family、staging membership、UUID、SHA-256、byte size、created/expiry 与状态；不会把未被
+causal transaction 接受的字节写进最终下载路径。同 UUID/同 bytes replay 幂等，同 UUID/不同
+bytes 返回稳定冲突。单文件服从 `LEZI_MAX_MEDIA_BYTES`；每 membership 最多 64 个、每 family
+最多 256 个未消费 preimage，family staging 总字节最多 512 MiB，TTL 为 24 小时。
+
+`causal commit` 在同一 SQLite transaction 内精确匹配 UUID/SHA/size 并把成功的
+accepted/merged/branched manifest 标记为 `consumed`；commit 后才 no-replace promotion 到
+`media/{family}/{uuid}`。若在任一 crash point 中断，启动会先重试 consumed promotion，再以
+`gc_pending` journal 删除过期/无 metadata staging 字节并 fsync 目录；被稳定版本或 branch
+引用的 consumed 字节不参与 TTL GC。
+
 ### 原子同步包（`atomic_bundle`）
 
-`GET /health` 广告
-`capabilities: ["atomic_bundle", "record_membership_author"]`。当前客户端要求 health
-为 `ok` 且 capabilities 至少包含这两项；允许增加能力，`version` 仅展示、不参与门闩。
+`GET /health` 广告 `capabilities`（与 `handlers/health.rs` 一致）包含：
+`atomic_bundle`、`record_membership_author`、`device_disaster_restore_v1`、
+`validated_deferred_fulfillment_v1`、
+`causal_versions`、`wake_observation`、`source_relations`。
+当前 Android 客户端 `REQUIRED_HEALTH_CAPABILITIES` 要求 health 为 `ok` 且具备上述完整协议能力
+（含三项因果键）；生产进程（`require_protocol_cutover_release` / `from_env`）只在启动语义校验完成、
+且已验证强制升级通道的 `version_code` **与** `min_supported_version_code` 均 ≥ **20**
+（0.3.13 因果切割 floor）后才可就绪，否则拒绝启动。`version` 仅展示、不参与门闩。
+运维真值见 `config/android-release-compatibility.json`（`minimum_sync_version_code`）与
+`deploy/app-update.json`；**不要**再按 0.3.9 时代的 versionCode 16 示例规划生产切割。
 公网 `8765` 只提供 HTTPS；容器健康检查使用仅绑定 `127.0.0.1:8766` 的明文
 `/health`、`/ready` 路由，该内部 listener 不挂载任何 `/v1/*` 业务接口。
-所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
+`atomic_bundle` 仅承载不可变的 `fulfillment_candidate` 事实；所有可变根均使用
+`causal_versions` commit-first 协议，不存在 metadata-first 或 bundle 回退路径。
 `record_membership_author` 表示服务端接受并回执 membership
 作者字段。
 
 典型发送流程：
 
 1. `POST /v1/bundles` — body
-   `{ "bundle_id", "root": {type: record|care_plan|baby|custom_item|fulfillment_candidate, ...}, "media": [...], "generation"? }`
-   live media 须带正 `byte_size`；响应
+   `{ "bundle_id", "root": {type: fulfillment_candidate, ...}, "media": [], "generation"? }`；响应
    `{bundle_id, status:"staging", missing_media, staged_media}`
-2. 对每个 missing media：`PUT /v1/bundles/{bundle_id}/media/{uuid}`（原始字节）
-3. `POST /v1/bundles/{bundle_id}/commit` — 先把暂存字节原子安装到
-   `media/{family}/{uuid}` 并同步文件、家庭目录与 `media/` 根目录，再以单个 SQLite 事务写入
-   entities + 提升 rev；重复 commit 安全幂等
+2. `POST /v1/bundles/{bundle_id}/commit` — 以单个 SQLite 事务冻结 fulfillment fact
+   并提升 rev；重复 commit 安全幂等
 
 规则：
 
 - commit 前普通 `GET /v1/pull` **看不到**包内任何实体
-- 每次 bundle media 上传同时持久化声明尺寸与 SHA-256；commit 必须同时匹配
-  精确摘要和尺寸
-- 媒体优先进入持久化边界，SQLite 后发布引用；DB 失败或进程中断只会留下
-  不可见字节，不会暴露缺字节的实体。已提交 bundle 在暂存清理后重试时会逐个
-  核对已发布文件的摘要与尺寸，并再次 fsync 文件、家庭目录和 `media/` 根目录
-- 同一数据根优先用 hard link 做 no-replace 发布；NAS 文件系统不支持 hard link
-  时，改用已 fsync 的暂存副本 + no-replace rename，不覆盖冲突字节
-- 编辑新版本：另开 `bundle_id` 暂存；commit 前 pull 仍返回旧完整版本
-- 根 `updated_at` 落后于已发布版本 → commit `409`
-- tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
-- 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
-- `record`/`care_plan` 只允许 `kind=log` 的媒体成员，`baby` 只允许 `kind=avatar`；
-  `custom_item`/`fulfillment_candidate` 必须使用空媒体清单
-- 零照片 Record/CarePlan 仍提交空媒体清单的包；所有根执行当前字段、引用与成员 ACL 校验
+- bundle 必须且只能包含一个 `fulfillment_candidate` 根和空 media 清单；其他根或任意
+  media 均 fail closed
+- 同一 fact 的 `updated_at` replay 不会改写首次冻结的提交 membership、role 与 confirmed_at
+- 每家庭最多 64 个 open staging bundle
 - 活动 `custom_item` 才可用于新建 custom Record/CarePlan；同家庭 tombstone 仅保留历史
   引用完整性，允许既有根的编辑/删除和已完成计划明确关联的履行 Record，不会被任意新根选择
 - CarePlan fulfillment pair 双向不变量：`status=completed` 必须同时带非空
@@ -470,6 +501,9 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
   皆空；残缺 pair 或非 completed 携带 pair → model `422`。首次 completed 写入即冻结完整
   pair；后续清空/残缺 rewrite → `422`，完整但改绑/改时 → `409`。精确 replay 与同 bundle
   retry 幂等；stage→commit 竞态 rebind 由 commit 冻结检查拦截
+- completed CarePlan 可先于关联 Record 耐久提交，但在 Record 缺失期间连同计划媒体一起
+  排除在公开 pull 图之外；Record 到达时在同一家庭锁与 SQLite 事务复验关系，随后让完整
+  CarePlan/Record/媒体闭包对已越过旧 cursor 的客户端重新可达
 - `/v1/push` 与普通媒体 PUT 固定 `422`；GET 媒体下载保留
 - pull 发出 live Record/CarePlan 时，同页共组其全部 live `log` 媒体；客户端仍逐页完整 apply
 
@@ -498,10 +532,10 @@ docker compose start
 权威路径、权限、状态矩阵和命令见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md) § Secret handling / Credential backup and restore。
 
-### 离线 v3→current 切割（`lezi-sync offline-migrate`）
+### 离线 schema 11/12→13 准备（`lezi-sync offline-migrate`）
 
 **架构边界（权威）：** [ADR-0013](../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)
-——离线 CLI 族 + 已授权**维护窗切割**；**不是** server startup / runtime 自动迁移，也
+——开发机 copy-out CLI；**不是** server startup / runtime 自动迁移，也
 **不**推翻 [ADR-0008](../../docs/adr/0008-support-only-fresh-current-product-contracts.md)
 的 NAS fresh-current / fail-closed 合同。日常启动仍只接受精确 current schema
 （`user_version` = `DATABASE_SCHEMA_VERSION` 且形状匹配）；探测旧库后自动迁移、
@@ -513,12 +547,20 @@ destructive fallback 或部分原地改写均被禁止。
 | 主题 | 合同 |
 |------|------|
 | 阶段 A — 离线准备（维护窗前） | 对独立备份：copy-out → `dry-run` / `migrate` / `validate` 于独立 `--out`；**不** stop 现网、**不**写 live bind |
-| 阶段 B — 维护窗切割（固定顺序，不得重排） | stop → dual backup confirm → copy-back → TLS CD → health/ready（见 runbook / `cutover_maintenance_steps`） |
-| 架构不变量 | 显式 CLI；固定源 v3→current；独立临时 `--out`；`validate` 后再切换；进程只开 current |
-| Secret | 运维选定 `LEZI_MIGRATE_NEW_ROOT_PASSWORD` / `--new-root-password`（≥16）；cutover 后作 `LEZI_BOOTSTRAP_SECRET`；**禁止**文档/日志打印明文；目标 `server.secret` 始终重生成 |
+| 阶段 B — 维护窗切割 | H29 所有；H28 不 stop/copy-back/CD，当前 legacy runbook 不接受 schema-13 `out/` |
+| 架构不变量 | 显式 CLI；冻结 exact-shape 11/12→13；独立临时 `--out`；源树摘要前后一致；进程只开 current |
+| Secret / TLS | `server.secret` 与完整有效、匹配的 TLS pair 逐字节保留；不得生成、替换或轮换 |
 | Data bind | 宿主路径 bind → `/data`；uid `10001:10001`；stop/rm **不**删宿主目录 |
-| 备份 / 回滚 | 本地 copy-out + NAS 侧双备份；失败恢复 **v3 copy-out** 与 pre-cutover 镜像，非半成品 `out/` |
-| 目标校验 | `offline-migrate validate --out`（current preflight + `server.secret` 长度；≠ 完整 `/ready`） |
+| 备份 / 回滚 | H29 必须绑定本地 copy-out、NAS 侧备份、旧 image/package 与 off-repo encrypted full-data rollback |
+| 目标校验 | exact schema-13 Store shape、row counts、quick/integrity/FK、媒体 digest、secret、TLS（≠ 完整 `/ready`） |
+
+H28 仅提供 schema-13 migrator。H29 已提供独立、显式授权的
+`deploy/schema-cutover.sh`，负责 APK 预发布、outer lease、off-repo age rollback、copy-out、
+migrate/validate、staging swap、guarded CD 与 post-check；普通 CD 仍不调用 migration。H30 已用
+`deploy/schema-cutover-rehearsal.sh` 在 developer-owned loopback Docker 与临时数据根完成
+schema 11/12→13 成功路径及八个开放写入前失败点的 rollback rehearsal。该入口拒绝 NAS/CD
+变量和非回环地址；其通过不等同于家庭 NAS 已可切割。旧 `copy-back-nas-data.sh` 仍冻结为
+schema-12 legacy path，不接受 schema 13 output。
 
 **权威运维 runbook（步骤与回滚）：**
 [`deploy/copy-back-tls-cutover-runbook.md`](deploy/copy-back-tls-cutover-runbook.md)
@@ -528,25 +570,12 @@ copy-out / copy-back 脚本：[`deploy/copy-out-nas-data.sh`](deploy/copy-out-na
 
 ```bash
 # 阶段 A — 维护窗前（服务可仍运行）；与 `lezi-sync offline-migrate help` 一致
-# 勿在命令中嵌入真实 secret
-export LEZI_MIGRATE_NEW_ROOT_PASSWORD='…ops-chosen ≥16 chars…'
 lezi-sync offline-migrate dry-run  --in "$BACKUP_DIR"
 lezi-sync offline-migrate migrate  --in "$BACKUP_DIR" --out "$OUT_DIR"
 lezi-sync offline-migrate validate --out "$OUT_DIR"
-# 阶段 B — 维护窗切割（stop → dual backup → copy-back → TLS CD → health）：
-# 见权威 runbook；help 指针：
+# 阶段 B 只能由显式授权的 deploy/schema-cutover.sh 编排；help 指针：
 # lezi-sync offline-migrate copy-out-help | copy-back-help | live-cutover-help
 ```
 
-机器可读 inventory 在 `src/offline_migrate/inventory.rs`。与 live
-`hard_delete_membership` 对齐的 **departed membership** 变换（hard-delete disposition）：
-
-- **Active membership**（`left_at IS NULL`）才复制到目标库。
-- **Departed membership**（v3 `left_at IS NOT NULL`）按 hard-delete 丢弃：不复制
-  membership 行、不占用 display name、不复制 device/credential/request/session。
-- 保留的 Record / CarePlan / CustomItem / FulfillmentCandidate 以及 committed
-  bundle 的作者/提交者/stager 引用若指向 departed membership，置 null / 空串
-  （匿名事实），禁止悬空 FK 或伪归因。
-- dry-run 与 migrate 共用同一 disposition；报告区分 `memberships`（copied）与
-  `discarded_departed_memberships` / `anonymized_membership_refs`。
-- 迁移后 members API 无需也不能再“清理”旧 departed 行——目标库已无 tombstone。
+历史 v3 inventory/disposition 仍在 `src/offline_migrate/inventory.rs`，仅作为冻结历史实现
+的审计依据，不是当前 11/12→13 CLI 合同。

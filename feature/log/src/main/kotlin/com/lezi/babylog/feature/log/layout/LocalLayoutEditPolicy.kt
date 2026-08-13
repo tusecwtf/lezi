@@ -188,5 +188,3 @@ internal fun layoutEditDeletedKeys(
         knownKeys = knownKeys,
         hiddenItems = prefs.hiddenItems,
     )
-
-internal fun layoutEditSlotCount(): Int = QUICK_RECORD_SLOT_COUNT

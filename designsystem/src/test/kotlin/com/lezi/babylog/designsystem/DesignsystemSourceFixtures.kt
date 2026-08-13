@@ -3,12 +3,15 @@ package com.lezi.babylog.designsystem
 import java.io.File
 
 /**
- * Shared source-level contract helpers for designsystem chrome / audit tests.
+ * Shared chrome-policy scan helpers for Phase A bare-Material gate.
  *
  * Ticket 05 (ui-drawing-polish): **Phase A** Material chrome primitives may only
  * appear inside documented Lezi **wrapper implementation** files, and only for
  * the primitives those wrappers own. Product modules (`app`, `feature`, `core/ui`)
  * have zero allowance.
+ *
+ * Restored as REWRITE after test-redundancy Wave 1 — this is the intentional
+ * designsystem chrome whitelist, not path/line-count StructureTest debt.
  *
  * Phase A ban set (spec §Phase A / ticket 05): Button, TextButton, OutlinedButton,
  * FilterChip, OutlinedTextField, Switch, IconButton, DatePickerDialog, AlertDialog.

@@ -36,6 +36,18 @@ internal abstract class LocalDataUpgradeModule {
         implementation: OutboxRetirementUpgradeStep,
     ): LocalDataUpgradeStep
 
+    @Binds
+    @IntoSet
+    abstract fun causalRoomUpgradeStep(
+        implementation: CausalRoomUpgradeStep,
+    ): LocalDataUpgradeStep
+
+    @Binds
+    @IntoSet
+    abstract fun finalCausalRoomUpgradeStep(
+        implementation: FinalCausalRoomUpgradeStep,
+    ): LocalDataUpgradeStep
+
     companion object {
         @Provides
         @Singleton

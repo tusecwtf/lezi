@@ -1,15 +1,15 @@
-//! Private offline v3→current migration contract (family NAS ops only).
+//! Private offline migration contracts (family NAS ops only).
 //!
 //! Crate-internal inventory + one-shot migrator. **Not** wired into
 //! lezi-sync startup; daily open remains fail-closed on the current schema only.
 //!
 //! ## Surface (by ticket)
 //!
-//! - **02** — [`migrator::migrate_v3_database`] transforms v3 `lezi.db` → current.
+//! - **02** — [`migrator::migrate_v3_database`] transforms v3 `lezi.db` → frozen schema 12.
 //! - **03** — [`media::migrate_v3_data_dir`] + [`media::media_file_relative_path`].
 //! - **04** — same DB call requires an ops-provided **new root password**; writes
 //!   `families.owner_root_fingerprint` and regenerates `server.secret` beside the
-//!   dest DB so current lezi-sync can `/ready` and owner can re-login.
+//!   dest DB so the current==12 server can `/ready` and owner can re-login.
 //! - **05** — [`cli`] (`lezi-sync offline-migrate …`): copy-out help, dry-run,
 //!   migrate `--in`/`--out`, validate out/ preflight, process exit codes.
 //! - **06** — [`cutover`]: fixed maintenance-window step order, copy-back help,
@@ -18,6 +18,8 @@
 //!   help + probe script pointer (execution evidence under tracker `evidence/07/`).
 //! - **21** — [`boundary`]: ADR/README/DEPLOY/PRD + CLI help seams; locks prep-before-
 //!   window vs cutover fixed order (does **not** add a second migrator).
+//! - **H28** — [`v13`]: exact schema 11/12 → current schema 13 copy-out while
+//!   preserving identity, sessions, media, `server.secret`, and TLS bytes.
 //!
 //! ## Re-auth after cutover (no silent restore)
 //!
@@ -40,12 +42,17 @@
 #![allow(dead_code)]
 
 pub(crate) mod boundary;
+pub(crate) mod causal;
 pub(crate) mod cli;
 pub(crate) mod cutover;
+pub(crate) mod immutable;
 pub(crate) mod inventory;
 pub(crate) mod live_cutover;
 pub(crate) mod media;
 pub(crate) mod migrator;
+pub(crate) mod schema_contract;
+pub(crate) mod v11;
+pub(crate) mod v13;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -71,4 +78,10 @@ pub(crate) use media::{
 #[allow(unused_imports)]
 pub(crate) use migrator::{
     migrate_v3_database, MigrateError, MigrateReport, MIN_NEW_ROOT_PASSWORD_LEN, REAUTH_OPS_NOTE,
+};
+#[allow(unused_imports)]
+pub(crate) use v11::{migrate_v11_data_dir, migrate_v11_database, SOURCE_V11_USER_VERSION};
+#[allow(unused_imports)]
+pub(crate) use v13::{
+    migrate_v11_or_v12_data_dir_to_v13, migrate_v12_data_dir_to_v13, validate_schema13_data_dir,
 };

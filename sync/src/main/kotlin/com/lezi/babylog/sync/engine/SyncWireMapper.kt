@@ -339,6 +339,33 @@ object SyncWireMapper {
         ).toString()
     }
 
+    /**
+     * Validates the portable payload nested inside a canonical root without
+     * inventing the device-local custom-item id that Room adds on materialization.
+     */
+    internal fun requireCurrentTransportPayload(
+        type: RecordType,
+        payload: JsonObject,
+        allowIntentOnlyFeed: Boolean = false,
+    ): JsonObject {
+        require("photos" !in payload && "custom_item_id" !in payload) {
+            "payload_json 包含设备本地字段"
+        }
+        val validationPayload = if (type == RecordType.CUSTOM) {
+            JsonObject(payload + ("custom_item_id" to JsonPrimitive(1L)))
+        } else {
+            payload
+        }
+        val canonical = requireStrictCurrentPayload(
+            type = type,
+            raw = validationPayload.toString(),
+            allowIntentOnlyFeed = allowIntentOnlyFeed,
+        )
+        val portableCanonical = JsonObject(canonical - "custom_item_id")
+        require(portableCanonical == payload) { "payload_json 不是 current canonical shape" }
+        return payload
+    }
+
     private fun localPayloadForWire(
         raw: String,
         type: RecordType,

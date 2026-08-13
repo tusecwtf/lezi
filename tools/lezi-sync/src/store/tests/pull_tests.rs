@@ -1,8 +1,8 @@
-//! Domain store tests.
+//! Pull pagination and dependency-order Store tests.
 
 use super::super::*;
 use super::test_support::*;
-use crate::{PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
+use crate::PULL_PAGE_TARGET_BYTES;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -52,21 +52,6 @@ fn full_pull_emits_custom_item_dependency_before_custom_record() {
     ] {
         publish_root(&store, &principal, root, 10).unwrap();
     }
-    publish_root(
-        &store,
-        &principal,
-        entity(
-            "custom_item",
-            custom_item_id,
-            2,
-            json!({
-                "name":"睡前抚触","icon_slot":2,"created_by_membership_id":"m-owner"
-            }),
-        ),
-        10,
-    )
-    .unwrap();
-
     let page = store.pull(&family_id, 0).unwrap();
     let ordered_keys = page
         .entities
@@ -82,109 +67,7 @@ fn full_pull_emits_custom_item_dependency_before_custom_record() {
         ]
     );
 }
-#[test]
-fn pull_parent_co_groups_later_log_media_at_page_boundary() {
-    for parent_type in ["record", "care_plan"] {
-        let directory = TempDir::new().unwrap();
-        let store = Store::open(directory.path().join("lezi.db")).unwrap();
-        let family_id = family(&store);
-        let principal = owner_principal(&family_id);
-        let baby_id = Uuid::new_v4();
-        let parent_id = Uuid::new_v4();
-        let media_id = Uuid::new_v4();
-        publish_root(
-            &store,
-            &principal,
-            entity(
-                "baby",
-                baby_id,
-                1,
-                json!({
-                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                    "avatar_media_uuid":null,"birth_weight_grams":3200
-                }),
-            ),
-            10,
-        )
-        .unwrap();
-        let parent_payload = if parent_type == "record" {
-            json!({
-                "baby_client_uuid":baby_id,"type":"formula","timestamp":100,
-                "end_timestamp":null,"note":null,"payload_json":{"amount_ml":120},
-                "schema_version":2
-            })
-        } else {
-            json!({
-                "baby_client_uuid":baby_id,"type":"formula",
-                "custom_item_client_uuid":null,
-                "scheduled_at":1_700_000_000_000i64,
-                "scheduled_zone_id":"Asia/Shanghai","status":"pending",
-                "payload_json":{"amount_ml":120},"schema_version":2,"note":null,
-                "fulfilled_record_client_uuid":null,"fulfilled_at":null
-            })
-        };
-        publish_root(
-            &store,
-            &principal,
-            entity(parent_type, parent_id, 2, parent_payload.clone()),
-            10,
-        )
-        .unwrap();
 
-        let filler: Vec<_> = (0..199)
-            .map(|index| {
-                entity(
-                    "baby",
-                    Uuid::new_v4(),
-                    3,
-                    json!({
-                        "nickname":format!("填充{index}"),"sex":"female",
-                        "birthday":"2025-01-02","avatar_media_uuid":null,
-                        "birth_weight_grams":3200
-                    }),
-                )
-            })
-            .collect();
-        for root in filler {
-            publish_root(&store, &principal, root, 10).unwrap();
-        }
-        let media_payload = if parent_type == "record" {
-            json!({
-                "kind":"log","record_client_uuid":parent_id,
-                "mime":"image/jpeg","byte_size":3
-            })
-        } else {
-            json!({
-                "kind":"log","care_plan_client_uuid":parent_id,
-                "mime":"image/jpeg","byte_size":3
-            })
-        };
-        publish_bundle(
-            &store,
-            &principal,
-            entity(parent_type, parent_id, 4, parent_payload),
-            vec![entity("media", media_id, 4, media_payload)],
-            10,
-        )
-        .unwrap();
-
-        let first_page = store.pull(&family_id, 1).unwrap();
-        assert!(first_page.has_more, "{parent_type}");
-        assert_eq!(first_page.entities.len(), PULL_PAGE_ENTITY_LIMIT - 1);
-        let second_page = store.pull(&family_id, first_page.cursor).unwrap();
-        let parent_index = second_page
-            .entities
-            .iter()
-            .position(|entity| entity.client_uuid == parent_id.to_string())
-            .unwrap();
-        let media_index = second_page
-            .entities
-            .iter()
-            .position(|entity| entity.client_uuid == media_id.to_string())
-            .unwrap();
-        assert_eq!(media_index + 1, parent_index, "{parent_type}");
-    }
-}
 #[test]
 fn pull_page_is_bounded_by_serialized_bytes_as_well_as_entity_count() {
     let directory = TempDir::new().unwrap();
@@ -231,56 +114,4 @@ fn pull_page_is_bounded_by_serialized_bytes_as_well_as_entity_count() {
     assert!(first.has_more);
     assert!(first.cursor < 11);
     assert!(serialized_bytes <= PULL_PAGE_TARGET_BYTES);
-}
-#[test]
-fn push_rejects_an_entity_that_cannot_fit_on_a_bounded_pull_page() {
-    let directory = TempDir::new().unwrap();
-    let store = Store::open(directory.path().join("lezi.db")).unwrap();
-    let family_id = family(&store);
-    let baby_id = Uuid::new_v4();
-    let principal = owner_principal(&family_id);
-    publish_root(
-        &store,
-        &principal,
-        entity(
-            "baby",
-            baby_id,
-            1,
-            json!({
-                "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                "avatar_media_uuid":null
-            }),
-        ),
-        100,
-    )
-    .unwrap();
-    let record_id = Uuid::new_v4();
-    let result = publish_root(
-        &store,
-        &principal,
-        entity(
-            "record",
-            record_id,
-            2,
-            json!({
-                "baby_client_uuid":baby_id,
-                "type":"diary",
-                "custom_item_client_uuid":null,
-                "timestamp":100,
-                "end_timestamp":null,
-                "note":null,
-                "payload_json":{"body":"x".repeat(PULL_PAGE_TARGET_BYTES)},
-                "schema_version":2
-            }),
-        ),
-        100,
-    );
-
-    assert!(matches!(result, Err(StoreError::PullEntityTooLarge)));
-    assert!(store
-        .pull(&family_id, 0)
-        .unwrap()
-        .entities
-        .iter()
-        .all(|entity| entity.client_uuid != record_id.to_string()));
 }

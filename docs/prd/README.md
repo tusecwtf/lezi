@@ -1,7 +1,11 @@
 # 乐记 — 产品 PRD
 
 > **个人/家庭使用** · Android · 无商业化
-> 决策日：2026-07-25 · 当前发布：**0.3.8**
+> 决策日：2026-07-25 · **tree 发布线**以 `config/android-release-compatibility.json` 为准
+> 当前 tree 已激活 **0.4.0** / code **21** / Room **28** / local-data contract **5** /
+> server schema **13** / floor **21** / `causal_sync_v2`。0.3.13/code 20/Room 27 仍是升级源；
+> 本地激活不表示家庭 NAS 已完成生产切割。
+> Wire 权威：[`causal-sync-wire.md`](./causal-sync-wire.md)。
 
 | 项 | 内容 |
 |----|------|
@@ -29,10 +33,11 @@
 | 文件 | 内容 |
 |------|------|
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
-| [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
-| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
+| [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约；**tree** SleepStart/WakeObservation 与疑似重复汇总（NAS 切割见 scratch ticket 09） |
+| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前已交付合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
+| [causal-sync-wire.md](./causal-sync-wire.md) | **0.4.0 conflict-v2 runtime 合同**：commit-first、N-way ConflictSnapshot、choice-only resolution 与升级边界；H27 已完成本地激活，生产切割仍待后续票 |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
-| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
+| [tech.md](./tech.md) | Android 技术栈、模块、权限、验收；区分 0.3.13 升级源、0.4.0 当前 tree 与尚未执行的生产切割 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 
 ---
@@ -183,7 +188,7 @@
 3. 备注支持最近输入候选（本机）。
 4. 时间轴默认 **新→旧**，可设置切换。
 5. 日汇总：睡眠时长、尿/便次数、奶量等。
-6. **一日时间条**：以选中日为中心、由连续四个本地午夜构造的三本地日横向三轨（通常 72h，DST 切换窗口为 71h/73h；非今日默认 D 为主、左右略露邻日；今日默认对准现在）；可横向拖动在真实窗口内窥视平移（不改选中日）；记录、当前时刻、午夜分隔、绘制/命中与平移共用同一瞬时轴；邻日标记变浅、午夜日界仅线无字；三天任一有日图类型即出图；跨午夜/DST 睡眠按实际经过时长连续绘制；汇总/明细/图例仍绑定选中日；筛选用 A2（D 上 0 条不进入）且选中后三日窗口内同类全亮。
+6. **一日时间条**：围绕全局选中日维护 D−1\|D\|D+1 连续三本地日三轨工作轴，空数据也显示；今天默认并实时吸附 `[现在−24h, 现在]`，历史日默认完整自然日。横拖线性跟手，一个有效宽度移动当前一日视窗，无速度阈值、无惯性、松手即停；按视窗日界规则一次最多换到相邻日，并同步 TopBar、汇总/成长/日历日期锚点。今天不进入未来，历史浏览只有到达现在边界才恢复实时吸附；换日保持同宝宝类型筛选与高亮，无匹配时显示分类空态，切换宝宝才清除。记录、当前时刻、午夜分隔、跨午夜/DST 睡眠、绘制/命中与拖动共用同一瞬时轴；完整合同见 `ui.md` §3 / §5.2。
 7. 全量删除需多重确认。
 8. **排泄**：尿尿大中小图标档；便便量/软硬/色图标档（见 §3.1）。
 9. **最近备注**：候选严格按当前宝宝与记录类型查询。
@@ -222,6 +227,9 @@
 
 - 「睡下」「醒来」；自动算时长。
 - 连续两次睡下等异常：仍写入，列表标 `!`。
+- **0.3.13 tree 已落地（NAS 切割待维护窗）：** 睡下为 SleepStart 记录；醒来为独立 WakeObservation（可多条、
+  暂定最早合法观察、作者/Owner 确认有效观察）；重叠开放睡眠不自动改写。详见
+  [`data-model.md`](./data-model.md) §3.5.1 与 ADR-0021。
 
 ### 4.4 体温
 
@@ -237,6 +245,9 @@
 - 聚合时钟：点事实仅 `timestamp ≤ now` 计入累计；睡眠按
   `[start, min(end, now)]` 裁剪。履行允许的「已确认但时刻未到」记录可在时间轴
   展示，但暂不进汇总，到点后自然计入（见 [data-model.md](./data-model.md) §5.1）。
+- **0.3.13 tree 已落地（NAS 切割待维护窗）：** 疑似重复组在时间轴 **展开全部来源**；未确认时汇总显示
+  指标 **上下界**；确认后按选定展示版单值聚合，其它来源/照片以 **来源关系** 永久保留
+  （见 [data-model.md](./data-model.md) §5.2、ADR-0021）。同 UUID 冲突徽章不阻断录入。
 
 ### 4.6 成长
 
@@ -358,3 +369,5 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 | 2026-07-22 | 排泄增强：便便分档 + **图标化**；尿尿增加 **大/中/小** 量档 |
 | 2026-07-22 | 配方奶 **默认 5ml 一档**；滚轮/加减/芯片与设置同步 |
 | 2026-07-23 | 所有记录改为用途专属二级确认面板；统一备注与圆盘时间；新增睡下/醒来状态确认及睡眠中头像反馈 |
+| 2026-08-08 | 冻结 0.3.13 因果领域/wire/ADR（规划）：CONTEXT 术语、ADR-0019/0020/0021、causal-sync-wire；标明对 ADR-0017/0018 与近邻/LWW/整行 sleep 的 supersession 范围 |
+| 2026-08-10 | 冻结 0.4.0 conflict-v2 目标：ADR-0022、commit-first、完整 N-way ConflictSnapshot、choice-only resolution、direct-base restore 与 shared Kotlin/Rust golden corpus；H27 前不激活 capability |

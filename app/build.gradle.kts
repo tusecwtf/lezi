@@ -44,6 +44,17 @@ val localDataRoomSchemas = localDataContractEntries.joinToString(",") { entry ->
     "${(entry["contract_version"] as Number).toInt()}:" +
         (entry["room_schema"] as Number).toInt()
 }
+val androidReleaseCompatibilityFile = rootProject.file(
+    "config/android-release-compatibility.json",
+)
+val androidReleaseCompatibility =
+    JsonSlurper().parse(androidReleaseCompatibilityFile) as Map<*, *>
+val releasedAndroidVersions =
+    (androidReleaseCompatibility["released_versions"] as List<*>).map { it as Map<*, *> }
+val androidUpgradeTarget = androidReleaseCompatibility["upgrade_target"] as Map<*, *>
+val cataloguedAndroidVersions = releasedAndroidVersions + androidUpgradeTarget
+val appUpdateMetadataFile = rootProject.file("tools/lezi-sync/deploy/app-update.json")
+val appUpdateMetadata = JsonSlurper().parse(appUpdateMetadataFile) as Map<*, *>
 
 android {
     namespace = "com.lezi.babylog"
@@ -53,8 +64,8 @@ android {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.3.8"
+        versionCode = 21
+        versionName = "0.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         manifestPlaceholders["localDataContractVersion"] = currentLocalDataContract
@@ -131,6 +142,7 @@ android {
         getByName("androidTest").assets.srcDir(
             rootProject.file("core/database/schemas"),
         )
+        getByName("androidTest").assets.srcDir(rootProject.file("config"))
     }
 }
 
@@ -264,8 +276,103 @@ val validateLocalDataContractLedger = tasks.register("validateLocalDataContractL
     }
 }
 
+val validateAndroidReleaseCompatibilityCatalog = tasks.register(
+    "validateAndroidReleaseCompatibilityCatalog",
+) {
+    group = "verification"
+    description = "Validates the released Android upgrade-source compatibility catalog."
+    inputs.files(androidReleaseCompatibilityFile, localDataContractFile)
+    doLast {
+        check(androidReleaseCompatibility["application_id"] == android.defaultConfig.applicationId) {
+            "Release compatibility application_id must match the Android applicationId"
+        }
+        val baseline =
+            (androidReleaseCompatibility["permanent_upgrade_baseline_version_code"] as Number)
+                .toInt()
+        val versionCodes = releasedAndroidVersions.map {
+            (it["version_code"] as Number).toInt()
+        }
+        check(versionCodes == (baseline..versionCodes.last()).toList()) {
+            "Released production upgrade-source versionCodes must be contiguous"
+        }
+        val lastRelease = releasedAndroidVersions.last()
+        val targetVersionCode = (androidUpgradeTarget["version_code"] as Number).toInt()
+        check(targetVersionCode == versionCodes.last() + 1) {
+            "upgrade_target must immediately follow the last released upgrade source"
+        }
+        val allowedBuildIdentities = setOf(
+            lastRelease["version_code"] to lastRelease["version_name"],
+            androidUpgradeTarget["version_code"] to androidUpgradeTarget["version_name"],
+        )
+        check(
+            android.defaultConfig.versionCode to android.defaultConfig.versionName in
+                allowedBuildIdentities,
+        ) {
+            "Android build must match the latest released source or the explicit upgrade target"
+        }
+        val contractsByVersion = localDataContractEntries.associate { entry ->
+            (entry["contract_version"] as Number).toInt() to
+                (entry["room_schema"] as Number).toInt()
+        }
+        cataloguedAndroidVersions.forEach { release ->
+            val contract = (release["local_data_contract"] as Number).toInt()
+            val roomSchema = (release["room_schema"] as Number).toInt()
+            check(contractsByVersion[contract] == roomSchema) {
+                "Released versionCode ${release["version_code"]} has an undeclared " +
+                    "local-data contract/Room boundary"
+            }
+        }
+        val contractIntroductions = localDataContractEntries.associate { entry ->
+            (entry["contract_version"] as Number).toInt() to
+                (entry["introduced_in_version_code"] as Number).toInt()
+        }
+        contractsByVersion.keys.forEach { contract ->
+            val firstRelease = cataloguedAndroidVersions.first {
+                (it["local_data_contract"] as Number).toInt() == contract
+            }
+            check(
+                (firstRelease["version_code"] as Number).toInt() ==
+                    contractIntroductions.getValue(contract),
+            ) {
+                "Local-data contract $contract introduction must match the release catalog"
+            }
+        }
+    }
+}
+
+val validateAndroidAppUpdateMetadataCompatibility = tasks.register(
+    "validateAndroidAppUpdateMetadataCompatibility",
+) {
+    group = "verification"
+    description = "Validates update metadata against the release compatibility policy."
+    inputs.files(androidReleaseCompatibilityFile, appUpdateMetadataFile)
+    doLast {
+        check(appUpdateMetadata["package_name"] == androidReleaseCompatibility["application_id"]) {
+            "App-update metadata package_name must match the Android applicationId"
+        }
+        check(
+            appUpdateMetadata["min_supported_version_code"] ==
+                androidReleaseCompatibility["minimum_sync_version_code"],
+        ) {
+            "The compatibility catalog and app-update metadata must share one sync floor"
+        }
+        val allowedMetadataIdentities = listOf(
+            releasedAndroidVersions.last(),
+            androidUpgradeTarget,
+        ).map {
+            it["version_code"] to it["version_name"]
+        }.toSet()
+        check(
+            appUpdateMetadata["version_code"] to appUpdateMetadata["version_name"] in
+                allowedMetadataIdentities,
+        ) {
+            "App-update metadata must identify the latest release or the upgrade target"
+        }
+    }
+}
+
 tasks.matching { it.name in setOf("preDebugBuild", "preReleaseBuild") }.configureEach {
-    dependsOn(validateLocalDataContractLedger)
+    dependsOn(validateLocalDataContractLedger, validateAndroidReleaseCompatibilityCatalog)
 }
 
 dependencies {
@@ -320,4 +427,6 @@ dependencies {
     androidTestImplementation(libs.truth)
     testImplementation(libs.junit)
     testImplementation(libs.truth)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.mockito.core)
 }

@@ -516,9 +516,6 @@ internal data class QuickRecordDraft(
     val isEditingCarePlan: Boolean
         get() = carePlanId != null && editCarePlan
 
-    private fun intervalValidationError(nowMillis: Long): String? =
-        intervalValidationResult(nowMillis)?.message
-
     private fun intervalValidationResult(nowMillis: Long): ComposerValidationResult? {
         val warning = intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning
             ?: return null

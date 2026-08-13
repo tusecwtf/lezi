@@ -1,10 +1,14 @@
 package com.lezi.babylog.feature.log.composer
+
+import android.net.Uri
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -25,6 +29,9 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.platform.testTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.ui.CameraCaptureLauncher
+import com.lezi.babylog.core.ui.CameraCaptureOutcome
+import com.lezi.babylog.core.ui.OwnedCameraCapture
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -45,6 +52,130 @@ import com.lezi.babylog.feature.log.photo.*
 class RecordComposerDiscardDeviceTest {
     @get:Rule
     val compose = createComposeRule()
+
+    @Test
+    fun recordCameraEntryReleasesCancelAndDurablyImportedCaptureAcrossRestoration() {
+        val restoration = StateRestorationTester(compose)
+        val camera = FakeCameraCapture()
+        val imported = AtomicReference<Uri?>(null)
+        restoration.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L),
+                    interactionKey = "camera-restoration",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = false,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = {},
+                    onDismiss = {},
+                    onDelete = null,
+                    onConfirm = {},
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onImportCapturedPhoto = { uri, done ->
+                        imported.set(uri)
+                        done(true)
+                    },
+                    onRemovePhoto = {},
+                    cameraCaptureLauncherFactory = { key, outcome ->
+                        camera.rememberLauncher(key, outcome)
+                    },
+                )
+            }
+        }
+
+        compose.onNodeWithText("拍照").assertIsDisplayed().performClick()
+        assertEquals(1, camera.launchCount)
+        compose.runOnIdle { camera.emitCancelled() }
+        assertEquals(1, camera.releaseCount)
+
+        compose.onNodeWithText("拍照").performClick()
+        val capturedUri = camera.pendingUri
+        compose.runOnIdle { camera.emitCaptured() }
+        compose.waitUntil(timeoutMillis = 5_000) { camera.releaseCount == 2 }
+        assertEquals(capturedUri, imported.get())
+        assertEquals(2, camera.releaseCount)
+
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("拍照").assertIsDisplayed()
+
+        compose.onNodeWithText("拍照").performClick()
+        compose.runOnIdle { camera.emitFailure(CameraCaptureOutcome.LaunchFailed) }
+        compose.onNodeWithText("无法打开相机，请稍后重试").assertIsDisplayed()
+        assertEquals(3, camera.releaseCount)
+    }
+
+    private class FakeCameraCapture {
+        var launchCount: Int = 0
+            private set
+        var releaseCount: Int = 0
+            private set
+        val pendingUri: Uri
+            get() = requireNotNull(pending).uri
+        private lateinit var onOutcome: (CameraCaptureOutcome) -> Unit
+        private var pending: FakeOwnedCapture? = null
+
+        private val launcher = object : CameraCaptureLauncher {
+            override fun launch() {
+                pending?.release()
+                launchCount += 1
+                pending = FakeOwnedCapture(
+                    token = "fake-record-$launchCount",
+                    uri = Uri.parse("content://camera-test/record-$launchCount.jpg"),
+                    onReleased = { releaseCount += 1 },
+                )
+            }
+
+            override fun dispose() {
+                pending?.release()
+                pending = null
+            }
+        }
+
+        @Composable
+        fun rememberLauncher(
+            ownershipKey: Any?,
+            outcome: (CameraCaptureOutcome) -> Unit,
+        ): CameraCaptureLauncher {
+            onOutcome = outcome
+            return launcher
+        }
+
+        fun emitCancelled() {
+            pending?.release()
+            pending = null
+            onOutcome(CameraCaptureOutcome.Cancelled)
+        }
+
+        fun emitCaptured() {
+            val capture = requireNotNull(pending)
+            pending = null
+            onOutcome(CameraCaptureOutcome.Captured(capture))
+        }
+
+        fun emitFailure(outcome: CameraCaptureOutcome) {
+            pending?.release()
+            pending = null
+            onOutcome(outcome)
+        }
+    }
+
+    private class FakeOwnedCapture(
+        override val token: String,
+        override val uri: Uri,
+        private val onReleased: () -> Unit,
+    ) : OwnedCameraCapture {
+        private var released = false
+
+        override fun release() {
+            if (released) return
+            released = true
+            onReleased()
+        }
+    }
 
     @Test
     fun promptSurvivesRestorationAndContinueKeepsTheDraftSurface() {
@@ -174,6 +305,7 @@ class RecordComposerDiscardDeviceTest {
                     onConfirm = {},
                     onStartNursingTimer = {},
                     onImportPhotos = {},
+                    onImportCapturedPhoto = { _, done -> done(false) },
                     onRemovePhoto = {},
                 )
             }
@@ -249,6 +381,7 @@ class RecordComposerDiscardDeviceTest {
                     onConfirm = {},
                     onStartNursingTimer = {},
                     onImportPhotos = {},
+                    onImportCapturedPhoto = { _, done -> done(false) },
                     onRemovePhoto = {},
                 )
             }

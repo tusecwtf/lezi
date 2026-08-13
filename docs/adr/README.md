@@ -19,8 +19,13 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0013](./0013-offline-migrate-is-maintenance-window-cutover.md) | offline-migrate 是已授权维护窗中的离线切割工具 | accepted |
 | [0014](./0014-owner-device-restores-only-empty-family-servers.md) | 只允许旧 Owner 设备恢复空家庭服务器 | accepted |
 | [0015](./0015-isolate-lan-invite-install-distribution.md) | 隔离家庭 LAN 邀请首装分发与可信同步 | accepted |
-| [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | partially superseded by ADR-0017（保留先对账/临时 plan，取代无 head 协议限制） |
-| [0017](./0017-authoritative-reconcile-settles-local-deltas.md) | 家庭服务器权威裁决必须终结本机待对账修改 | accepted |
+| [0016](./0016-reconcile-before-ephemeral-publish-planning.md) | 先对账，再从 Room 临时规划家庭发布 | partially superseded by ADR-0017 and ADR-0022; Room facts remain truth, one immutable envelope per pending mutation is allowed |
+| [0017](./0017-authoritative-reconcile-settles-local-deltas.md) | 家庭服务器权威裁决必须终结本机待对账修改 | partially superseded by ADR-0019/0020 for 0.3.13+ causal LWW vocabulary; settle-before-publish skeleton retained |
+| [0018](./0018-neighbor-duplicate-records-and-tombstone-wins.md) | 跨成员近邻重复由服务器隐式落选，护理记录墓碑永胜 | partially superseded by ADR-0021 for 0.3.13+ new data; historical tombstones stay hidden |
+| [0019](./0019-server-validates-constraints-not-care-truth.md) | 服务器验证约束，不裁决护理真相 | accepted (0.3.13 tree landed; production cutover pending) |
+| [0020](./0020-stable-projection-immutable-versions-and-branches.md) | 稳定投影 + 不可变版本/分支，三方合并与显式 resolution | partially superseded by ADR-0022 for 0.4.0 commit-first and choice-only resolution; causal versions/branches retained |
+| [0021](./0021-wake-observation-and-nondestructive-duplicate-groups.md) | WakeObservation 与非破坏性疑似重复分组 | accepted (0.3.13 tree landed; production cutover pending) |
+| [0022](./0022-commit-first-choice-only-conflict-snapshots.md) | Commit-first 与 choice-only ConflictSnapshot | accepted (0.4.0 contract frozen; runtime activation waits for ticket 27) |
 
 ## Numbering
 

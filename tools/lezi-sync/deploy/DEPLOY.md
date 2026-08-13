@@ -20,7 +20,7 @@ operator entrypoint that may replace the production container is `push-and-deplo
 | Compose engine on NAS | **zdocker** bundled `docker-compose` v2 (`/zspace/applications/services/zdocker/bin/docker-compose`) |
 | Bootstrap secret | Live container is authoritative during ordinary CD; a matching mode-`600` persistent NAS file is seeded/verified before replace |
 | Credential backup | `push-and-deploy.sh` must stream the root secret + TLS pair into a local `age`-encrypted off-repo backup before ordinary replace |
-| Concurrency | One NAS-side owner-token lease spans package transfer, credential snapshot, replace, and any deferred post-start snapshot; competing export/CD fails closed |
+| Concurrency | Ordinary CD holds an app-update publication lease plus the data owner-token lease across package transfer and replace. Schema cutover holds the publication lease while it publishes the forced-update pair, then acquires the data lease before releasing the publication lease; competing CD cannot enter the handoff gap. |
 | Package identity | Measured linux/amd64 image + full image id + pinned Lezi APK signer certificate + closed file inventory/SHA-256; extra/stale remote files are fatal |
 | TLS identity | Ordinary CD never rotates it; generate once only on a verified fresh data root, then validate and reuse the exact pair on every replace |
 | System `docker compose` | Not required / not installed |
@@ -40,6 +40,8 @@ operator entrypoint that may replace the production container is `push-and-deplo
 | `promote-nas-package.sh` | NAS | Internal | Atomically replace the stable release directory only after staging and the prior package are validated. |
 | `init-tls.sh`, `tls-certificate-sha256.sh`, `tls-spki.sh` | NAS or isolated developer fixture | Internal/read-only except authorized bootstrap | Distinguish absent/present/unsafe TLS state, validate the pair, and measure exact certificate/SPKI identity. |
 | `copy-out-nas-data.sh`, `copy-back-nas-data.sh`, `live-cutover-probe.sh` | Maintenance workflow | Authorized maintenance window only | Prepare or execute the separately governed offline-migration cutover; they are never part of ordinary CD. |
+| `schema-cutover.sh`, `schema-cutover-steps.sh` | Developer machine | Exact `LEZI_SCHEMA_CUTOVER_APPROVAL` only | H29 0.4.0/schema-13 state machine; owns APK prepublish, outer lease, encrypted rollback, migration, staged swap, target activation and post-check. |
+| `schema-cutover-rehearsal.sh`, `schema-cutover-rehearsal-steps.sh` | Developer-owned isolated Docker only | Exact `LEZI_ISOLATED_SCHEMA_CUTOVER_REHEARSAL=1`; loopback and `/tmp`/`/var/tmp` roots only | H30 schema 11/12 success plus all eight pre-write failure/rollback cases. Never targets the family NAS and is not a production deploy entrypoint. |
 | `backup-pre-tls-cutover-state.sh`, `restore-pre-tls-cutover-state.sh`, `validate-pre-tls-cutover-state.py` | Developer machine | Authorized maintenance preparation | Capture and validate the pre-cutover container start contract for rollback staging; they do not make the incomplete live rollback executable. |
 | `validate-credential-bundle.sh` | Developer machine | Internal/read-only | Validate the pipe-only credential bundle before encryption or recovery staging. |
 | `docker-compose.nas.yml.tpl`, `.env.example`, `app-update.json` | Package inputs | Never executed directly | Define the rendered runtime shape, a deliberately empty local secret example, and the APK update metadata contract. |
@@ -115,7 +117,7 @@ directory to a separately named legacy archive. Do not copy its `.env` into the 
 
 1. **package-nas.sh** — require a locally inspectable image and measure `.Os=linux` + `.Architecture=amd64` → verify the APK signature against tracked public pin `config/release-apk-signer-sha256.txt` → record Docker's complete `config.digest` (the identity produced by `docker load` and reported by the running container, not a local OCI manifest-list digest) → `docker save` the exact tar → render `docker-compose.yml` → add fail-closed app-update artifacts/current helpers → write `MANIFEST.json` + exact-inventory `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`.
 2. **push-and-deploy.sh** — fresh-package by default (reuse only with explicit `LEZI_SKIP_PACKAGE=1`) → repeat local helper/inventory/checksum and APK-signer attestation → acquire the stable data-bind-derived NAS lease → create a new mode-`700` random-suffixed staging directory → scp and validate there before execution → stream/validate/encrypt the live credential snapshot → replace while retaining the lease. On success promote staging to the stable `NAS_REMOTE_DIR`; a prior exact package is removed only after the promotion validates. Failed staging is left for deliberate inspection/cleanup.
-3. **remote-deploy.sh** (on NAS) — require the outer push lease (direct production execution is forbidden) → revalidate the exact package → resolve live/persistent secret sources → seed or byte-compare the persistent file → revalidate immediately before `docker load` → require loaded id and measured OS/architecture to match → validate persistent TLS and pin exact certificate SHA-256 + SPKI → install APK metadata → require stop and rm to succeed → start via Compose/docker → require the running container `.Image` to equal the manifest id → HTTPS `/health` + `/ready` with exact version → recheck both TLS digests.
+3. **remote-deploy.sh** (on NAS) — require the outer push lease (direct production execution is forbidden) → revalidate the exact package → resolve live/persistent secret sources → seed or byte-compare the persistent file → revalidate immediately before `docker load` → require loaded id and measured OS/architecture to match → validate persistent TLS and pin exact certificate SHA-256 + SPKI → snapshot the prior update pair, atomically install APK metadata, and require the still-running old container's LAN install channel to serve the exact APK hash (restore the prior pair on failure) → require stop and rm to succeed → start via Compose/docker → require the running container `.Image` to equal the manifest id → HTTPS `/health` + `/ready` with exact version → recheck both TLS digests.
 4. A verified fresh/recovery flow with no live container cannot take a pre-replace live backup. It is allowed only with the existing explicit secret/recovery authorization and must complete an encrypted backup immediately after the new container becomes healthy.
 
 ### Package and deployment lease fail-closed behavior
@@ -184,10 +186,15 @@ Metadata contract (`app-update.json`, snake_case):
   value get `code=client_update_required` on authoritative sync paths **and disaster-restore
   write paths**, but can still call the app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
-- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
-- The server enforces `min_supported_version_code` on authoritative sync and disaster-restore
-  writes **only** when the on-disk channel is verified (metadata + APK sha256). Metadata-only
-  or integrity-failing packages fail open (do not brick into forced upgrade with nothing to install).
+- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`) via **atomic pair publish**: both artifacts are staged completely, then the APK is renamed into place **before** metadata so a running service never observes “new `min_supported` + missing/old/broken package” under the final paths. When an old container is running, CD snapshots the prior pair and restores it if the live 8767 hash proof fails, before any stop/rm. Smoke: `deploy/test-remote-deploy-app-update-atomic.sh`.
+- Older server generations enforce `min_supported_version_code` on authoritative sync and
+  disaster-restore writes **only** when the on-disk channel is verified (metadata + APK sha256),
+  so metadata-only or integrity-failing packages fail open. **0.3.13 (causal) production** is the
+  current cutover boundary: `from_env` fails startup unless the verified channel already carries
+  `version_code` **and** `min_supported_version_code` ≥ **20** (`PROTOCOL_CUTOVER_CLIENT_VERSION_CODE`),
+  so the causal generation cannot become ready without an installable forced update. Historical
+  note only: 0.3.9 used the same fail-closed pattern with floor **16**; do **not** reuse 16 as the
+  production floor while this tree publishes minSupported=20.
 - Joined clients use authenticated `GET /v1/app-update` (JSON) and
   `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
   server-side). Separately, the LAN-only invite-install listener anonymously serves the same
@@ -213,9 +220,14 @@ home LAN safety is entirely the min floor + installable package:
    versionCode, treat schema/allowlist/entity set as frozen. Do not rely on older phones
    skipping unknown keys. Next break → repeat 2–4.
 
-Relationship to today's baseline: e.g. floor `6` means versionCodes in the supported range
-share one frozen wire; raising the floor is how a home LAN forces upgrades before silent
-pull stalls. Product narrative: [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
+The permanent lossless APK baseline is versionCode `6`; it is not the current sync floor.
+The current floor is **`20`** (catalog `minimum_sync_version_code` and deploy
+`app-update.json` `min_supported_version_code`), so versionCodes **20 through the latest
+release** share one frozen wire. After a verified minSupported=20 publish, versions **6 through
+19** are sync-blocked (same role as 6–15 after the historical floor-16 cutover) but must still
+reach the same verified APK through the authenticated update route when available or LAN recovery
+on 8767. Raising the floor is how a home LAN forces upgrades before silent pull stalls. Product
+narrative: [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.1.
 
 Invite-install smoke after deploy is separate from readiness: `curl -fsS
 http://<LEZI_TLS_HOST>:8767/join` must return the branded page, and
@@ -361,7 +373,7 @@ the operator's approved secure cleanup procedure.
 
 ## offline-migrate 架构边界（非普通 CD）
 
-`lezi-sync offline-migrate` 是已授权**维护窗**中的 v3→current **离线切割** CLI，
+`lezi-sync offline-migrate` 是 schema 11/12→13 的显式 copy-out **离线准备** CLI，
 **不是**服务启动/runtime 自动迁移，也**不**推翻 NAS fresh-current / fail-closed
 （[ADR-0008](../../../docs/adr/0008-support-only-fresh-current-product-contracts.md)）。
 架构 disposition 见
@@ -371,13 +383,40 @@ the operator's approved secure cleanup procedure.
 |------|------|
 | 普通 CD | `package-nas` / `push-and-deploy` / 容器重启 **不得执行** `offline-migrate` |
 | 启动合同 | 现网进程只打开精确 current schema；旧库 fail closed，无自动迁移 |
-| 切割流水线 | 显式 CLI、停服、固定源 v3→current、独立临时 `out/`、`validate` 后再 copy-back |
-| 权威 runbook | [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)（步骤、双备份、回滚、secret 转发） |
-| 当前开窗门 | pre-TLS rollback 的 exact container recreation 尚无审计过的可执行 helper；runbook 将其列为 blocker，未补齐前不得开始 live cutover |
-| Cutover secret | 仅维护窗：迁移期新根密码 → `LEZI_BOOTSTRAP_SECRET`；可用 `LEZI_FORWARD_BOOTSTRAP_SECRET=1`；**普通 CD 勿设** |
+| 切割流水线 | H28 只提供冻结 11/12→13 migrator；H29 的独立 `schema-cutover.sh` 串联实际维护阶段，普通 CD 仍不可调用 migrator |
+| 权威 runbook | 本节与 [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)；旧 `copy-back-nas-data.sh` 仍冻结在 schema 12，不可用于 H29 |
+| 当前开窗门 | H30 已在 developer-owned isolated instance 完成 schema 11/12 的成功与八阶段 rollback rehearsal；生产仍由 release ticket 09 重新确认，且不得复用测试证书、fixture 或临时根 |
+| Identity | H28 byte-preserves `server.secret` 与 TLS pair；H29 必须证明 pre/post certificate + SPKI 完全一致 |
 | 发布二进制 | 可含该子命令 ≠ 滚动 schema 兼容产品承诺 |
 
-产品 README 摘要：[`../README.md`](../README.md) § 离线 v3→current 切割。
+### Dedicated schema cutover
+
+`schema-cutover.sh` is the release-specific one-shot orchestration entry; its exact source/target
+tuple and approval token live in the release ticket and cutover runbook, not this version-neutral CD
+runbook. It performs every local image/package/signer check before acquiring the data-bind-derived
+data lease. A separate publication lease serializes the required APK-before-data-lease step with
+ordinary CD and remains held through every automatic rollback boundary. The data lease spans encrypted
+credential capture, stopped-source rollback capture, migration, staged activation, validation, and release;
+the publication lease is released last.
+
+The target starts behind an explicit read-only gate. Health/readiness, image identity, TLS identity,
+and migrated data semantics are checked while mutations still return `503`. Any failure through that
+point automatically restores the frozen source bind, source image, and prior APK pair. Only after
+those checks pass does the workflow remove the gate and restart the target; failures after that
+write-open boundary require explicit incident authorization and reconciliation. Release-specific
+evidence and isolated rehearsal remain mandatory before using this command on a family NAS.
+
+H30 的隔离复验入口是 `schema-cutover-rehearsal.sh`。它只接受回环地址、非特权测试端口和
+`/tmp`/`/var/tmp` 下 mode-700 空目录，并拒绝 `NAS_SSH`、`NAS_REMOTE_DIR`、
+`LEZI_DATA_HOST_PATH`。测试数据可由 `create-schema-cutover-rehearsal-fixture.sh` 生成；运行者必须
+显式提供固定的 schema-11/schema-12 旧镜像、0.4.0 目标镜像以及目标 APK/metadata。输出的
+`matrix.tsv` 与 `receipts.sha256` 记录两条成功路径和 backup、copy-out、migrate、validate、
+copy-back、start、health、APK-hash 八类失败回滚。隔离 adapter 直接驱动 H29
+`schema-cutover.sh`，只把其生产 SSH/NAS phase runner 映射成本机 Docker；receipt 逐行证明
+facts、identity/session、causal associations、media、secret、TLS、APK pair 与 health/pull。
+此入口不获得生产维护权限。
+
+产品 README 摘要：[`../README.md`](../README.md) § 离线 schema 11/12→13 准备。
 
 ## TLS identity
 
@@ -393,6 +432,9 @@ values; fingerprints carried only inside the candidate ciphertext are not a trus
   `LEZI_ALLOW_TLS_BOOTSTRAP=1` for the first deployment to a verified fresh data root where both
   files are absent. Ordinary CD leaves the flag unset. If both files are absent from an established/configured family
   data root, treat that as an incident and stop; do not use CD to create a replacement identity.
+- `LEZI_TLS_INSPECT_ONLY=1` is a separate read-only capability. It never creates the data root or
+  `tls/`, never stages temporary files, and never shares bootstrap authorization. Container-side
+  inspection mounts the existing data root read-only; any unreadable/partial/unsafe state aborts.
 - Existing-file checks and validation must run from the helper-container uid `10001` view. The NAS
   SSH user not being able to traverse a mode-`700` bind does **not** mean the identity is absent.
 - A missing half, invalid/expired certificate, mismatched key, helper-container read failure, or

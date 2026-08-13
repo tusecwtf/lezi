@@ -191,34 +191,6 @@ class TimelineAxisTest {
     }
 
     @Test
-    fun todayCenteredViewportCentersNowAndClampsAtEdges() {
-        val duration = TimelineAxis.DEFAULT_VIEWPORT_MINUTES
-        val noonOnD = TimelineAxis.PRIMARY_DAY_START_MINUTES + 12 * 60
-        val centered = TimelineAxis.todayCenteredViewportStartMinutes(noonOnD, duration)
-        assertEquals(noonOnD - duration / 2, centered)
-
-        // Near content start: clamps to 0 (no blank before window).
-        assertEquals(0, TimelineAxis.todayCenteredViewportStartMinutes(10, duration))
-
-        // Near content end: clamps to max start.
-        val maxStart = TimelineAxis.THREE_DAY_CONTENT_MINUTES - duration
-        assertEquals(
-            maxStart,
-            TimelineAxis.todayCenteredViewportStartMinutes(
-                TimelineAxis.THREE_DAY_CONTENT_MINUTES - 5,
-                duration,
-            ),
-        )
-        // Centered viewport always fully inside content.
-        val late = TimelineAxis.todayCenteredViewportStartMinutes(
-            TimelineAxis.PRIMARY_DAY_END_MINUTES + 20 * 60,
-            duration,
-        )
-        assertTrue(late >= 0)
-        assertTrue(late + duration <= TimelineAxis.THREE_DAY_CONTENT_MINUTES)
-    }
-
-    @Test
     fun panViewportStartMovesOppositeFingerAndClamps() {
         val duration = TimelineAxis.DEFAULT_VIEWPORT_MINUTES
         val axis = duration.toFloat() // 1px per content minute

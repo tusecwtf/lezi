@@ -18,7 +18,9 @@ import kotlin.math.abs
  * - Once past slop the dominant axis wins: horizontal motion is consumed and reported
  *   as **cumulative** delta from down via [onHorizontalDrag]; vertical motion is left
  *   unconsumed so an outer LazyColumn / pull-to-refresh takes over.
- * - [onGestureEnd] always runs in `finally` with `wasHorizontal` so callers can settle.
+ * - [onGestureEnd] runs only after a pointer-up; [onGestureCancel] runs when the pointer
+ *   coroutine is cancelled or its tracked pointer disappears, so preview-only state is
+ *   never mistaken for a committed release.
  */
 internal suspend fun PointerInputScope.trackSlopHorizontalGesture(
     onGestureStart: () -> Unit = {},
@@ -26,6 +28,7 @@ internal suspend fun PointerInputScope.trackSlopHorizontalGesture(
     onHorizontalStart: () -> Unit = {},
     onHorizontalDrag: (totalDeltaX: Float) -> Unit,
     onGestureEnd: (wasHorizontal: Boolean) -> Unit = {},
+    onGestureCancel: (wasHorizontal: Boolean) -> Unit = {},
 ) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
@@ -35,6 +38,7 @@ internal suspend fun PointerInputScope.trackSlopHorizontalGesture(
         var totalY = 0f
         var pastSlop = false
         var isHorizontal = false
+        var released = false
         val pointerId = down.id
         try {
             while (true) {
@@ -42,6 +46,7 @@ internal suspend fun PointerInputScope.trackSlopHorizontalGesture(
                 val change = event.changes.firstOrNull { it.id == pointerId } ?: break
                 if (!change.pressed) {
                     if (!pastSlop) onTap?.invoke(down.position)
+                    released = true
                     break
                 }
                 val delta = change.positionChange()
@@ -66,7 +71,11 @@ internal suspend fun PointerInputScope.trackSlopHorizontalGesture(
                 }
             }
         } finally {
-            onGestureEnd(isHorizontal)
+            if (released) {
+                onGestureEnd(isHorizontal)
+            } else {
+                onGestureCancel(isHorizontal)
+            }
         }
     }
 }

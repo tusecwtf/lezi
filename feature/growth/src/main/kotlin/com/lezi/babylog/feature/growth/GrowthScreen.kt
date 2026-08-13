@@ -76,6 +76,7 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.TransientShallowSyncStatus
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziHairlineColor
 import com.lezi.babylog.designsystem.LeziTextButton
@@ -326,27 +327,18 @@ fun GrowthRoute(
                     com.lezi.babylog.designsystem.PageHero(
                         eyebrow = "",
                         title = "成长",
-                        trailing = {
-                            LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
-                        },
                     )
                 }
 
                 item(key = "growth_sync", contentType = "growth_sync") {
-                    Text(
-                        shallowSyncStatus.text,
-                        style = LeziTypography.Meta,
-                        color = if (
-                            shallowSyncStatus.state in setOf(
-                                ShallowSyncState.Error,
-                                ShallowSyncState.ReauthRequired,
-                            )
-                        ) {
-                            MaterialTheme.colorScheme.error
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        modifier = Modifier.testTag("growth_shallow_sync_status"),
+                    TransientShallowSyncStatus(
+                        text = shallowSyncStatus.text,
+                        isError = shallowSyncStatus.state in setOf(
+                            ShallowSyncState.Error,
+                            ShallowSyncState.ReauthRequired,
+                        ),
+                        isUserRefreshing = isRefreshing,
+                        contentTestTag = "growth_shallow_sync_status",
                     )
                 }
 
@@ -364,14 +356,16 @@ fun GrowthRoute(
                     )
                 }
 
+                item(key = "growth_add", contentType = "growth_add") {
+                    LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
+                }
+
                 if (ui.points.isEmpty()) {
                     item(key = "growth_empty", contentType = "growth_empty") {
                         StateContainer(
                             kind = StateKind.Empty,
                             title = "还没有测量",
                             message = "添加身长/身高或体重后，这里会显示趋势与参考曲线。",
-                            actionLabel = "去录入",
-                            onAction = { openNewMeasurement() },
                         )
                     }
                 } else {
