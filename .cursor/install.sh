@@ -108,36 +108,13 @@ PROPS
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Matt Pocock coding skills (https://github.com/mattpocock/skills).
-#    Install ONLY the stable "coding" bucket (skills/engineering/*) into the
-#    user-global Cursor skills dir so future Cloud Agents auto-discover them.
-#    The in-testing bucket (skills/in-progress/*) and the non-coding buckets
-#    (misc/, productivity/, deprecated/) are deliberately excluded. Tracks the
-#    latest main; a fetch failure warns but never fails the environment build.
-# ---------------------------------------------------------------------------
-log "Matt Pocock coding skills"
-MP_SKILLS_DEST="$HOME/.cursor/skills/mattpocock"
-mp_tmp="$(mktemp -d)"
-if git clone --depth 1 --branch main https://github.com/mattpocock/skills.git \
-        "$mp_tmp/skills" >/dev/null 2>&1; then
-    mp_src="$mp_tmp/skills/skills/engineering"
-    rm -rf "$MP_SKILLS_DEST"
-    mkdir -p "$MP_SKILLS_DEST"
-    mp_count=0
-    for skill_dir in "$mp_src"/*/; do
-        [ -f "${skill_dir}SKILL.md" ] || continue   # skip README and non-skill entries
-        cp -R "$skill_dir" "$MP_SKILLS_DEST/"
-        mp_count=$((mp_count + 1))
-    done
-    echo "Installed $mp_count coding skills into $MP_SKILLS_DEST (mattpocock/skills @ $(git -C "$mp_tmp/skills" rev-parse --short HEAD))"
-else
-    echo "WARNING: could not fetch mattpocock/skills; skipping coding-skills install" >&2
-fi
-rm -rf "$mp_tmp"
-
-# ---------------------------------------------------------------------------
-# 6. Warm caches so the first agent action is fast, and prove the toolchains
+# 5. Warm caches so the first agent action is fast, and prove the toolchains
 #    resolve end-to-end. Deterministic build/fetch only (no flaky test gating).
+#
+#    Note: Matt Pocock's coding skills are NOT installed here. Cloud Agents do
+#    not surface skills written to $HOME/.cursor/skills at install time; they
+#    load repo-committed skills from .cursor/skills/. Those skills therefore
+#    live in-repo at .cursor/skills/mattpocock/ instead of in this script.
 # ---------------------------------------------------------------------------
 log "Warm Gradle (build debug APK)"
 ./gradlew :app:assembleDebug --no-daemon
