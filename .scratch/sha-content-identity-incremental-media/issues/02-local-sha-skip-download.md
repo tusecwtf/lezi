@@ -18,6 +18,19 @@
 
 因果根 pull 的 `media[]` **已经有** `sha256`。本票先用这份清单，不改 HTTP。
 
+## Flow this ticket owns
+
+对照 [spec.md](../spec.md) 下行 before/after。本票只替换
+`stageLogMediaDownloads` / `downloadMissingMedia` 的 skip 条件。
+
+```text
+Before: UUID + updatedAt + localUri 非空 → 不 GET
+After:  远端 sha256 + 本地文件（同 UUID 或跨 UUID 同 digest）→ 不 GET
+        否则 GET，落盘，再算 SHA；对不上整页失败
+```
+
+空增量、握手、pull JSON 形状不在本票验收里。
+
 ## Behavior
 
 1. Room **28→29** 相邻迁移：`media_assets.sha256` 可空，64 位小写 hex 或 null。

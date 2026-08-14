@@ -12,6 +12,16 @@
 `PUT /v1/causal/media/{media_uuid}` 已对 **同一 UUID + 同一 SHA + 同一 size** 幂等。
 履行克隆、计划图带入记录会 **新 UUID、同一文件**。客户端仍会再 PUT 一遍最多 10 MiB。
 
+## Flow this ticket owns
+
+对照 [spec.md](../spec.md) 上行 before/after。commit 步骤不变。
+
+```text
+Before: 新 UUID → 必 PUT 整文件
+After:  新 UUID + 本机已有已发布同 SHA → bind（0 字节）
+        未命中 / 旧 NAS 4xx → 完整 PUT
+```
+
 ## Behavior
 
 1. 客户端冻结 spool 后：若本机存在 `sha256` 相同且 `remoteUri` 非空的行，

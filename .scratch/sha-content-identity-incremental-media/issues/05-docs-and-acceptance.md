@@ -24,7 +24,9 @@
       抓包或 fake backend 计数证明无重复 `GET` / 无重复 `PUT` body
 - [ ] 原子包：缺文件或 SHA 不符时，对端看不到半成品记录
 - [ ] 空增量周期不要求变快；验收不得把握手/探测时间算进本 tracker
+- [ ] 带图下拉例子与 spec「带图下拉请求数」一致：3 张里 2 张本机已有 → 1 次 GET，克隆上行 0 字节 PUT body（04 落地时）
 - [ ] 不改 NAS TLS 身份；证书测试仍隔离
+- [ ] PRD 写回的流程叙述与 spec before/after 同一条河，不得写成 have-set pull
 
 ## Comments
 

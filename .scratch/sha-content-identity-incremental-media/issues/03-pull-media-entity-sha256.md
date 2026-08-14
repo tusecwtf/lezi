@@ -16,6 +16,12 @@ record/care_plan 的 `media[]` 拿到 digest。下列情况 02 看不到远端 S
 - 父根已在更早页 apply，本页只剩 media sidecar；
 - 旧 `updatedAt` 规则把「路径在」当成命中，却无法证明内容。
 
+## Flow this ticket owns
+
+对照 [spec.md](../spec.md) 下行 After 的「没有远端 SHA → 退回 updatedAt」。
+本票让独立 `media` 实体也带 `sha256`，使这条退回路径在 03 之后消失。
+不改 GET 次数规则本身（仍由 02 的 skip owner 执行）。
+
 ## Contract
 
 1. 独立 media 实体 payload 在现网 closed keys 上 **增加** `sha256`

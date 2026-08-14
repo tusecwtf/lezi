@@ -23,12 +23,21 @@
 8. **上行** 同 UUID+SHA 的 `PUT` 幂等保持。新 UUID 复用家庭已有 blob 是 04 的兼容扩展，
    旧服务器必须能回退完整 `PUT`。
 
+## Cycle contract (before vs after)
+
+整周期步骤与 0.4.1 相同，见 [spec.md](../spec.md)「Sync flow」。本票锁定：
+
+- [ ] 完整周期仍是 handshake →（可选 members）→ pull 页 → 齐照片 → Room → 冻结 → PUT/bind → commit
+- [ ] LocalWrite 仍无 pull、不推进 cursor
+- [ ] 实现票只改「齐照片 / PUT」两处的 skip 条件，不得改握手、探测、cursor 语义
+- [ ] spec 的 before/after 表是实现与验收的对照权威；票 02/04 不得写第二套流程
+
 ## Deliverables
 
 - [ ] 本 tracker `spec.md` 被 PRD/ADR 指针引用，或本票把上述 8 条写进
       `docs/prd/causal-sync-wire.md` 的「实现注记」段（不改 closed key 权威表，除非 03/04 落地）
 - [ ] `CONTEXT.md` 若需要：内容身份 / 字节复用 与 记录同步包 的关系（一句话，不造新术语洪水）
-- [ ] 明确非目标写进 spec（已起草，本票只确认不漂移）
+- [ ] spec「Sync flow: before vs after」不漂移：骨架同一条河，只改照片字节要不要传
 
 ## Comments
 

@@ -67,6 +67,127 @@ ADR-0005 原子包（已被 ADR-0008 取代为 fresh-current，原子可见性�
 旧服务端不会绑定 → 客户端必须能回退完整 `PUT`。这是兼容扩展，不是 mixed-generation
 第二套协议。
 
+## Sync flow: before (0.4.1) vs after (this tracker)
+
+骨架不变。0.4.1 与本 tracker 落地后都是同一条河；只改照片字节要不要传。
+
+```text
+回前台 / 下拉          本机刚写完（LocalWrite）
+        │                      │
+        ▼                      ▼
+ 握手 POST /v1/sync/handshake   同一握手
+ 目录 generation 变了才拉成员   同一
+        │                      │
+        ▼                      │
+ GET /v1/pull 增量页            不 pull、不推进 cursor
+ 每页：先齐照片，再写 Room      │
+        │                      │
+        └──────────┬───────────┘
+                   ▼
+            冻结 dirty 根
+                   ▼
+         PUT 照片预图（有图时）
+                   ▼
+         POST /v1/causal/commit
+```
+
+握手、`cursor`、commit-first、原子可见性、媒体串行（只减次数）都不动。
+
+### 下行（票 02 / 03）
+
+**Before（0.4.1 `stageLogMediaDownloads`）：**
+
+```text
+pull 到 media 实体
+    │
+    ├─ 本机有同一 UUID
+    │     且 updatedAt >= 远端
+    │     且 localUri 非空  → 不 GET
+    │
+    └─ 否则 GET /v1/media/{uuid} 整文件
+         下完才允许这页进 Room、推进 cursor
+```
+
+**After：**
+
+```text
+pull 到根 + media[]（带 sha256）
+    │
+    ├─ 同一 UUID，本地文件在，SHA 相等     → 不 GET
+    ├─ 不同 UUID，本机已有同一 SHA 的文件 → 复用路径，不 GET
+    ├─ 没有远端 SHA                      → 才退回 updatedAt 规则（03 补齐后应消失）
+    └─ 否则 GET，落盘后再算一遍 SHA
+         对不上：整页失败，cursor 不动
+```
+
+| 场景 | Before | After |
+|------|--------|-------|
+| 空增量，无新图 | 握手 + 空 pull | 一样，不要求更快 |
+| 改备注，图没变，本机文件还在 | 多半不 GET（`updatedAt` 没抬） | 明确不 GET（SHA 相等） |
+| 全量重拉 / `updatedAt` 抬高，图没变 | 常会再 GET | SHA 相等则不 GET |
+| 履行克隆：新 UUID，同一张图 | 对端再 GET | 复用本机已有文件 |
+| 本机文件丢了 | 路径空就 GET | 必须 GET，下完验 SHA |
+| 第一次加入 | 历史图全下 | 一样 |
+
+### 上行（票 04）
+
+**Before：**
+
+```text
+冻结根（清单里已有 sha256）
+    │
+    ├─ 这个 UUID 已有同 SHA 的 PUT receipt → 不重传
+    └─ 新 UUID（即使文件一模一样）        → PUT 整文件
+              │
+              ▼
+         POST commit（只带清单，不带字节）
+```
+
+**After：**
+
+```text
+冻结根
+    │
+    ├─ 同 UUID + 同 SHA receipt        → 不 PUT（现网就有）
+    ├─ 新 UUID，本机已有已发布的同 SHA → 尝试 bind（空 PUT / 只声明 SHA）
+    │     家庭 consumed 库命中         → receipt，0 字节
+    │     未命中或旧 NAS               → 完整 PUT
+    └─ 家庭里没有这张图               → 完整 PUT
+              │
+              ▼
+         POST commit（合同不变）
+```
+
+| 场景 | Before | After |
+|------|--------|-------|
+| 同一条记录重试提交 | 不重复 PUT | 一样 |
+| 计划图 clone 成记录图（新 UUID） | 再上传最多 10 MiB | bind，0 字节 |
+| 另一台手机第一次发这张图 | 必须 PUT | 必须 PUT |
+| 对端 NAS 还不懂 bind | — | 4xx 后完整 PUT，周期仍成功 |
+
+### 带图下拉请求数（例子）
+
+对端新来一条日记，3 张图里有 2 张本机履行时已经有过：
+
+```text
+Before
+  handshake
+  pull（JSON：记录 + 3 个 media 实体）
+  GET 图1
+  GET 图2
+  GET 图3
+  （若本机还要回传克隆）PUT 图1'  PUT 图2'
+
+After
+  handshake
+  pull（同一份 JSON，根清单带 sha256）
+  （图1、图2 SHA 命中，0 GET）
+  GET 图3
+  （上行若走 04）bind 图1'  bind 图2'   ← 无 body
+```
+
+图 3 没下完，这条日记对用户仍不可见。
+
 ### 明确不做
 
 - 用短 hashid / 非 SHA-256 当身份
