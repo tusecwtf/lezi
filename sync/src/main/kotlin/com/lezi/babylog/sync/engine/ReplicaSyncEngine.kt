@@ -1811,14 +1811,18 @@ internal class ReplicaSyncEngine(
         val wakeObservations = wakeObservationDao.listPendingSync()
         val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync()
         val capturedPendingCreatorAcknowledgements = mutableSetOf<CreatorAcknowledgementRef>()
-        materializeLocalMedia(
-            includeAvatars = session.role != FamilyRole.Member,
-            babies = babySnapshots,
-        )
-        // Avatar inspection can suspend. Re-read every pending Baby before
-        // materializing its plan row so a concurrent profile edit is either
-        // packaged as one current epoch or rejected later by the push CAS.
-        val babies = babyDao.listPendingSync()
+        val babies = if (babySnapshots.isNotEmpty()) {
+            materializeLocalMedia(
+                includeAvatars = session.role != FamilyRole.Member,
+                babies = babySnapshots,
+            )
+            // Avatar inspection can suspend. Re-read every pending Baby before
+            // materializing its plan row so a concurrent profile edit is either
+            // packaged as one current epoch or rejected later by the push CAS.
+            babyDao.listPendingSync()
+        } else {
+            emptyList()
+        }
         val directlyChangedMedia = mediaDao.listPendingSync()
         val referencedMedia = buildList {
             babies.forEach { baby ->
