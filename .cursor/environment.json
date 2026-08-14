@@ -1,4 +1,0 @@
-{
-  "name": "lezi (Android app + lezi-sync)",
-  "install": "bash .cursor/install.sh"
-}
