@@ -959,46 +959,52 @@ pub(crate) async fn pull_entities(
         // member has durable public bytes, omit both the incomplete member and its owner.
         // Finalization advances their revisions so a later pull cannot strand the group
         // behind a cursor observed while filesystem promotion was pending.
-        let media_ids = page
+        let has_live_media = page
             .entities
             .iter()
-            .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
-            .map(|entity| entity.client_uuid.clone())
-            .collect::<BTreeSet<_>>();
-        let published_media = blocking_state
-            .store
-            .published_media(&family_id, &media_ids)?;
-        let pullable_media = page
-            .entities
-            .iter()
-            .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
-            .filter(|entity| {
-                media_entity_is_pullable(
-                    blocking_state.as_ref(),
-                    &family_id,
-                    entity,
-                    &published_media,
-                )
-            })
-            .map(|entity| entity.client_uuid.clone())
-            .collect::<BTreeSet<_>>();
-        let blocked_owners = page
-            .entities
-            .iter()
-            .filter(|entity| {
-                entity.entity_type == "media"
-                    && entity.deleted_at.is_none()
-                    && !pullable_media.contains(&entity.client_uuid)
-            })
-            .filter_map(media_owner_key)
-            .map(|(entity_type, client_uuid)| (entity_type.to_owned(), client_uuid.to_owned()))
-            .collect::<BTreeSet<_>>();
-        page.entities.retain(|entity| {
-            if entity.entity_type == "media" && entity.deleted_at.is_none() {
-                return pullable_media.contains(&entity.client_uuid);
-            }
-            !blocked_owners.contains(&(entity.entity_type.clone(), entity.client_uuid.clone()))
-        });
+            .any(|entity| entity.entity_type == "media" && entity.deleted_at.is_none());
+        if has_live_media {
+            let media_ids = page
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+                .map(|entity| entity.client_uuid.clone())
+                .collect::<BTreeSet<_>>();
+            let published_media = blocking_state
+                .store
+                .published_media(&family_id, &media_ids)?;
+            let pullable_media = page
+                .entities
+                .iter()
+                .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+                .filter(|entity| {
+                    media_entity_is_pullable(
+                        blocking_state.as_ref(),
+                        &family_id,
+                        entity,
+                        &published_media,
+                    )
+                })
+                .map(|entity| entity.client_uuid.clone())
+                .collect::<BTreeSet<_>>();
+            let blocked_owners = page
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.entity_type == "media"
+                        && entity.deleted_at.is_none()
+                        && !pullable_media.contains(&entity.client_uuid)
+                })
+                .filter_map(media_owner_key)
+                .map(|(entity_type, client_uuid)| (entity_type.to_owned(), client_uuid.to_owned()))
+                .collect::<BTreeSet<_>>();
+            page.entities.retain(|entity| {
+                if entity.entity_type == "media" && entity.deleted_at.is_none() {
+                    return pullable_media.contains(&entity.client_uuid);
+                }
+                !blocked_owners.contains(&(entity.entity_type.clone(), entity.client_uuid.clone()))
+            });
+        }
         Ok(page)
     })
     .await?;
