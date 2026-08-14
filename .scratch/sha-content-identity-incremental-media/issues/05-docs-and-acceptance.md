@@ -3,7 +3,7 @@
 **What to build:** 把已落地行为写回 PRD/数据模型，并用测试证明「比 SHA、不重传」
 只发生在内容层，原子包仍然成立。
 
-**Blocked by:** 02；若 03/04 已做则一并收口。
+**Blocked by:** 02；若 03/04/06 已做则一并收口。
 
 **Status:** ready-for-agent
 

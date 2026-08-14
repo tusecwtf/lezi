@@ -59,10 +59,34 @@ Room 自增 `id` 才是本机根，而且已经不进 wire。
 空 pull 就是整库权威投影相等。再哈希一遍本地库不会比 cursor 更增量，mismatch
 时反而只能全量重拉。
 
-本 tracker 只在 **单张照片字节** 上用 SHA。UUID 继续当行身份。若以后要省掉
-「空 pull」这一趟 JSON，只能在握手里带 **服务器权威投影** 的 snapshot hash
-（排序后的稳定 `version_id` / `content_hash`），相等则跳过 pull 页；那是另一张
-可选票，且 **仍按 UUID 寻址每一行**，不得进入 02–04。
+本 tracker 只在 **单张照片字节** 上用 SHA。UUID 继续当行身份。空 pull 的省略见
+下方 Git 映射与票 06，不得进入 02–04 的媒体 skip。
+
+## Git 映射（优雅做法，不是整库 hash）
+
+Git 的实践是：**ref / tree 里只带对象 ID，blob 另传；本地用对象库按 ID 查，
+缺了再取。** 它不是每轮把工作区打成一个 SHA，也不是用 JSON 当校验载荷。
+
+| Git | 乐记（本 tracker） | 重不重 |
+|-----|-------------------|--------|
+| blob id = content SHA | 照片 `sha256` | 64 hex，约 80 字节 JSON |
+| tree 条目 = 名字 + blob id | 根 `media[]`：`media_uuid` + `sha256` | 树，不是文件 |
+| commit / ref tip | 家庭 `rev` + `generation`（现网 cursor） | 一个整数 |
+| `git fetch`：tip 没变则结束 | 空 pull；票 06 可在握手比 tip 后跳过 pull | 省一趟小 JSON |
+| 本地 `.git/objects` + index | Room `sha256` → `local_uri` | 每行多 32–64 字节，相对 10 MiB 图可忽略 |
+| 新 commit 引用已有 blob | 票 04 bind：新 UUID 指向已有 blob | 0 字节上传 |
+| have/want 列出大量 object id | **不做默认路径** | 我们已有线性 cursor，不必每轮上报全库 SHA |
+
+JSON 里的 `sha256` 是 **tree 条目**，用来知道「要哪块 blob」，不是拿整段 JSON
+做校验。重的是 `GET`/`PUT` 的图片字节。把 SHA 从 JSON 拿掉，客户端就无法在
+不下载的情况下做 Git 式比对，只会退回 `updatedAt` 或再传文件。
+
+本机存 SHA 不是牺牲存储，是对象库索引。每轮对文件现算 SHA 才是牺牲性能；
+所以 02 只在导入/下载时算一次，之后只比已存 ID。
+
+默认协商仍是：服务器用 cursor 给出 **变了的 tree**（根 JSON + 清单里的 SHA ID），
+客户端对本地对象库做 diff，只取缺失 blob。这已经是 Git「先比 ID、再传 diff」。
+不在每轮把本地所有 SHA 发给服务器（那是没有 tip/cursor 时才需要的 have/want）。
 
 原子包不变：根元数据可以先在 JSON 里到，**对用户可见**仍要等该包全部
 照片字节就绪（本机已有或新下载）。hash 命中只是「字节已就绪」的一种证明。
@@ -215,6 +239,7 @@ After
 ### 明确不做
 
 - 用短 hashid / 非 SHA-256 当身份
+- 整库 / 整份 Room SHA 当同步单位，或不再用 UUID 做行身份
 - 客户端每轮上报全库 hash 换掉 cursor
 - 用 `version_id` 相等跳过照片（根没变也会缺本地文件）
 - 跨家庭内容寻址（只在同一 `family_id` 内复用 blob）
@@ -226,13 +251,14 @@ After
 | 票 | 内容 | 协议 |
 |----|------|------|
 | 01 | 冻结身份合同与非目标 | 文档 |
-| 02 | Room 存 SHA + 下行 skip / 跨 UUID 复用 | 无新 HTTP |
+| 02 | 本机对象库：存 SHA，按 ID 取缺失 blob | 无新 HTTP |
 | 03 | 独立 `media` pull 实体带 `sha256`（02 覆盖不到的页） | 小 closed-key 扩展 |
 | 04 | 家庭内按 SHA 绑定，跳过同内容 `PUT` | commit/PUT 兼容扩展 |
 | 05 | PRD/测试/双端验收 | — |
+| 06 | 握手比家庭 tip，跳过空 pull（可选） | 握手 closed-key 扩展 |
 
-Frontier = **01**。02 不依赖 03；03 只在「页里只有独立 media、没有父根清单」时成为必要。
-04 不阻塞 02 的下载收益。
+Frontier = **01**。02 不依赖 03/06；03 只补 sidecar 盲区。04 不阻塞 02。
+06 不阻塞媒体 skip，且不得改成整库 SHA 或 have-set。
 
 ## Release
 

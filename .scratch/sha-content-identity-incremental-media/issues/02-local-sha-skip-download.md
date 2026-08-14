@@ -1,7 +1,7 @@
-# 02 — Room 存 SHA，下行按 digest 跳过 GET
+# 02 — 本机对象库：按 SHA ID 取缺失 blob
 
-**What to build:** 本机记住每张图的 `sha256`，下载前按内容比对；命中则不
-`GET /v1/media/{uuid}`。同一 digest 的不同 UUID 复用已有 `local_uri`。
+**What to build:** 本机用 `sha256 → local_uri` 当 Git 对象库。pull 树里的 SHA
+只是对象 ID；本地有则不 `GET`，没有才取 blob。同一 digest 的不同 UUID 复用路径。
 
 **Blocked by:** 01.
 
@@ -61,3 +61,4 @@ After:  远端 sha256 + 本地文件（同 UUID 或跨 UUID 同 digest）→ 不
 
 - 本票是内网「库不大但仍慢」里唯一能先落地的主收益：少串行 `GET`。
 - 空增量不会因此变快；不要把握手/探测算进本票验收。
+- 存 SHA 不是牺牲存储（索引）；每轮现算文件 SHA 才是牺牲性能，所以只回填一次。

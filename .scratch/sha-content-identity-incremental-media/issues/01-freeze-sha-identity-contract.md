@@ -24,8 +24,11 @@
    旧服务器必须能回退完整 `PUT`。
 9. **禁止整库 SHA 同步。** 不得把 `client_uuid` 降成本机根、用整份 Room（或整份
    家庭库）的一个 digest 当 pull/commit 单位。UUID 仍是跨设备行身份。见 spec
-   「Rejected: 整库 SHA + 不再区分 UUID」。握手里带服务器权威 snapshot hash
-   以跳过空 pull 不在 02–04，另票且不得取消 UUID。
+   「Rejected」与「Git 映射」。
+10. **Git 式协商。** `sha256` 在 JSON 里是 tree 条目（对象 ID），不是校验载荷。
+    本机 Room `sha256` 是对象库索引。默认只把 cursor 给出的新 tree 与本地对象库
+    diff，取缺失 blob。禁止每轮上报全库 SHA have-set。跳过空 pull 只允许票 06
+    比 **服务器家庭 tip**（`rev`/`generation` 或等价权威 digest），不得进入 02–04。
 
 ## Cycle contract (before vs after)
 
@@ -33,7 +36,8 @@
 
 - [ ] 完整周期仍是 handshake →（可选 members）→ pull 页 → 齐照片 → Room → 冻结 → PUT/bind → commit
 - [ ] LocalWrite 仍无 pull、不推进 cursor
-- [ ] 实现票只改「齐照片 / PUT」两处的 skip 条件，不得改握手、探测、cursor 语义
+- [ ] 02–04 只改「齐照片 / PUT」的 skip；06 只允许握手多一个家庭 tip 以跳过空 pull
+- [ ] 不得改探测、cursor 增量语义，不得改成 have-set 或整库 SHA
 - [ ] spec 的 before/after 表是实现与验收的对照权威；票 02/04 不得写第二套流程
 
 ## Deliverables
@@ -47,3 +51,5 @@
 
 - 用户口中的 SHAID = 现网 `sha256`，不是 Hashids，也不是包级新 ID。
 - 2026-08-14：否决「整库 SHA、不再区分 UUID」。比 hash 只针对媒体字节。
+- 2026-08-14：Git 实践映射为 tree+blob+本地对象库；JSON 里的 SHA 是对象 ID。
+  空 pull 省略另见票 06。
