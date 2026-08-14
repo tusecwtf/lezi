@@ -1,0 +1,96 @@
+# SHA 内容身份：媒体增量比对与跳过重传
+
+Status: ready-for-agent
+
+Baseline: `115aaeb7`（0.4.1 / versionCode 22 / Room 28 / schema 13 / `causal_sync_v2`）
+
+Authority: [`docs/prd/causal-sync-wire.md`](../../docs/prd/causal-sync-wire.md) §4.6、
+[`docs/prd/data-model.md`](../../docs/prd/data-model.md) §3.7、
+[`CONTEXT.md`](../../CONTEXT.md)「记录同步包 / 计划同步包」、
+ADR-0005 原子包（已被 ADR-0008 取代为 fresh-current，原子可见性仍有效）。
+
+本 tracker **不** 替换 pull `cursor` / `generation`，**不** 新开 have-set 同步协议，
+**不** 发明第二套 hashid。SHA 身份就是现网已经冻结的 **64 位小写 hex `sha256`**。
+
+## Problem
+
+家庭同步的体积在照片字节，不在 SQLite 行数。0.4.1 已经：
+
+- 用 `rev > cursor` 做实体 JSON 增量；
+- 用 `version_id` 决定要不要 apply 根；
+- 用 `PUT` 的 UUID+SHA+size 做上行幂等；
+- 在因果根清单里携带每张图的 `sha256`。
+
+但下行跳过仍看 `updatedAt` + `localUri`。本机 `media_assets` 不存 digest。
+独立 pull `media` 实体的 closed keys 不含 `sha256`。履行克隆会给同一文件新
+`media_uuid`，对端按 UUID 再 `GET` / 本机再 `PUT` 一遍。
+
+空增量（握手 + 空 pull）本来就便宜。该省的是：**全量重拉、依赖页带旧图、
+同图新 UUID、本机路径空了之后的补传**。
+
+## Solution
+
+两层身份，不要混：
+
+| 身份 | 键 | 管什么 |
+|------|----|--------|
+| 行身份 | `media_uuid` / `client_uuid` | 归属、tombstone、因果清单成员 |
+| 内容身份 | `sha256` + `byte_size` | 字节是否已经在本机或本家庭 |
+
+比对只发生在内容层。行身份变了、内容没变 → 复用字节，不重传。
+内容变了 → 必须传，传完再验 SHA，对不上整包失败。
+
+原子包不变：根元数据可以先在 JSON 里到，**对用户可见**仍要等该包全部
+照片字节就绪（本机已有或新下载）。hash 命中只是「字节已就绪」的一种证明。
+
+### 下载（先做，客户端为主）
+
+`stageLogMediaDownloads` / `downloadMissingMedia` 在 `GET /v1/media/{uuid}` 之前：
+
+1. 取远端 digest：优先本页因果根 `media[]` 的 `sha256`；没有则用本机已存列；
+   再没有才退回现网 `updatedAt` 规则（不得猜）。
+2. 同一 `media_uuid`：本地文件在，且存档 SHA 或现算 SHA 相等 → 不 `GET`。
+3. 不同 UUID、同一 SHA、已有可读文件 → 复用 `local_uri`（引用计数已允许共享路径）。
+4. 文件缺、SHA 缺、对不上 → 照旧 `GET`，落盘后再算 SHA；对不上整页失败、不推进 cursor。
+
+本机必须把算过的 SHA 写进 Room，避免每轮对大图重哈希。
+
+### 上传（后做，服务端绑定）
+
+同 UUID+SHA 的 `PUT` 已幂等，不动。增量指 **新 UUID、家庭里已有同一 SHA 的 consumed 字节**：
+
+- 客户端冻结 spool 后已有 SHA。若本机任一已发布行（`remoteUri` 非空）持有同一 SHA，
+  可跳过 `PUT`，只在 commit 清单里声明新 `media_uuid` + 该 SHA。
+- 服务端 commit 在本家庭 consumed 库按 SHA+size 找到已有 blob，绑定到新 UUID。
+- 找不到 → fail closed，客户端再走完整 `PUT`。禁止「只传 hash、假定对端有文件」。
+
+旧服务端不会绑定 → 客户端必须能回退完整 `PUT`。这是兼容扩展，不是 mixed-generation
+第二套协议。
+
+### 明确不做
+
+- 用短 hashid / 非 SHA-256 当身份
+- 客户端每轮上报全库 hash 换掉 cursor
+- 用 `version_id` 相等跳过照片（根没变也会缺本地文件）
+- 跨家庭内容寻址（只在同一 `family_id` 内复用 blob）
+- 让记录/计划在照片未齐时可见
+- 改握手、成员目录、可用性探测（那是另一个体感问题）
+
+## Phases
+
+| 票 | 内容 | 协议 |
+|----|------|------|
+| 01 | 冻结身份合同与非目标 | 文档 |
+| 02 | Room 存 SHA + 下行 skip / 跨 UUID 复用 | 无新 HTTP |
+| 03 | 独立 `media` pull 实体带 `sha256`（02 覆盖不到的页） | 小 closed-key 扩展 |
+| 04 | 家庭内按 SHA 绑定，跳过同内容 `PUT` | commit/PUT 兼容扩展 |
+| 05 | PRD/测试/双端验收 | — |
+
+Frontier = **01**。02 不依赖 03；03 只在「页里只有独立 media、没有父根清单」时成为必要。
+04 不阻塞 02 的下载收益。
+
+## Release
+
+实现落在 0.4.1 之后的相邻版本（预期 Room **29** 可空 `sha256` 列）。
+`minimum_sync_version_code` 保持 **21**，除非 03/04 被做成旧客户端无法解析的
+破坏性键集——那时必须先抬 floor 并备好可安装 APK（既有发版纪律）。

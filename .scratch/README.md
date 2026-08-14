@@ -7,6 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
+| [`sha-content-identity-incremental-media`](./sha-content-identity-incremental-media/) | **ready-for-agent** — 用现网 `sha256` 做媒体内容身份：本机 skip/跨 UUID 复用下行，家庭内 bind 跳过同内容 PUT；不替换 pull cursor；frontier = **01** |
 | [`causal-sync-conflict-transport-hardening`](./causal-sync-conflict-transport-hardening/) | **ready-for-agent** — **0.4.0**（code 21 / Room 28 / server schema 13）：43 张单-session 串行票覆盖无损 APK/后端升级、ConflictSnapshot、N 方合并、commit-first、传输、媒体、schema-cutover CD 与分段验收；frontier = **01**，资源合同复用审查票 12/17/18/19，生产切割仍归旧票 09 |
 | [`repository-dedup-algorithm-audit-20260809`](./repository-dedup-algorithm-audit-20260809/) | **in-progress** — 固定 `38cfbe7` 的全库重复/残留/算法审查；19 个 ticket，其中资源所有权拆为 admission 12、head loader 17、snapshot receipt/page 18、resolution metadata retention 19；当前 frontier 见 tracker |
 | [`post-0.3.13-review-remediation`](./post-0.3.13-review-remediation/) | **ready-for-agent** — 0.3.13 固定 HEAD 审查修复：票 01 闭合升级 dirty 因果安全及 Wake/conflict/duplicate 产品面；票 02 收缩旧路径、精简测试并重建预切割证据；frontier = **01** |
