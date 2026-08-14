@@ -103,25 +103,39 @@ run_prepare() {
     "${SCRIPT_DIR}/prepare-build-context.sh" "${dest}"
 }
 
+default_index="sparse+https://rsproxy.cn/index/"
+
 assert_mode() {
   local dest=$1
   local expected=$2
+  local expected_offline=$3
+  local expected_vendor=$4
   # shellcheck disable=SC1091
   source "${dest}/docker/build-mode.sh"
   if [[ "${LEZI_CARGO_BUILD_MODE}" != "${expected}" ]]; then
     echo "error: expected mode ${expected}, got ${LEZI_CARGO_BUILD_MODE}" >&2
     exit 1
   fi
+  if [[ "${LEZI_CARGO_OFFLINE}" != "${expected_offline}" ]]; then
+    echo "error: expected offline ${expected_offline}, got ${LEZI_CARGO_OFFLINE}" >&2
+    exit 1
+  fi
+  if [[ "${VENDOR_SRC}" != "${expected_vendor}" ]]; then
+    echo "error: expected VENDOR_SRC ${expected_vendor}, got ${VENDOR_SRC}" >&2
+    exit 1
+  fi
 }
 
 dest="${test_root}/ctx-offline"
 LEZI_TEST_VENDOR_OFFLINE=ok LEZI_TEST_FETCH=fail run_prepare "${dest}"
-assert_mode "${dest}" vendor-offline
+assert_mode "${dest}" vendor-offline 1 vendor
 [[ -f "${dest}/Cargo.toml" ]]
 [[ -f "${dest}/Dockerfile" ]]
 [[ -d "${dest}/src" ]]
 [[ -f "${dest}/docker/fetch-and-build.sh" ]]
 [[ -f "${dest}/docker/empty-vendor/.keep" ]]
+[[ -f "${dest}/docker/cargo-config.vendor.toml" ]]
+[[ ! -e "${dest}/docker/cargo-config.toml" ]]
 [[ -d "${dest}/vendor/axum-0.0.0-test" ]]
 grep -q 'directory = "vendor"' "${dest}/docker/cargo-config.vendor.toml"
 grep -q 'replace-with = "vendored-sources"' "${dest}/docker/cargo-config.vendor.toml"
@@ -132,8 +146,7 @@ fi
 [[ ! -e "${dest}/.cargo" ]]
 # shellcheck disable=SC1091
 source "${dest}/docker/build-mode.sh"
-[[ "${LEZI_CARGO_OFFLINE}" == "1" ]]
-[[ "${VENDOR_SRC}" == "vendor" ]]
+[[ "${CARGO_INDEX_URL}" == "${default_index}" ]]
 if grep -qw fetch "${log}"; then
   echo "error: vendor-offline path contacted fetch" >&2
   exit 1
@@ -144,12 +157,17 @@ LEZI_TEST_VENDOR_OFFLINE=fail-once \
   LEZI_TEST_FETCH=ok \
   LEZI_TEST_STATE_DIR="${test_root}/vendor-after-fetch-state" \
   run_prepare "${dest}"
-assert_mode "${dest}" vendor-after-fetch
+assert_mode "${dest}" vendor-after-fetch 1 vendor
 [[ -d "${dest}/vendor/axum-0.0.0-test" ]]
 grep -qw fetch "${log}"
-grep -q 'lezi-mirror' "${log}"
-if ! grep vendor "${log}" | grep -q 'lezi-mirror'; then
+grep -q 'source.mirror' "${log}"
+if ! grep vendor "${log}" | grep -q 'source.mirror'; then
   echo "error: post-fetch vendor must reuse the same registry replacement" >&2
+  cat "${log}" >&2
+  exit 1
+fi
+if grep vendor "${log}" | grep 'source.mirror' | grep -q -- '--offline'; then
+  echo "error: post-fetch vendor should not retry --offline after a completed fetch" >&2
   cat "${log}" >&2
   exit 1
 fi
@@ -157,16 +175,12 @@ fi
 dest="${test_root}/ctx-mirror-fallback"
 LEZI_TEST_VENDOR_OFFLINE=fail LEZI_TEST_FETCH=fail LEZI_CARGO_FETCH_ATTEMPTS=2 \
   run_prepare "${dest}"
-assert_mode "${dest}" mirror-only
+assert_mode "${dest}" mirror-only 0 docker/empty-vendor
 [[ ! -e "${dest}/vendor" ]]
-# shellcheck disable=SC1091
-source "${dest}/docker/build-mode.sh"
-[[ "${LEZI_CARGO_OFFLINE}" == "0" ]]
-[[ "${VENDOR_SRC}" == "docker/empty-vendor" ]]
 
 dest="${test_root}/ctx-skip-vendor"
 LEZI_CARGO_VENDOR=0 run_prepare "${dest}"
-assert_mode "${dest}" mirror-only
+assert_mode "${dest}" mirror-only 0 docker/empty-vendor
 [[ ! -e "${dest}/vendor" ]]
 if grep -Eqw 'vendor|fetch' "${log}"; then
   echo "error: LEZI_CARGO_VENDOR=0 still invoked cargo vendor/fetch" >&2
@@ -180,8 +194,8 @@ LEZI_TEST_VENDOR_OFFLINE=fail-once \
   LEZI_TEST_STATE_DIR="${test_root}/official-index-state" \
   LEZI_CARGO_INDEX_URL=sparse+https://index.crates.io/ \
   run_prepare "${dest}"
-assert_mode "${dest}" vendor-after-fetch
-if grep -q 'lezi-mirror' "${log}"; then
+assert_mode "${dest}" vendor-after-fetch 1 vendor
+if grep -q 'replace-with' "${log}"; then
   echo "error: official crates.io index still used a source replacement" >&2
   cat "${log}" >&2
   exit 1
@@ -224,8 +238,11 @@ if grep -qw fetch "${log}"; then
   exit 1
 fi
 
-default_index="sparse+https://rsproxy.cn/index/"
 grep -Fq "${default_index}" "${SCRIPT_DIR}/cargo-config.toml"
 grep -Fq "CARGO_INDEX_URL=${default_index}" "${SYNC_ROOT}/Dockerfile"
+if grep -Fq "${default_index}" "${SCRIPT_DIR}/prepare-build-context.sh"; then
+  echo "error: prepare-build-context.sh must read the default index from cargo-config.toml" >&2
+  exit 1
+fi
 
 echo "docker cargo build-context smoke passed"

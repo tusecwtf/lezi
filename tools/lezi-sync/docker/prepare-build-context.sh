@@ -18,7 +18,16 @@ if [ -z "${dest}" ]; then
   exit 2
 fi
 
-DEFAULT_INDEX_URL="sparse+https://rsproxy.cn/index/"
+if [ ! -f "${SYNC_ROOT}/Cargo.lock" ]; then
+  echo "error: Cargo.lock is required for a locked image build" >&2
+  exit 1
+fi
+
+DEFAULT_INDEX_URL=$(awk -F'"' '/^registry = / { print $2; exit }' "${SCRIPT_DIR}/cargo-config.toml")
+if [ -z "${DEFAULT_INDEX_URL}" ]; then
+  echo "error: could not read default cargo index from docker/cargo-config.toml" >&2
+  exit 1
+fi
 index_url="${LEZI_CARGO_INDEX_URL:-${DEFAULT_INDEX_URL}}"
 vendor_enabled="${LEZI_CARGO_VENDOR:-1}"
 max_fetch_attempts="${LEZI_CARGO_FETCH_ATTEMPTS:-5}"
@@ -27,8 +36,8 @@ mkdir -p "${dest}/src" "${dest}/docker/empty-vendor"
 
 cp "${SYNC_ROOT}/Cargo.toml" "${SYNC_ROOT}/Cargo.lock" "${SYNC_ROOT}/Dockerfile" "${dest}/"
 cp -R "${SYNC_ROOT}/src/." "${dest}/src/"
-cp "${SCRIPT_DIR}/cargo-config.toml" \
-  "${SCRIPT_DIR}/project-cargo-config.toml" \
+cp "${SCRIPT_DIR}/project-cargo-config.toml" \
+  "${SCRIPT_DIR}/cargo-config.vendor.toml" \
   "${SCRIPT_DIR}/fetch-and-build.sh" \
   "${dest}/docker/"
 cp "${SCRIPT_DIR}/empty-vendor/.keep" "${dest}/docker/empty-vendor/"
@@ -40,23 +49,30 @@ if [ -e "${dest}/.cargo" ]; then
 fi
 
 write_mode() {
+  mode=$1
+  case "${mode}" in
+    vendor-offline | vendor-after-fetch)
+      offline=1
+      vendor_src=vendor
+      project_config=docker/cargo-config.vendor.toml
+      ;;
+    mirror-only)
+      offline=0
+      vendor_src=docker/empty-vendor
+      project_config=docker/project-cargo-config.toml
+      ;;
+    *)
+      echo "error: unknown cargo build mode: ${mode}" >&2
+      exit 1
+      ;;
+  esac
   printf '%s\n' \
-    "LEZI_CARGO_OFFLINE=$1" \
-    "VENDOR_SRC=$2" \
-    "PROJECT_CARGO_CONFIG=$3" \
-    "LEZI_CARGO_BUILD_MODE=$4" \
+    "LEZI_CARGO_OFFLINE=${offline}" \
+    "VENDOR_SRC=${vendor_src}" \
+    "PROJECT_CARGO_CONFIG=${project_config}" \
+    "LEZI_CARGO_BUILD_MODE=${mode}" \
     "CARGO_INDEX_URL=${index_url}" \
     >"${dest}/docker/build-mode.sh"
-}
-
-write_vendor_config() {
-  cat >"${dest}/docker/cargo-config.vendor.toml" <<'EOF'
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"
-EOF
 }
 
 use_mirror_replacement() {
@@ -90,8 +106,8 @@ run_cargo_maybe_mirror() {
   # cache directory. Later vendor/fetch must use the same replacement.
   if use_mirror_replacement; then
     run_cargo \
-      --config "source.crates-io.replace-with=\"lezi-mirror\"" \
-      --config "source.lezi-mirror.registry=\"${index_url}\"" \
+      --config "source.crates-io.replace-with=\"mirror\"" \
+      --config "source.mirror.registry=\"${index_url}\"" \
       --config "net.retry=10" \
       "$@"
   else
@@ -115,40 +131,24 @@ fetch_with_retry() {
   done
 }
 
-vendor_from_crates_io_cache() {
-  run_cargo vendor --locked --offline --versioned-dirs "${dest}/vendor" >/dev/null
-}
-
-vendor_from_fetched_cache() {
-  if run_cargo_maybe_mirror vendor --locked --offline --versioned-dirs "${dest}/vendor" >/dev/null 2>/dev/null; then
-    return 0
-  fi
-  run_cargo_maybe_mirror vendor --locked --versioned-dirs "${dest}/vendor"
-}
-
-if [ ! -f "${SYNC_ROOT}/Cargo.lock" ]; then
-  echo "error: Cargo.lock is required for a locked image build" >&2
-  exit 1
-fi
-
 if [ "${vendor_enabled}" = "1" ]; then
-  if vendor_from_crates_io_cache 2>/dev/null; then
-    write_vendor_config
-    write_mode 1 vendor docker/cargo-config.vendor.toml vendor-offline
+  # Offline vendor is the cache-completeness probe. cargo's missing-crate
+  # listing is expected noise when the host cache is incomplete.
+  if run_cargo vendor --locked --offline --versioned-dirs "${dest}/vendor" >/dev/null 2>/dev/null; then
+    write_mode vendor-offline
     echo "cargo vendor: reused host crates.io cache (docker build will be --offline)"
   else
     echo "cargo vendor: host crates.io cache incomplete; fetching via ${index_url}"
-    if fetch_with_retry && vendor_from_fetched_cache; then
-      write_vendor_config
-      write_mode 1 vendor docker/cargo-config.vendor.toml vendor-after-fetch
+    if fetch_with_retry && run_cargo_maybe_mirror vendor --locked --versioned-dirs "${dest}/vendor"; then
+      write_mode vendor-after-fetch
       echo "cargo vendor: fetched missing crates via ${index_url} (docker build will be --offline)"
     else
       echo "warning: could not vendor crates; Dockerfile will fetch via ${index_url}" >&2
       rm -rf "${dest}/vendor"
-      write_mode 0 docker/empty-vendor docker/project-cargo-config.toml mirror-only
+      write_mode mirror-only
     fi
   fi
 else
-  write_mode 0 docker/empty-vendor docker/project-cargo-config.toml mirror-only
+  write_mode mirror-only
   echo "cargo vendor: skipped (LEZI_CARGO_VENDOR=${vendor_enabled})"
 fi

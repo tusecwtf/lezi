@@ -1,3 +1,2 @@
-# Placeholder project Cargo config for online Docker builds.
-# CARGO_HOME still supplies the crates.io replacement / retry policy.
-# Vendored builds replace this file with docker/cargo-config.vendor.toml.
+# Empty on-purpose: online builds take fetch policy from CARGO_HOME.
+# Vendored builds swap this path for docker/cargo-config.vendor.toml.
