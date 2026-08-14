@@ -2,7 +2,7 @@ package com.lezi.babylog.sync.media
 
 import com.lezi.babylog.sync.IsolatedLeziSyncServer
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
-import com.lezi.babylog.sync.session.pinnedSslContext
+import com.lezi.babylog.sync.session.pinnedSslSocketFactory
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.io.DataInputStream
@@ -132,7 +132,7 @@ internal class DeterministicHttpsFaultProxy private constructor(
     }
 
     private fun openBackend(): Socket {
-        val factory = pinnedSslContext(backendSpki).socketFactory
+        val factory = pinnedSslSocketFactory(backendSpki)
         val host = backendOrigin.removePrefix("https://").substringBefore(':')
         val port = backendOrigin.substringAfterLast(':').toInt()
         return factory.createSocket(host, port)
@@ -184,8 +184,9 @@ internal class DeterministicHttpsFaultProxy private constructor(
         val normalizedHeaders = headers.filterNot {
             it.startsWith("Transfer-Encoding:", ignoreCase = true) ||
                 it.startsWith("Content-Length:", ignoreCase = true) ||
+                it.startsWith("Connection:", ignoreCase = true) ||
                 it.startsWith("Host:", ignoreCase = true)
-        } + "Content-Length: ${body.size}"
+        } + listOf("Content-Length: ${body.size}", "Connection: close")
         return HttpMessage(lines.first(), normalizedHeaders, body)
     }
 

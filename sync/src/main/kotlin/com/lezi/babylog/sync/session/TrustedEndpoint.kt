@@ -9,11 +9,13 @@ import java.security.SecureRandom
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -219,7 +221,7 @@ internal class DefaultSetupHttpTransport @Inject constructor() : SetupHttpTransp
             val connection = URL(request.endpoint.origin + request.path)
                 .openConnection() as HttpsURLConnection
             request.endpoint.spkiSha256?.let { pin ->
-                connection.sslSocketFactory = pinnedSslContext(pin).socketFactory
+                connection.sslSocketFactory = pinnedSslSocketFactory(pin)
             }
             connection.requestMethod = "GET"
             connection.connectTimeout = TLS_TIMEOUT_MILLIS
@@ -374,6 +376,13 @@ private inline fun <reified T : Throwable> Throwable.hasCause(): Boolean =
     causes().any { it is T }
 
 private fun Throwable.causes(): Sequence<Throwable> = generateSequence(this) { it.cause }
+
+private val pinnedSslSocketFactoryCache = ConcurrentHashMap<String, SSLSocketFactory>()
+
+internal fun pinnedSslSocketFactory(pin: String): SSLSocketFactory =
+    pinnedSslSocketFactoryCache.computeIfAbsent(pin) {
+        pinnedSslContext(it).socketFactory
+    }
 
 internal fun pinnedSslContext(pin: String): SSLContext = SSLContext.getInstance("TLS").apply {
     init(null, arrayOf(PinnedSpkiTrustManager(pin)), SecureRandom())

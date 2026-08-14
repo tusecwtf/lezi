@@ -52,7 +52,7 @@ import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.matchesOrigin
 import com.lezi.babylog.sync.session.normalizeFamilyNameForWire
-import com.lezi.babylog.sync.session.pinnedSslContext
+import com.lezi.babylog.sync.session.pinnedSslSocketFactory
 import com.lezi.babylog.sync.session.requireDeviceName
 import com.lezi.babylog.sync.session.requireMemberDisplayName
 
@@ -1569,7 +1569,7 @@ class HttpSyncBackend internal constructor(
                 require(this is HttpsURLConnection) {
                     "固定证书的家庭服务器必须使用 HTTPS"
                 }
-                sslSocketFactory = pinnedSslContext(pin).socketFactory
+                sslSocketFactory = pinnedSslSocketFactory(pin)
             }
             requestMethod = method
             connectTimeout = boundedHttpTimeout(

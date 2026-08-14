@@ -443,6 +443,7 @@ class RealSyncPortIdentityClearTest {
             reauthRequired = true,
         )
         val rig = SyncRig(session = retained)
+        rig.awaitStartupRecovery()
         assertThat(
             withTimeout(2_000) {
                 rig.port.status().filter { it == SyncStatus.ReauthRequired }.first()
