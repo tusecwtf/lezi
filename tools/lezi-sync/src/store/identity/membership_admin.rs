@@ -451,6 +451,7 @@ impl Store {
             return Err(StoreError::MembershipNotFound);
         }
         transaction.commit()?;
+        self.invalidate_auth_cache();
         Ok(())
     }
 
@@ -511,6 +512,7 @@ impl Store {
             return Err(StoreError::FamilyNotConfigured);
         }
         transaction.commit()?;
+        self.invalidate_auth_cache();
         Ok(())
     }
 }

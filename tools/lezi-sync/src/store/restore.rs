@@ -128,6 +128,7 @@ impl Store {
             access_expires_at: identity.access_expires_at,
             refresh_token: identity.refresh_token.to_owned(),
             family_name: Some(identity.family_name.to_owned()),
+            role: "owner".to_owned(),
         })
     }
 }

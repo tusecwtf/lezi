@@ -521,6 +521,7 @@ impl Store {
             access_expires_at,
             refresh_token,
             family_name,
+            role: "member".to_owned(),
         })
     }
 
@@ -689,6 +690,7 @@ impl Store {
             access_expires_at,
             refresh_token,
             family_name,
+            role: "member".to_owned(),
         })
     }
 }

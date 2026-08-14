@@ -645,6 +645,7 @@ impl Store {
             causal_media_gc_in_flight: Arc::new(std::sync::Mutex::new(
                 std::collections::BTreeSet::new(),
             )),
+            auth_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         };
         Self::preflight_existing_schema(&store.database_path)?;
         if read_only {

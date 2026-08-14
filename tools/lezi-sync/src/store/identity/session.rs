@@ -199,6 +199,7 @@ impl Store {
                         access_expires_at,
                         refresh_token,
                         family_name: stored_family_name,
+                        role: "owner".to_owned(),
                     });
                 }
             }
@@ -285,6 +286,7 @@ impl Store {
             access_expires_at,
             refresh_token,
             family_name: Some(family_name.to_owned()),
+            role: "owner".to_owned(),
         })
     }
 
@@ -343,6 +345,7 @@ impl Store {
             params![current_fingerprint, family_id],
         )?;
         transaction.commit()?;
+        self.invalidate_auth_cache();
         Ok(())
     }
 
@@ -432,6 +435,7 @@ impl Store {
                 access_expires_at,
                 refresh_token,
                 family_name,
+                role: "owner".to_owned(),
             });
         }
 
@@ -526,6 +530,9 @@ impl Store {
             params![request_hash, device_id, device_name, takeover],
         )?;
         transaction.commit()?;
+        if takeover {
+            self.invalidate_auth_cache();
+        }
         Ok(CreatedDeviceSession {
             family_id,
             membership_id,
@@ -535,6 +542,7 @@ impl Store {
             access_expires_at,
             refresh_token,
             family_name,
+            role: "owner".to_owned(),
         })
     }
 
@@ -545,17 +553,42 @@ impl Store {
             "UPDATE families SET name = ?1 WHERE id = ?2",
             params![family_name, family_id],
         )?;
+        self.invalidate_auth_cache();
         Ok(())
     }
 
     pub fn authenticate(&self, token: &str, now: i64) -> Result<Option<Principal>, StoreError> {
-        let connection = self.connect()?;
         let token_hash = crate::hash_secret(token);
+        if let Ok(cache) = self.auth_cache.read() {
+            if let Some(cached) = cache.get(&token_hash) {
+                if cached.access_expires_at > now {
+                    let should_sync_last_used =
+                        now.saturating_sub(cached.last_used_synced_at) >= 60;
+                    let principal = cached.principal.clone();
+                    drop(cache);
+                    if should_sync_last_used {
+                        if let Ok(connection) = self.connect() {
+                            let _ = connection.execute(
+                                "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
+                                params![now, principal.device_id],
+                            );
+                        }
+                        if let Ok(mut cache) = self.auth_cache.write() {
+                            if let Some(entry) = cache.get_mut(&token_hash) {
+                                entry.last_used_synced_at = now;
+                            }
+                        }
+                    }
+                    return Ok(Some(principal));
+                }
+            }
+        }
+        let connection = self.connect()?;
         let row = connection
             .query_row(
                 "
             SELECT memberships.family_id, memberships.role, memberships.membership_id,
-                   devices.device_id, device_sessions.session_id
+                   devices.device_id, device_sessions.access_expires_at
             FROM device_sessions
             JOIN devices ON devices.device_id = device_sessions.device_id
             JOIN memberships ON memberships.membership_id = devices.membership_id
@@ -572,24 +605,35 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((family_id, role, membership_id, device_id, _session_id)) = row else {
+        let Some((family_id, role, membership_id, device_id, access_expires_at)) = row else {
             return Ok(None);
         };
         connection.execute(
             "UPDATE devices SET last_used_at = ?1 WHERE device_id = ?2",
             params![now, device_id],
         )?;
-        Ok(Some(Principal {
+        let principal = Principal {
             family_id,
             role,
             membership_id,
             device_id,
-        }))
+        };
+        if let Ok(mut cache) = self.auth_cache.write() {
+            cache.insert(
+                token_hash,
+                super::super::CachedSession {
+                    principal: principal.clone(),
+                    access_expires_at,
+                    last_used_synced_at: now,
+                },
+            );
+        }
+        Ok(Some(principal))
     }
 
     /// Returns only the terminal reason bound to this exact access-token hash.
@@ -679,7 +723,7 @@ impl Store {
             family_id,
             family_name,
             membership_id,
-            _role,
+            role,
             device_id,
             session_id,
             current_access_expires_at,
@@ -726,6 +770,7 @@ impl Store {
                     extended
                 };
                 transaction.commit()?;
+                self.invalidate_auth_cache();
                 return Ok(CreatedDeviceSession {
                     family_id,
                     membership_id,
@@ -735,6 +780,7 @@ impl Store {
                     access_expires_at,
                     refresh_token: new_refresh_token,
                     family_name,
+                    role,
                 });
             }
 
@@ -767,6 +813,7 @@ impl Store {
                 params![now, device_id],
             )?;
             transaction.commit()?;
+            self.invalidate_auth_cache();
             return Ok(CreatedDeviceSession {
                 family_id,
                 membership_id,
@@ -776,6 +823,7 @@ impl Store {
                 access_expires_at,
                 refresh_token: new_refresh_token,
                 family_name,
+                role,
             });
         }
 
@@ -822,7 +870,7 @@ impl Store {
                 .query_row(
                     "
                     SELECT families.id, families.name, memberships.membership_id,
-                           devices.device_id, device_sessions.session_id,
+                           memberships.role, devices.device_id, device_sessions.session_id,
                            device_sessions.access_expires_at,
                            device_sessions.access_token_hash,
                            device_sessions.refresh_token_hash
@@ -845,9 +893,10 @@ impl Store {
                             row.get::<_, String>(2)?,
                             row.get::<_, String>(3)?,
                             row.get::<_, String>(4)?,
-                            row.get::<_, i64>(5)?,
-                            row.get::<_, String>(6)?,
+                            row.get::<_, String>(5)?,
+                            row.get::<_, i64>(6)?,
                             row.get::<_, String>(7)?,
+                            row.get::<_, String>(8)?,
                         ))
                     },
                 )
@@ -856,6 +905,7 @@ impl Store {
                 family_id,
                 family_name,
                 membership_id,
+                role,
                 device_id,
                 session_id,
                 current_access_expires_at,
@@ -886,6 +936,7 @@ impl Store {
                         extended
                     };
                     transaction.commit()?;
+                    self.invalidate_auth_cache();
                     return Ok(CreatedDeviceSession {
                         family_id,
                         membership_id,
@@ -895,6 +946,7 @@ impl Store {
                         access_expires_at,
                         refresh_token,
                         family_name,
+                        role,
                     });
                 }
             }
@@ -930,6 +982,7 @@ impl Store {
             params![now, device_id],
         )?;
         transaction.commit()?;
+        self.invalidate_auth_cache();
         Err(StoreError::RefreshTokenReplay)
     }
 
@@ -978,6 +1031,7 @@ impl Store {
             params![now, device_id],
         )?;
         transaction.commit()?;
+        self.invalidate_auth_cache();
         Ok(())
     }
 

@@ -603,19 +603,12 @@ pub(crate) async fn refresh_session(
         }
         Err(error) => return Err(error.into()),
     };
-    let store = state.store.clone();
-    let rotated_access = refreshed.access_token.clone();
-    let now = state.now();
-    let role = run_blocking(move || Ok(store.authenticate(&rotated_access, now)?))
-        .await?
-        .ok_or_else(|| ApiError::internal("rotated session is not authenticatable"))?
-        .role;
     Ok(Json(json!({
         "family_id": refreshed.family_id,
         "membership_id": refreshed.membership_id,
         "device_id": refreshed.device_id,
         "session_id": refreshed.session_id,
-        "role": role,
+        "role": refreshed.role,
         "access_token": refreshed.access_token,
         "access_expires_at": refreshed.access_expires_at,
         "refresh_token": refreshed.refresh_token,

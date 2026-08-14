@@ -96,6 +96,7 @@ pub struct CreatedDeviceSession {
     pub access_expires_at: i64,
     pub refresh_token: String,
     pub family_name: Option<String>,
+    pub role: String,
 }
 
 pub struct CreateFamilyInput<'a> {
@@ -431,6 +432,13 @@ pub struct CommittedPendingBundleMedia {
 }
 
 #[derive(Clone)]
+pub(in crate::store) struct CachedSession {
+    pub principal: Principal,
+    pub access_expires_at: i64,
+    pub last_used_synced_at: i64,
+}
+
+#[derive(Clone)]
 pub struct Store {
     database_path: PathBuf,
     read_only: bool,
@@ -440,6 +448,7 @@ pub struct Store {
     causal_media_publication_locks:
         Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
     causal_media_gc_in_flight: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    pub(in crate::store) auth_cache: Arc<std::sync::RwLock<HashMap<String, CachedSession>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,6 +522,12 @@ impl Store {
         }
         Ok(())
     }
+    pub fn invalidate_auth_cache(&self) {
+        if let Ok(mut cache) = self.auth_cache.write() {
+            cache.clear();
+        }
+    }
+
     pub fn health_check(&self) -> Result<(), StoreError> {
         let connection = self.connect()?;
         connection.query_row("SELECT COUNT(*) FROM family_meta", [], |row| {

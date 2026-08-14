@@ -863,7 +863,7 @@ fn causal_media_gc_orphan_cursor_survives_restart_and_collects_reserved_upload()
 #[test]
 fn causal_media_gc_orphan_cursor_advances_past_retained_prefix_after_restart() {
     let (directory, store, owner) = fixture();
-    let future = future_gc_now().saturating_add(1);
+    let future = future_gc_now().saturating_add(10_000);
     let mut connection = store.connect().unwrap();
     let tx = connection.transaction().unwrap();
     tx.execute(
