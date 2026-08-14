@@ -22,6 +22,10 @@
    不写 `remoteUri`。
 8. **上行** 同 UUID+SHA 的 `PUT` 幂等保持。新 UUID 复用家庭已有 blob 是 04 的兼容扩展，
    旧服务器必须能回退完整 `PUT`。
+9. **禁止整库 SHA 同步。** 不得把 `client_uuid` 降成本机根、用整份 Room（或整份
+   家庭库）的一个 digest 当 pull/commit 单位。UUID 仍是跨设备行身份。见 spec
+   「Rejected: 整库 SHA + 不再区分 UUID」。握手里带服务器权威 snapshot hash
+   以跳过空 pull 不在 02–04，另票且不得取消 UUID。
 
 ## Cycle contract (before vs after)
 
@@ -42,3 +46,4 @@
 ## Comments
 
 - 用户口中的 SHAID = 现网 `sha256`，不是 Hashids，也不是包级新 ID。
+- 2026-08-14：否决「整库 SHA、不再区分 UUID」。比 hash 只针对媒体字节。
