@@ -1,0 +1,21 @@
+# Shared Cargo target across main tree and git worktrees.
+# Copy to tools/lezi-sync/.cargo/config.toml and/or repo .cargo/config.toml
+# (both are gitignored), or export:
+#   export CARGO_TARGET_DIR=$HOME/.cache/cargo-target
+#
+# Android/Gradle: use GRADLE_USER_HOME=$HOME/.cache/gradle-user-home for global
+# caches; project app/build/ remains per-worktree.
+[build]
+target-dir = "/home/YOU/.cache/cargo-target"
+
+# Optional: crates.io replacement for host `cargo test` / `cargo vendor`
+# when index.crates.io times out. Docker image builds default to rsproxy
+# independently via tools/lezi-sync/docker/cargo-config.toml.
+#
+# [source.crates-io]
+# replace-with = "mirror"
+# [source.mirror]
+# registry = "sparse+https://rsproxy.cn/index/"
+# [net]
+# retry = 10
+# git-fetch-with-cli = true

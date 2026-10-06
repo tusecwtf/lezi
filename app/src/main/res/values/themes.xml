@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Lezi" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/lezi_window_bg</item>
+    </style>
+
+    <!-- Cold-start bridge (motion-polish ticket 01): the system launch window
+         shares the first frame's background color, and MainActivity keeps it
+         on screen only while the local-data gate is still Checking. No branded
+         splash page, no artificial delay (CONTEXT.md 本地数据升级门禁). -->
+    <style name="Theme.Lezi.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/lezi_window_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.Lezi</item>
+    </style>
+</resources>

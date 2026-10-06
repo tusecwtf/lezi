@@ -1,0 +1,245 @@
+package com.lezi.babylog.core.database
+
+import com.google.common.truth.Truth.assertThat
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.yield
+import org.junit.Test
+
+class PendingReminderCleanupStoreTest {
+    @Test
+    fun upsertMergesCurrentCarePlanIdsAndPromotesRetention() = runBlocking {
+        val dao = FakePendingReminderCleanupDao(
+            PendingReminderCleanupEntity(
+                operation = "records_clear",
+                carePlanIds = "5,2,5",
+                familyServerRetained = false,
+            ),
+        )
+        val store = RoomPendingReminderCleanupStore(dao)
+
+        store.upsert(
+            PendingReminderCleanup(
+                scope = LocalDataClearScope.RecordsOnly,
+                carePlanIds = setOf(3L, 2L),
+                systemCalendarProjections = linkedMapOf(
+                    "plan-3" to "evt,3",
+                    "plan-2" to "evt-2",
+                ),
+                familyServerRetained = true,
+            ),
+        )
+
+        assertThat(dao.pending).isEqualTo(
+            PendingReminderCleanupEntity(
+                operation = "records_clear",
+                carePlanIds = "2,3,5",
+                systemCalendarProjectionsJson =
+                    "{\"plan-2\":\"evt-2\",\"plan-3\":\"evt,3\"}",
+                familyServerRetained = true,
+            ),
+        )
+    }
+
+    @Test
+    fun emptyCurrentSnapshotRemainsRecoverableUntilCompletion() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val scope = LocalDataClearScope.RecordsOnly
+
+        store.upsert(
+            PendingReminderCleanup(
+                scope = scope,
+                familyServerRetained = true,
+            ),
+        )
+
+        assertThat(store.load(scope)?.carePlanIds).isEmpty()
+        assertThat(store.load(scope)?.systemCalendarProjections).isEmpty()
+
+        store.delete(scope)
+
+        assertThat(store.load(scope)).isNull()
+    }
+
+    @Test
+    fun currentProjectionSnapshotRoundTrips() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val pending = PendingReminderCleanup(
+            scope = LocalDataClearScope.RecordsOnly,
+            carePlanIds = setOf(8L),
+            systemCalendarProjections = linkedMapOf(
+                "plan-with-id" to "evt-41",
+                "plan-needs-uid-lookup" to null,
+            ),
+            familyServerRetained = false,
+        )
+
+        store.upsert(pending)
+
+        assertThat(store.load(LocalDataClearScope.RecordsOnly)).isEqualTo(pending)
+    }
+
+    @Test
+    fun nursingTimerEpochRoundTripsAndMergesPreferExisting() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val timerJson =
+            """{"schemaVersion":1,"completionClientUuid":"session-a","leftRunning":true}"""
+        store.upsert(
+            PendingReminderCleanup(
+                scope = LocalDataClearScope.RecordsOnly,
+                carePlanIds = setOf(1L),
+                nursingTimer = com.lezi.babylog.core.model.NursingTimerClearEpoch(
+                    json = timerJson,
+                    sessionToken = "session-a",
+                ),
+                familyServerRetained = false,
+            ),
+        )
+
+        store.upsert(
+            PendingReminderCleanup(
+                scope = LocalDataClearScope.RecordsOnly,
+                carePlanIds = setOf(2L),
+                nursingTimer = com.lezi.babylog.core.model.NursingTimerClearEpoch.EMPTY,
+                familyServerRetained = true,
+            ),
+        )
+
+        val loaded = store.load(LocalDataClearScope.RecordsOnly)
+        assertThat(loaded?.carePlanIds).containsExactly(1L, 2L)
+        assertThat(loaded?.nursingTimerJson).isEqualTo(timerJson)
+        assertThat(loaded?.nursingTimerSessionToken).isEqualTo("session-a")
+        assertThat(loaded?.familyServerRetained).isTrue()
+    }
+
+    @Test
+    fun allLocalCleanupUsesIndependentOperationKey() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val scope = LocalDataClearScope.AllLocalData
+
+        store.upsert(
+            PendingReminderCleanup(
+                scope = scope,
+                carePlanIds = setOf(8L),
+                familyServerRetained = false,
+            ),
+        )
+
+        assertThat(dao.pending?.operation).isEqualTo("all_local_data_clear")
+        assertThat(store.load(scope)?.scope).isEqualTo(scope)
+    }
+
+    @Test
+    fun corruptCarePlanIdsFailClosedAndKeepPendingRow() = runBlocking {
+        val original = PendingReminderCleanupEntity(
+            operation = "records_clear",
+            carePlanIds = "7,not-a-plan,11",
+            familyServerRetained = true,
+        )
+        val dao = FakePendingReminderCleanupDao(original)
+        val store = RoomPendingReminderCleanupStore(dao)
+
+        val failure = runCatching {
+            store.load(LocalDataClearScope.RecordsOnly)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(CorruptPendingReminderCleanupException::class.java)
+        assertThat(failure).hasMessageThat().contains("care-plan")
+        assertThat(dao.pending).isEqualTo(original)
+        assertThat(dao.deleteCount).isEqualTo(0)
+    }
+
+    @Test
+    fun overlappingUpsertsKeepBothCarePlanIds(): Unit = runBlocking {
+        val dao = InterleavingPendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val first = async {
+            store.upsert(
+                PendingReminderCleanup(
+                    scope = LocalDataClearScope.RecordsOnly,
+                    carePlanIds = setOf(1L),
+                    familyServerRetained = false,
+                ),
+            )
+        }
+        val second = async {
+            store.upsert(
+                PendingReminderCleanup(
+                    scope = LocalDataClearScope.RecordsOnly,
+                    carePlanIds = setOf(2L),
+                    familyServerRetained = false,
+                ),
+            )
+        }
+
+        first.await()
+        second.await()
+        dao.armRace = false
+
+        assertThat(store.load(LocalDataClearScope.RecordsOnly)?.carePlanIds)
+            .containsExactly(1L, 2L)
+    }
+}
+
+private class FakePendingReminderCleanupDao(
+    var pending: PendingReminderCleanupEntity? = null,
+) : PendingReminderCleanupDao {
+    var deleteCount: Int = 0
+
+    override suspend fun get(operation: String): PendingReminderCleanupEntity? =
+        pending?.takeIf { it.operation == operation }
+
+    override suspend fun upsert(pending: PendingReminderCleanupEntity) {
+        this.pending = pending
+    }
+
+    override suspend fun delete(operation: String) {
+        deleteCount += 1
+        if (pending?.operation == operation) pending = null
+    }
+}
+
+/**
+ * Separate get/upsert calls both pass a barrier, so a merge done outside
+ * [PendingReminderCleanupDao.mergeUpsert] keeps only the later snapshot.
+ */
+private class InterleavingPendingReminderCleanupDao : PendingReminderCleanupDao {
+    var pending: PendingReminderCleanupEntity? = null
+    var armRace: Boolean = true
+    private val merge = Mutex()
+    private var racingGets = 0
+    private val bothReading = CompletableDeferred<Unit>()
+
+    override suspend fun get(operation: String): PendingReminderCleanupEntity? {
+        if (armRace) {
+            racingGets += 1
+            if (racingGets >= 2) bothReading.complete(Unit) else bothReading.await()
+            yield()
+        }
+        return pending?.takeIf { it.operation == operation }
+    }
+
+    override suspend fun upsert(pending: PendingReminderCleanupEntity) {
+        this.pending = pending
+    }
+
+    override suspend fun delete(operation: String) {
+        if (pending?.operation == operation) pending = null
+    }
+
+    override suspend fun mergeUpsert(
+        operation: String,
+        merged: (PendingReminderCleanupEntity?) -> PendingReminderCleanupEntity,
+    ) {
+        merge.withLock {
+            upsert(merged(pending?.takeIf { it.operation == operation }))
+        }
+    }
+}

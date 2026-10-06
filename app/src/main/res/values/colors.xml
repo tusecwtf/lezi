@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches cream canvas of 87-safe-rainbow-le launcher art. -->
+    <color name="ic_launcher_background">#F4F0E7</color>
+    <!-- Must stay in sync with LeziColors.Bg: the launch window and first
+         Compose frame share this color so cold start never flashes. -->
+    <color name="lezi_window_bg">#FBF7EE</color>
+</resources>

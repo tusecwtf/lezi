@@ -1,0 +1,1184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lezi.invalid/contracts/conflict-v2-golden.schema.json",
+  "title": "Lezi conflict-v2 language-neutral golden corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "contract", "version", "release", "capability", "terminal_error_codes", "terminal_error_examples", "cases", "dataflow_01_sleep_wake", "dataflow_02_care_plan", "dataflow_03_portable_identity", "dataflow_04_fulfillment_candidate", "dataflow_05_custom_item", "dataflow_06_media", "dataflow_07_record_non_sleep"],
+  "properties": {
+    "$schema": { "const": "https://lezi.invalid/contracts/conflict-v2-golden.schema.json" },
+    "contract": { "const": "lezi.conflict-v2-golden" },
+    "version": { "const": 2 },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["android", "server", "version_code", "room", "local_data_contract", "server_schema", "minimum_sync_version_code", "source_room", "source_server_schemas"],
+      "properties": {
+        "android": { "const": "0.4.0" },
+        "server": { "const": "0.4.0" },
+        "version_code": { "const": 21 },
+        "room": { "const": 28 },
+        "local_data_contract": { "const": 5 },
+        "server_schema": { "const": 13 },
+        "minimum_sync_version_code": { "const": 21 },
+        "source_room": { "const": 27 },
+        "source_server_schemas": { "const": [11, 12] }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "advertise_after_ticket", "mixed_generation"],
+      "properties": {
+        "key": { "const": "causal_sync_v2" },
+        "advertise_after_ticket": { "const": 27 },
+        "mixed_generation": { "const": "reject_before_mutation" }
+      }
+    },
+    "terminal_error_codes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/terminalCode" }
+    },
+    "terminal_error_examples": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "response"],
+        "properties": {
+          "code": { "$ref": "#/$defs/terminalCode" },
+          "response": { "$ref": "#/$defs/terminalResponse" }
+        }
+      }
+    },
+    "dataflow_01_sleep_wake": { "$ref": "#/$defs/dataflow01SleepWake" },
+    "dataflow_02_care_plan": { "$ref": "#/$defs/dataflow02CarePlan" },
+    "dataflow_03_portable_identity": { "$ref": "#/$defs/dataflow03PortableIdentity" },
+    "dataflow_04_fulfillment_candidate": { "$ref": "#/$defs/dataflow04FulfillmentCandidate" },
+    "dataflow_05_custom_item": { "$ref": "#/$defs/dataflow05CustomItem" },
+    "dataflow_06_media": { "$ref": "#/$defs/dataflow06Media" },
+    "dataflow_07_record_non_sleep": { "$ref": "#/$defs/dataflow07RecordNonSleep" },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/case" },
+      "allOf": [
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-explicit-null" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-missing-known-field" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-unknown-field" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-wrong-type" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-parent-null-versus-child-edit" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-media-remove" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "canonical-delete-transition" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "snapshot-two-pages" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "snapshot-choice-stable-across-pages" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "snapshot-choice-stable-after-restart" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "snapshot-auto-conflict-disjoint" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "resolve-choice-only-full-set" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "resolve-direct-base-restore" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "resolve-missing-direct-base" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "resolve-missing-direct-base-media" } } } },
+        { "contains": { "type": "object", "required": ["id"], "properties": { "id": { "const": "commit-exact-replay-marker" } } } }
+      ]
+    }
+  },
+  "$defs": {
+    "closedKeyList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "mediaRoleRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "owner_entity_type", "kind", "owner_wire_field", "max_items"],
+      "properties": {
+        "role": { "enum": ["wake", "log", "plan", "avatar"] },
+        "owner_entity_type": { "enum": ["wake_observation", "record", "care_plan", "baby"] },
+        "kind": { "enum": ["wake", "log", "avatar"] },
+        "owner_wire_field": { "enum": ["record_client_uuid", "care_plan_client_uuid", "baby_client_uuid"] },
+        "max_items": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "wakeShapes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_mutation_keys", "pull_keys", "pull_stamp_optional", "stable_root_keys"],
+      "properties": {
+        "local_mutation_keys": { "$ref": "#/$defs/closedKeyList" },
+        "pull_keys": { "$ref": "#/$defs/closedKeyList" },
+        "pull_stamp_optional": { "$ref": "#/$defs/closedKey" },
+        "stable_root_keys": { "$ref": "#/$defs/closedKeyList" }
+      }
+    },
+    "dataflow01SleepWake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sleep_record", "wake_observation", "wake_shapes", "media_roles"],
+      "properties": {
+        "wake_shapes": { "$ref": "#/$defs/wakeShapes" },
+        "sleep_record": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation_keys", "stable_keys", "forbidden_keys", "effective_wake"],
+          "properties": {
+            "mutation_keys": { "$ref": "#/$defs/closedKeyList" },
+            "stable_keys": { "$ref": "#/$defs/closedKeyList" },
+            "forbidden_keys": { "$ref": "#/$defs/closedKeyList" },
+            "effective_wake": { "const": "required_nullable" }
+          }
+        },
+        "wake_observation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation_keys", "stable_keys", "forbidden_keys"],
+          "properties": {
+            "mutation_keys": { "$ref": "#/$defs/closedKeyList" },
+            "stable_keys": { "$ref": "#/$defs/closedKeyList" },
+            "forbidden_keys": { "$ref": "#/$defs/closedKeyList" }
+          }
+        },
+        "media_roles": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/mediaRoleRow" }
+        }
+      }
+    },
+    "dataflow04FulfillmentCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_type", "publish_channel", "mutation_keys", "stable_keys", "stamp_rules", "frozen_evidence", "idempotent_replay"],
+      "properties": {
+        "entity_type": { "const": "fulfillment_candidate" },
+        "publish_channel": { "const": "atomic_bundle_only" },
+        "mutation_keys": { "$ref": "#/$defs/closedKeyList" },
+        "stable_keys": { "$ref": "#/$defs/closedKeyList" },
+        "stamp_rules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation_trail", "server_on_mutation", "stable_required"],
+          "properties": {
+            "mutation_trail": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/closedKey" }
+            },
+            "server_on_mutation": { "const": "ignore_and_restamp" },
+            "stable_required": { "$ref": "#/$defs/closedKeyList" }
+          }
+        },
+        "frozen_evidence": { "$ref": "#/$defs/closedKeyList" },
+        "idempotent_replay": { "const": "exact_evidence_lww_noop" }
+      }
+    },
+    "dataflow05CustomItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_type", "mutation_keys", "stable_keys", "stamp_rules", "not_on_family_wire", "max_undeleted"],
+      "properties": {
+        "entity_type": { "const": "custom_item" },
+        "mutation_keys": { "$ref": "#/$defs/closedKeyList" },
+        "stable_keys": { "$ref": "#/$defs/closedKeyList" },
+        "stamp_rules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation_stamp_optional", "stable_required", "server_on_mutation"],
+          "properties": {
+            "mutation_stamp_optional": { "$ref": "#/$defs/closedKey" },
+            "stable_required": { "$ref": "#/$defs/closedKeyList" },
+            "server_on_mutation": { "const": "ignore_and_restamp" }
+          }
+        },
+        "not_on_family_wire": { "$ref": "#/$defs/closedKeyList" },
+        "max_undeleted": { "const": 10 }
+      }
+    },
+    "dataflow06Media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_item_keys", "entity_keys", "entity_has_content_identity", "wake_download_without_expectation"],
+      "properties": {
+        "manifest_item_keys": { "$ref": "#/$defs/closedKeyList" },
+        "entity_keys": { "$ref": "#/$defs/closedKeyList" },
+        "entity_has_content_identity": { "const": false },
+        "wake_download_without_expectation": { "const": "fail_closed" }
+      }
+    },
+    "dataflow07RecordNonSleep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_type", "shape", "mutation_keys", "stable_keys", "stamp_rules"],
+      "properties": {
+        "entity_type": { "const": "record" },
+        "shape": { "const": "end_timestamp_null_injected" },
+        "mutation_keys": { "$ref": "#/$defs/closedKeyList" },
+        "stable_keys": { "$ref": "#/$defs/closedKeyList" },
+        "stamp_rules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation_forbidden", "stable_required"],
+          "properties": {
+            "mutation_forbidden": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/closedKey" }
+            },
+            "stable_required": { "$ref": "#/$defs/closedKeyList" }
+          }
+        }
+      }
+    },
+    "terminalCode": {
+      "enum": [
+        "unknown_field", "missing_field", "wrong_type", "non_canonical_value", "invalid_domain",
+        "content_drift", "unauthenticated", "forbidden", "capability_mismatch",
+        "invalid_snapshot_token", "snapshot_expired", "snapshot_stale", "invalid_choice",
+        "duplicate_choice", "incomplete_choices", "missing_restore_base",
+        "incomplete_restore_base", "missing_restore_media", "cas_mismatch"
+      ]
+    },
+    "terminalResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "error"],
+      "properties": {
+        "status": { "const": "rejected" },
+        "mutation_id": { "$ref": "#/$defs/uuid" },
+        "resolution_mutation_id": { "$ref": "#/$defs/uuid" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "retryable"],
+          "properties": {
+            "code": { "$ref": "#/$defs/terminalCode" },
+            "retryable": { "const": false }
+          }
+        }
+      },
+      "oneOf": [
+        { "not": { "anyOf": [{ "required": ["mutation_id"] }, { "required": ["resolution_mutation_id"] }] } },
+        { "required": ["mutation_id"], "not": { "required": ["resolution_mutation_id"] } },
+        { "required": ["resolution_mutation_id"], "not": { "required": ["mutation_id"] } }
+      ]
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "snapshotToken": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64,}$"
+    },
+    "jsonPointer": {
+      "type": "string",
+      "pattern": "^/(?:[^~/]|~0|~1)+(?:/(?:[^~/]|~0|~1)+)*$"
+    },
+    "typedOutcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op", "value"],
+          "properties": { "op": { "const": "set" }, "value": true }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op"],
+          "properties": { "op": { "const": "remove" } }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version_id", "mutation_id", "actor_id", "device_id", "received_at"],
+      "properties": {
+        "version_id": { "type": "string", "minLength": 1 },
+        "mutation_id": { "$ref": "#/$defs/uuid" },
+        "actor_id": { "type": "string", "minLength": 1 },
+        "device_id": { "type": "string", "minLength": 1 },
+        "received_at": { "type": "integer" }
+      }
+    },
+    "babyMutationRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nickname", "sex", "birthday", "birth_weight_grams", "avatar_media_uuid", "updated_at"],
+      "properties": {
+        "nickname": { "type": "string" },
+        "sex": { "type": ["string", "null"] },
+        "birthday": { "type": ["string", "null"] },
+        "birth_weight_grams": { "type": ["integer", "null"] },
+        "avatar_media_uuid": { "type": ["string", "null"] },
+        "updated_at": { "type": "integer" }
+      }
+    },
+    "babyStableRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nickname", "sex", "birthday", "birth_weight_grams", "avatar_media_uuid", "updated_at", "created_by_membership_id"],
+      "properties": {
+        "nickname": { "type": "string" },
+        "sex": { "type": ["string", "null"] },
+        "birthday": { "type": ["string", "null"] },
+        "birth_weight_grams": { "type": ["integer", "null"] },
+        "avatar_media_uuid": { "type": ["string", "null"] },
+        "updated_at": { "type": "integer" },
+        "created_by_membership_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "payloadKeySpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "optional"],
+      "properties": {
+        "required": { "type": "array", "items": { "type": "string" } },
+        "optional": { "type": "array", "items": { "type": "string" } },
+        "forbidden_on_portable": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "dataflow03PortableIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["typed_payload_keys", "baby_closed_set", "stamp_fields", "samples"],
+      "properties": {
+        "typed_payload_keys": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/payloadKeySpec" }
+        },
+        "baby_closed_set": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["business_keys", "revision_key", "stamp_key"],
+          "properties": {
+            "business_keys": {
+              "const": ["nickname", "sex", "birthday", "birth_weight_grams", "avatar_media_uuid"]
+            },
+            "revision_key": { "const": "updated_at" },
+            "stamp_key": { "const": "created_by_membership_id" }
+          }
+        },
+        "stamp_fields": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation", "stable", "snapshot", "server_on_mutation", "keys"],
+          "properties": {
+            "mutation": { "const": "forbid" },
+            "stable": { "const": "require" },
+            "snapshot": { "const": "require" },
+            "server_on_mutation": { "const": "ignore_and_restamp" },
+            "keys": { "const": ["created_by_membership_id", "observer_membership_id"] }
+          }
+        },
+        "samples": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["portable_custom_payload", "local_custom_payload", "baby_mutation", "baby_stable"],
+          "properties": {
+            "portable_custom_payload": { "type": "object" },
+            "local_custom_payload": { "type": "object" },
+            "baby_mutation": { "$ref": "#/$defs/babyMutationRoot" },
+            "baby_stable": { "$ref": "#/$defs/babyStableRoot" }
+          }
+        }
+      }
+    },
+    "versionView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version_id", "base_version", "root", "media", "deleted", "mutation_id", "actor_id", "device_id", "received_at"],
+      "properties": {
+        "version_id": { "type": "string", "minLength": 1 },
+        "base_version": { "type": ["string", "null"] },
+        "root": { "$ref": "#/$defs/babyStableRoot" },
+        "media": { "type": "array", "items": { "$ref": "#/$defs/mediaItem" } },
+        "deleted": { "type": "boolean" },
+        "mutation_id": { "$ref": "#/$defs/uuid" },
+        "actor_id": { "type": "string", "minLength": 1 },
+        "device_id": { "type": "string", "minLength": 1 },
+        "received_at": { "type": "integer" }
+      }
+    },
+    "mediaItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["media_uuid", "role", "sha256", "byte_size", "mime", "width", "height"],
+      "properties": {
+        "media_uuid": { "$ref": "#/$defs/uuid" },
+        "role": { "enum": ["avatar", "log", "plan", "wake"] },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "byte_size": { "type": "integer", "minimum": 1 },
+        "mime": { "type": "string", "minLength": 1 },
+        "width": { "type": ["integer", "null"] },
+        "height": { "type": ["integer", "null"] }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["choice_id", "outcome", "sources"],
+      "properties": {
+        "choice_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" },
+        "outcome": { "$ref": "#/$defs/typedOutcome" },
+        "sources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } }
+      }
+    },
+    "conflictingItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "candidates"],
+      "properties": {
+        "path": { "$ref": "#/$defs/jsonPointer" },
+        "candidates": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/candidate" } }
+      }
+    },
+    "autoMergedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "outcome", "sources"],
+      "properties": {
+        "path": { "$ref": "#/$defs/jsonPointer" },
+        "outcome": { "$ref": "#/$defs/typedOutcome" },
+        "sources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } }
+      }
+    },
+    "snapshotPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract", "conflict_id", "entity_type", "client_uuid", "snapshot_token", "expires_at", "stable", "branches", "conflicting", "auto_merged", "page_index", "continuation", "complete"],
+      "properties": {
+        "contract": { "const": "conflict_snapshot_v2" },
+        "conflict_id": { "$ref": "#/$defs/uuid" },
+        "entity_type": { "const": "baby" },
+        "client_uuid": { "$ref": "#/$defs/uuid" },
+        "snapshot_token": { "$ref": "#/$defs/snapshotToken" },
+        "expires_at": { "type": "integer" },
+        "stable": { "$ref": "#/$defs/versionView" },
+        "branches": { "type": "array", "items": { "$ref": "#/$defs/versionView" } },
+        "conflicting": { "type": "array", "items": { "$ref": "#/$defs/conflictingItem" } },
+        "auto_merged": { "type": "array", "items": { "$ref": "#/$defs/autoMergedItem" } },
+        "page_index": { "type": "integer", "minimum": 0 },
+        "continuation": { "type": ["string", "null"] },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "resolutionChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "choice_id"],
+      "properties": {
+        "path": { "$ref": "#/$defs/jsonPointer" },
+        "choice_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" }
+      }
+    },
+    "resolutionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_token", "resolution_mutation_id", "choices"],
+      "properties": {
+        "snapshot_token": { "$ref": "#/$defs/snapshotToken" },
+        "resolution_mutation_id": { "$ref": "#/$defs/uuid" },
+        "choices": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/resolutionChoice" } }
+      }
+    },
+    "caseBase": {
+      "type": "object",
+      "required": ["id", "kind", "input", "expect"]
+    },
+    "canonicalCase": {
+      "oneOf": [
+        { "$ref": "#/$defs/canonicalExplicitNullCase" },
+        { "$ref": "#/$defs/canonicalMissingFieldCase" },
+        { "$ref": "#/$defs/canonicalUnknownFieldCase" },
+        { "$ref": "#/$defs/canonicalWrongTypeCase" }
+      ]
+    },
+    "canonicalExplicitNullCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-explicit-null" },
+            "kind": { "const": "accept" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entity_type", "root"],
+              "properties": {
+                "entity_type": { "const": "baby" },
+                "root": {
+                  "allOf": [
+                    { "$ref": "#/$defs/babyMutationRoot" },
+                    { "properties": { "birthday": { "const": null } } }
+                  ]
+                }
+              }
+            },
+            "expect": { "$ref": "#/$defs/canonicalAccept" }
+          }
+        }
+      ]
+    },
+    "canonicalMissingFieldCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-missing-known-field" },
+            "kind": { "const": "reject" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entity_type", "root"],
+              "properties": {
+                "entity_type": { "const": "baby" },
+                "root": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["nickname", "sex", "avatar_media_uuid", "birth_weight_grams", "updated_at"],
+                  "properties": {
+                    "nickname": { "type": "string" },
+                    "sex": { "type": ["string", "null"] },
+                    "avatar_media_uuid": { "type": ["string", "null"] },
+                    "birth_weight_grams": { "type": ["integer", "null"] },
+                    "updated_at": { "type": "integer" }
+                  }
+                }
+              }
+            },
+            "expect": {
+              "allOf": [
+                { "$ref": "#/$defs/terminalResponse" },
+                { "properties": { "error": { "properties": { "code": { "const": "missing_field" } } } } }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "canonicalUnknownFieldCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-unknown-field" },
+            "kind": { "const": "reject" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entity_type", "root"],
+              "properties": {
+                "entity_type": { "const": "baby" },
+                "root": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["nickname", "sex", "birthday", "birth_weight_grams", "avatar_media_uuid", "updated_at", "alias"],
+                  "properties": {
+                    "nickname": { "type": "string" },
+                    "sex": { "type": ["string", "null"] },
+                    "birthday": { "type": ["string", "null"] },
+                    "birth_weight_grams": { "type": ["integer", "null"] },
+                    "avatar_media_uuid": { "type": ["string", "null"] },
+                    "updated_at": { "type": "integer" },
+                    "alias": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "expect": {
+              "allOf": [
+                { "$ref": "#/$defs/terminalResponse" },
+                { "properties": { "error": { "properties": { "code": { "const": "unknown_field" } } } } }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "canonicalWrongTypeCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-wrong-type" },
+            "kind": { "const": "reject" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["entity_type", "root"],
+              "properties": {
+                "entity_type": { "const": "record" },
+                "root": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["baby_client_uuid", "type", "custom_item_client_uuid", "timestamp", "end_timestamp", "note", "payload_json", "schema_version", "updated_at"],
+                  "properties": {
+                    "baby_client_uuid": { "$ref": "#/$defs/uuid" },
+                    "type": { "const": "formula" },
+                    "custom_item_client_uuid": { "type": "null" },
+                    "timestamp": { "type": "string" },
+                    "end_timestamp": { "type": "null" },
+                    "note": { "type": "null" },
+                    "payload_json": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["amount_ml"],
+                      "properties": { "amount_ml": { "type": "integer", "minimum": 1 } }
+                    },
+                    "schema_version": { "const": 2 },
+                    "updated_at": { "type": "integer" }
+                  }
+                }
+              }
+            },
+            "expect": {
+              "allOf": [
+                { "$ref": "#/$defs/terminalResponse" },
+                { "properties": { "error": { "properties": { "code": { "const": "wrong_type" } } } } }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "canonicalAccept": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical", "outcome"],
+      "properties": {
+        "canonical": { "const": true },
+        "outcome": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "op", "value"],
+          "properties": {
+            "path": { "$ref": "#/$defs/jsonPointer" },
+            "op": { "const": "set" },
+            "value": true
+          }
+        }
+      }
+    },
+    "classificationCase": {
+      "oneOf": [
+        { "$ref": "#/$defs/parentNullClassificationCase" },
+        { "$ref": "#/$defs/mediaRemoveClassificationCase" },
+        { "$ref": "#/$defs/deleteClassificationCase" }
+      ]
+    },
+    "parentNullClassificationCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-parent-null-versus-child-edit" },
+            "kind": { "const": "classify" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["base", "heads"],
+              "properties": {
+                "base": { "$ref": "#/$defs/doseContainer" },
+                "heads": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["dose"],
+                    "properties": { "dose": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/dose" }] } }
+                  }
+                }
+              }
+            },
+            "expect": { "$ref": "#/$defs/pathClassification" }
+          }
+        }
+      ]
+    },
+    "doseContainer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dose"],
+      "properties": { "dose": { "$ref": "#/$defs/dose" } }
+    },
+    "dose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["amount", "unit"],
+      "properties": {
+        "amount": { "type": "integer", "minimum": 0 },
+        "unit": { "type": "string", "minLength": 1 }
+      }
+    },
+    "pathClassification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conflicting_paths", "auto_merged_paths"],
+      "properties": {
+        "conflicting_paths": { "type": "array", "items": { "$ref": "#/$defs/jsonPointer" } },
+        "auto_merged_paths": { "type": "array", "items": { "$ref": "#/$defs/jsonPointer" } }
+      }
+    },
+    "mediaRemoveClassificationCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-media-remove" },
+            "kind": { "const": "classify" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "before", "after"],
+              "properties": {
+                "path": { "const": "/media/00000000-0000-0000-0000-000000000010" },
+                "before": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["sha256"],
+                  "properties": { "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+                },
+                "after": { "type": "null" }
+              }
+            },
+            "expect": { "$ref": "#/$defs/removeExpectation" }
+          }
+        }
+      ]
+    },
+    "deleteClassificationCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "canonical-delete-transition" },
+            "kind": { "const": "classify" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "before", "after"],
+              "properties": {
+                "path": { "const": "/_mutation.deleted" },
+                "before": { "const": false },
+                "after": { "const": true }
+              }
+            },
+            "expect": { "$ref": "#/$defs/removeExpectation" }
+          }
+        }
+      ]
+    },
+    "removeExpectation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome"],
+      "properties": {
+        "outcome": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op"],
+          "properties": { "op": { "const": "remove" } }
+        }
+      }
+    },
+    "snapshotPagesCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "snapshot-two-pages" },
+            "kind": { "const": "accept" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["pages"],
+              "properties": { "pages": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/snapshotPage" } } }
+            },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["full_branch_set", "resolution_token"],
+              "properties": {
+                "full_branch_set": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                "resolution_token": { "$ref": "#/$defs/snapshotToken" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "snapshotChoicePageCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "snapshot-choice-stable-across-pages" },
+            "kind": { "const": "accept" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["snapshot_token", "path", "page_choice_ids"],
+              "properties": {
+                "snapshot_token": { "$ref": "#/$defs/snapshotToken" },
+                "path": { "$ref": "#/$defs/jsonPointer" },
+                "page_choice_ids": { "type": "array", "minItems": 2, "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" } }
+              }
+            },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["choice_id"],
+              "properties": { "choice_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" } }
+            }
+          }
+        }
+      ]
+    },
+    "snapshotChoiceRestartCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "snapshot-choice-stable-after-restart" },
+            "kind": { "const": "accept" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["snapshot_token", "before_restart", "after_restart"],
+              "properties": {
+                "snapshot_token": { "$ref": "#/$defs/snapshotToken" },
+                "before_restart": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" },
+                "after_restart": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" }
+              }
+            },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["same"],
+              "properties": { "same": { "const": true } }
+            }
+          }
+        }
+      ]
+    },
+    "snapshotDisjointCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "snapshot-auto-conflict-disjoint" },
+            "kind": { "const": "accept" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["conflicting_paths", "auto_merged_paths"],
+              "properties": {
+                "conflicting_paths": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/jsonPointer" } },
+                "auto_merged_paths": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/jsonPointer" } }
+              }
+            },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["intersection"],
+              "properties": { "intersection": { "const": [] } }
+            }
+          }
+        }
+      ]
+    },
+    "resolutionRequestCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "resolve-choice-only-full-set" },
+            "kind": { "const": "accept" },
+            "input": { "$ref": "#/$defs/resolutionRequest" },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["request_keys", "status", "replay"],
+              "properties": {
+                "request_keys": { "const": ["snapshot_token", "resolution_mutation_id", "choices"] },
+                "status": { "enum": ["accepted", "merged", "branched"] },
+                "replay": { "const": false }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "restoreSuccessCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "resolve-direct-base-restore" },
+            "kind": { "const": "accept" },
+            "input": {
+              "allOf": [
+                { "$ref": "#/$defs/restoreInput" },
+                { "required": ["choice_id"] }
+              ]
+            },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["restore_version", "post_restore_edit"],
+              "properties": {
+                "restore_version": { "type": "string", "minLength": 1 },
+                "post_restore_edit": { "const": "separate_mutation" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "restoreRejectCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "enum": ["resolve-missing-direct-base", "resolve-missing-direct-base-media"] },
+            "kind": { "const": "reject" },
+            "input": { "$ref": "#/$defs/restoreInput" },
+            "expect": { "$ref": "#/$defs/terminalResponse" }
+          }
+        }
+      ]
+    },
+    "restoreInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stable", "direct_base"],
+      "properties": {
+        "stable": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version_id", "deleted", "base_version"],
+          "properties": {
+            "version_id": { "type": "string", "minLength": 1 },
+            "deleted": { "const": true },
+            "base_version": { "type": "string", "minLength": 1 }
+          }
+        },
+        "direct_base": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/directRestoreBase" }
+          ]
+        },
+        "choice_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{16,}$" }
+      }
+    },
+    "directRestoreBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version_id", "base_version", "root", "media", "deleted", "mutation_id", "actor_id", "device_id", "received_at", "media_bytes_readable"],
+      "properties": {
+        "version_id": { "type": "string", "minLength": 1 },
+        "base_version": { "type": ["string", "null"] },
+        "root": { "$ref": "#/$defs/babyStableRoot" },
+        "media": { "type": "array", "items": { "$ref": "#/$defs/mediaItem" } },
+        "deleted": { "const": false },
+        "mutation_id": { "$ref": "#/$defs/uuid" },
+        "actor_id": { "type": "string", "minLength": 1 },
+        "device_id": { "type": "string", "minLength": 1 },
+        "received_at": { "type": "integer" },
+        "media_bytes_readable": { "type": "boolean" }
+      }
+    },
+    "replayCase": {
+      "allOf": [
+        { "$ref": "#/$defs/caseBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "const": "commit-exact-replay-marker" },
+            "kind": { "const": "accept" },
+            "input": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mutation_id", "request_hash", "attempts"],
+              "properties": {
+                "mutation_id": { "$ref": "#/$defs/uuid" },
+                "request_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "attempts": { "const": 2 }
+              }
+            },
+            "expect": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["batch_keys", "unit_required_keys", "unit_optional_keys", "stable_keys", "first", "second", "new_status"],
+              "properties": {
+                "batch_keys": {
+                  "const": ["generation", "results"]
+                },
+                "unit_required_keys": {
+                  "const": ["status", "mutation_id", "request_hash", "replay", "stable"]
+                },
+                "unit_optional_keys": {
+                  "const": ["branch_version_id", "conflict_id"]
+                },
+                "stable_keys": {
+                  "const": ["version_id", "root", "media", "deleted", "deleted_at"]
+                },
+                "first": {
+                  "allOf": [
+                    { "$ref": "#/$defs/successMarker" },
+                    { "properties": { "replay": { "const": false } } }
+                  ]
+                },
+                "second": {
+                  "allOf": [
+                    { "$ref": "#/$defs/successMarker" },
+                    { "properties": { "replay": { "const": true } } }
+                  ]
+                },
+                "new_status": { "const": false }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "successMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "replay"],
+      "properties": {
+        "status": { "enum": ["accepted", "merged", "branched"] },
+        "replay": { "type": "boolean" }
+      }
+    },
+    "closedKey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dataflow02CarePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entity_type",
+        "mutation_keys",
+        "stable_keys",
+        "nullable_keys",
+        "stamp_rules",
+        "fulfillment_pair",
+        "not_on_family_wire"
+      ],
+      "properties": {
+        "entity_type": { "const": "care_plan" },
+        "mutation_keys": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/closedKey" }
+        },
+        "stable_keys": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/closedKey" }
+        },
+        "nullable_keys": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/closedKey" }
+        },
+        "stamp_rules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mutation_forbidden", "stable_required"],
+          "properties": {
+            "mutation_forbidden": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/closedKey" }
+            },
+            "stable_required": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/closedKey" }
+            }
+          }
+        },
+        "fulfillment_pair": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "completed_requires_full_pair",
+            "pending_requires_empty_pair",
+            "missed_requires_empty_pair",
+            "skipped_requires_empty_pair"
+          ],
+          "properties": {
+            "completed_requires_full_pair": { "const": true },
+            "pending_requires_empty_pair": { "const": true },
+            "missed_requires_empty_pair": { "const": true },
+            "skipped_requires_empty_pair": { "const": true }
+          }
+        },
+        "not_on_family_wire": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/closedKey" }
+        }
+      }
+    },
+    "case": {
+      "oneOf": [
+        { "$ref": "#/$defs/canonicalCase" },
+        { "$ref": "#/$defs/classificationCase" },
+        { "$ref": "#/$defs/snapshotPagesCase" },
+        { "$ref": "#/$defs/snapshotChoicePageCase" },
+        { "$ref": "#/$defs/snapshotChoiceRestartCase" },
+        { "$ref": "#/$defs/snapshotDisjointCase" },
+        { "$ref": "#/$defs/resolutionRequestCase" },
+        { "$ref": "#/$defs/restoreSuccessCase" },
+        { "$ref": "#/$defs/restoreRejectCase" },
+        { "$ref": "#/$defs/replayCase" }
+      ]
+    }
+  }
+}

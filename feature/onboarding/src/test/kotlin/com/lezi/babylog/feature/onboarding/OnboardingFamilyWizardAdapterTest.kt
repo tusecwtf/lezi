@@ -1,0 +1,373 @@
+package com.lezi.babylog.feature.onboarding
+
+import com.lezi.babylog.domain.family.FamilyWizardEntry
+import com.lezi.babylog.domain.family.FamilyWizardMode
+import com.lezi.babylog.domain.family.FamilyWizardJoinRole
+import com.lezi.babylog.domain.family.FamilyWizardOutcome
+import com.lezi.babylog.domain.family.FamilyWizardState
+import com.lezi.babylog.domain.family.FamilyWizardStep
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
+import com.lezi.babylog.sync.InitialFamilyDataRecovery
+import com.lezi.babylog.sync.session.FamilyEndpointDraft
+import com.lezi.babylog.sync.session.SyncSession
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class OnboardingFamilyWizardAdapterTest {
+    @Test
+    fun onboardingProjectsTheSharedActionsAndSnapshot() {
+        val draft = FamilyEndpointDraft.fromConfig(
+            FamilyEndpointConfig(host = "nas.home"),
+        )
+
+        val snapshot = onboardingFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Join,
+            step = FamilyWizardStep.Identity,
+            draft = draft,
+            displayName = "妈妈",
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+
+        assertEquals(FamilyWizardEntry.Onboarding, snapshot.entry)
+        assertEquals(listOf(onboardingConnectFamilyAction()), onboardingFamilyActions())
+        assertEquals("连接家庭服务器", onboardingConnectFamilyAction())
+        assertEquals(draft, snapshot.toEndpointDraft())
+        assertEquals("妈妈", snapshot.displayName)
+        assertEquals(FamilyWizardJoinRole.Member, snapshot.joinRole)
+        assertTrue(onboardingChooseFamilyBody().contains("离线模式"))
+    }
+
+    @Test
+    fun offlineModeCreateBabyCopyDoesNotRequireFamilySession() {
+        assertEquals(
+            OnboardingCreateBabySource.OfflineMode,
+            onboardingCreateBabySource(FamilyWizardState.Editing(emptySnapshot())),
+        )
+        assertTrue(onboardingCreateBabyBody(OnboardingCreateBabySource.OfflineMode).contains("离线模式"))
+        assertTrue(onboardingCreateBabyBody(OnboardingCreateBabySource.OfflineMode).contains("账户"))
+        assertEquals(
+            OnboardingCreateBabySource.AfterFamilyCreate,
+            onboardingCreateBabySource(
+                completed(emptySnapshot(), FamilyWizardOutcome.Created(ownerSession())),
+            ),
+        )
+        assertEquals(
+            OnboardingCreateBabySource.AfterFamilyReclaim,
+            onboardingCreateBabySource(
+                completed(
+                    emptySnapshot(),
+                    FamilyWizardOutcome.Reclaimed(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun onboardingProjectsCreatedReclaimedAndJoinedWithoutARecoveryMode() {
+        val snapshot = onboardingFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Create,
+            step = FamilyWizardStep.Identity,
+            draft = FamilyEndpointDraft.fromConfig(
+                FamilyEndpointConfig(host = "nas.home"),
+            ),
+            displayName = "妈妈",
+        )
+        assertEquals(
+            OnboardingFamilyTransition(false, OnboardingStep.CreateBaby),
+            onboardingFamilyWizardTransition(
+                completed(snapshot, FamilyWizardOutcome.Created(ownerSession())),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.RecoveryComplete),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot,
+                    FamilyWizardOutcome.Reclaimed(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = false,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.RecoveryComplete),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.OwnerLoggedIn(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = false,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.RetryRequired(),
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberLoginQrClaimed(
+                        memberSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberLoginQrClaimed(
+                        memberSession(),
+                        InitialFamilyDataRecovery.RetryRequired(),
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.NotRequired,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+    }
+
+    @Test
+    fun committedRecoveryFailureLeavesOnboardingForTheGlobalSyncOwner() {
+        val snapshot = onboardingFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Create,
+            step = FamilyWizardStep.Identity,
+            draft = FamilyEndpointDraft.fromConfig(
+                FamilyEndpointConfig(host = "nas.home"),
+            ),
+            displayName = "妈妈",
+        )
+        val committed = FamilyWizardOutcome.Reclaimed(
+            ownerSession(),
+            InitialFamilyDataRecovery.RetryRequired(),
+        )
+
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                FamilyWizardState.RetryableFailure(
+                    snapshot,
+                    "历史数据恢复失败，请确认家庭服务器可访问后重试",
+                    committed,
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+    }
+
+    @Test
+    fun babyStepHoldArmsOnlyForCreateAndOwnerLoginAndStaysForCreateBaby() {
+        assertTrue(onboardingArmsBabyStepHold(FamilyWizardMode.Create, joinRole = null))
+        assertTrue(
+            onboardingArmsBabyStepHold(FamilyWizardMode.Join, FamilyWizardJoinRole.Owner),
+        )
+        assertFalse(
+            onboardingArmsBabyStepHold(FamilyWizardMode.Join, FamilyWizardJoinRole.Member),
+        )
+        assertFalse(onboardingArmsBabyStepHold(FamilyWizardMode.Join, joinRole = null))
+
+        val createFailure = FamilyWizardState.RetryableFailure(
+            snapshot = onboardingFamilyWizardSnapshot(
+                mode = FamilyWizardMode.Create,
+                step = FamilyWizardStep.Identity,
+                draft = FamilyEndpointDraft.fromConfig(FamilyEndpointConfig(host = "nas.home")),
+                displayName = "妈妈",
+            ),
+            message = "创建家庭失败，请重试",
+        )
+        assertTrue(onboardingRetryArmsBabyStepHold(createFailure))
+        val memberFailure = FamilyWizardState.RetryableFailure(
+            snapshot = onboardingFamilyWizardSnapshot(
+                mode = FamilyWizardMode.Join,
+                step = FamilyWizardStep.Identity,
+                draft = FamilyEndpointDraft.fromConfig(FamilyEndpointConfig(host = "nas.home")),
+                displayName = "爸爸",
+                joinRole = FamilyWizardJoinRole.Member,
+            ),
+            message = "申请加入失败，请重试",
+        )
+        assertFalse(onboardingRetryArmsBabyStepHold(memberFailure))
+        assertFalse(
+            onboardingRetryArmsBabyStepHold(
+                FamilyWizardState.Editing(
+                    onboardingFamilyWizardSnapshot(
+                        mode = FamilyWizardMode.Create,
+                        step = FamilyWizardStep.Identity,
+                        draft = FamilyEndpointDraft.fromConfig(FamilyEndpointConfig(host = "nas.home")),
+                        displayName = "妈妈",
+                    ),
+                ),
+            ),
+        )
+
+        val snapshot = onboardingFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Create,
+            step = FamilyWizardStep.Identity,
+            draft = FamilyEndpointDraft.fromConfig(FamilyEndpointConfig(host = "nas.home")),
+            displayName = "妈妈",
+        )
+        assertTrue(
+            onboardingKeepsCreateBabyStep(
+                completed(snapshot, FamilyWizardOutcome.Created(ownerSession())),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertTrue(
+            onboardingKeepsCreateBabyStep(
+                completed(
+                    snapshot,
+                    FamilyWizardOutcome.Reclaimed(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = true,
+            ),
+        )
+        assertFalse(
+            onboardingKeepsCreateBabyStep(
+                completed(
+                    snapshot,
+                    FamilyWizardOutcome.Reclaimed(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = false,
+            ),
+        )
+        assertFalse(
+            onboardingKeepsCreateBabyStep(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+    }
+
+    @Test
+    fun memberLoginQrVerificationFailedAndReadyFeedbackProjectSharedRetryPolicy() {
+        val payload = com.lezi.babylog.sync.qr.MemberLoginQrPayload(
+            endpoint = com.lezi.babylog.sync.session.TrustedEndpointProfile.systemPki("https://nas.home"),
+            grant = "grant-0000000000000000000000000000000000000",
+            familyName = "乐乐一家",
+            memberDisplayName = "妈妈",
+            expiresAtEpochSeconds = 1_753_419_000,
+        )
+        val snapshot = onboardingFamilyWizardSnapshot(
+            mode = FamilyWizardMode.Join,
+            step = FamilyWizardStep.Identity,
+            draft = FamilyEndpointDraft.fromConfig(
+                FamilyEndpointConfig(host = "nas.home"),
+            ),
+            displayName = "妈妈",
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+
+        val failed = com.lezi.babylog.domain.family.projectMemberLoginQrDialog(
+            FamilyWizardState.MemberLoginQrVerificationFailed(
+                snapshot = snapshot,
+                payload = payload,
+                message = "暂时无法确认二维码中的家庭服务器，请稍后重试",
+            ),
+        )!!
+        assertEquals(true, failed.verificationRetryRequired)
+        assertEquals(true, failed.confirmEnabled)
+        assertEquals("重新确认", failed.confirmLabel)
+
+        val ready = com.lezi.babylog.domain.family.projectMemberLoginQrDialog(
+            FamilyWizardState.MemberLoginQrReady(
+                snapshot = snapshot,
+                payload = payload,
+                feedback = "请填写设备称呼",
+            ),
+        )!!
+        assertEquals("请填写设备称呼", ready.feedback)
+        assertEquals(true, ready.confirmEnabled)
+        assertEquals("在这台设备登录", ready.confirmLabel)
+    }
+
+    private fun completed(
+        snapshot: com.lezi.babylog.domain.family.FamilyWizardSnapshot,
+        outcome: FamilyWizardOutcome,
+    ) = FamilyWizardState.Completed(snapshot, outcome)
+
+    private fun emptySnapshot() = onboardingFamilyWizardSnapshot(
+        mode = FamilyWizardMode.Create,
+        step = FamilyWizardStep.Identity,
+        draft = FamilyEndpointDraft.fromConfig(
+            FamilyEndpointConfig(host = "nas.home"),
+        ),
+        displayName = "妈妈",
+    )
+}
+
+private fun ownerSession() = SyncSession(
+    familyId = "family-owner",
+    accessToken = "owner-token",
+    role = FamilyRole.Owner,
+    membershipId = "owner-membership",
+)
+
+private fun memberSession() = SyncSession(
+    familyId = "family-member",
+    accessToken = "member-token",
+    role = FamilyRole.Member,
+    membershipId = "member-membership",
+)

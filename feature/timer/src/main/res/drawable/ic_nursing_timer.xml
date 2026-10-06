@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome notification small icon: minimal stopwatch in the app's geometric style.
+     Only alpha matters to the system tint; a single flat fill keeps it legible at 24dp. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Stopwatch ring -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M12,5 C16.14,5 19.5,8.36 19.5,12.5 C19.5,16.64 16.14,20 12,20 C7.86,20 4.5,16.64 4.5,12.5 C4.5,8.36 7.86,5 12,5 Z M12,7 C8.96,7 6.5,9.46 6.5,12.5 C6.5,15.54 8.96,18 12,18 C15.04,18 17.5,15.54 17.5,12.5 C17.5,9.46 15.04,7 12,7 Z" />
+    <!-- Top button -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M10.75,2 L13.25,2 L13.25,4.5 L10.75,4.5 Z" />
+    <!-- Hand at twelve o'clock -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11.25,12.5 L12.75,12.5 L12.75,8 L11.25,8 Z" />
+</vector>

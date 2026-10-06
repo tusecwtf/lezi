@@ -1,0 +1,129 @@
+package com.lezi.babylog.core.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Text
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import com.lezi.babylog.core.model.limitBabyNicknameInput
+import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziDatePickerDialog
+import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LeziTextButton
+import com.lezi.babylog.designsystem.LeziFilterChip
+import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziTextButtonTone
+import com.lezi.babylog.designsystem.LeziTextField
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
+
+/**
+ * Shared 昵称/性别/出生日期/出生体重 field group for baby-profile dialogs
+ * (settings 添加宝宝 + family 编辑宝宝档案). Keeps the fuller edit-dialog
+ * affordances: nickname error supportingText and weight placeholder/hint.
+ */
+@Composable
+fun BabyProfileFormFields(
+    nickname: String,
+    onNicknameChange: (String) -> Unit,
+    nicknameError: String?,
+    sex: String?,
+    onSexChange: (String?) -> Unit,
+    birthdayEpochDay: Long,
+    onPickBirthday: () -> Unit,
+    weightText: String,
+    onWeightTextChange: (String) -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val dateLabel = formatBabyBirthday(birthdayEpochDay)
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+    ) {
+        LeziTextField(
+            value = nickname,
+            enabled = enabled,
+            onValueChange = { onNicknameChange(limitBabyNicknameInput(it)) },
+            label = { Text("昵称（不可重复）") },
+            singleLine = true,
+            isError = nicknameError != null,
+            supportingText = nicknameError?.let { { Text(it) } },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text("性别", style = LeziTypography.Label)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Home-LAN wire values only (female/male/null), not Kotlin enum names.
+            listOf(
+                "female" to "女宝",
+                "male" to "男宝",
+                null to "未设置",
+            ).forEach { (key, label) ->
+                LeziFilterChip(
+                    selected = sex == key,
+                    enabled = enabled,
+                    onClick = { onSexChange(key) },
+                    label = label,
+                )
+            }
+        }
+        Text("出生日期", style = LeziTypography.Label)
+        LeziSecondaryButton(
+            label = dateLabel,
+            onClick = onPickBirthday,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        LeziTextField(
+            value = weightText,
+            enabled = enabled,
+            onValueChange = { onWeightTextChange(it.filter { ch -> ch.isDigit() || ch == '.' }) },
+            label = { Text("出生体重（kg，可选）") },
+            placeholder = { Text("例如 3.20") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            supportingText = { Text("可填千克，保存时换算为克") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/** Shared UTC-safe birthday DatePickerDialog for baby-profile dialogs. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun BabyBirthdayDatePickerDialog(
+    birthdayEpochDay: Long,
+    onDismiss: () -> Unit,
+    onSelect: (Long) -> Unit,
+) {
+    val initialUtc = LocalDate.ofEpochDay(birthdayEpochDay)
+        .atStartOfDay(ZoneOffset.UTC)
+        .toInstant()
+        .toEpochMilli()
+    val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
+    LeziDatePickerDialog(
+        onDismissRequest = onDismiss,
+        onConfirm = {
+            dateState.selectedDateMillis?.let { ms ->
+                onSelect(
+                    Instant.ofEpochMilli(ms)
+                        .atZone(ZoneOffset.UTC)
+                        .toLocalDate()
+                        .toEpochDay(),
+                )
+            }
+            onDismiss()
+        },
+    ) {
+        LeziDatePicker(state = dateState)
+    }
+}

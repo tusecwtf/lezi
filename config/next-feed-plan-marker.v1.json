@@ -1,0 +1,66 @@
+{
+  "contract": "lezi.next-feed-plan-marker",
+  "version": 1,
+  "description": "Internal CarePlan note protocol marker for family-shared next-feed intent. Not a user-facing note format. Production constants stay hardcoded; this file is the build/test contract only.",
+  "marker": "[[lezi:next-feed:v1]]",
+  "semantics": {
+    "recognition": "note.startsWith(marker) — Kotlin isNextFeedPlanNote / Rust is_next_feed_plan_note",
+    "strip_visible": "when recognized: removePrefix(marker).trimStart(); blank becomes null. Non-recognized notes do not use strip."
+  },
+  "samples": [
+    {
+      "id": "marker_only",
+      "note": "[[lezi:next-feed:v1]]",
+      "is_next_feed": true,
+      "visible_note": null
+    },
+    {
+      "id": "marker_plus_visible",
+      "note": "[[lezi:next-feed:v1]] 带奶瓶",
+      "is_next_feed": true,
+      "visible_note": "带奶瓶"
+    },
+    {
+      "id": "marker_plus_visible_extra_space",
+      "note": "[[lezi:next-feed:v1]]   bottle",
+      "is_next_feed": true,
+      "visible_note": "bottle"
+    },
+    {
+      "id": "illegal_v2_prefix",
+      "note": "[[lezi:next-feed:v2]]",
+      "is_next_feed": false,
+      "visible_note": null
+    },
+    {
+      "id": "illegal_single_bracket",
+      "note": "[lezi:next-feed:v1]",
+      "is_next_feed": false,
+      "visible_note": null
+    },
+    {
+      "id": "illegal_embedded_not_prefix",
+      "note": "note [[lezi:next-feed:v1]]",
+      "is_next_feed": false,
+      "visible_note": null
+    },
+    {
+      "id": "illegal_partial_prefix",
+      "note": "[[lezi:next-feed:",
+      "is_next_feed": false,
+      "visible_note": null
+    },
+    {
+      "id": "plain_user_note",
+      "note": "带奶瓶",
+      "is_next_feed": false,
+      "visible_note": null
+    },
+    {
+      "id": "empty",
+      "note": "",
+      "is_next_feed": false,
+      "visible_note": null
+    }
+  ]
+}

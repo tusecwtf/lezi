@@ -1,0 +1,56 @@
+package com.lezi.babylog.feature.family
+
+import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.feature.family.members.MembersDevicesUi
+import com.lezi.babylog.feature.family.overview.AccountOverviewUi
+import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.session.FamilyRole
+import org.junit.Test
+
+/**
+ * Read-model contracts for the three family hosts (ticket 24).
+ * Account overview stays free of technical credentials and roster command state.
+ */
+class FamilyHostReadModelTest {
+    @Test
+    fun accountOverviewReadModelExcludesRosterAndEndpointCredentials() {
+        val overview = AccountOverviewUi(
+            identity = FamilyIdentityUi(
+                displayName = "管理员",
+                enabled = true,
+                role = FamilyRole.Owner,
+                familyName = "乐乐一家",
+            ),
+            status = SyncStatus.Idle,
+        )
+        assertThat(overview.familyName).isEqualTo("乐乐一家")
+        assertThat(overview.displayName).isEqualTo("管理员")
+        assertThat(overview.status).isEqualTo(SyncStatus.Idle)
+        assertThat(overview.familyNameLabel).isEqualTo("乐乐一家")
+    }
+
+    @Test
+    fun membersDevicesReadModelOwnsRosterAndPendingApprovals() {
+        val members = MembersDevicesUi(
+            identity = FamilyIdentityUi(
+                displayName = "管理员",
+                enabled = true,
+                role = FamilyRole.Owner,
+                familyName = "乐乐一家",
+            ),
+            members = listOf(
+                FamilyMember("管理员", FamilyRole.Owner, true, "m-owner"),
+            ),
+            membersLoaded = true,
+            membersLoading = false,
+            pendingMemberRequests = emptyList(),
+            pendingMemberRenameRequests = emptyList(),
+        )
+        assertThat(members.members).hasSize(1)
+        assertThat(members.membersLoaded).isTrue()
+        assertThat(members.membersError).isNull()
+        assertThat(members.displayName).isEqualTo("管理员")
+    }
+
+}

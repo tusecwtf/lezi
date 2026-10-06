@@ -1,0 +1,10 @@
+org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8 -XX:+UseParallelGC
+org.gradle.parallel=true
+org.gradle.caching=true
+org.gradle.configuration-cache=false
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+kotlin.code.style=official
+# Do not pin org.gradle.java.home here — absolute paths break CI and other machines.
+# Use JDK 21 (not 25+; AGP fails). Optionally set in ~/.gradle/gradle.properties:
+#   org.gradle.java.home=/path/to/jdk-21

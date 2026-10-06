@@ -1,0 +1,8 @@
+{
+  "package_name": "com.lezi.babylog",
+  "version_code": 34,
+  "version_name": "0.5.4",
+  "min_supported_version_code": 21,
+  "sha256": "9a8c319c4e8d25e15813ffd4db75b7edb7028e4e17a0ba9adf2c168e2824ffb2",
+  "release_notes": "0.5.4：退出前未同步提醒等数据安全加固；时间轴、动效与搜索打磨；多图一次发布与同步修复；服务端同升 0.5.4"
+}

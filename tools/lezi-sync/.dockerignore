@@ -1,0 +1,8 @@
+.git
+.gitignore
+target
+data
+data-*
+*.db
+tests
+vendor

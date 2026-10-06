@@ -1,0 +1,425 @@
+package com.lezi.babylog.feature.log.composer
+
+import android.net.Uri
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.junit4.StateRestorationTester
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.platform.testTag
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.ui.CameraCaptureLauncher
+import com.lezi.babylog.core.ui.CameraCaptureOutcome
+import com.lezi.babylog.core.ui.OwnedCameraCapture
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.concurrent.atomic.AtomicReference
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import com.lezi.babylog.feature.log.*
+import com.lezi.babylog.feature.log.timeline.*
+import com.lezi.babylog.feature.log.dock.*
+import com.lezi.babylog.feature.log.layout.*
+import com.lezi.babylog.feature.log.photo.*
+
+@RunWith(AndroidJUnit4::class)
+class RecordComposerDiscardDeviceTest {
+    @get:Rule
+    val compose = createComposeRule()
+
+    @Test
+    fun recordCameraEntryReleasesCancelAndDurablyImportedCaptureAcrossRestoration() {
+        val restoration = StateRestorationTester(compose)
+        val camera = FakeCameraCapture()
+        val imported = AtomicReference<Uri?>(null)
+        restoration.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L),
+                    interactionKey = "camera-restoration",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = false,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = {},
+                    onDismiss = {},
+                    onDelete = null,
+                    onConfirm = {},
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onImportCapturedPhoto = { uri, done ->
+                        imported.set(uri)
+                        done(true)
+                    },
+                    onRemovePhoto = {},
+                    cameraCaptureLauncherFactory = { key, outcome ->
+                        camera.rememberLauncher(key, outcome)
+                    },
+                )
+            }
+        }
+
+        compose.onNodeWithText("拍照").assertIsDisplayed().performClick()
+        assertEquals(1, camera.launchCount)
+        compose.runOnIdle { camera.emitCancelled() }
+        assertEquals(1, camera.releaseCount)
+
+        compose.onNodeWithText("拍照").performClick()
+        val capturedUri = camera.pendingUri
+        compose.runOnIdle { camera.emitCaptured() }
+        compose.waitUntil(timeoutMillis = 5_000) { camera.releaseCount == 2 }
+        assertEquals(capturedUri, imported.get())
+        assertEquals(2, camera.releaseCount)
+
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("拍照").assertIsDisplayed()
+
+        compose.onNodeWithText("拍照").performClick()
+        compose.runOnIdle { camera.emitFailure(CameraCaptureOutcome.LaunchFailed) }
+        compose.onNodeWithText("相机暂时打不开，可稍后再试一次").assertIsDisplayed()
+        assertEquals(3, camera.releaseCount)
+    }
+
+    private class FakeCameraCapture {
+        var launchCount: Int = 0
+            private set
+        var releaseCount: Int = 0
+            private set
+        val pendingUri: Uri
+            get() = requireNotNull(pending).uri
+        private lateinit var onOutcome: (CameraCaptureOutcome) -> Unit
+        private var pending: FakeOwnedCapture? = null
+
+        private val launcher = object : CameraCaptureLauncher {
+            override fun launch() {
+                pending?.release()
+                launchCount += 1
+                pending = FakeOwnedCapture(
+                    token = "fake-record-$launchCount",
+                    uri = Uri.parse("content://camera-test/record-$launchCount.jpg"),
+                    onReleased = { releaseCount += 1 },
+                )
+            }
+
+            override fun dispose() {
+                pending?.release()
+                pending = null
+            }
+        }
+
+        @Composable
+        fun rememberLauncher(
+            ownershipKey: Any?,
+            outcome: (CameraCaptureOutcome) -> Unit,
+        ): CameraCaptureLauncher {
+            onOutcome = outcome
+            return launcher
+        }
+
+        fun emitCancelled() {
+            pending?.release()
+            pending = null
+            onOutcome(CameraCaptureOutcome.Cancelled)
+        }
+
+        fun emitCaptured() {
+            val capture = requireNotNull(pending)
+            pending = null
+            onOutcome(CameraCaptureOutcome.Captured(capture))
+        }
+
+        fun emitFailure(outcome: CameraCaptureOutcome) {
+            pending?.release()
+            pending = null
+            onOutcome(outcome)
+        }
+    }
+
+    private class FakeOwnedCapture(
+        override val token: String,
+        override val uri: Uri,
+        private val onReleased: () -> Unit,
+    ) : OwnedCameraCapture {
+        private var released = false
+
+        override fun release() {
+            if (released) return
+            released = true
+            onReleased()
+        }
+    }
+
+    @Test
+    fun promptSurvivesRestorationAndContinueKeepsTheDraftSurface() {
+        val restoration = StateRestorationTester(compose)
+        var continued = false
+        restoration.setContent {
+            MaterialTheme {
+                var prompt by rememberRecordComposerDiscardPrompt("request-7")
+                Text("未保存备注仍在")
+                Button(onClick = { prompt = true }) { Text("请求退出") }
+                if (prompt) {
+                    RecordComposerDiscardDialog(
+                        busy = false,
+                        onContinueEditing = {
+                            continued = true
+                            prompt = false
+                        },
+                        onDiscard = {},
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithText("请求退出").performClick()
+        compose.onNodeWithText("放弃未保存的更改？").assertIsDisplayed()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("放弃未保存的更改？").assertIsDisplayed()
+        compose.onNodeWithText("继续编辑").performClick()
+
+        assertTrue(continued)
+        compose.onNodeWithText("未保存备注仍在").assertIsDisplayed()
+        compose.onNodeWithText("放弃未保存的更改？").assertDoesNotExist()
+    }
+
+    @Test
+    fun discardIsExplicitAndBusyStateCannotCloseTheDraft() {
+        var discarded = false
+        var continued = false
+        var busy by mutableStateOf(true)
+        compose.setContent {
+            MaterialTheme {
+                RecordComposerDiscardDialog(
+                    busy = busy,
+                    onContinueEditing = { continued = true },
+                    onDiscard = { discarded = true },
+                )
+            }
+        }
+
+        compose.onNodeWithText("继续编辑").assertIsNotEnabled()
+        compose.onNodeWithText("放弃").assertIsNotEnabled()
+        assertFalse(continued)
+        assertFalse(discarded)
+
+        compose.runOnIdle { busy = false }
+        compose.onNodeWithText("放弃").assertIsEnabled().performClick()
+        assertTrue(discarded)
+    }
+
+    @Test
+    fun continueEditingKeepsTheCurrentFieldTextAndFocus() {
+        val focusRequester = FocusRequester()
+        var body by mutableStateOf("焦点中的草稿")
+        var prompt by mutableStateOf(false)
+        compose.setContent {
+            MaterialTheme {
+                TextField(
+                    value = body,
+                    onValueChange = { body = it },
+                    modifier = Modifier
+                        .testTag("dirty_draft_field")
+                        .focusRequester(focusRequester),
+                )
+                if (prompt) {
+                    RecordComposerDiscardDialog(
+                        busy = false,
+                        onContinueEditing = { prompt = false },
+                        onDiscard = {},
+                    )
+                }
+            }
+        }
+
+        compose.runOnIdle { focusRequester.requestFocus() }
+        compose.onNodeWithTag("dirty_draft_field").assertIsFocused()
+        compose.runOnIdle { prompt = true }
+        compose.onNodeWithText("继续编辑").performClick()
+
+        compose.onNodeWithTag("dirty_draft_field")
+            .assertTextContains("焦点中的草稿")
+            .assertIsFocused()
+    }
+
+    @Test
+    fun headerCloseAndFooterCancelReportTheirExactSharedGateSources() {
+        val source = AtomicReference<ComposerDismissSource?>()
+        setSheet { source.set(it) }
+
+        compose.onNodeWithText("关闭").performClick()
+        assertEquals(ComposerDismissSource.HeaderClose, source.get())
+
+        source.set(null)
+        compose.onNodeWithText("取消").performClick()
+        assertEquals(ComposerDismissSource.FooterCancel, source.get())
+    }
+
+    @Test
+    fun newSleepPanelConfirmsOpenSleepStartWithoutWakeToggle() {
+        val confirmed = AtomicReference<QuickRecordDraft?>(null)
+        compose.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = QuickRecordDraft.create(
+                        type = RecordType.SLEEP,
+                        timestamp = 1_000L,
+                    ).copy(endTimestamp = 2_000L),
+                    interactionKey = "sleep-open-start",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = false,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = {},
+                    onDismiss = {},
+                    onDelete = null,
+                    onConfirm = { confirmed.set(it) },
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onImportCapturedPhoto = { _, done -> done(false) },
+                    onRemovePhoto = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("同时记醒来").assertDoesNotExist()
+        compose.onNodeWithText("确认睡下").assertIsEnabled().performClick()
+        assertNull(confirmed.get()?.toSaveCommand()?.endTimestamp)
+    }
+
+    @Test
+    fun savingDisablesTimeNoteAndRecentNoteControls() {
+        compose.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = QuickRecordDraft.create(
+                        type = RecordType.SLEEP,
+                        timestamp = 1_000L,
+                        recentNotes = listOf("昨日状态稳定"),
+                    ),
+                    interactionKey = "busy-fields",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = true,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = {},
+                    onDismiss = {},
+                    onDelete = null,
+                    onConfirm = {},
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onImportCapturedPhoto = { _, done -> done(false) },
+                    onRemovePhoto = {},
+                )
+            }
+        }
+
+        val renderedTime = Instant.ofEpochMilli(1_000L)
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
+        compose.onNodeWithContentDescription("睡下，$renderedTime，选择时间")
+            .assertIsNotEnabled()
+        compose.onNodeWithTag(RECORD_COMPOSER_NOTE_FIELD_TAG).assertIsNotEnabled()
+        compose.onNodeWithText("昨日状态稳定").assertIsNotEnabled()
+    }
+
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Test
+    fun discardPromptContinueKeepsTheModalSheetVisible() {
+        var prompt by mutableStateOf(false)
+        compose.setContent {
+            MaterialTheme {
+                val sheetState = rememberModalBottomSheetState(
+                    skipPartiallyExpanded = RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED,
+                )
+                RecordComposerModalSheet(
+                    sheetState = sheetState,
+                    systemBackEnabled = true,
+                    modalOverlayVisible = prompt,
+                    onSystemBack = { prompt = !prompt },
+                    onDismissRequest = { prompt = true },
+                    overlay = {
+                        if (prompt) {
+                            RecordComposerDiscardDialog(
+                                busy = false,
+                                onContinueEditing = { prompt = false },
+                                onDiscard = {},
+                            )
+                        }
+                    },
+                ) {
+                    Text("Modal 中的未保存草稿")
+                    Button(onClick = { prompt = true }) {
+                        Text("请求退出")
+                    }
+                }
+            }
+        }
+
+        compose.onNodeWithText("Modal 中的未保存草稿").assertIsDisplayed()
+        compose.onNodeWithText("请求退出").performClick()
+        compose.onNodeWithText("放弃未保存的更改？").assertIsDisplayed()
+        compose.onNodeWithText("继续编辑").performClick()
+
+        compose.onNodeWithText("Modal 中的未保存草稿").assertIsDisplayed()
+        compose.onNodeWithText("放弃未保存的更改？").assertDoesNotExist()
+    }
+
+    private fun setSheet(onDismiss: (ComposerDismissSource) -> Unit) {
+        compose.setContent {
+            MaterialTheme {
+                QuickRecordSheet(
+                    draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L),
+                    interactionKey = "discard-device",
+                    amountStepMl = 5,
+                    timeStepMin = 1,
+                    saving = false,
+                    deleting = false,
+                    saveError = null,
+                    canStartNursingTimer = false,
+                    onDraftChange = {},
+                    onDismiss = onDismiss,
+                    onDelete = null,
+                    onConfirm = {},
+                    onStartNursingTimer = {},
+                    onImportPhotos = {},
+                    onImportCapturedPhoto = { _, done -> done(false) },
+                    onRemovePhoto = {},
+                )
+            }
+        }
+    }
+}

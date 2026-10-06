@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>乐记 · 排泄图标预览</title>
+  <style>
+    :root {
+      --bg: #FBF7EE;
+      --surface: #FEFCF9;
+      --fg: #1E2C3C;
+      --muted: #657383;
+      --border: #CCDBE9;
+      --poop: oklch(68% 0.13 82);
+      --pee: #45AD8F;
+      --sun-soft: #F8F0D4;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      padding: 24px 16px 48px;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.45 "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { margin: 0 0 4px; font-size: 22px; }
+    .sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+    section {
+      margin-bottom: 18px;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--surface);
+    }
+    h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; }
+    .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+    .cell { display: grid; justify-items: center; gap: 6px; min-width: 64px; }
+    .cell span { color: var(--muted); font-size: 11px; }
+    .swatch {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: color-mix(in oklch, var(--poop) 82%, white);
+      color: color-mix(in oklch, var(--fg) 78%, var(--poop));
+      place-items: center;
+    }
+    .swatch.pee {
+      background: color-mix(in oklch, var(--pee) 22%, white);
+      color: var(--pee);
+    }
+    .swatch.round { border-radius: 50%; }
+    .swatch.plain { background: transparent; border: 1px dashed var(--border); }
+    .swatch img, .swatch object { width: 28px; height: 28px; }
+    .hero {
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .hero-card {
+      display: grid;
+      width: 160px;
+      height: 160px;
+      border-radius: 28px;
+      background: var(--sun-soft);
+      border: 1px solid #E8D9B0;
+      place-items: center;
+    }
+    .hero-card img { width: 120px; height: 120px; }
+    .sizes { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+    .size-box {
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: color-mix(in oklch, var(--poop) 82%, white);
+      color: color-mix(in oklch, var(--fg) 78%, var(--poop));
+    }
+    .note {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: color-mix(in oklch, var(--poop) 12%, var(--surface));
+      color: var(--muted);
+      font-size: 12px;
+    }
+    code { font-family: ui-monospace, monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>排泄图标套件</h1>
+    <p class="sub">乐记自绘 · 对齐 brand-spec 1.8px 描边 · 禁止参考产品官方美术</p>
+
+    <section>
+      <h2>主视觉（卡通）</h2>
+      <div class="hero">
+        <div class="hero-card">
+          <img src="poop-cartoon.svg" alt="便便卡通 SVG" />
+        </div>
+        <div>
+          <p style="margin:0 0 8px">用途：空态插画、引导、营销轻量素材</p>
+          <p style="margin:0;color:var(--muted);font-size:12px">文件：<code>poop-cartoon.svg</code> · 96×96 画板 · 圆形暖底 + 软堆叠</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>试验 · image gen 透明底（可换背景）</h2>
+      <div class="hero">
+        <div class="hero-card" style="background:#F8F0D4;border-color:#E8D9B0">
+          <img src="poop-cartoon-gen.png" alt="生成版暖底" style="width:120px;height:120px;object-fit:contain" />
+        </div>
+        <div class="hero-card" style="background:#15202c;border-color:#2a3848">
+          <img src="poop-cartoon-gen.png" alt="生成版暗底" style="width:120px;height:120px;object-fit:contain" />
+        </div>
+        <div class="hero-card" style="background:color-mix(in oklch, var(--poop) 82%, white);border-color:transparent">
+          <img src="poop-cartoon-gen.png" alt="生成版语义底" style="width:120px;height:120px;object-fit:contain" />
+        </div>
+        <div class="hero-card plain" style="background:transparent;border:1px dashed var(--border)">
+          <img src="poop-cartoon-gen-96.png" alt="生成版 96 透明" style="width:96px;height:96px;object-fit:contain;image-rendering:auto" />
+        </div>
+      </div>
+      <p class="note">
+        源：image gen → 白底 JPG → 去底 PNG。
+        文件：<code>poop-cartoon-gen.png</code>（512）· <code>poop-cartoon-gen-96.png</code>。
+        背景由外层 shell 填充，主体保持强轮廓。对比上方 SVG：矢量仍更干净、可编辑；gen 仅作装饰向候选。
+      </p>
+    </section>
+
+    <section>
+      <h2>类型图标 · 多尺寸（UI 用）</h2>
+      <div class="sizes">
+        <div>
+          <div class="size-box" style="width:48px;height:48px;border-radius:50%">
+            <img src="poop.svg" width="28" height="28" alt="" />
+          </div>
+          <div style="text-align:center;margin-top:6px;font-size:11px;color:var(--muted)">快捷 36–48</div>
+        </div>
+        <div>
+          <div class="size-box" style="width:34px;height:34px">
+            <img src="poop.svg" width="20" height="20" alt="" />
+          </div>
+          <div style="text-align:center;margin-top:6px;font-size:11px;color:var(--muted)">列表 34</div>
+        </div>
+        <div>
+          <div class="size-box" style="width:26px;height:26px">
+            <img src="poop.svg" width="16" height="16" alt="" />
+          </div>
+          <div style="text-align:center;margin-top:6px;font-size:11px;color:var(--muted)">摘要 26</div>
+        </div>
+        <div>
+          <div class="size-box plain" style="width:20px;height:20px;background:transparent;border:1px dashed var(--border);border-radius:6px;display:grid;place-items:center">
+            <img src="poop.svg" width="16" height="16" alt="" style="color:#1E2C3C" />
+          </div>
+          <div style="text-align:center;margin-top:6px;font-size:11px;color:var(--muted)">轴 16–20</div>
+        </div>
+      </div>
+      <p class="note">单色 <code>currentColor</code>，背景由 <code>.type-icon</code> 的 <code>--poop</code> 语义色承载。</p>
+    </section>
+
+    <section>
+      <h2>尿量 pee_amount 1–3</h2>
+      <div class="row">
+        <div class="cell"><div class="swatch pee"><img src="pee_amount_1.svg" alt="" /></div><span>1 小</span></div>
+        <div class="cell"><div class="swatch pee"><img src="pee_amount_2.svg" alt="" /></div><span>2 中（默认）</span></div>
+        <div class="cell"><div class="swatch pee"><img src="pee_amount_3.svg" alt="" /></div><span>3 大</span></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>便量 stool_amount 1–4</h2>
+      <div class="row">
+        <div class="cell"><div class="swatch"><img src="stool_amount_1.svg" alt="" /></div><span>1 一点</span></div>
+        <div class="cell"><div class="swatch"><img src="stool_amount_2.svg" alt="" /></div><span>2 偏少</span></div>
+        <div class="cell"><div class="swatch"><img src="stool_amount_3.svg" alt="" /></div><span>3 正常</span></div>
+        <div class="cell"><div class="swatch"><img src="stool_amount_4.svg" alt="" /></div><span>4 偏多</span></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>软硬 stool_consistency 1–4</h2>
+      <div class="row">
+        <div class="cell"><div class="swatch"><img src="stool_consistency_1.svg" alt="" /></div><span>1 稀</span></div>
+        <div class="cell"><div class="swatch"><img src="stool_consistency_2.svg" alt="" /></div><span>2 偏软</span></div>
+        <div class="cell"><div class="swatch"><img src="stool_consistency_3.svg" alt="" /></div><span>3 正常</span></div>
+        <div class="cell"><div class="swatch"><img src="stool_consistency_4.svg" alt="" /></div><span>4 偏硬</span></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>色 stool_color 0–7</h2>
+      <div class="row">
+        <div class="cell"><div class="swatch plain"><img src="stool_color_0.svg" alt="" /></div><span>0 未选</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_1.svg" alt="" /></div><span>1 白</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_2.svg" alt="" /></div><span>2 黄</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_3.svg" alt="" /></div><span>3 橙</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_4.svg" alt="" /></div><span>4 褐</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_5.svg" alt="" /></div><span>5 绿</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_6.svg" alt="" /></div><span>6 红</span></div>
+        <div class="cell"><div class="swatch plain"><img src="stool_color_7.svg" alt="" /></div><span>7 黑</span></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

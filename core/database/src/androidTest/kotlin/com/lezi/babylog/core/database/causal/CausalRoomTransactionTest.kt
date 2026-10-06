@@ -1,0 +1,1560 @@
+package com.lezi.babylog.core.database.causal
+
+import androidx.room.Room
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanEntity
+import com.lezi.babylog.core.database.CustomItemEntity
+import com.lezi.babylog.core.database.LeziDatabase
+import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.database.RoomDatabaseTransactionRunner
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
+import org.junit.After
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Room transactional seams for freeze read, exact CAS ack, branch receipt,
+ * resolution apply, and media reference changes (ticket 04).
+ */
+@RunWith(AndroidJUnit4::class)
+class CausalRoomTransactionTest {
+    private lateinit var database: LeziDatabase
+
+    @Before
+    fun setUp() {
+        database = Room.inMemoryDatabaseBuilder(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+            LeziDatabase::class.java,
+        ).build()
+    }
+
+    @After
+    fun tearDown() {
+        database.close()
+    }
+
+    @Test
+    fun freezeThenExactCasAckAdvancesBaseAndClearsPending() = runBlocking {
+        val records = database.recordDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-cas",
+                babyId = 1,
+                type = "nursing",
+                timestamp = 10L,
+                updatedAt = 100L,
+                syncDirty = true,
+                baseVersion = "v-base",
+            ),
+        )
+
+        val frozen = records.freezeDirtyEpoch(
+            clientUuid = "record-cas",
+            contentEpoch = 100L,
+            newMutationId = "mut-1",
+        )
+        assertThat(frozen?.mutationId).isEqualTo("mut-1")
+        assertThat(frozen?.baseVersion).isEqualTo("v-base")
+        assertThat(frozen?.syncDirty).isTrue()
+
+        // Retry freeze at same epoch reuses mutation id.
+        val refrozen = records.freezeDirtyEpoch(
+            clientUuid = "record-cas",
+            contentEpoch = 100L,
+            newMutationId = "mut-should-not-replace",
+        )
+        assertThat(refrozen?.mutationId).isEqualTo("mut-1")
+
+        assertThat(
+            records.acknowledgeCausalAcceptedOrMerged(
+                clientUuid = "record-cas",
+                expectedMutationId = "mut-1",
+                expectedContentEpoch = 100L,
+                newBaseVersion = "v-stable-2",
+            ),
+        ).isTrue()
+        val settled = requireNotNull(records.getByClientUuid("record-cas"))
+        assertThat(settled.baseVersion).isEqualTo("v-stable-2")
+        assertThat(settled.mutationId).isNull()
+        assertThat(settled.syncDirty).isFalse()
+        assertThat(settled.openConflictId).isNull()
+
+        assertThat(
+            records.acknowledgeCausalAcceptedOrMerged(
+                clientUuid = "record-cas",
+                expectedMutationId = "mut-1",
+                expectedContentEpoch = 100L,
+                newBaseVersion = "v-should-not-apply",
+            ),
+        ).isFalse()
+    }
+
+    @Test
+    fun recordEnvelopeFreezeAndSupersededSettlementAreAtomic() = runBlocking {
+        val records = database.recordDao()
+        val envelopes = database.conflictSnapshotCacheDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-commit-first",
+                babyId = 1,
+                type = "formula",
+                timestamp = 10,
+                note = "epoch-1",
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-base",
+            ),
+        )
+
+        RoomDatabaseTransactionRunner(database).run {
+            assertThat(
+                records.freezeCommitFirstEpoch(
+                    clientUuid = "record-commit-first",
+                    contentEpoch = 100,
+                    newMutationId = "00000000-0000-4000-8000-000000000010",
+                )?.mutationId,
+            ).isEqualTo("00000000-0000-4000-8000-000000000010")
+            envelopes.putFrozenMutation(
+                entityType = "record",
+                clientUuid = "record-commit-first",
+                canonicalEnvelopeJson = "{\"proof\":\"frozen\"}",
+                contentEpoch = 100,
+            )
+        }
+        assertThat(
+            envelopes.getFrozenMutation("record", "record-commit-first")?.payloadJson,
+        ).isEqualTo("{\"proof\":\"frozen\"}")
+
+        val frozen = requireNotNull(records.getByClientUuid("record-commit-first"))
+        records.update(
+            frozen.copy(
+                note = "epoch-2",
+                updatedAt = 200,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+        RoomDatabaseTransactionRunner(database).run {
+            assertThat(
+                records.settleCommitFirstAcceptedOrMerged(
+                    clientUuid = "record-commit-first",
+                    expectedMutationId = "00000000-0000-4000-8000-000000000010",
+                    expectedContentEpoch = 100,
+                    newBaseVersion = "v-epoch-1",
+                ),
+            ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+            envelopes.deleteFrozenMutation("record", "record-commit-first")
+        }
+
+        val pending = requireNotNull(records.getByClientUuid("record-commit-first"))
+        assertThat(pending.note).isEqualTo("epoch-2")
+        assertThat(pending.updatedAt).isEqualTo(200)
+        assertThat(pending.syncDirty).isTrue()
+        assertThat(pending.mutationId).isNull()
+        assertThat(pending.baseVersion).isEqualTo("v-epoch-1")
+        assertThat(envelopes.getFrozenMutation("record", "record-commit-first")).isNull()
+    }
+
+    @Test
+    fun carePlanCommitFirstDaoUsesContentEpochCasAndPreservesLocalOnlyColumns() = runBlocking {
+        val plans = database.carePlanDao()
+        plans.upsert(
+            CarePlanEntity(
+                clientUuid = "plan-commit-first",
+                babyId = 1,
+                type = "formula",
+                scheduledAt = 10,
+                scheduledZoneId = "UTC",
+                note = "epoch-1",
+                payloadJson = """{"amount_ml":90}""",
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-plan-base",
+                sourceRecordClientUuid = "local-source",
+                systemCalendarEventId = "local-calendar",
+            ),
+        )
+
+        assertThat(
+            plans.freezeCommitFirstEpoch(
+                "plan-commit-first",
+                100,
+                "plan-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("plan-mutation-1")
+        val frozen = requireNotNull(plans.getByClientUuid("plan-commit-first"))
+        plans.update(
+            frozen.copy(
+                note = "epoch-2",
+                updatedAt = 200,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+
+        assertThat(
+            plans.settleCommitFirstBranched(
+                "plan-commit-first",
+                "plan-mutation-1",
+                100,
+                "plan-conflict",
+                "plan-branch",
+                "v-plan-stable",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        with(requireNotNull(plans.getByClientUuid("plan-commit-first"))) {
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-plan-stable")
+            assertThat(openConflictId).isEqualTo("plan-conflict")
+            assertThat(localBranchVersionId).isEqualTo("plan-branch")
+            assertThat(sourceRecordClientUuid).isEqualTo("local-source")
+            assertThat(systemCalendarEventId).isEqualTo("local-calendar")
+        }
+
+        assertThat(
+            plans.freezeCommitFirstEpoch(
+                "plan-commit-first",
+                200,
+                "plan-mutation-2",
+            )?.mutationId,
+        ).isEqualTo("plan-mutation-2")
+        assertThat(
+            plans.settleCommitFirstAcceptedOrMerged(
+                "plan-commit-first",
+                "plan-mutation-2",
+                200,
+                "v-plan-epoch-2",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.CurrentEpoch)
+        with(requireNotNull(plans.getByClientUuid("plan-commit-first"))) {
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(syncDirty).isFalse()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-plan-epoch-2")
+            assertThat(sourceRecordClientUuid).isEqualTo("local-source")
+            assertThat(systemCalendarEventId).isEqualTo("local-calendar")
+        }
+    }
+
+    @Test
+    fun wakeCommitFirstDaoPreservesSourceAndObserverAcrossSupersededBranch() = runBlocking {
+        val wakes = database.wakeObservationDao()
+        wakes.upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-commit-first",
+                sleepRecordClientUuid = "sleep-source",
+                wakeTimestamp = 200,
+                observerMembershipId = "server-observer",
+                note = "epoch-1",
+                withdrawn = false,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-wake-base",
+            ),
+        )
+        assertThat(
+            wakes.freezeCommitFirstEpoch(
+                "wake-commit-first",
+                100,
+                "wake-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("wake-mutation-1")
+        val frozen = requireNotNull(wakes.getByClientUuid("wake-commit-first"))
+        wakes.update(
+            frozen.copy(
+                wakeTimestamp = 240,
+                note = "epoch-2",
+                withdrawn = true,
+                updatedAt = 200,
+                syncDirty = true,
+                mutationId = null,
+            ),
+        )
+
+        assertThat(
+            wakes.settleCommitFirstBranched(
+                "wake-commit-first",
+                "wake-mutation-1",
+                100,
+                "wake-conflict",
+                "wake-branch",
+                "v-wake-stable",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        with(requireNotNull(wakes.getByClientUuid("wake-commit-first"))) {
+            assertThat(sleepRecordClientUuid).isEqualTo("sleep-source")
+            assertThat(observerMembershipId).isEqualTo("server-observer")
+            assertThat(wakeTimestamp).isEqualTo(240)
+            assertThat(note).isEqualTo("epoch-2")
+            assertThat(withdrawn).isTrue()
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-wake-stable")
+            assertThat(openConflictId).isEqualTo("wake-conflict")
+            assertThat(localBranchVersionId).isEqualTo("wake-branch")
+        }
+    }
+
+    @Test
+    fun wakeAcceptedAndMergedCurrentOrSupersededCasPreservesFactsAndRollsBack() = runBlocking {
+        data class Case(val disposition: String, val superseded: Boolean)
+        val wakes = database.wakeObservationDao()
+        for (case in listOf(
+            Case("accepted", superseded = false),
+            Case("accepted", superseded = true),
+            Case("merged", superseded = false),
+            Case("merged", superseded = true),
+        )) {
+            val suffix = "${case.disposition}-${case.superseded}"
+            val clientUuid = "wake-$suffix"
+            wakes.upsert(
+                WakeObservationEntity(
+                    clientUuid = clientUuid,
+                    sleepRecordClientUuid = "sleep-$suffix",
+                    wakeTimestamp = 200,
+                    observerMembershipId = "server-observer-$suffix",
+                    note = "epoch-1-$suffix",
+                    withdrawn = false,
+                    updatedAt = 100,
+                    syncDirty = true,
+                    baseVersion = "v-base-$suffix",
+                ),
+            )
+            assertThat(
+                wakes.freezeCommitFirstEpoch(clientUuid, 100, "mutation-$suffix")?.mutationId,
+            ).isEqualTo("mutation-$suffix")
+            if (case.superseded) {
+                val frozen = requireNotNull(wakes.getByClientUuid(clientUuid))
+                wakes.update(
+                    frozen.copy(
+                        wakeTimestamp = 240,
+                        note = "epoch-2-$suffix",
+                        withdrawn = true,
+                        updatedAt = 200,
+                        syncDirty = true,
+                        mutationId = null,
+                    ),
+                )
+            }
+
+            assertThat(
+                wakes.settleCommitFirstAcceptedOrMerged(
+                    clientUuid,
+                    "mutation-$suffix",
+                    100,
+                    "v-stable-$suffix",
+                ),
+            ).isEqualTo(
+                if (case.superseded) {
+                    CommitFirstSettlementEpoch.SupersededEpoch
+                } else {
+                    CommitFirstSettlementEpoch.CurrentEpoch
+                },
+            )
+            with(requireNotNull(wakes.getByClientUuid(clientUuid))) {
+                assertThat(sleepRecordClientUuid).isEqualTo("sleep-$suffix")
+                assertThat(observerMembershipId).isEqualTo("server-observer-$suffix")
+                assertThat(wakeTimestamp).isEqualTo(if (case.superseded) 240 else 200)
+                assertThat(note).isEqualTo(
+                    if (case.superseded) "epoch-2-$suffix" else "epoch-1-$suffix",
+                )
+                assertThat(withdrawn).isEqualTo(case.superseded)
+                assertThat(updatedAt).isEqualTo(if (case.superseded) 200 else 100)
+                assertThat(baseVersion).isEqualTo("v-stable-$suffix")
+                assertThat(familyPublishedUpdatedAt).isEqualTo(100)
+                assertThat(syncDirty).isEqualTo(case.superseded)
+                assertThat(mutationId).isNull()
+                assertThat(openConflictId).isNull()
+                assertThat(localBranchVersionId).isNull()
+            }
+        }
+
+        val rollbackUuid = "wake-accepted-rollback"
+        wakes.upsert(
+            WakeObservationEntity(
+                clientUuid = rollbackUuid,
+                sleepRecordClientUuid = "sleep-rollback",
+                wakeTimestamp = 300,
+                observerMembershipId = "server-observer-rollback",
+                note = "rollback-fact",
+                withdrawn = false,
+                updatedAt = 300,
+                syncDirty = true,
+                baseVersion = "v-rollback-base",
+            ),
+        )
+        wakes.freezeCommitFirstEpoch(rollbackUuid, 300, "mutation-rollback")
+        val beforeRollback = requireNotNull(wakes.getByClientUuid(rollbackUuid))
+        val failure = runCatching {
+            RoomDatabaseTransactionRunner(database).run {
+                checkNotNull(
+                    wakes.settleCommitFirstAcceptedOrMerged(
+                        rollbackUuid,
+                        "mutation-rollback",
+                        300,
+                        "v-never-visible",
+                    ),
+                )
+                error("projection after Wake settlement failed")
+            }
+        }.exceptionOrNull()
+        assertThat(failure).isNotNull()
+        assertThat(wakes.getByClientUuid(rollbackUuid)).isEqualTo(beforeRollback)
+    }
+
+    @Test
+    fun providerCommitFirstDaosPreserveCurrentAndSupersededProductEpochs() = runBlocking {
+        val babies = database.babyDao()
+        val customItems = database.customItemDao()
+        babies.upsert(
+            BabyEntity(
+                familyId = 1,
+                nickname = "baby-epoch-1",
+                birthdayEpochDay = 1,
+                themeColorArgb = 0,
+                clientUuid = "baby-provider-commit-first",
+                sortOrder = 8,
+                updatedAt = 100,
+                syncDirty = true,
+                familyAuthority = true,
+                baseVersion = "v-baby-base",
+            ),
+        )
+        customItems.upsert(
+            CustomItemEntity(
+                clientUuid = "custom-provider-commit-first",
+                familyId = 1,
+                name = "custom-epoch-1",
+                iconSlot = 2,
+                sortOrder = 9,
+                updatedAt = 100,
+                syncDirty = true,
+                baseVersion = "v-custom-base",
+            ),
+        )
+
+        assertThat(
+            babies.freezeCommitFirstEpoch(
+                "baby-provider-commit-first",
+                100,
+                "baby-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("baby-mutation-1")
+        assertThat(
+            customItems.freezeCommitFirstEpoch(
+                "custom-provider-commit-first",
+                100,
+                "custom-mutation-1",
+            )?.mutationId,
+        ).isEqualTo("custom-mutation-1")
+
+        val frozenBaby = requireNotNull(babies.getByClientUuid("baby-provider-commit-first"))
+        babies.update(
+            frozenBaby.copy(
+                nickname = "baby-epoch-2",
+                sortOrder = 18,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        val frozenCustom = requireNotNull(
+            customItems.getByClientUuid("custom-provider-commit-first"),
+        )
+        customItems.update(
+            frozenCustom.copy(
+                name = "custom-epoch-2",
+                sortOrder = 19,
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(
+            babies.settleCommitFirstAcceptedOrMerged(
+                "baby-provider-commit-first",
+                "baby-mutation-1",
+                100,
+                "v-baby-epoch-1",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+        assertThat(
+            customItems.settleCommitFirstBranched(
+                "custom-provider-commit-first",
+                "custom-mutation-1",
+                100,
+                "custom-conflict",
+                "custom-branch",
+                "v-custom-stable",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.SupersededEpoch)
+
+        with(requireNotNull(babies.getByClientUuid("baby-provider-commit-first"))) {
+            assertThat(nickname).isEqualTo("baby-epoch-2")
+            assertThat(sortOrder).isEqualTo(18)
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-baby-epoch-1")
+        }
+        with(requireNotNull(customItems.getByClientUuid("custom-provider-commit-first"))) {
+            assertThat(name).isEqualTo("custom-epoch-2")
+            assertThat(sortOrder).isEqualTo(19)
+            assertThat(updatedAt).isEqualTo(200)
+            assertThat(syncDirty).isTrue()
+            assertThat(mutationId).isNull()
+            assertThat(openConflictId).isEqualTo("custom-conflict")
+            assertThat(localBranchVersionId).isEqualTo("custom-branch")
+            assertThat(baseVersion).isEqualTo("v-custom-stable")
+        }
+
+        assertThat(
+            babies.freezeCommitFirstEpoch(
+                "baby-provider-commit-first",
+                200,
+                "baby-mutation-2",
+            )?.mutationId,
+        ).isEqualTo("baby-mutation-2")
+        assertThat(
+            babies.settleCommitFirstAcceptedOrMerged(
+                "baby-provider-commit-first",
+                "baby-mutation-2",
+                200,
+                "v-baby-epoch-2",
+            ),
+        ).isEqualTo(CommitFirstSettlementEpoch.CurrentEpoch)
+        with(requireNotNull(babies.getByClientUuid("baby-provider-commit-first"))) {
+            assertThat(nickname).isEqualTo("baby-epoch-2")
+            assertThat(sortOrder).isEqualTo(18)
+            assertThat(syncDirty).isFalse()
+            assertThat(mutationId).isNull()
+            assertThat(baseVersion).isEqualTo("v-baby-epoch-2")
+        }
+    }
+
+    @Test
+    fun recordEnvelopeFreezeRollsBackIdentityWhenCacheWriteFails() = runBlocking {
+        val records = database.recordDao()
+        val envelopes = database.conflictSnapshotCacheDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-freeze-rollback",
+                babyId = 1,
+                type = "formula",
+                timestamp = 10,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(
+            runCatching {
+                RoomDatabaseTransactionRunner(database).run {
+                    checkNotNull(
+                        records.freezeCommitFirstEpoch(
+                            clientUuid = "record-freeze-rollback",
+                            contentEpoch = 100,
+                            newMutationId = "00000000-0000-4000-8000-000000000011",
+                        ),
+                    )
+                    envelopes.putFrozenMutation(
+                        entityType = "record",
+                        clientUuid = "record-freeze-rollback",
+                        canonicalEnvelopeJson = "{\"proof\":\"never-visible\"}",
+                        contentEpoch = 100,
+                    )
+                    error("cache persistence failed")
+                }
+            }.exceptionOrNull(),
+        ).isNotNull()
+
+        assertThat(records.getByClientUuid("record-freeze-rollback")?.mutationId).isNull()
+        assertThat(
+            envelopes.getFrozenMutation("record", "record-freeze-rollback"),
+        ).isNull()
+    }
+
+    @Test
+    fun allCausalRootDaosRejectStaleCapturedEpochWithoutDowngrade() = runBlocking {
+        database.babyDao().upsert(
+            BabyEntity(
+                familyId = 1,
+                nickname = "new",
+                birthdayEpochDay = 1,
+                themeColorArgb = 0,
+                clientUuid = "baby-stale-freeze",
+                updatedAt = 200,
+            ),
+        )
+        database.recordDao().upsert(
+            RecordEntity(
+                clientUuid = "record-stale-freeze",
+                babyId = 1,
+                type = "nursing",
+                timestamp = 1,
+                updatedAt = 200,
+            ),
+        )
+        database.carePlanDao().upsert(
+            CarePlanEntity(
+                clientUuid = "plan-stale-freeze",
+                babyId = 1,
+                type = "nursing",
+                scheduledAt = 1,
+                scheduledZoneId = "UTC",
+                updatedAt = 200,
+            ),
+        )
+        database.customItemDao().upsert(
+            CustomItemEntity(
+                clientUuid = "custom-stale-freeze",
+                familyId = 1,
+                name = "new",
+                iconSlot = 0,
+                updatedAt = 200,
+            ),
+        )
+        database.wakeObservationDao().upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-stale-freeze",
+                sleepRecordClientUuid = "sleep-1",
+                wakeTimestamp = 200,
+                updatedAt = 200,
+            ),
+        )
+
+        assertThat(database.babyDao().freezeDirtyEpoch("baby-stale-freeze", 100, "old")).isNull()
+        assertThat(database.recordDao().freezeDirtyEpoch("record-stale-freeze", 100, "old")).isNull()
+        assertThat(database.carePlanDao().freezeDirtyEpoch("plan-stale-freeze", 100, "old")).isNull()
+        assertThat(database.customItemDao().freezeDirtyEpoch("custom-stale-freeze", 100, "old")).isNull()
+        assertThat(
+            database.wakeObservationDao().freezeDirtyEpoch("wake-stale-freeze", 100, "old"),
+        ).isNull()
+        assertThat(database.babyDao().getByClientUuid("baby-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(database.recordDao().getByClientUuid("record-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(database.carePlanDao().getByClientUuid("plan-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(database.customItemDao().getByClientUuid("custom-stale-freeze")!!.updatedAt).isEqualTo(200)
+        assertThat(
+            database.wakeObservationDao().getByClientUuid("wake-stale-freeze")!!.updatedAt,
+        ).isEqualTo(200)
+    }
+
+    @Test
+    fun settlementReceiptRootMediaAndConflictEvidenceRollbackTogether() = runBlocking {
+        val records = database.recordDao()
+        val recordId = records.upsert(
+            RecordEntity(
+                clientUuid = "record-rollback",
+                babyId = 1,
+                type = "formula",
+                timestamp = 1,
+                updatedAt = 100,
+                syncDirty = true,
+                mutationId = "mut-rollback",
+                baseVersion = "v0",
+            ),
+        )
+        database.mediaAssetDao().upsert(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-rollback",
+                localUri = "media/rollback.jpg",
+                createdAt = 1,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(
+            runCatching {
+                RoomDatabaseTransactionRunner(database).run {
+                    check(
+                        records.acknowledgeCausalAcceptedOrMerged(
+                            clientUuid = "record-rollback",
+                            expectedMutationId = "mut-rollback",
+                            expectedContentEpoch = 100,
+                            newBaseVersion = "v1",
+                        ),
+                    )
+                    database.mediaAssetDao().markSynced("media-rollback", 100)
+                    database.conflictSummaryDao().upsert(
+                        ConflictSummaryEntity(
+                            conflictId = "conflict-rollback",
+                            entityType = "record",
+                            clientUuid = "record-rollback",
+                            stableVersionId = "v1",
+                            status = "open",
+                            kind = "concurrent",
+                            updatedAt = 100,
+                        ),
+                    )
+                    error("projection failed")
+                }
+            }.exceptionOrNull(),
+        ).isNotNull()
+
+        val record = requireNotNull(records.getByClientUuid("record-rollback"))
+        assertThat(record.syncDirty).isTrue()
+        assertThat(record.mutationId).isEqualTo("mut-rollback")
+        assertThat(record.baseVersion).isEqualTo("v0")
+        assertThat(database.mediaAssetDao().getByClientUuid("media-rollback")!!.syncDirty).isTrue()
+        assertThat(database.conflictSummaryDao().get("conflict-rollback")).isNull()
+    }
+
+    @Test
+    fun branchedReceiptConvertsPendingToUnresolvedConflict() = runBlocking {
+        val records = database.recordDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-branch",
+                babyId = 1,
+                type = "formula",
+                timestamp = 20L,
+                updatedAt = 200L,
+                syncDirty = true,
+                baseVersion = "v-base",
+                mutationId = "mut-b",
+            ),
+        )
+        // Ensure freeze path sets dirty epoch state consistently.
+        records.freezeDirtyEpoch(
+            clientUuid = "record-branch",
+            contentEpoch = 200L,
+            newMutationId = "mut-b",
+        )
+
+        assertThat(
+            records.acknowledgeCausalBranched(
+                clientUuid = "record-branch",
+                expectedMutationId = "mut-b",
+                expectedContentEpoch = 200L,
+                conflictId = "conflict-1",
+                branchVersionId = "branch-v9",
+                stableBaseVersion = "v-base",
+            ),
+        ).isTrue()
+
+        val branched = requireNotNull(records.getByClientUuid("record-branch"))
+        assertThat(branched.syncDirty).isFalse()
+        assertThat(branched.openConflictId).isEqualTo("conflict-1")
+        assertThat(branched.localBranchVersionId).isEqualTo("branch-v9")
+        assertThat(branched.mutationId).isEqualTo("mut-b")
+        assertThat(branched.baseVersion).isEqualTo("v-base")
+        // Not fully consistent: still has open conflict.
+        assertThat(branched.openConflictId).isNotNull()
+    }
+
+    @Test
+    fun ownerResolutionAppliesSourceRelationWithoutRecordTombstone() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val records = database.recordDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "display-r",
+                babyId = 1,
+                type = "nursing",
+                timestamp = 1L,
+                updatedAt = 1L,
+                syncDirty = false,
+                deletedAt = null,
+            ),
+        )
+        records.upsert(
+            RecordEntity(
+                clientUuid = "source-r",
+                babyId = 1,
+                type = "nursing",
+                timestamp = 2L,
+                updatedAt = 2L,
+                syncDirty = false,
+                deletedAt = null,
+            ),
+        )
+
+        sources.applyOwnerGroupResolution(
+            relation = SourceRelationEntity(
+                relationId = "rel-1",
+                displayClientUuid = "display-r",
+                mediaRetained = true,
+                reason = "owner_group_resolve",
+                mutationId = "mut-resolve",
+                createdByMembershipId = "owner-m",
+                createdAt = 10L,
+            ),
+            members = listOf(
+                SourceRelationMemberEntity("rel-1", "display-r", "display"),
+                SourceRelationMemberEntity("rel-1", "source-r", "source"),
+            ),
+        )
+
+        assertThat(sources.get("rel-1")?.displayClientUuid).isEqualTo("display-r")
+        assertThat(sources.listMembers("rel-1")).hasSize(2)
+        assertThat(records.getByClientUuid("source-r")?.deletedAt).isNull()
+        assertThat(records.getByClientUuid("display-r")?.deletedAt).isNull()
+    }
+
+    @Test
+    fun relationOnlyDeltaInvalidatesObserversAndRollsBackWithTheOuterPage() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val invalidation = async {
+            withTimeout(1_000) {
+                sources.observeAllMembers().drop(1).first()
+            }
+        }
+        yield()
+
+        sources.applyPullSummary(
+            relationId = "rel-observed",
+            recordClientUuid = "display-observed",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("source-observed"),
+            observedAt = 20,
+        )
+
+        assertThat(invalidation.await().map { it.recordClientUuid })
+            .containsExactly("display-observed", "source-observed")
+        val rollback = runCatching {
+            RoomDatabaseTransactionRunner(database).run {
+                sources.applyPullSummary(
+                    relationId = "rel-rolled-back",
+                    recordClientUuid = "display-rolled-back",
+                    role = SourceRelationRole.DISPLAY,
+                    peerIds = listOf("source-rolled-back"),
+                    observedAt = 30,
+                    autoAligned = true,
+                )
+                error("record body dependency failed")
+            }
+        }
+        assertThat(rollback.exceptionOrNull()).isNotNull()
+        assertThat(sources.get("rel-rolled-back")).isNull()
+        assertThat(sources.listMembers("rel-rolled-back")).isEmpty()
+        assertThat(
+            database.conflictSnapshotCacheDao()
+                .getTransportJournal(sourceRelationAutoJournalKey("rel-rolled-back")),
+        ).isNull()
+        assertThat(sources.listAutoAlignedDisplayClientUuids()).isEmpty()
+    }
+
+    @Test
+    fun sourceFirstPullDeltaSurvivesReopenAndDisplayFinalizesCanonicalSet() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val databaseName = "source-relation-${System.nanoTime()}.db"
+        var local = Room.databaseBuilder(context, LeziDatabase::class.java, databaseName).build()
+        try {
+            val firstDao = local.sourceRelationDao()
+            val invalidation = async {
+                withTimeout(1_000) {
+                    firstDao.observeAllMembers().drop(1).first()
+                }
+            }
+            yield()
+            firstDao.applyPullSummary(
+                relationId = "rel-restart",
+                recordClientUuid = "source-a",
+                role = SourceRelationRole.SOURCE,
+                peerIds = listOf("display", "source-b"),
+                observedAt = 40,
+            )
+            assertThat(invalidation.await().map { it.recordClientUuid })
+                .containsExactly("source-a")
+            assertThat(firstDao.get("rel-restart")?.displayClientUuid).isEmpty()
+
+            local.close()
+            local = Room.databaseBuilder(context, LeziDatabase::class.java, databaseName).build()
+            val restartedDao = local.sourceRelationDao()
+            assertThat(restartedDao.observeAllMembers().first().map { it.recordClientUuid })
+                .containsExactly("source-a")
+            restartedDao.applyPullSummary(
+                relationId = "rel-restart",
+                recordClientUuid = "display",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("source-a", "source-b"),
+                observedAt = 41,
+            )
+
+            assertThat(restartedDao.get("rel-restart")?.displayClientUuid).isEqualTo("display")
+            assertThat(restartedDao.listMembers("rel-restart"))
+                .containsExactly(
+                    SourceRelationMemberEntity("rel-restart", "display", SourceRelationRole.DISPLAY),
+                    SourceRelationMemberEntity("rel-restart", "source-a", SourceRelationRole.SOURCE),
+                    SourceRelationMemberEntity("rel-restart", "source-b", SourceRelationRole.SOURCE),
+                )
+        } finally {
+            local.close()
+            context.deleteDatabase(databaseName)
+        }
+    }
+
+    @Test
+    fun legacyPullMarkerUpgradesThroughPublicTransitionAndFreezesClosedSet() = runBlocking<Unit> {
+        val relationId = "rel-legacy"
+        val sqlite = database.openHelper.writableDatabase
+        sqlite.execSQL(
+            """
+            INSERT INTO source_relations(
+                relationId, displayClientUuid, mediaRetained, reason, mutationId,
+                createdByMembershipId, createdAt
+            ) VALUES (?, ?, 1, ?, ?, '', 1)
+            """.trimIndent(),
+            arrayOf(relationId, "display", SourceRelationReason.PULL_SUMMARY, "pull-$relationId"),
+        )
+        sqlite.execSQL(
+            "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+            arrayOf(relationId, "display", SourceRelationRole.DISPLAY),
+        )
+        sqlite.execSQL(
+            "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+            arrayOf(relationId, "source", SourceRelationRole.SOURCE),
+        )
+        val sources = database.sourceRelationDao()
+
+        sources.applyPullSummary(
+            relationId = relationId,
+            recordClientUuid = "source",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display"),
+            observedAt = 2,
+        )
+
+        val frozen = sources.get(relationId)?.mutationId
+        assertThat(frozen)
+            .isEqualTo(
+                "pull-$relationId:" + sourceRelationMemberSetFingerprint(setOf("display", "source")),
+            )
+        LegacyZeroFourSevenPullSummaryReader.requireConsumable(
+            relationId = relationId,
+            storedMutationId = frozen!!,
+            storedDisplayClientUuid = "display",
+            storedMemberIds = setOf("display", "source"),
+            closedMemberIds = setOf("display", "source"),
+        )
+        val drift = runCatching {
+            sources.applyPullSummary(
+                relationId = relationId,
+                recordClientUuid = "source",
+                role = SourceRelationRole.SOURCE,
+                peerIds = listOf("display", "other"),
+                observedAt = 3,
+            )
+        }
+        assertThat(drift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.listMembers(relationId).map { it.recordClientUuid })
+            .containsExactly("display", "source")
+    }
+
+    @Test
+    fun autoAlignedPullSummaryKeepsPullMutationIdAndJournaledAutoBadge() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val journals = database.conflictSnapshotCacheDao()
+        val relationId = "rel-auto-room"
+        val closedMemberIds = setOf("display-room", "source-room")
+
+        sources.applyPullSummary(
+            relationId = relationId,
+            recordClientUuid = "display-room",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("source-room"),
+            observedAt = 50,
+            autoAligned = true,
+        )
+
+        val stored = sources.get(relationId)
+        assertThat(stored?.mutationId)
+            .isEqualTo(
+                "pull-$relationId:" + sourceRelationMemberSetFingerprint(closedMemberIds),
+            )
+        assertThat(stored?.reason).isEqualTo(SourceRelationReason.PULL_SUMMARY)
+        assertThat(journals.getTransportJournal(sourceRelationAutoJournalKey(relationId)))
+            .isNotNull()
+        assertThat(sources.listAutoAlignedDisplayClientUuids())
+            .containsExactly("display-room")
+        assertThat(sources.observeAutoAlignedDisplayClientUuids().first())
+            .containsExactly("display-room")
+
+        // The frozen 0.4.7 reader accepts the row on a repeated pull.
+        LegacyZeroFourSevenPullSummaryReader.requireConsumable(
+            relationId = relationId,
+            storedMutationId = stored!!.mutationId,
+            storedDisplayClientUuid = stored.displayClientUuid,
+            storedMemberIds = closedMemberIds,
+            closedMemberIds = closedMemberIds,
+        )
+        sources.applyPullSummary(
+            relationId = relationId,
+            recordClientUuid = "source-room",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display-room"),
+            observedAt = 51,
+            autoAligned = true,
+        )
+        assertThat(sources.get(relationId)?.mutationId).isEqualTo(stored.mutationId)
+        assertThat(sources.listAutoAlignedDisplayClientUuids())
+            .containsExactly("display-room")
+
+        val drift = runCatching {
+            sources.applyPullSummary(
+                relationId = relationId,
+                recordClientUuid = "display-room",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("source-room", "other-room"),
+                observedAt = 52,
+            )
+        }
+        assertThat(drift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun repairLegacyAutoAlignedSummariesRestoresPullFormatKeepsMediaAndIsIdempotent() =
+        runBlocking {
+            val sources = database.sourceRelationDao()
+            val journals = database.conflictSnapshotCacheDao()
+            val refs = database.mediaReferenceDao()
+            val sqlite = database.openHelper.writableDatabase
+            val fullId = "rel-old-auto"
+            val halfId = "rel-old-auto-half"
+            // First 0.4.8 rows: the closed-set proof was overwritten by the marker.
+            sqlite.execSQL(
+                """
+                INSERT INTO source_relations(
+                    relationId, displayClientUuid, mediaRetained, reason, mutationId,
+                    createdByMembershipId, createdAt
+                ) VALUES (?, ?, 1, ?, ?, '', 1)
+                """.trimIndent(),
+                arrayOf(
+                    fullId,
+                    "display-legacy",
+                    SourceRelationReason.PULL_SUMMARY,
+                    "${AUTO_NEAR_NEIGHBOR_MUTATION_PREFIX}$fullId",
+                ),
+            )
+            sqlite.execSQL(
+                "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+                arrayOf(fullId, "display-legacy", SourceRelationRole.DISPLAY),
+            )
+            sqlite.execSQL(
+                "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+                arrayOf(fullId, "source-legacy", SourceRelationRole.SOURCE),
+            )
+            sqlite.execSQL(
+                """
+                INSERT INTO source_relations(
+                    relationId, displayClientUuid, mediaRetained, reason, mutationId,
+                    createdByMembershipId, createdAt
+                ) VALUES (?, '', 1, ?, ?, '', 1)
+                """.trimIndent(),
+                arrayOf(
+                    halfId,
+                    SourceRelationReason.PULL_SUMMARY,
+                    "${AUTO_NEAR_NEIGHBOR_MUTATION_PREFIX}$halfId",
+                ),
+            )
+            sqlite.execSQL(
+                "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+                arrayOf(halfId, "source-half", SourceRelationRole.SOURCE),
+            )
+            refs.upsert(
+                MediaReferenceEntity(
+                    mediaUuid = "media-legacy",
+                    holderKind = MediaReferenceHolderKind.DUPLICATE_SOURCE,
+                    holderId = fullId,
+                    createdAt = 1,
+                ),
+            )
+
+            sources.repairLegacyAutoAlignedSummaries()
+
+            val repairedFull = sources.get(fullId)
+            assertThat(repairedFull?.mutationId)
+                .isEqualTo(
+                    "pull-$fullId:" +
+                        sourceRelationMemberSetFingerprint(setOf("display-legacy", "source-legacy")),
+                )
+            assertThat(repairedFull?.reason).isEqualTo(SourceRelationReason.PULL_SUMMARY)
+            assertThat(repairedFull?.mediaRetained).isTrue()
+            assertThat(journals.getTransportJournal(sourceRelationAutoJournalKey(fullId)))
+                .isNotNull()
+            // Half-edge: the unknown peer set is never fabricated into a hash.
+            assertThat(sources.get(halfId)?.mutationId).isEqualTo("pull-$halfId")
+            assertThat(journals.getTransportJournal(sourceRelationAutoJournalKey(halfId)))
+                .isNotNull()
+            assertThat(sources.listMembers(fullId).map { it.recordClientUuid })
+                .containsExactly("display-legacy", "source-legacy")
+            assertThat(sources.listMembers(halfId).map { it.recordClientUuid })
+                .containsExactly("source-half")
+            assertThat(refs.countHoldersForMedia("media-legacy")).isEqualTo(1)
+            assertThat(sources.listAutoAlignedDisplayClientUuids())
+                .containsExactly("display-legacy")
+
+            // Idempotent: a second pass changes nothing and adds no journals.
+            sources.repairLegacyAutoAlignedSummaries()
+            assertThat(sources.get(fullId)?.mutationId).isEqualTo(repairedFull?.mutationId)
+            assertThat(sources.get(halfId)?.mutationId).isEqualTo("pull-$halfId")
+            assertThat(sources.listAll()).hasSize(2)
+        }
+
+    @Test
+    fun repairedLegacyHalfEdgeFreezesClosedSetOnNextSummary() = runBlocking<Unit> {
+        val sources = database.sourceRelationDao()
+        val sqlite = database.openHelper.writableDatabase
+        val relationId = "rel-repair-half"
+        sqlite.execSQL(
+            """
+            INSERT INTO source_relations(
+                relationId, displayClientUuid, mediaRetained, reason, mutationId,
+                createdByMembershipId, createdAt
+            ) VALUES (?, '', 1, ?, ?, '', 1)
+            """.trimIndent(),
+            arrayOf(
+                relationId,
+                SourceRelationReason.PULL_SUMMARY,
+                "${AUTO_NEAR_NEIGHBOR_MUTATION_PREFIX}$relationId",
+            ),
+        )
+        sqlite.execSQL(
+            "INSERT INTO source_relation_members(relationId, recordClientUuid, role) VALUES (?, ?, ?)",
+            arrayOf(relationId, "source-half", SourceRelationRole.SOURCE),
+        )
+
+        sources.repairLegacyAutoAlignedSummaries()
+        assertThat(sources.get(relationId)?.mutationId).isEqualTo("pull-$relationId")
+
+        sources.applyPullSummary(
+            relationId = relationId,
+            recordClientUuid = "display-half",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("source-half", "source-other"),
+            observedAt = 2,
+            autoAligned = true,
+        )
+
+        val frozenMemberIds = setOf("display-half", "source-half", "source-other")
+        val frozen = sources.get(relationId)?.mutationId
+        assertThat(frozen)
+            .isEqualTo(
+                "pull-$relationId:" + sourceRelationMemberSetFingerprint(frozenMemberIds),
+            )
+        LegacyZeroFourSevenPullSummaryReader.requireConsumable(
+            relationId = relationId,
+            storedMutationId = frozen!!,
+            storedDisplayClientUuid = "display-half",
+            storedMemberIds = frozenMemberIds,
+            closedMemberIds = frozenMemberIds,
+        )
+        assertThat(sources.listAutoAlignedDisplayClientUuids()).containsExactly("display-half")
+    }
+
+    @Test
+    fun manualResolveClearsSupersededAutoJournalAndBadge() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val journals = database.conflictSnapshotCacheDao()
+        sources.applyPullSummary(
+            relationId = "rel-auto-superseded",
+            recordClientUuid = "source-stays",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("display-promoted"),
+            observedAt = 60,
+            autoAligned = true,
+        )
+        assertThat(sources.listAutoAlignedDisplayClientUuids())
+            .containsExactly("source-stays")
+
+        sources.applyOwnerGroupResolution(
+            relation = SourceRelationEntity(
+                relationId = "rel-owner-manual",
+                displayClientUuid = "display-promoted",
+                mediaRetained = true,
+                reason = SourceRelationReason.OWNER_GROUP_RESOLVE,
+                mutationId = "manual-mutation",
+                createdByMembershipId = "owner",
+                createdAt = 61,
+            ),
+            members = listOf(
+                SourceRelationMemberEntity("rel-owner-manual", "display-promoted", SourceRelationRole.DISPLAY),
+                SourceRelationMemberEntity("rel-owner-manual", "source-stays", SourceRelationRole.SOURCE),
+            ),
+        )
+
+        assertThat(
+            journals.getTransportJournal(sourceRelationAutoJournalKey("rel-auto-superseded")),
+        ).isNull()
+        assertThat(sources.listAutoAlignedDisplayClientUuids()).isEmpty()
+        assertThat(sources.listMembers("rel-auto-superseded")).isEmpty()
+    }
+
+    @Test
+    fun clearingRelationsDoesNotRestoreAnOldAutoBadgeOrEraseOtherReceipts() = runBlocking {
+        val sources = database.sourceRelationDao()
+        val journals = database.conflictSnapshotCacheDao()
+        journals.putTransportJournal("frozen-mutation:record:unrelated", "{\"frozen\":true}", 9)
+        sources.applyPullSummary(
+            relationId = "relation-reused-after-clear",
+            recordClientUuid = "display",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("source"),
+            observedAt = 1,
+            autoAligned = true,
+        )
+        assertThat(sources.observeAutoAlignedDisplayClientUuids().first())
+            .containsExactly("display")
+
+        sources.deleteAllMembers()
+        sources.deleteAll()
+        sources.applyPullSummary(
+            relationId = "relation-reused-after-clear",
+            recordClientUuid = "display",
+            role = SourceRelationRole.DISPLAY,
+            peerIds = listOf("source"),
+            observedAt = 2,
+            autoAligned = false,
+        )
+        assertThat(sources.observeAutoAlignedDisplayClientUuids().first()).isEmpty()
+        assertThat(journals.getTransportJournal("frozen-mutation:record:unrelated")?.payloadJson)
+            .isEqualTo("{\"frozen\":true}")
+    }
+
+    @Test
+    fun pendingPullMemberRoleDriftRollsBack() = runBlocking<Unit> {
+        val sources = database.sourceRelationDao()
+        sources.applyPullSummary(
+            relationId = "rel-role-drift",
+            recordClientUuid = "source-a",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display", "source-b"),
+            observedAt = 1,
+        )
+
+        val drift = runCatching {
+            sources.applyPullSummary(
+                relationId = "rel-role-drift",
+                recordClientUuid = "source-a",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("display", "source-b"),
+                observedAt = 2,
+            )
+        }
+
+        assertThat(drift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-role-drift")?.displayClientUuid).isEmpty()
+        assertThat(sources.listMembers("rel-role-drift"))
+            .containsExactly(
+                SourceRelationMemberEntity(
+                    "rel-role-drift",
+                    "source-a",
+                    SourceRelationRole.SOURCE,
+                ),
+            )
+    }
+
+    @Test
+    fun malformedCanonicalTransitionAndPeerSetDriftRollBack() = runBlocking<Unit> {
+        val sources = database.sourceRelationDao()
+        val relation = SourceRelationEntity(
+            relationId = "rel-invalid",
+            displayClientUuid = "display",
+            mediaRetained = true,
+            reason = SourceRelationReason.OWNER_GROUP_RESOLVE,
+            mutationId = "mut-invalid",
+            createdByMembershipId = "owner",
+            createdAt = 50,
+        )
+        val relationMismatch = runCatching {
+            sources.applyOwnerGroupResolution(
+                relation,
+                listOf(
+                    SourceRelationMemberEntity("other-relation", "display", SourceRelationRole.DISPLAY),
+                    SourceRelationMemberEntity("rel-invalid", "source", SourceRelationRole.SOURCE),
+                ),
+            )
+        }
+        assertThat(relationMismatch.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-invalid")).isNull()
+
+        val invalidRole = runCatching {
+            sources.applyOwnerGroupResolution(
+                relation,
+                listOf(
+                    SourceRelationMemberEntity("rel-invalid", "display", SourceRelationRole.DISPLAY),
+                    SourceRelationMemberEntity("rel-invalid", "source", "winner"),
+                ),
+            )
+        }
+        assertThat(invalidRole.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-invalid")).isNull()
+
+        sources.applyPullSummary(
+            relationId = "rel-peer-drift",
+            recordClientUuid = "source-a",
+            role = SourceRelationRole.SOURCE,
+            peerIds = listOf("display", "source-b"),
+            observedAt = 60,
+        )
+        val peerDrift = runCatching {
+            sources.applyPullSummary(
+                relationId = "rel-peer-drift",
+                recordClientUuid = "display",
+                role = SourceRelationRole.DISPLAY,
+                peerIds = listOf("source-a"),
+                observedAt = 61,
+            )
+        }
+        assertThat(peerDrift.exceptionOrNull()).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sources.get("rel-peer-drift")?.displayClientUuid).isEmpty()
+        assertThat(sources.listMembers("rel-peer-drift").map { it.recordClientUuid })
+            .containsExactly("source-a")
+    }
+
+    @Test
+    fun mediaReferenceChangeKeepsBytesWhileAnyHolderRemains() = runBlocking {
+        val refs = database.mediaReferenceDao()
+        val mediaUuid = "media-ref-1"
+        refs.replaceHolders(
+            mediaUuid,
+            listOf(
+                MediaReferenceEntity(
+                    mediaUuid = mediaUuid,
+                    holderKind = MediaReferenceHolderKind.STABLE_ROOT,
+                    holderId = "v-stable",
+                    localUri = "/path/a.jpg",
+                    createdAt = 1L,
+                ),
+                MediaReferenceEntity(
+                    mediaUuid = mediaUuid,
+                    holderKind = MediaReferenceHolderKind.CONFLICT_BRANCH,
+                    holderId = "branch-1",
+                    localUri = "/path/a.jpg",
+                    createdAt = 2L,
+                ),
+            ),
+        )
+        assertThat(refs.countHoldersForMedia(mediaUuid)).isEqualTo(2)
+        assertThat(refs.countHoldersForLocalUri("/path/a.jpg")).isEqualTo(2)
+
+        refs.remove(mediaUuid, MediaReferenceHolderKind.STABLE_ROOT, "v-stable")
+        assertThat(refs.countHoldersForMedia(mediaUuid)).isEqualTo(1)
+        assertThat(
+            mediaBytesEligibleForCleanup(
+                activeMediaAssetReferences = 0,
+                mediaReferenceHolders = refs.countHoldersForMedia(mediaUuid),
+            ),
+        ).isFalse()
+
+        refs.remove(mediaUuid, MediaReferenceHolderKind.CONFLICT_BRANCH, "branch-1")
+        assertThat(
+            mediaBytesEligibleForCleanup(
+                activeMediaAssetReferences = 0,
+                mediaReferenceHolders = refs.countHoldersForMedia(mediaUuid),
+            ),
+        ).isTrue()
+    }
+
+    @Test
+    fun wakeObservationPersistsCausalFieldsAndSleepLink() = runBlocking<Unit> {
+        val wakes = database.wakeObservationDao()
+        val id = wakes.upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-1",
+                sleepRecordClientUuid = "sleep-1",
+                wakeTimestamp = 500L,
+                observerMembershipId = "member-a",
+                note = "awake",
+                withdrawn = false,
+                updatedAt = 500L,
+                syncDirty = true,
+                baseVersion = null,
+            ),
+        )
+        assertThat(id).isGreaterThan(0)
+        val frozen = wakes.freezeDirtyEpoch(
+            clientUuid = "wake-1",
+            contentEpoch = 500L,
+            newMutationId = "wake-mut",
+        )
+        assertThat(frozen?.mutationId).isEqualTo("wake-mut")
+        assertThat(frozen?.sleepRecordClientUuid).isEqualTo("sleep-1")
+        assertThat(wakes.listActiveForSleep("sleep-1")).hasSize(1)
+
+        wakes.upsert(
+            WakeObservationEntity(
+                clientUuid = "wake-withdrawn",
+                sleepRecordClientUuid = "sleep-1",
+                wakeTimestamp = 600L,
+                observerMembershipId = "member-b",
+                withdrawn = true,
+                updatedAt = 600L,
+                syncDirty = false,
+            ),
+        )
+        assertThat(wakes.listActiveForSleep("sleep-1").map { it.clientUuid })
+            .containsExactly("wake-1")
+    }
+
+    @Test
+    fun freezeAfterBranchedSameEpochDoesNotRequeueOnRecord() = runBlocking {
+        val records = database.recordDao()
+        records.upsert(
+            RecordEntity(
+                clientUuid = "record-freeze-branch",
+                babyId = 1,
+                type = "nursing",
+                timestamp = 10L,
+                updatedAt = 100L,
+                syncDirty = true,
+                baseVersion = "v-base",
+                mutationId = "mut-b",
+            ),
+        )
+        assertThat(
+            records.acknowledgeCausalBranched(
+                clientUuid = "record-freeze-branch",
+                expectedMutationId = "mut-b",
+                expectedContentEpoch = 100L,
+                conflictId = "c-1",
+                branchVersionId = "br-1",
+                stableBaseVersion = "v-base",
+            ),
+        ).isTrue()
+        val refrozen = records.freezeDirtyEpoch(
+            clientUuid = "record-freeze-branch",
+            contentEpoch = 100L,
+            newMutationId = "mut-should-not",
+        )
+        assertThat(refrozen?.syncDirty).isFalse()
+        assertThat(refrozen?.mutationId).isEqualTo("mut-b")
+        assertThat(refrozen?.openConflictId).isEqualTo("c-1")
+    }
+
+    @Test
+    fun babyCarePlanCustomItemFreezeAndExactCasAck() = runBlocking {
+        val babies = database.babyDao()
+        babies.upsert(
+            BabyEntity(
+                familyId = 1L,
+                nickname = "A",
+                birthdayEpochDay = 1L,
+                themeColorArgb = 0,
+                clientUuid = "baby-cas",
+                updatedAt = 10L,
+                syncDirty = true,
+                baseVersion = "v-b0",
+            ),
+        )
+        assertThat(
+            babies.freezeDirtyEpoch("baby-cas", 10L, "mut-baby")?.mutationId,
+        ).isEqualTo("mut-baby")
+        assertThat(
+            babies.acknowledgeCausalAcceptedOrMerged(
+                clientUuid = "baby-cas",
+                expectedMutationId = "mut-baby",
+                expectedContentEpoch = 10L,
+                newBaseVersion = "v-b1",
+            ),
+        ).isTrue()
+        assertThat(babies.getByClientUuid("baby-cas")?.baseVersion).isEqualTo("v-b1")
+        assertThat(babies.getByClientUuid("baby-cas")?.syncDirty).isFalse()
+
+        val plans = database.carePlanDao()
+        plans.upsert(
+            CarePlanEntity(
+                clientUuid = "plan-cas",
+                babyId = 1L,
+                type = "nursing",
+                scheduledAt = 20L,
+                scheduledZoneId = "UTC",
+                updatedAt = 20L,
+                syncDirty = true,
+                baseVersion = "v-p0",
+            ),
+        )
+        assertThat(
+            plans.freezeDirtyEpoch("plan-cas", 20L, "mut-plan")?.mutationId,
+        ).isEqualTo("mut-plan")
+        assertThat(
+            plans.acknowledgeCausalBranched(
+                clientUuid = "plan-cas",
+                expectedMutationId = "mut-plan",
+                expectedContentEpoch = 20L,
+                conflictId = "pc-1",
+                branchVersionId = "pb-1",
+                stableBaseVersion = "v-p0",
+            ),
+        ).isTrue()
+        assertThat(plans.getByClientUuid("plan-cas")?.openConflictId).isEqualTo("pc-1")
+        assertThat(plans.getByClientUuid("plan-cas")?.syncDirty).isFalse()
+
+        val customs = database.customItemDao()
+        customs.upsert(
+            CustomItemEntity(
+                clientUuid = "custom-cas",
+                familyId = 1L,
+                name = "抚触",
+                iconSlot = 0,
+                updatedAt = 30L,
+                syncDirty = true,
+                baseVersion = "v-c0",
+            ),
+        )
+        assertThat(
+            customs.freezeDirtyEpoch("custom-cas", 30L, "mut-custom")?.mutationId,
+        ).isEqualTo("mut-custom")
+        assertThat(
+            customs.acknowledgeCausalAcceptedOrMerged(
+                clientUuid = "custom-cas",
+                expectedMutationId = "mut-custom",
+                expectedContentEpoch = 30L,
+                newBaseVersion = "v-c1",
+            ),
+        ).isTrue()
+        assertThat(customs.getByClientUuid("custom-cas")?.baseVersion).isEqualTo("v-c1")
+    }
+}
+
+/**
+ * Verbatim port of the 0.4.7 release reader (d7d1650d
+ * `CausalDaos.applyPullSummary`): the mutation-id guard and member-set
+ * fingerprint a rolled-back 0.4.7 client applies to one arriving pull summary
+ * against the stored row. Frozen on purpose — do not modernize.
+ */
+private object LegacyZeroFourSevenPullSummaryReader {
+    fun memberSetFingerprint(memberIds: Set<String>): String {
+        val canonical = memberIds.sorted().joinToString(separator = "") { memberId ->
+            val bytes = memberId.toByteArray(Charsets.UTF_8)
+            "${bytes.size}:$memberId"
+        }
+        return java.security.MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString(separator = "") { byte ->
+                (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+            }
+    }
+
+    fun requireConsumable(
+        relationId: String,
+        storedMutationId: String,
+        storedDisplayClientUuid: String,
+        storedMemberIds: Set<String>,
+        closedMemberIds: Set<String>,
+    ) {
+        val pullMutationId = "pull-$relationId:${memberSetFingerprint(closedMemberIds)}"
+        when (storedMutationId) {
+            pullMutationId -> Unit
+            "pull-$relationId" -> if (storedDisplayClientUuid.isNotBlank()) {
+                check(storedMemberIds == closedMemberIds) { "source relation peer set drift" }
+            }
+            else -> throw IllegalArgumentException("source relation peer set drift")
+        }
+    }
+}

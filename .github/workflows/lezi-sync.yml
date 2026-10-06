@@ -1,0 +1,70 @@
+name: lezi-sync
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "tools/lezi-sync/**"
+      - ".github/workflows/lezi-sync.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "tools/lezi-sync/**"
+      - ".github/workflows/lezi-sync.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: lezi-sync-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: tools/lezi-sync
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/lezi-sync -> target
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Isolated deployment smoke: tool fixtures never contact the NAS or save real images.
+      # Invoke via bash so a non-executable commit mode still runs on Actions.
+      - name: docker cargo build-context helper
+        run: bash docker/test-prepare-build-context.sh
+
+      - name: package-nas app-update inputs
+        run: bash deploy/test-package-nas-app-update.sh
+
+      - name: NAS release and rollback identity
+        run: bash deploy/test-nas-release-identity.sh
+
+      - name: remote-deploy app-update atomic pair
+        run: bash deploy/test-remote-deploy-app-update-atomic.sh
+
+      - name: TLS inspect-only read-only contract
+        run: |
+          bash deploy/test-init-tls-read-only.sh
+          bash deploy/test-remote-deploy-tls-inspection-read-only.sh
+
+      - name: TLS identity preservation
+        run: |
+          bash deploy/test-init-tls.sh
+          bash deploy/test-remote-deploy-tls-guard.sh
