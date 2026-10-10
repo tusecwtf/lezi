@@ -5,8 +5,11 @@
 //! the staged manifest and media have no family row and are invisible to normal APIs.
 
 mod cache;
+#[cfg(test)]
+mod reference_tests;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::OnceCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -631,20 +634,39 @@ fn validate_restore_references(
     entities: &[Entity],
     keys: &BTreeSet<(String, String)>,
 ) -> Result<(), ApiError> {
+    // Borrow only this validated manifest. Ordinary manifests with no wake lookups
+    // never allocate the index; the original entity order still decides the first error.
+    let index = OnceCell::new();
+    let find_entity = |entity_type: &str, client_uuid: &str| {
+        index
+            .get_or_init(|| {
+                entities
+                    .iter()
+                    .map(|entity| {
+                        (
+                            (entity.entity_type.as_str(), entity.client_uuid.as_str()),
+                            entity,
+                        )
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+            .get(&(entity_type, client_uuid))
+            .copied()
+    };
     for entity in entities {
         // Commit (`validate_push`) messages, not a new restore payload shape.
         if entity.entity_type == "wake_observation" {
-            validate_restore_wake_observation(entity, entities)?;
+            validate_restore_wake_observation(entity, &find_entity)?;
         }
         if entity.entity_type == "record"
             && entity.payload.get("type").and_then(Value::as_str) == Some("sleep")
         {
-            validate_restore_effective_wake(entity, entities)?;
+            validate_restore_effective_wake(entity, &find_entity)?;
         }
         let wake_media = entity.entity_type == "media"
             && entity.payload.get("kind").and_then(Value::as_str) == Some("wake");
         if wake_media {
-            validate_restore_wake_media(entity, entities)?;
+            validate_restore_wake_media(entity, &find_entity)?;
         }
         for (field, entity_type) in [
             ("baby_client_uuid", "baby"),
@@ -671,17 +693,10 @@ fn validate_restore_references(
     Ok(())
 }
 
-fn restore_entity<'a>(
-    entities: &'a [Entity],
-    entity_type: &str,
-    client_uuid: &str,
-) -> Option<&'a Entity> {
-    entities
-        .iter()
-        .find(|entity| entity.entity_type == entity_type && entity.client_uuid == client_uuid)
-}
-
-fn validate_restore_wake_observation(entity: &Entity, entities: &[Entity]) -> Result<(), ApiError> {
+fn validate_restore_wake_observation<'a>(
+    entity: &Entity,
+    find_entity: &impl Fn(&str, &str) -> Option<&'a Entity>,
+) -> Result<(), ApiError> {
     let Some(sleep_id) = entity
         .payload
         .get("sleep_record_client_uuid")
@@ -691,7 +706,7 @@ fn validate_restore_wake_observation(entity: &Entity, entities: &[Entity]) -> Re
             "wake_observation sleep_record_client_uuid does not exist",
         ));
     };
-    let Some(sleep) = restore_entity(entities, "record", sleep_id) else {
+    let Some(sleep) = find_entity("record", sleep_id) else {
         return Err(ApiError::unprocessable(
             "wake_observation sleep_record_client_uuid does not exist",
         ));
@@ -704,7 +719,10 @@ fn validate_restore_wake_observation(entity: &Entity, entities: &[Entity]) -> Re
     Ok(())
 }
 
-fn validate_restore_effective_wake(record: &Entity, entities: &[Entity]) -> Result<(), ApiError> {
+fn validate_restore_effective_wake<'a>(
+    record: &Entity,
+    find_entity: &impl Fn(&str, &str) -> Option<&'a Entity>,
+) -> Result<(), ApiError> {
     let Some(wake_id) = record
         .payload
         .get("effective_wake_observation_client_uuid")
@@ -712,7 +730,7 @@ fn validate_restore_effective_wake(record: &Entity, entities: &[Entity]) -> Resu
     else {
         return Ok(());
     };
-    let Some(wake) = restore_entity(entities, "wake_observation", wake_id) else {
+    let Some(wake) = find_entity("wake_observation", wake_id) else {
         return Err(ApiError::unprocessable(
             "effective WakeObservation does not exist",
         ));
@@ -730,13 +748,15 @@ fn validate_restore_effective_wake(record: &Entity, entities: &[Entity]) -> Resu
     Ok(())
 }
 
-fn validate_restore_wake_media(entity: &Entity, entities: &[Entity]) -> Result<(), ApiError> {
+fn validate_restore_wake_media<'a>(
+    entity: &Entity,
+    find_entity: &impl Fn(&str, &str) -> Option<&'a Entity>,
+) -> Result<(), ApiError> {
     let wake_id = entity
         .payload
         .get("record_client_uuid")
         .and_then(Value::as_str);
-    if wake_id.is_none_or(|wake_id| restore_entity(entities, "wake_observation", wake_id).is_none())
-    {
+    if wake_id.is_none_or(|wake_id| find_entity("wake_observation", wake_id).is_none()) {
         return Err(ApiError::unprocessable(
             "wake media record_client_uuid does not exist",
         ));
