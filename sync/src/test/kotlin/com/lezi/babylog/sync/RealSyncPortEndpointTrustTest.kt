@@ -152,7 +152,7 @@ class RealSyncPortEndpointTrustTest {
         val preferences = MemorySyncPreferences(session)
         val previousEndpoint = TrustedEndpointProfile.systemPki(session.baseUrl)
         val candidate = CertificateTrustCandidate.fromSpki(
-            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             "stable-nas-public-key".toByteArray(),
         )
         val trusted = candidate.trustedEndpoint()
@@ -184,7 +184,7 @@ class RealSyncPortEndpointTrustTest {
         val preferences = MemorySyncPreferences(session)
         preferences.rememberEndpointError = IllegalStateException("disk full")
         val candidate = CertificateTrustCandidate.fromSpki(
-            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             "stable-nas-public-key".toByteArray(),
         )
         val trusted = candidate.trustedEndpoint()
@@ -219,12 +219,12 @@ class RealSyncPortEndpointTrustTest {
         val preferences = MemorySyncPreferences(SyncSession())
         preferences.rememberEndpoint(
             TrustedEndpointProfile.tofuSpki(
-                "https://192.168.50.4:8765",
+                "https://192.168.77.4:8765",
                 "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
             ),
         )
         val candidate = CertificateTrustCandidate.fromSpki(
-            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             "unstable-nas-public-key".toByteArray(),
         )
         val rig = SyncRig(

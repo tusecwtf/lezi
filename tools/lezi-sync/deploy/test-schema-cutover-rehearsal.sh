@@ -152,7 +152,7 @@ grep -q $'^schema11-apk_hash-failure\t11\tapk_hash$' "${test_root}/actions.tsv" 
 grep -q $'^schema11-apk_hash-failure\t11\tverify_rollback$' "${test_root}/actions.tsv" \
   || fail "APK publication failure must reopen and read the old service"
 [[ -s "${state_root}/receipts.sha256" ]] || fail "closed receipt checksum set is missing"
-if rg -n '192\.168\.50\.4|13096920600|LEZI_BOOTSTRAP_SECRET' "${state_root}" >/dev/null; then
+if rg -n '192\.168\.77\.4|nas-account|LEZI_BOOTSTRAP_SECRET' "${state_root}" >/dev/null; then
   fail "isolated receipts contain a production address or secret name"
 fi
 
@@ -164,7 +164,7 @@ if env \
     LEZI_SCHEMA_CUTOVER_REHEARSAL_RUNNER="${runner}" \
     LEZI_REHEARSAL_TEST_LOG="${test_root}/unsafe-actions.tsv" \
     LEZI_SCHEMA_CUTOVER_REHEARSAL_ROOT="${unsafe_root}" \
-    LEZI_REHEARSAL_HOST=192.168.50.4 \
+    LEZI_REHEARSAL_HOST=192.168.77.4 \
     "${REHEARSAL}" >/dev/null 2>"${test_root}/unsafe.err"; then
   fail "rehearsal must reject non-loopback hosts"
 fi

@@ -29,7 +29,7 @@ import org.junit.Test
 class FamilyWizardControllerProbeTrustTest {
     @Test
     fun selfSignedCertificateMustBeAcceptedBeforeProbeRoutingAndAnyLoginSecret() = runTest {
-        val endpoint = TrustedEndpointProfile.systemPki("https://192.168.50.4:8765")
+        val endpoint = TrustedEndpointProfile.systemPki("https://192.168.77.4:8765")
         val candidate = CertificateTrustCandidate.fromSpki(
             endpoint,
             "stable-nas-key".toByteArray(),
@@ -65,7 +65,7 @@ class FamilyWizardControllerProbeTrustTest {
     @Test
     fun rejectingCertificateLeavesNoTrustedProfileOrLateFamilyOperation() = runTest {
         val candidate = CertificateTrustCandidate.fromSpki(
-            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             "unaccepted-nas-key".toByteArray(),
         )
         val gateway = RecordingFamilyWizardGateway(
@@ -229,7 +229,7 @@ class FamilyWizardControllerProbeTrustTest {
     @Test
     fun trustCertificatePersistFailureIsNotANetworkKindAndDoesNotAskToChangeAddress() = runTest {
         val candidate = CertificateTrustCandidate.fromSpki(
-            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             "stable-nas-key".toByteArray(),
         )
         val gateway = RecordingFamilyWizardGateway(

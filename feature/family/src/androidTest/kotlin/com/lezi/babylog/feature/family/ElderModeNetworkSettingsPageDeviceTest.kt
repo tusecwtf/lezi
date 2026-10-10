@@ -47,10 +47,10 @@ class ElderModeNetworkSettingsPageDeviceTest {
                     ) {
                         FamilyNetworkSettingsScreen(
                             ui = FamilyNetworkSettingsUi(
-                                currentEndpoint = "https://192.168.50.4:8765",
+                                currentEndpoint = "https://192.168.77.4:8765",
                                 role = FamilyRole.Owner,
                                 availabilityStatus = "家庭服务器可用",
-                                endpointDraft = "https://192.168.50.4:8765",
+                                endpointDraft = "https://192.168.77.4:8765",
                             ),
                             onBack = {},
                             onEndpointDraftChange = {},

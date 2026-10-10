@@ -28,6 +28,7 @@ keystore.properties
 *.env
 *.env.*
 !/tools/lezi-sync/deploy/.env.example
+tools/lezi-sync/deploy/env.local
 *.key
 *.pem
 *.crt

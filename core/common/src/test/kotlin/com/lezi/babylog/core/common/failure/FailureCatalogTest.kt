@@ -43,7 +43,7 @@ class FailureCatalogTest {
             assertThat(explanation.actions).isNotEmpty()
             explanation.surfaceTexts().forEach { text ->
                 assertThat(text).doesNotContain("https://")
-                assertThat(text).doesNotContain("192.168.50.4")
+                assertThat(text).doesNotContain("192.168.77.4")
                 assertThat(text).doesNotContain("8765")
                 assertThat(text).doesNotContain("HTTP 503")
                 assertThat(text).doesNotContain("ConnectException")
@@ -192,7 +192,7 @@ class FailureCatalogTest {
             "改地址",
             "先离线用",
         ).inOrder()
-        assertThat(content.title + content.body).doesNotContain("192.168.50.4")
+        assertThat(content.title + content.body).doesNotContain("192.168.77.4")
     }
 
     private fun explanation(kind: FailureKind): FailureExplanation = failureExplanation(kind)
@@ -213,7 +213,7 @@ class FailureCatalogTest {
 
     private companion object {
         const val LEAKED_TECHNICAL_DETAIL =
-            "https://192.168.50.4:8765 HTTP 503 java.net.ConnectException: timed out"
+            "https://192.168.77.4:8765 HTTP 503 java.net.ConnectException: timed out"
 
         val NETWORK_KINDS = listOf(
             FailureKind.AddressNotFound,

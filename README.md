@@ -76,7 +76,8 @@ git 历史，不作为执行指引。现网家庭仍在 NAS。以下 NAS 回滚�
 
 **权威步骤与脚本**：[`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)
 
-NAS 脚本家族默认仍是 `ssh -p 10000 13096920600@192.168.50.4`，只作回滚和只读
+NAS 脚本家族的真实目标保存在未跟踪的 `tools/lezi-sync/deploy/env.local`（`NAS_SSH` 等，
+合成示例 `nas-operator@192.168.77.10:10000`），只作回滚和只读
 copy-out。不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。
 
 | 项 | 选择 |
@@ -113,8 +114,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 # （Zspace SSH 用户 HOME 常为 /home/ 不可写，故不用 ~）
 
 # 4) 验收（本机或 NAS）
-curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/health
-curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
+curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.77.10:8765/health
+curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.77.10:8765/ready
 ```
 
 **现网证书是发布硬边界：**普通 CD 不承担证书轮换，不得覆盖、删除、改名或重新生成已有
@@ -133,15 +134,15 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 
 | 变量 | 默认 / 含义 |
 |---|---|
-| `NAS_SSH` | `13096920600@192.168.50.4` |
+| `NAS_SSH` | `nas-operator@192.168.77.10` |
 | `NAS_SSH_PORT` | `10000` |
 | `NAS_REMOTE_DIR` | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
-| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data`；须为规范化 portable 绝对路径，拒绝 `/` 及 `/etc`、`/usr`、`/var`、`/home`、`/root`、`/tmp`、`/opt`、`/srv` 这些精确广域根路径，须使用产品专属子目录 |
+| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data`；须为规范化 portable 绝对路径，拒绝 `/` 及 `/etc`、`/usr`、`/var`、`/home`、`/root`、`/tmp`、`/opt`、`/srv` 这些精确广域根路径，须使用产品专属子目录 |
 | `LEZI_SECRET_FILE` | NAS 持久根密码文件；默认数据 bind 同级 `config/lezi-sync.env`（目录 700、文件 600） |
 | `LEZI_ALLOW_SECRET_RECOVERY=1` | live 容器缺失时，显式授权从持久文件恢复；普通 CD 不设置 |
 | `LEZI_ALLOW_SECRET_RESEED=1` | live 缺失的维护窗内显式替换冲突值；须同时转发新 secret，普通 CD 不设置 |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | 仅已确认全新数据根首次建证书；须显式转发 secret 且远端无 live 容器 |
-| `LEZI_TLS_HOST` | `192.168.50.4`；首次证书 SAN 使用的 NAS IPv4 或解析到 IPv4 的 DNS 名 |
+| `LEZI_TLS_HOST` | `192.168.77.10`；首次证书 SAN 使用的 NAS IPv4 或解析到 IPv4 的 DNS 名 |
 | `LEZI_SKIP_PACKAGE=1` | 显式复用本地包；默认每次 push 都从当前可检查镜像重新打包。复用仍要求对应本地镜像 config digest/OS/架构一致，并重验 data/TLS/origin、inventory/helpers/hashes，以及 APK 签名者、application/version、本地数据合同和 metadata |
 | `LEZI_BOOTSTRAP_SECRET` | 仅无现网容器可继承时手动提供 |
 | `LEZI_FORWARD_BOOTSTRAP_SECRET=1` | 仅首次/切割时通过 SSH stdin 转发上述 secret；普通 CD 不设置 |
@@ -155,7 +156,7 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 邀请首装页的 LAN HTTP origin；NAS 默认 `http://<LEZI_TLS_HOST>:8767`，本版仅支持 IPv4/DNS，禁止公网发布 |
 
 家庭 NAS 首次使用加固 CD 前，须由管理员一次性创建数据 bind 同级
-`/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/config`，交给 SSH 用户并设为 mode `700`；
+`/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config`，交给 SSH 用户并设为 mode `700`；
 `/tmp/lezi-sync-releases` 也必须由 SSH 用户所有且为 mode `700`。不得递归修改数据 bind 或
 `tls/` 权限。精确命令、遗留含 `.env` 发布目录的保留式迁移方式见
 [`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md) § One-time NAS filesystem preflight。

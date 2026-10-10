@@ -11,7 +11,7 @@
 #
 # Env (defaults match AGENTS.md / cutover.rs):
 #   NAS_SSH / NAS_SSH_PORT
-#   LEZI_LAN_HOST                 default 192.168.50.4
+#   LEZI_LAN_HOST                 default 192.168.77.4
 #   LEZI_CONTAINER_NAME           default lezi-sync
 #   LEZI_TLS_CACERT               optional path to data-bind tls/server.crt
 #   LEZI_EVIDENCE_DIR             default <repo>/.scratch/nas-v3-offline-migrate/evidence/07
@@ -33,9 +33,9 @@ if [[ -z "${DEFAULT_EXPECTED_VERSION}" ]]; then
   echo "error: could not determine lezi-sync version from Cargo.toml" >&2
   exit 1
 fi
-NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
+NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
-LEZI_LAN_HOST="${LEZI_LAN_HOST:-192.168.50.4}"
+LEZI_LAN_HOST="${LEZI_LAN_HOST:-192.168.77.4}"
 LEZI_CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 LEZI_EVIDENCE_DIR="${LEZI_EVIDENCE_DIR:-${ROOT}/.scratch/nas-v3-offline-migrate/evidence/07}"
 LEZI_PROBE_WRITE_EVIDENCE="${LEZI_PROBE_WRITE_EVIDENCE:-1}"

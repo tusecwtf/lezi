@@ -579,9 +579,9 @@ pub(crate) fn copy_out_help_text() -> String {
 #   bash {COPY_OUT_SCRIPT}
 #
 # Env table (script defaults):
-#   NAS_SSH              13096920600@192.168.50.4
+#   NAS_SSH              nas-account@192.168.77.4
 #   NAS_SSH_PORT         10000
-#   LEZI_DATA_HOST_PATH  /tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data
+#   LEZI_DATA_HOST_PATH  /tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data
 #   LEZI_BACKUP_ROOT     $HOME/lezi-nas-backups
 #   LEZI_BACKUP_DIR      optional explicit destination
 #   LEZI_COPY_OUT_RO     1 = chmod -R a-w backup after copy (fail closed)
@@ -1116,12 +1116,12 @@ mod tests {
         let text = &outcome.stdout;
         assert!(text.contains(COPY_BACK_RUNBOOK), "{text}");
         assert!(text.contains(COPY_BACK_SCRIPT), "{text}");
-        assert!(text.contains("https://192.168.50.4:8765"), "{text}");
+        assert!(text.contains("https://192.168.77.4:8765"), "{text}");
         assert!(
-            text.contains("/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data"),
+            text.contains("/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data"),
             "{text}"
         );
-        assert!(text.contains("13096920600@192.168.50.4"), "{text}");
+        assert!(text.contains("nas-account@192.168.77.4"), "{text}");
         // Fixed order markers
         assert!(text.contains("stop live container"), "{text}");
         assert!(text.contains("dual backup"), "{text}");

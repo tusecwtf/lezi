@@ -20,9 +20,9 @@
 #   LEZI_NAS_BACKUP_PATH             remote path to NAS-side v3 snapshot (non-dry-run)
 #
 # Optional env (defaults match AGENTS.md / measured family control plane):
-#   NAS_SSH              default 13096920600@192.168.50.4
+#   NAS_SSH              default nas-account@192.168.77.4
 #   NAS_SSH_PORT         default 10000
-#   LEZI_DATA_HOST_PATH  default /tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data
+#   LEZI_DATA_HOST_PATH  default /tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data
 #   LEZI_CONTAINER_NAME  default lezi-sync
 #   LEZI_COPY_BACK_DRY_RUN=1  local gates + plan only; no SSH write
 #   LEZI_SYNC_BIN        path to lezi-sync binary (for offline-migrate validate)
@@ -50,9 +50,9 @@ SHIPPED_USER_VERSION=12
 SHIPPED_MIN_SECRET_BYTES=32
 # END shipped constants
 
-NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
+NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
-LEZI_DATA_HOST_PATH="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
+LEZI_DATA_HOST_PATH="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
 LEZI_CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 LEZI_COPY_BACK_DRY_RUN="${LEZI_COPY_BACK_DRY_RUN:-0}"
 LEZI_COPY_BACK_SKIP_VALIDATE="${LEZI_COPY_BACK_SKIP_VALIDATE:-0}"

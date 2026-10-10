@@ -64,7 +64,7 @@ class FamilyHostBehaviorTest {
                     SyncSession(
                         familyId = "fam-1",
                         role = FamilyRole.Owner,
-                        serverHost = "192.168.50.4",
+                        serverHost = "192.168.77.4",
                         membershipId = "m-owner",
                         accessToken = "tok",
                         refreshToken = "ref",
@@ -117,7 +117,7 @@ class FamilyHostBehaviorTest {
                 SyncSession(
                     familyId = "fam-1",
                     role = FamilyRole.Owner,
-                    serverHost = "192.168.50.4",
+                    serverHost = "192.168.77.4",
                     membershipId = "m-owner",
                     accessToken = "tok",
                     refreshToken = "ref",
@@ -152,7 +152,7 @@ class FamilyHostBehaviorTest {
                 SyncSession(
                     familyId = "fam-1",
                     role = FamilyRole.Owner,
-                    serverHost = "192.168.50.4",
+                    serverHost = "192.168.77.4",
                     membershipId = "m-owner",
                     accessToken = "tok",
                     refreshToken = "ref",
@@ -192,7 +192,7 @@ class FamilyHostBehaviorTest {
 
     @Test
     fun wizardQrVerifyThinDelegatesOntoFamilyWizardController() = runTest {
-        val endpoint = TrustedEndpointProfile.systemPki("https://192.168.50.4:8765")
+        val endpoint = TrustedEndpointProfile.systemPki("https://192.168.77.4:8765")
         val gateway = object : FamilyWizardGateway {
             var verifyCalls = 0
             override suspend fun probeEndpoint(endpointDraft: String) =

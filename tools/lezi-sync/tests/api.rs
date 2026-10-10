@@ -775,17 +775,17 @@ async fn schema_cutover_read_only_gate_keeps_health_open_and_rejects_mutations()
 fn lan_apk_download_origin_rejects_everything_except_bare_http_port_8767() {
     let directory = TempDir::new().unwrap();
     for origin in [
-        "https://192.168.50.4:8767",
-        "http://user@192.168.50.4:8767",
-        "http://192.168.50.4",
-        "http://192.168.50.4:8765",
-        "http://192.168.50.4:8767/",
-        "http://192.168.50.4:8767/join",
-        "http://192.168.50.4:8767?source=qr",
-        "http://192.168.50.4:8767#invite",
+        "https://192.168.77.4:8767",
+        "http://user@192.168.77.4:8767",
+        "http://192.168.77.4",
+        "http://192.168.77.4:8765",
+        "http://192.168.77.4:8767/",
+        "http://192.168.77.4:8767/join",
+        "http://192.168.77.4:8767?source=qr",
+        "http://192.168.77.4:8767#invite",
         "http://:8767",
         "http://[2001:db8::1]:8767",
-        "192.168.50.4:8767",
+        "192.168.77.4:8767",
     ] {
         let mut config = ServerConfig::new(directory.path());
         config.lan_apk_download_origin = Some(origin.to_owned());
@@ -800,7 +800,7 @@ fn lan_apk_download_origin_rejects_everything_except_bare_http_port_8767() {
 async fn lan_install_router_is_optional_and_exposes_no_sync_or_health_surface() {
     let directory = TempDir::new().unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     let apps = build_server_apps(config).unwrap();
     let lan = apps
         .lan_apk_download
@@ -924,7 +924,7 @@ fn https_invite_origin_rejects_anything_except_the_public_host() {
 fn https_and_lan_invite_origins_cannot_both_be_set() {
     let directory = TempDir::new().unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     config.invite_install_origin = Some("https://invite.example.invalid".to_owned());
     assert!(build_app(config).is_err());
 }
@@ -966,7 +966,7 @@ async fn neither_invite_origin_leaves_no_install_surface() {
 async fn lan_invite_origin_stays_only_on_the_8767_router() {
     let directory = TempDir::new().unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     let apps = build_server_apps(config).unwrap();
     let lan = apps
         .lan_apk_download
@@ -1112,7 +1112,7 @@ async fn lan_install_page_uses_only_verified_release_metadata_and_clears_the_inv
     )
     .unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
 
     let response = request(&lan, Method::GET, "/join", None, Body::empty(), None).await;
@@ -1176,7 +1176,7 @@ async fn lan_install_page_honestly_disables_download_for_missing_or_unverified_a
             fs::write(directory.path().join("app-release.apk"), bytes).unwrap();
         }
         let mut config = ServerConfig::new(directory.path());
-        config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+        config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
         let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
 
         let response = request(&lan, Method::GET, "/join", None, Body::empty(), None).await;
@@ -1247,7 +1247,7 @@ async fn lan_apk_download_is_anonymous_integrity_checked_and_non_cacheable() {
     )
     .unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     let lan = build_server_apps(config).unwrap().lan_apk_download.unwrap();
 
     let response = request(
@@ -1320,7 +1320,7 @@ async fn every_released_android_version_keeps_apk_recovery_independent_of_sync_f
     )
     .unwrap();
     let mut config = ServerConfig::new(directory.path());
-    config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+    config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     let apps = build_server_apps(config).unwrap();
     let public = apps.public;
     let lan = apps.lan_apk_download.unwrap();
@@ -6903,7 +6903,7 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
 #[tokio::test]
 async fn member_login_grant_advertises_only_the_configured_lan_install_page() {
     let rig = Rig::with_config(|config| {
-        config.lan_apk_download_origin = Some("http://192.168.50.4:8767".to_owned());
+        config.lan_apk_download_origin = Some("http://192.168.77.4:8767".to_owned());
     });
     let owner = create_family(
         &rig.app,
@@ -6924,7 +6924,7 @@ async fn member_login_grant_advertises_only_the_configured_lan_install_page() {
     .await;
 
     assert_eq!(status, StatusCode::CREATED, "{grant}");
-    assert_eq!(grant["landing_url"], "http://192.168.50.4:8767/join",);
+    assert_eq!(grant["landing_url"], "http://192.168.77.4:8767/join",);
 
     let without_landing = Rig::new();
     let owner = create_family(

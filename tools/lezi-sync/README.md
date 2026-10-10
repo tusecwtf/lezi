@@ -69,7 +69,8 @@ VPS 部署工具链已按 owner 决定删除（2026-09-06）；脚本只存于 g
 
 ## NAS / Docker Compose（冻结回滚）
 
-NAS 脚本家族默认仍是 `ssh -p 10000 13096920600@192.168.50.4`，只作回滚和只读
+NAS 脚本家族的真实目标保存在未跟踪的 `deploy/env.local`（`NAS_SSH` 等，合成示例
+`nas-operator@192.168.77.10:10000`），只作回滚和只读
 copy-out。不能靠改 `NAS_SSH` 把同一套脚本切到 VPS。zdocker 打包 + scp +
 仓库外 age（根密码 + NAS 自签 TLS）见
 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)：
@@ -124,10 +125,10 @@ curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:876
 默认只绑定宿主 loopback。手机要直连时，显式发布 LAN/全接口（仍勿映射公网）：
 
 ```bash
-# 仅示例：192.168.50.4 是这台宿主的 LAN IP。
+# 仅示例：192.168.77.10 是这台宿主的 LAN IP。
 LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
   LEZI_LAN_APK_DOWNLOAD_PUBLISH=0.0.0.0:8767 \
-  LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://192.168.50.4:8767 \
+  LEZI_LAN_APK_DOWNLOAD_ORIGIN=http://192.168.77.10:8767 \
   LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
   LEZI_BOOTSTRAP_SECRET=... \
   docker compose up -d

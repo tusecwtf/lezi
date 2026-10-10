@@ -25,7 +25,7 @@ class OnboardingHostCommandSurfaceTest {
     fun connectStepModelSharesPrimaryDecisionWithActionWiring() {
         val ready = FamilyWizardState.EndpointReady(
             snapshot = emptySnapshot().copy(mode = FamilyWizardMode.Join),
-            endpoint = TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            endpoint = TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
         )
         val model = connectServerStepModel(ready)
         val decision = connectServerPrimaryDecision(ready)
@@ -96,7 +96,7 @@ class OnboardingHostCommandSurfaceTest {
         assertFalse(
             FamilyWizardState.EndpointReady(
                 emptySnapshot(),
-                TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+                TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             ).isBusy,
         )
         val waiting = FamilyWizardState.WaitingForMemberApproval(
@@ -143,7 +143,7 @@ class OnboardingHostCommandSurfaceTest {
 
     private fun samplePayload(
         endpoint: TrustedEndpointProfile =
-            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
     ) = MemberLoginQrPayload(
         endpoint = endpoint,
         grant = "grant-0000000000000000000000000000000000000",

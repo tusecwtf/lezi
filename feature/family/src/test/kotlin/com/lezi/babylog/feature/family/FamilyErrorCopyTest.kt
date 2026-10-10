@@ -321,7 +321,7 @@ class FamilyErrorCopyTest {
 
     @Test
     fun primarySurfaceFlagsByJoinRoleAndNetwork() {
-        assertTrue(isEndpointConfigured("192.168.50.4", ""))
+        assertTrue(isEndpointConfigured("192.168.77.4", ""))
         assertFalse(isEndpointConfigured("", ""))
 
         val joinedConfigured = familyPrimarySurface(

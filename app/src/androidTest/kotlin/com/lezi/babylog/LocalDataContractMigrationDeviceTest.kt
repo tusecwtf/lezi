@@ -173,7 +173,7 @@ class LocalDataContractMigrationDeviceTest {
         val credentialStore = InMemorySecureRefreshTokenStore()
         val syncPreferences = DataStoreSyncPreferences(dataStore, credentialStore)
         val endpoint = TrustedEndpointProfile.tofuSpki(
-            "https://192.168.50.4:8765",
+            "https://192.168.77.4:8765",
             Base64.getEncoder().encodeToString(ByteArray(32) { 7 }),
         )
         syncPreferences.rememberEndpoint(endpoint)
@@ -187,7 +187,7 @@ class LocalDataContractMigrationDeviceTest {
                 role = FamilyRole.Owner,
                 pullCursor = 12L,
                 pullGeneration = "generation-a",
-                serverHost = "192.168.50.4",
+                serverHost = "192.168.77.4",
                 serverPort = 8765,
                 serverScheme = "https",
                 familyName = "乐乐一家",
@@ -487,7 +487,7 @@ class LocalDataContractMigrationDeviceTest {
         val credentialStore = InMemorySecureRefreshTokenStore()
         val syncPreferences = DataStoreSyncPreferences(dataStore, credentialStore)
         val endpoint = TrustedEndpointProfile.tofuSpki(
-            "https://192.168.50.4:8765",
+            "https://192.168.77.4:8765",
             Base64.getEncoder().encodeToString(ByteArray(32) { 7 }),
         )
         syncPreferences.rememberEndpoint(endpoint)
@@ -501,7 +501,7 @@ class LocalDataContractMigrationDeviceTest {
                 role = FamilyRole.Owner,
                 pullCursor = 12L,
                 pullGeneration = "generation-a",
-                serverHost = "192.168.50.4",
+                serverHost = "192.168.77.4",
                 serverPort = 8765,
                 serverScheme = "https",
                 familyName = "乐乐一家",

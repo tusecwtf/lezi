@@ -19,7 +19,7 @@ if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-
   exit 1
 fi
 
-NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
+NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
 case "${NAS_SSH#*@}" in
   vps-host|192.0.2.36|203.0.113.10|192.0.2.97|192.0.2.105)
@@ -239,8 +239,8 @@ if [[ -n "${LEZI_SCHEMA12_COMPATIBLE_IMAGE_ID:-}" ]]; then
     exit 1
   fi
 fi
-expected_data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
-expected_tls_host="${LEZI_TLS_HOST:-192.168.50.4}"
+expected_data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
+expected_tls_host="${LEZI_TLS_HOST:-192.168.77.4}"
 expected_lan_apk_download_origin="${LEZI_LAN_APK_DOWNLOAD_ORIGIN:-http://${expected_tls_host}:8767}"
 if [[ "${manifest_data_host_path}" != "${expected_data_host_path}" \
     || "${manifest_tls_host}" != "${expected_tls_host}" \

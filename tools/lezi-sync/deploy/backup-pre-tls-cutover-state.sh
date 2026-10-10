@@ -5,7 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
+NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
 CONTAINER_NAME="${LEZI_PRE_TLS_CONTAINER_NAME:-lezi-sync}"
 EXPECTED_IMAGE_ID="${LEZI_EXPECTED_PRE_TLS_IMAGE_ID:-}"

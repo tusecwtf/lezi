@@ -157,7 +157,7 @@ class SyncPreferencesTrustEndpointTest {
             PreferenceDataStoreFactory.create(scope = firstScope) { file },
         )
         val endpoint = TrustedEndpointProfile.tofuSpki(
-            "https://192.168.50.4:8765",
+            "https://192.168.77.4:8765",
             Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() }),
         )
 

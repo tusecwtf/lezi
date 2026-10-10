@@ -212,7 +212,7 @@ mod tests {
         );
         // Probe topology: LAN HTTPS required; host:8766 dead path forbidden.
         assert!(
-            text.contains("LAN HTTPS") || text.contains("https://192.168.50.4:8765"),
+            text.contains("LAN HTTPS") || text.contains("https://192.168.77.4:8765"),
             "{text}"
         );
         assert!(

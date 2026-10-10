@@ -26,7 +26,7 @@ if [[ "${image}" != "lezi-sync:${version}" ]]; then
   echo "error: LEZI_SYNC_IMAGE must be lezi-sync:${version}" >&2
   exit 1
 fi
-data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
+data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
 if [[ "${data_host_path}" != /* \
     || "${data_host_path}" == "/" \
     || ! "${data_host_path}" =~ ^/[A-Za-z0-9._/-]+$ \
@@ -44,7 +44,7 @@ case "${data_host_path}" in
     exit 1
     ;;
 esac
-tls_host="${LEZI_TLS_HOST:-192.168.50.4}"
+tls_host="${LEZI_TLS_HOST:-192.168.77.4}"
 if [[ ! "${tls_host}" =~ ^[A-Za-z0-9.:-]+$ ]] || [[ "${#tls_host}" -gt 253 ]]; then
   echo "error: LEZI_TLS_HOST must be a plain DNS name or IP address" >&2
   exit 1

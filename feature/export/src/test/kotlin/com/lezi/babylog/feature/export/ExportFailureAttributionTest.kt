@@ -57,7 +57,7 @@ class ExportFailureAttributionTest {
     fun unknownExceptionWithoutReadableMessageFallsBack() {
         listOf<Throwable>(
             RuntimeException(),
-            RuntimeException("E/Sync: connection refused to 192.168.50.4:8765"),
+            RuntimeException("E/Sync: connection refused to 192.168.77.4:8765"),
         ).forEach { error ->
             val attribution = exportFailureAttribution(error)
             assertNull(attribution.dialogKind)

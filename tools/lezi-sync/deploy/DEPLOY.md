@@ -3,7 +3,9 @@
 VPS deployment tooling was removed at the owner's request (2026-09-06, after
 the 2026-09-05 suspension); git history retains the deleted scripts. This
 runbook keeps only the guarded NAS rollback and read-only copy-out path.
-Defaults remain `ssh -p 10000 13096920600@192.168.50.4`; do not retarget these
+Real target values live in untracked `deploy/env.local` (`NAS_SSH`, `NAS_SSH_PORT`,
+`LEZI_DATA_HOST_PATH`, `LEZI_TLS_HOST`); tracked files use only the synthetic
+example `nas-operator@192.168.77.10:10000`. Do not retarget these
 scripts. Operator permission repair does not authorize a container
 replacement: deployment still requires a separately confirmed window.
 
@@ -71,14 +73,14 @@ Environment overrides:
 
 | Variable | Default |
 |---|---|
-| `NAS_SSH` | `13096920600@192.168.50.4` |
+| `NAS_SSH` | No tracked real default; source `deploy/env.local` (synthetic example `nas-operator@192.168.77.10`) |
 | `NAS_SSH_PORT` | `10000` |
 | `NAS_REMOTE_DIR` | Stable validated package path `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas`（该机 `HOME=/home/` 不可写）。Push uploads into a fresh mode-`700` `.incoming-<nonce>` sibling, validates and deploys there, then promotes it to this stable path only after success. The parent must be a canonical non-symlink mode-`700` directory owned by the SSH user. |
 | `LEZI_SYNC_VERSION` | from `Cargo.toml` |
-| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data`; must be a normalized portable absolute path because it is rendered into compose/manifest and derives the lock domain. Filesystem root and exact broad/system roots `/etc`, `/usr`, `/var`, `/home`, `/root`, `/tmp`, `/opt`, `/srv` are refused; use a product-specific child. |
-| `LEZI_TLS_HOST` | `192.168.50.4`; IPv4 address or DNS name resolving to IPv4, included in the self-signed certificate SAN |
+| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data`; must be a normalized portable absolute path because it is rendered into compose/manifest and derives the lock domain. Filesystem root and exact broad/system roots `/etc`, `/usr`, `/var`, `/home`, `/root`, `/tmp`, `/opt`, `/srv` are refused; use a product-specific child. |
+| `LEZI_TLS_HOST` | `192.168.77.10`; IPv4 address or DNS name resolving to IPv4, included in the self-signed certificate SAN |
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | `http://<LEZI_TLS_HOST>:8767`; invite-install origin, restricted to the same IPv4/DNS host and port 8767; IPv6 is not supported by this NAS publish path |
-| `LEZI_SECRET_FILE` | NAS-side persistent root-secret file. Default: sibling of the data bind at `../config/lezi-sync.env` (`/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/config/lezi-sync.env` on the family NAS). Overrides must be normalized absolute paths using only letters, digits, `.`, `_`, `/`, and `-` so the SSH login shell cannot reinterpret them. |
+| `LEZI_SECRET_FILE` | NAS-side persistent root-secret file. Default: sibling of the data bind at `../config/lezi-sync.env` (`/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config/lezi-sync.env` on the family NAS). Overrides must be normalized absolute paths using only letters, digits, `.`, `_`, `/`, and `-` so the SSH login shell cannot reinterpret them. |
 | `LEZI_ALLOW_SECRET_RECOVERY=1` | Explicit incident authorization to use the persistent file when the live container is absent. Ordinary CD leaves it unset. |
 | `LEZI_ALLOW_SECRET_RESEED=1` | Explicit maintenance authorization to replace a conflicting persistent value; requires live container absent plus forwarded explicit secret. Never use for ordinary CD. |
 | `LEZI_ALLOW_TLS_BOOTSTRAP=1` | One-time opt-in to create TLS files only on an operator-verified fresh data root. Requires an explicitly forwarded secret, and remote deploy aborts if a live container exists. Ordinary CD, rollback, and certificate tests on the family NAS leave it unset. |
@@ -107,13 +109,13 @@ NAS administrator. This does not authorize deployment or a daemon restart.
 1. Open an interactive session from the developer machine:
 
 ```bash
-ssh -o ControlPath=none -p 10000 13096920600@192.168.50.4
+ssh -o ControlPath=none -p 10000 nas-operator@192.168.77.10
 ```
 
 2. Run on the NAS. Enter the NAS sudo password only at its terminal prompt:
 
 ```bash
-test "$(id -un)" = 13096920600 || exit 1
+test "$(id -un)" = nas-account || exit 1
 sudo -v
 sudo sh -eu -c '
   user=$1
@@ -179,7 +181,7 @@ user nor a Docker helper may weaken the ZFS parent to make this pass. Do this on
 NAS shell (never paste the sudo password into logs or chat):
 
 ```bash
-config=/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/config
+config=/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config
 sudo mkdir -p "${config}"
 sudo chown "$(id -u):$(id -g)" "${config}"
 sudo chmod 700 "${config}"
@@ -345,7 +347,7 @@ LEZI_RELEASE_APK=../../app/build/outputs/apk/release/app-release.apk \
   requires immediate rotation and history incident handling.
 - Canonical NAS file: `${LEZI_SECRET_FILE}` or, by default, the data bind's sibling
   `../config/lezi-sync.env`. For the family NAS that is
-  `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/config/lezi-sync.env`. Despite the `/tmp/zfsv3`
+  `/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/config/lezi-sync.env`. Despite the `/tmp/zfsv3`
   prefix this is the NAS persistent ZFS-backed tree; `/tmp/lezi-sync-releases/` is disposable.
 - The dedicated `config/` directory must be a non-symlink mode-`700` directory. The secret file must
   be a non-symlink regular mode-`600` file containing exactly one line:
@@ -437,7 +439,7 @@ SAN host:
 ```bash
 cd tools/lezi-sync
 LEZI_AGE_IDENTITY_FILE=/path/on/offline-media/lezi-age-identity.txt \
-LEZI_EXPECTED_TLS_HOST=192.168.50.4 \
+LEZI_EXPECTED_TLS_HOST=192.168.77.10 \
 LEZI_EXPECTED_CERTIFICATE_SHA256=75023c71d8ca918a42fe4f058aab8faf85db3f02b9a69bfb6522951ce362da9e \
 LEZI_EXPECTED_SPKI_SHA256=bd07d8645ed3b7adead162eca454373aee4007b0a35aa7c62caf7d8ac0cb3215 \
   ./deploy/restore-nas-credentials.sh \

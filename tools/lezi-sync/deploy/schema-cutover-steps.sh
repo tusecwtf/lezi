@@ -8,9 +8,9 @@ REPO_ROOT="$(cd "${SYNC_ROOT}/../.." && pwd)"
 phase="${1:-}"
 state_dir="${LEZI_SCHEMA_CUTOVER_STATE_DIR:?}"
 
-NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
+NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
-DATA_PATH="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
+DATA_PATH="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data}"
 CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 PACKAGE_DIR="${LEZI_NAS_PACKAGE_DIR:-${REPO_ROOT}/dist/lezi-sync-0.4.0-nas}"
 ROLLBACK_PACKAGE_DIR="${LEZI_SCHEMA_CUTOVER_ROLLBACK_PACKAGE_DIR:-}"
@@ -479,7 +479,7 @@ post_check() {
   ssh "${SSH_OPTS[@]}" "${NAS_SSH}" \
     "docker exec '${CONTAINER_NAME}' lezi-sync healthcheck"
   health="$(curl -k -fsS --connect-timeout 5 \
-    "https://${LEZI_LAN_HOST:-192.168.50.4}:8765/health")"
+    "https://${LEZI_LAN_HOST:-192.168.77.4}:8765/health")"
   python3 - "${health}" <<'PY'
 import json, sys
 body = json.loads(sys.argv[1])

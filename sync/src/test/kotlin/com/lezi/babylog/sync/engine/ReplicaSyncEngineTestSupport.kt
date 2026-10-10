@@ -151,7 +151,7 @@ internal fun joinedReplicaSession() = SyncSession(
     role = FamilyRole.Owner,
     pullGeneration = "generation-a",
     membershipId = "membership-a",
-    serverHost = "192.168.50.4",
+    serverHost = "192.168.77.4",
     serverPort = 8765,
 )
 

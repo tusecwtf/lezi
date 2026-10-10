@@ -11,7 +11,7 @@ if [[ -z "${version}" ]]; then
   version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${SYNC_ROOT}/Cargo.toml" | head -1)"
 fi
 
-NAS_SSH="${NAS_SSH:-13096920600@192.168.50.4}"
+NAS_SSH="${NAS_SSH:-nas-account@192.168.77.4}"
 NAS_SSH_PORT="${NAS_SSH_PORT:-10000}"
 case "${NAS_SSH#*@}" in
   vps-host|192.0.2.36|203.0.113.10|192.0.2.97|192.0.2.105)

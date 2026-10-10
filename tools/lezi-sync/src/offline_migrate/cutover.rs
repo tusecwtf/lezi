@@ -21,18 +21,18 @@ pub(crate) const COPY_BACK_RUNBOOK: &str =
 pub(crate) const COPY_BACK_SCRIPT: &str = "tools/lezi-sync/deploy/copy-back-nas-data.sh";
 
 /// Default SSH target (AGENTS.md / measured family control plane).
-pub(crate) const DEFAULT_NAS_SSH: &str = "13096920600@192.168.50.4";
+pub(crate) const DEFAULT_NAS_SSH: &str = "nas-account@192.168.77.4";
 /// Default SSH port on the family NAS.
 pub(crate) const DEFAULT_NAS_SSH_PORT: &str = "10000";
 /// Default host bind for `/data`.
 pub(crate) const DEFAULT_DATA_HOST_PATH: &str =
-    "/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data";
+    "/tmp/zfsv3/sata1/nas-account/data/Docker/lezi/data";
 /// Default LAN HTTPS endpoint after TLS cutover.
-pub(crate) const DEFAULT_LAN_HTTPS_ENDPOINT: &str = "https://192.168.50.4:8765";
+pub(crate) const DEFAULT_LAN_HTTPS_ENDPOINT: &str = "https://192.168.77.4:8765";
 /// Container-internal HTTP readiness base (not published on host; use docker exec healthcheck).
 pub(crate) const DEFAULT_LOOPBACK_HTTP_READY: &str = "http://127.0.0.1:8766";
 /// Pre-TLS measured live surface (protocol drift probe).
-pub(crate) const PRE_TLS_HTTP_PROBE: &str = "http://192.168.50.4:8765";
+pub(crate) const PRE_TLS_HTTP_PROBE: &str = "http://192.168.77.4:8765";
 
 /// Fixed maintenance-window steps (ticket 06 acceptance). Order is contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +232,7 @@ mod tests {
         assert!(text.contains(DEFAULT_DATA_HOST_PATH), "{text}");
         assert!(text.contains(DEFAULT_LAN_HTTPS_ENDPOINT), "{text}");
         assert!(
-            text.contains("https://192.168.50.4:8765"),
+            text.contains("https://192.168.77.4:8765"),
             "LAN https endpoint required: {text}"
         );
         // Fixed order present

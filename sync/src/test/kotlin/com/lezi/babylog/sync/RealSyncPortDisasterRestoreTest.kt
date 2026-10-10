@@ -134,7 +134,7 @@ class RealSyncPortDisasterRestoreTest {
     fun disasterRestoreStartClientUpdateRequiredPublishesForceShellAndCandidateLanInvite() =
         runTest {
             val candidate = TrustedEndpointProfile.systemPki(
-                "https://192.168.50.4:8765",
+                "https://192.168.77.4:8765",
             )
             val rig = SyncRig(
                 session = joinedSession("family-a"),
@@ -169,9 +169,9 @@ class RealSyncPortDisasterRestoreTest {
             assertThat(rig.port.availableForcedAppUpdate().first())
                 .isEqualTo(ForcedAppUpdateState.PackageUnknown)
             assertThat(rig.port.forcedUpdateLanInviteHost().first())
-                .isEqualTo("192.168.50.4")
+                .isEqualTo("192.168.77.4")
             assertThat(lanInviteApkDownloadUrl(rig.port.forcedUpdateLanInviteHost().first()!!))
-                .isEqualTo("http://192.168.50.4:8767/download/lezi.apk")
+                .isEqualTo("http://192.168.77.4:8767/download/lezi.apk")
             // Retain the old joined session; restore did not switch endpoint.
             assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
             assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()

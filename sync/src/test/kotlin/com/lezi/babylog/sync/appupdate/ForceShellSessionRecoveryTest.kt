@@ -32,8 +32,8 @@ class ForceShellSessionRecoveryTest {
 
     @Test
     fun lanInviteApkUrlUsesPort8767ForKnownHost() {
-        assertThat(lanInviteApkDownloadUrl("192.168.50.4"))
-            .isEqualTo("http://192.168.50.4:8767/download/lezi.apk")
+        assertThat(lanInviteApkDownloadUrl("192.168.77.4"))
+            .isEqualTo("http://192.168.77.4:8767/download/lezi.apk")
         assertThat(lanInviteApkDownloadUrl("  nas.home  "))
             .isEqualTo("http://nas.home:8767/download/lezi.apk")
         assertThat(lanInviteApkDownloadUrl("")).isNull()
@@ -42,7 +42,7 @@ class ForceShellSessionRecoveryTest {
 
     @Test
     fun lanInviteGuidanceNamesPortAndNoFamilyApi() {
-        val url = requireNotNull(lanInviteApkDownloadUrl("192.168.50.4"))
+        val url = requireNotNull(lanInviteApkDownloadUrl("192.168.77.4"))
         val copy = forcedUpdateLanInviteGuidance(url)
         assertThat(copy).contains("8767")
         assertThat(copy).contains("原地升级会保留本机数据与家庭配置")

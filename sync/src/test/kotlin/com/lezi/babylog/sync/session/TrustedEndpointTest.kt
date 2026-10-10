@@ -18,7 +18,7 @@ class TrustedEndpointTest {
     @Test
     fun selfSignedHandshakeReturnsACompleteSpkiFingerprintWithoutSendingHttpBeforeApproval() =
         runTest {
-            val endpoint = TrustedEndpointProfile.systemPki("https://192.168.50.4:8765")
+            val endpoint = TrustedEndpointProfile.systemPki("https://192.168.77.4:8765")
             val candidate = CertificateTrustCandidate.fromSpki(
                 endpoint = endpoint,
                 subjectPublicKeyInfo = ByteArray(32) { it.toByte() },
@@ -45,7 +45,7 @@ class TrustedEndpointTest {
     @Test
     fun acceptedSpkiUsesOnlyThePinnedTransportAndMismatchHardBlocksWithoutRediscovery() = runTest {
         val candidate = CertificateTrustCandidate.fromSpki(
-            endpoint = TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            endpoint = TrustedEndpointProfile.systemPki("https://192.168.77.4:8765"),
             subjectPublicKeyInfo = "stable-public-key".toByteArray(),
         )
         val pinned = candidate.trustedEndpoint()
