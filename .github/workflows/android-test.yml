@@ -104,7 +104,7 @@ jobs:
           distribution: temurin
           java-version: "21"
       # Deliberately no Gradle/Cargo cache: this is the clean-bootstrap proof.
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
       - uses: dtolnay/rust-toolchain@stable

@@ -136,6 +136,15 @@ class WorkflowContractsTest(unittest.TestCase):
                     self.assertTrue(uploads)
                     self.assertTrue(all(step.get("if") == "always()" for step in uploads))
 
+    def test_android_jobs_keep_upstream_sdk_action_and_explicit_packages(self):
+        for name, job in self.android["jobs"].items():
+            with self.subTest(job=name):
+                setup = [step for step in job["steps"]
+                         if step.get("uses", "").startswith("android-actions/setup-android@")]
+                self.assertEqual(len(setup), 1)
+                self.assertEqual(setup[0]["uses"], "android-actions/setup-android@v4")
+                self.assertEqual(setup[0].get("with", {}).get("packages"), "platform-tools")
+
     def test_clean_paired_gate_cannot_be_conditional_or_fast_only(self):
         job = self.android["jobs"]["integration"]
         self.assertNotIn("if", job)
