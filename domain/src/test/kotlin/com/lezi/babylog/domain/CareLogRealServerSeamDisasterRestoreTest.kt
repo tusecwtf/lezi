@@ -224,7 +224,7 @@ class CareLogRealServerSeamDisasterRestoreTest {
         assertThat(batch.familyId).isEqualTo(before.familyId)
         owner.foreground.setForeground(false)
         val committed = owner.port.commitDisasterRecovery(replacement.bootstrapSecret).getOrThrow()
-        assertThat(committed.session.familyId).isEqualTo(before.familyId)
+        assertThat(committed.sessionPresentation.familyId).isEqualTo(before.familyId)
         assertThat(owner.currentSession().baseUrl).isEqualTo(replacement.origin)
         assertThat(owner.currentSession().isJoined).isTrue()
         assertThat(owner.preferences.disasterRestoreCheckpoint.first()).isNull()

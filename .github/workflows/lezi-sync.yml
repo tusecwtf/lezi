@@ -7,6 +7,8 @@ on:
       - "tools/lezi-sync/**"
       - ".github/workflows/lezi-sync.yml"
       - "config/**"
+      # Metadata validation logic is itself a release-contract input.
+      - "app/build.gradle.kts"
       # Android codecs/closed key sets are wire inputs even without doc edits.
       - "sync/src/main/**"
       - "core/model/src/main/**"
@@ -19,6 +21,8 @@ on:
       - "tools/lezi-sync/**"
       - ".github/workflows/lezi-sync.yml"
       - "config/**"
+      # Metadata validation logic is itself a release-contract input.
+      - "app/build.gradle.kts"
       # Android codecs/closed key sets are wire inputs even without doc edits.
       - "sync/src/main/**"
       - "core/model/src/main/**"
@@ -35,6 +39,9 @@ defaults:
   run:
     working-directory: tools/lezi-sync
 
+env:
+  LEZI_EXPECTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -42,6 +49,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact source revision
+        run: |
+          test "$(git rev-parse HEAD)" = "$LEZI_EXPECTED_REVISION"
+          mkdir -p ../../build/ci-evidence
+          git rev-parse HEAD HEAD^{tree} > ../../build/ci-evidence/rust-source-identity.txt
+
+      - name: Required fixture tools and workflow contracts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssl curl sqlite3 ripgrep python3-yaml
+          python3 ../testing/test_workflow_contracts.py
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +79,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Test
-        run: cargo test --locked
+        run: |
+          set -o pipefail
+          cargo test --locked 2>&1 | tee ../../build/ci-evidence/rust-tests.log
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -93,8 +117,6 @@ jobs:
 
       - name: Remaining isolated release fixtures
         run: |
-          sudo apt-get update
-          sudo apt-get install -y sqlite3
           bash deploy/test-copy-back-nas-data.sh
           bash deploy/test-image-config-digest.sh
           bash deploy/test-live-cutover-probe.sh
@@ -103,3 +125,10 @@ jobs:
           bash deploy/test-schema-update-pair.sh
           bash deploy/test-schema-cutover-rehearsal.sh
           bash ../testing/test-isolated-integration.sh
+
+      - name: Rust source identity and test evidence (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-gates-${{ env.LEZI_EXPECTED_REVISION }}
+          path: build/ci-evidence/

@@ -184,12 +184,12 @@ fun LeziSurfacePanel(
 
 /** Off keeps the historical 18.dp clip box; elder follows ChipMetric line height. */
 @Composable
-fun leziChipMetricWellModifier(): Modifier {
+fun Modifier.leziChipMetricWell(): Modifier {
     val line = LeziThemeExt.typography.ChipMetric.lineHeight
     return if (LeziThemeExt.isElder) {
-        Modifier.heightIn(min = with(LocalDensity.current) { line.toDp() })
+        this.heightIn(min = with(LocalDensity.current) { line.toDp() })
     } else {
-        Modifier.height(18.dp)
+        this.height(18.dp)
     }
 }
 
@@ -206,8 +206,8 @@ fun leziChipMetricWellModifier(): Modifier {
 fun SummaryMetric(
     value: String,
     label: String,
-    tone: LeziTone = LeziTone.Neutral,
     modifier: Modifier = Modifier,
+    tone: LeziTone = LeziTone.Neutral,
     icon: (@Composable () -> Unit)? = null,
     selected: Boolean = false,
     selectionLabel: String? = null,
@@ -267,7 +267,7 @@ fun SummaryMetric(
             val chipMetric = LeziThemeExt.typography.ChipMetric
             val structure = LeziThemeExt.structure
             Box(
-                leziChipMetricWellModifier(),
+                Modifier.leziChipMetricWell(),
                 contentAlignment = Alignment.BottomStart,
             ) {
                 Text(

@@ -23,6 +23,23 @@ use super::v11::{migrate_v11_data_dir, SOURCE_V11_USER_VERSION};
 use crate::store::{Store, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
 use crate::SERVER_SECRET_BYTES;
 
+// Test-only deterministic failures at phase boundaries. No environment variable,
+// command-line switch, or production fault-injection surface is introduced.
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_MIGRATION_PHASE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn fail_migration_phase(phase: &'static str) -> Result<(), MigrateError> {
+    if FAIL_MIGRATION_PHASE.with(|slot| slot.get() == Some(phase)) {
+        return Err(MigrateError::Internal(format!(
+            "synthetic migration failure: {phase}"
+        )));
+    }
+    Ok(())
+}
+
 const SOURCE_V12_USER_VERSION: i64 = 12;
 const DATA_ROOT_ENTRIES: &[&str] = &[
     "app-release.apk",
@@ -51,6 +68,8 @@ pub(crate) fn migrate_v11_or_v12_data_dir_to_v13(
                 PrivateDirectory::new(dest_data_dir.parent().unwrap(), "schema12-stage")?;
             let stage = owned_stage.path();
             migrate_v11_data_dir(source_data_dir, stage)?;
+            #[cfg(test)]
+            fail_migration_phase("v11_rebuilt")?;
             copy_tree_exact(&source_data_dir.join("tls"), &stage.join("tls"))?;
             migrate_v12_data_dir_to_v13(stage, dest_data_dir)
         }
@@ -95,23 +114,37 @@ pub(crate) fn migrate_v12_data_dir_to_v13(
     let temp = owned_temp.path();
     let result = (|| {
         rebuild_v12_database(&source_data_dir.join("lezi.db"), &temp.join("lezi.db"))?;
+        #[cfg(test)]
+        fail_migration_phase("database_rebuilt")?;
         copy_required_file(
             &source_data_dir.join("server.secret"),
             &temp.join("server.secret"),
         )?;
+        #[cfg(test)]
+        fail_migration_phase("secret_copied")?;
         copy_tree_exact(&source_data_dir.join("media"), &temp.join("media"))?;
+        #[cfg(test)]
+        fail_migration_phase("media_copied")?;
         copy_tree_exact(&source_data_dir.join("tls"), &temp.join("tls"))?;
+        #[cfg(test)]
+        fail_migration_phase("tls_copied")?;
         validate_schema13_data_dir(temp)?;
+        #[cfg(test)]
+        fail_migration_phase("authority_validated")?;
         if source_digest != tree_digest(source_data_dir)? {
             return Err(MigrateError::Internal(
                 "source data root changed while offline migration was running".to_owned(),
             ));
         }
         validate_copied_assets(source_data_dir, temp)?;
+        #[cfg(test)]
+        fail_migration_phase("assets_validated")?;
         migration_report(&temp.join("lezi.db"))
     })();
 
     let report = result?;
+    #[cfg(test)]
+    fail_migration_phase("before_publish")?;
     publish_directory(temp, dest_data_dir)?;
     Ok(report)
 }
@@ -740,7 +773,7 @@ mod tests {
     const CONFLICT: &str = "66666666-6666-6666-6666-666666666666";
     const MEDIA: &str = "77777777-7777-7777-7777-777777777777";
 
-    fn write_v12_fixture(root: &std::path::Path) {
+    pub(super) fn write_v12_fixture(root: &std::path::Path) {
         fs::create_dir_all(root.join("media").join(FAMILY)).unwrap();
         fs::create_dir_all(root.join("tls")).unwrap();
         fs::write(root.join("server.secret"), [9u8; 32]).unwrap();
@@ -869,7 +902,7 @@ mod tests {
         connection.execute("UPDATE entity_version_media SET media_payload_json=?1,content_hash=?2 WHERE version_id=?3",params![media.to_string(),hash,BRANCH]).unwrap();
     }
 
-    fn write_v11_fixture(root: &std::path::Path) {
+    pub(super) fn write_v11_fixture(root: &std::path::Path) {
         fs::create_dir_all(root.join("media")).unwrap();
         fs::create_dir_all(root.join("tls")).unwrap();
         fs::write(root.join("server.secret"), [8u8; 32]).unwrap();
@@ -1274,5 +1307,160 @@ mod tests {
         );
         assert!(!output.exists());
         assert_eq!(super::tree_digest(&source).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod failure_ownership_matrix {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn source(root: &Path, version: u8) {
+        if version == 11 {
+            super::tests::write_v11_fixture(root);
+        } else {
+            super::tests::write_v12_fixture(root);
+        }
+    }
+
+    fn manual_leftovers(parent: &Path) {
+        for name in [
+            ".out.schema13-migrating",
+            ".out.schema12-stage",
+            ".schema13-migrating-11111111-1111-4111-8111-111111111111",
+            ".schema12-stage-22222222-2222-4222-8222-222222222222",
+        ] {
+            fs::create_dir(parent.join(name)).unwrap();
+            fs::write(
+                parent.join(name).join("operator-owned"),
+                b"do not adopt or remove",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn every_copy_out_phase_failure_preserves_source_and_only_cleans_owned_paths() {
+        for version in [11, 12] {
+            for phase in [
+                "v11_rebuilt",
+                "database_rebuilt",
+                "secret_copied",
+                "media_copied",
+                "tls_copied",
+                "authority_validated",
+                "assets_validated",
+                "before_publish",
+            ] {
+                if version == 12 && phase == "v11_rebuilt" {
+                    continue;
+                }
+                let root = tempfile::tempdir().unwrap();
+                let input = root.path().join("source");
+                source(&input, version);
+                manual_leftovers(root.path());
+                // Digest includes input, both historical names, and UUID-looking
+                // unknown leftovers. No output/lease/private stage may remain.
+                let before = tree_digest(root.path()).unwrap();
+                FAIL_MIGRATION_PHASE.with(|slot| slot.set(Some(phase)));
+                let result = migrate_v11_or_v12_data_dir_to_v13(&input, &root.path().join("out"));
+                FAIL_MIGRATION_PHASE.with(|slot| slot.set(None));
+                let error = result.unwrap_err().to_string();
+                assert!(
+                    error.contains(&format!("synthetic migration failure: {phase}")),
+                    "v{version} {phase} failed before selected phase: {error}"
+                );
+                assert_eq!(
+                    tree_digest(root.path()).unwrap(),
+                    before,
+                    "v{version} {phase}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_preflight_errors_preserve_input_and_unknown_output_ownership() {
+        for blocked_by in [
+            "nonempty_output",
+            "unknown_lock",
+            "invalid_schema",
+            "invalid_authority",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let input = root.path().join("source");
+            source(&input, 12);
+            manual_leftovers(root.path());
+            let out = root.path().join("out");
+            match blocked_by {
+                "nonempty_output" => {
+                    fs::create_dir(&out).unwrap();
+                    fs::write(out.join("manual"), b"preserve").unwrap();
+                }
+                "unknown_lock" => {
+                    fs::write(
+                        root.path().join(".out.offline-migrate-lock"),
+                        b"operator lock",
+                    )
+                    .unwrap();
+                }
+                "invalid_schema" => {
+                    Connection::open(input.join("lezi.db"))
+                        .unwrap()
+                        .execute_batch("PRAGMA user_version=99;")
+                        .unwrap();
+                }
+                "invalid_authority" => {
+                    Connection::open(input.join("lezi.db"))
+                        .unwrap()
+                        .execute_batch("DELETE FROM entity_stable_heads;")
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let before = tree_digest(root.path()).unwrap();
+            assert!(
+                migrate_v11_or_v12_data_dir_to_v13(&input, &out).is_err(),
+                "{blocked_by}"
+            );
+            assert_eq!(tree_digest(root.path()).unwrap(), before, "{blocked_by}");
+        }
+    }
+
+    #[test]
+    fn concurrent_same_and_distinct_outputs_preserve_source_and_manual_leftovers() {
+        for same_output in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let input = root.path().join("source");
+            source(&input, 12);
+            manual_leftovers(root.path());
+            let before = tree_digest(root.path()).unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+            let mut workers = Vec::new();
+            for index in 0..2 {
+                let input = input.clone();
+                let out = root.path().join(if same_output || index == 0 {
+                    "out"
+                } else {
+                    "other"
+                });
+                let barrier = barrier.clone();
+                workers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    migrate_v11_or_v12_data_dir_to_v13(&input, &out).is_ok()
+                }));
+            }
+            let successes = workers
+                .into_iter()
+                .map(|worker| usize::from(worker.join().unwrap()))
+                .sum::<usize>();
+            assert_eq!(successes, if same_output { 1 } else { 2 });
+            // These exact paths are successful outputs owned by this test.
+            fs::remove_dir_all(root.path().join("out")).unwrap();
+            if !same_output {
+                fs::remove_dir_all(root.path().join("other")).unwrap();
+            }
+            assert_eq!(tree_digest(root.path()).unwrap(), before);
+        }
     }
 }

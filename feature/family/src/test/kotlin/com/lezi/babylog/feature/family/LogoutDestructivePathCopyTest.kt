@@ -8,13 +8,11 @@ import com.lezi.babylog.feature.family.members.SourceCommandLogoutPreview
 import com.lezi.babylog.sync.DeviceRemovedCleanupReceipt
 import com.lezi.babylog.sync.SourceCommandLogoutConsent
 import com.lezi.babylog.sync.SourceCommandLogoutState
-import java.util.TimeZone
-import org.junit.After
+import java.time.ZoneOffset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Test
 
 /**
@@ -23,18 +21,6 @@ import org.junit.Test
  * device-removal cleanup receipt. Tier B pure functions, JVM-locked.
  */
 class LogoutDestructivePathCopyTest {
-    private val originalTimeZone = TimeZone.getDefault()
-
-    @Before
-    fun pinUtc() {
-        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
-    }
-
-    @After
-    fun restoreTimeZone() {
-        TimeZone.setDefault(originalTimeZone)
-    }
-
     @Test
     fun pendingDisclosureNamesTheCountAndPermanentLoss() {
         assertNull(logoutPendingDisclosure(0))
@@ -131,14 +117,14 @@ class LogoutDestructivePathCopyTest {
 
     @Test
     fun removalReceiptCopyNamesRemovalTimeAndClearedLoss() {
-        // 2026-09-13 04:30 UTC, pinned via TimeZone in this test class.
+        // Pass UTC explicitly; do not mutate the JVM-wide device zone.
         val receipt = DeviceRemovedCleanupReceipt(
             removedAtEpochMillis = 1_789_273_800_000L,
             clearedPendingCount = 12,
         )
         assertEquals(
             "该设备于 2026-09-13 04:30 被家庭管理员移除，已清理 12 条未同步内容。",
-            deviceRemovedReceiptCopy(receipt),
+            deviceRemovedReceiptCopy(receipt, zoneId = ZoneOffset.UTC),
         )
 
         // Zero loss stays honest instead of being hidden.

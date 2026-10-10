@@ -25,17 +25,42 @@ internal class IsolatedLeziSyncServer private constructor(
     val bootstrapSecret: String,
     val origin: String,
     val spkiSha256Base64: String,
-    private val process: Process,
+    private var process: Process,
+    private val launch: () -> Process,
 ) : AutoCloseable {
     val databaseFile: File
         get() = File(dataRoot, "lezi.db")
 
-    override fun close() {
+    /** Preserve the exact data root/TLS identity and run the production startup GC. */
+    fun advanceReceiptClockAndRestart(epochSeconds: Long) {
+        val clock = File(dataRoot, "receipt-test-clock")
+        check(clock.isFile) { "Only the test-only clock runner supports time advancement" }
+        stopProcess()
+        setReceiptClock(epochSeconds)
+        process = launch()
+        waitForHttpsReady(certificateFile, publicPort)
+    }
+
+    fun setReceiptClock(epochSeconds: Long) {
+        val clock = File(dataRoot, "receipt-test-clock")
+        check(clock.isFile)
+        val temporary = File(dataRoot, "receipt-test-clock.next")
+        temporary.writeText(epochSeconds.toString())
+        Files.move(temporary.toPath(), clock.toPath(),
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    private fun stopProcess() {
         process.destroy()
         if (!process.waitFor(3, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             process.waitFor(2, TimeUnit.SECONDS)
         }
+    }
+
+    override fun close() {
+        stopProcess()
         dataRoot.deleteRecursively()
     }
 
@@ -44,10 +69,13 @@ internal class IsolatedLeziSyncServer private constructor(
         private const val READY_ATTEMPTS = 80
         private const val READY_SLEEP_MS = 100L
 
-        fun start(): IsolatedLeziSyncServer {
-            val binary = resolveLeziSyncBinary()
+        fun start(controlledReceiptClock: Boolean = false): IsolatedLeziSyncServer {
+            val binary = resolveLeziSyncBinary(controlledReceiptClock)
             val dataRoot = Files.createTempDirectory("lezi-h44-seam-").toFile()
             dataRoot.deleteOnExit()
+            if (controlledReceiptClock) {
+                File(dataRoot, "receipt-test-clock").writeText((System.currentTimeMillis() / 1000).toString())
+            }
             val certificateFile = File(dataRoot, "server.crt")
             val privateKeyFile = File(dataRoot, "server.key")
             generateCertificate(certificateFile, privateKeyFile)
@@ -90,16 +118,18 @@ internal class IsolatedLeziSyncServer private constructor(
                 origin = "https://127.0.0.1:$publicPort",
                 spkiSha256Base64 = spkiSha256Base64(certificateFile),
                 process = child,
+                launch = { builder.start() },
             )
         }
 
-        private fun resolveLeziSyncBinary(): File {
-            val path = requireNotNull(System.getenv("LEZI_SYNC_BIN")) {
+        private fun resolveLeziSyncBinary(controlledReceiptClock: Boolean): File {
+            val binaryVariable = if (controlledReceiptClock) "LEZI_SYNC_CLOCK_BIN" else "LEZI_SYNC_BIN"
+            val path = requireNotNull(System.getenv(binaryVariable)) {
                 "Required integration artifact missing; run tools/testing/run-isolated-integration.sh"
             }
             val binary = File(path).canonicalFile
             require(binary.isFile && binary.canExecute()) { "LEZI_SYNC_BIN is not executable: $path" }
-            val expectedHash = requireNotNull(System.getenv("LEZI_SYNC_BIN_SHA256")) {
+            val expectedHash = requireNotNull(System.getenv("${binaryVariable}_SHA256")) {
                 "Missing current-build artifact digest; use run-isolated-integration.sh"
             }
             val digest = java.security.MessageDigest.getInstance("SHA-256")

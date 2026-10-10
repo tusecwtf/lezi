@@ -2011,7 +2011,7 @@ internal class SyncRig(
     clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
     apkIdentityReader: AppUpdateApkIdentityReader = FakeAppUpdateApkIdentityReader(),
-    val appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
+    val appUpdateCacheDir: java.io.File = kotlin.io.path.createTempDirectory(prefix = "lezi-app-update-rig").toFile(),
     awaitPiggybackAppUpdateDiscovery: Boolean = true,
     mediaFileStore: TestMediaFileStore = TestMediaFileStore(),
     immutableMediaSpoolOverride: ImmutableMediaSpool? = null,

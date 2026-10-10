@@ -93,6 +93,7 @@ import com.lezi.babylog.domain.nextSyncUpdatedAt
 import com.lezi.babylog.domain.toModel
 
 // Split from CareLogTest kitchen sink by contract cluster (ticket 06).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class CareLogCarePlanTest {
     @Test
     fun carePlanCreationRejectsUnsupportedPayloadSchema() = runTest {

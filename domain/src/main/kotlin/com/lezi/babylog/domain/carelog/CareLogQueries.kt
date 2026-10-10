@@ -232,10 +232,11 @@ internal class CareLogQueries(
         babyId: Long,
         zone: ZoneId,
         hiddenSourceClientUuids: Set<String> = emptySet(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): WidgetSummaryDto {
         val baby = babyDao.get(babyId)?.toModel()
-        val day = LocalDate.now(zone)
-        val now = RecordTime.currentTimeMillis()
+        // The date and stale-open cutoff must belong to the same clock snapshot.
+        val day = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
         val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
         // Bounded widget read (was a full-history projection scan). The window
         // overlap clause carries today's point facts plus every sleep whose

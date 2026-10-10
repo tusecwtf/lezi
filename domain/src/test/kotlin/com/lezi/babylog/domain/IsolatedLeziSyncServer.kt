@@ -24,14 +24,25 @@ internal class IsolatedLeziSyncServer private constructor(
     val bootstrapSecret: String,
     val origin: String,
     val spkiSha256Base64: String,
-    private val process: Process,
+    private var process: Process,
+    private val launch: () -> Process,
 ) : AutoCloseable {
-    override fun close() {
+    fun restart() {
+        stopProcess()
+        process = launch()
+        waitForHttpsReady(certificateFile, publicPort)
+    }
+
+    private fun stopProcess() {
         process.destroy()
         if (!process.waitFor(3, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             process.waitFor(2, TimeUnit.SECONDS)
         }
+    }
+
+    override fun close() {
+        stopProcess()
         dataRoot.deleteRecursively()
     }
 
@@ -88,6 +99,7 @@ internal class IsolatedLeziSyncServer private constructor(
                 origin = "https://127.0.0.1:$publicPort",
                 spkiSha256Base64 = spkiSha256Base64(certificateFile),
                 process = child,
+                launch = { builder.start() },
             )
         }
 

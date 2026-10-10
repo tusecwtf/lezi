@@ -37,6 +37,7 @@ import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.parseBabySex
@@ -1504,10 +1505,17 @@ class CareLog internal constructor(
     suspend fun recentCareSummary(
         babyId: Long,
         zone: ZoneId = ZoneId.systemDefault(),
+    ): WidgetSummaryDto = recentCareSummaryAt(babyId, zone, RecordTime.currentTimeMillis())
+
+    internal suspend fun recentCareSummaryAt(
+        babyId: Long,
+        zone: ZoneId,
+        now: Long,
     ): WidgetSummaryDto = queries.recentCareSummary(
         babyId = babyId,
         zone = zone,
         hiddenSourceClientUuids = sourceRelationCoordinator.sourceRoleClientUuids(),
+        now = now,
     )
 
     fun observeMeasurements(babyId: Long, type: RecordType): Flow<List<Record>> =

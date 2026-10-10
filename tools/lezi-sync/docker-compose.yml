@@ -6,12 +6,12 @@
 # Do not run both services against the same data directory.
 
 x-lezi-sync-common: &lezi-sync-common
-  image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.3.13}
+  image: ${LEZI_SYNC_IMAGE:-lezi-sync:${LEZI_SYNC_VERSION:?set LEZI_SYNC_VERSION to the Cargo.toml package version}}
   build:
     context: .
     dockerfile: Dockerfile
     args:
-      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.3.13}
+      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:?set LEZI_SYNC_VERSION to the Cargo.toml package version}
       CARGO_INDEX_URL: ${LEZI_CARGO_INDEX_URL:-sparse+https://rsproxy.cn/index/}
   restart: unless-stopped
   stop_grace_period: 30s

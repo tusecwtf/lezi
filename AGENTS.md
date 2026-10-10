@@ -159,7 +159,7 @@ ssh -p "${NAS_SSH_PORT}" "${NAS_SSH}" 'curl -fsS http://127.0.0.1:8765/health'
 
 ### Agent workflow: cheapest proof, NAS only when required
 
-**Current alignment — 0.5.4 everywhere (2026-09-30 coordinated CD).** Android tree 0.5.4 / versionCode 34; `tools/lezi-sync` crate and family NAS 0.5.4; wire 0.4.0 / schema 13 / floor 21. Client-ahead with frozen wire is allowed (it produced the 2026-09 split; the 2026-09-30 maintenance window closed it). Do not propose NAS, bump `Cargo.toml`, or refresh `app-update.json` solely so versionName matches.
+**Historical alignment snapshot — 2026-09-30 coordinated CD.** At that maintenance window, Android was 0.5.4 / versionCode 34; the `tools/lezi-sync` crate and recorded family NAS were 0.5.4; wire 0.4.0 / schema 13 / floor 21. This is not the current source identity or a current NAS probe. Current source identity is authoritative in `app/build.gradle.kts`, `config/android-release-compatibility.json`, `tools/lezi-sync/Cargo.toml`, and `docs/spec/contracts/causal-sync-wire.md`; the NAS has not been probed in this audit. Client-ahead with frozen wire is allowed (it produced the 2026-09 split; the 2026-09-30 maintenance window closed it). Do not propose NAS, bump `Cargo.toml`, or refresh `app-update.json` solely so versionName matches.
 
 **Live server ≠ NAS.** Dual-side live proof is `IsolatedLeziSyncServer` (mktemp data root, openssl loopback cert, tree `lezi-sync` binary). Certificate creation/replacement/TOFU tests stay on that harness; never against the family NAS, its container, or its data bind.
 

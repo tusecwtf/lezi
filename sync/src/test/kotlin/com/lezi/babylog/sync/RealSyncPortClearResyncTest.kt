@@ -122,6 +122,7 @@ import com.lezi.babylog.sync.backend.FakeSyncBackend
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RealSyncPortClearResyncTest {
     @Test
     fun resumedCommittedClearStillHonorsTheNewExplicitClearRequest() = runTest {

@@ -145,6 +145,68 @@ class SuspectedDuplicateBoundsTest {
     }
 
     @Test
+    fun boundaryAndFactCutoffCountsAndAveragesMatchSmallExhaustiveOracle() = runTest {
+        val dayEnd = dayStart + 24 * 3_600_000L
+        data class Cut(val boundary: Long, val factEnd: Long, val clock: Long)
+        val cuts = listOf(
+            Cut(dayStart, dayEnd, dayEnd),             // left halo has a zero-contribution choice
+            Cut(dayEnd, dayEnd, dayEnd + 3_600_000L),  // right halo likewise
+            Cut(dayStart + 12 * 3_600_000L, dayStart + 12 * 3_600_000L, dayEnd),
+            Cut(dayStart + 12 * 3_600_000L, dayEnd, dayStart + 12 * 3_600_000L - 1),
+            Cut(dayStart + 12 * 3_600_000L, dayEnd, dayStart + 12 * 3_600_000L),
+        )
+        for (cut in cuts) for (withFixedTemperature in listOf(false, true)) {
+            // Three two-member groups give only 3^3 = 27 interpretations.
+            // The second member is exactly on the boundary: factEnd is exclusive,
+            // while now is inclusive. The oracle below does not call aggregation.
+            val records = buildList {
+                for ((suffix, timestamp, member) in listOf(
+                    Triple("a", cut.boundary - 1, "a"),
+                    Triple("b", cut.boundary, "b"),
+                )) {
+                    add(formula("feed-$suffix", timestamp, if (suffix == "a") 100 else 120, member))
+                    add(pee("pee-$suffix", timestamp, member))
+                    add(metricRecord("temp-$suffix", RecordType.TEMPERATURE, timestamp, member,
+                        if (suffix == "a") """{"celsius":36.5}""" else """{"celsius":38.0}"""))
+                }
+                if (withFixedTemperature) add(metricRecord(
+                    "fixed-temp", RecordType.TEMPERATURE,
+                    minOf(cut.factEnd, cut.clock) - 3_600_000L, "solo",
+                    """{"celsius":37.0}""",
+                ))
+            }
+            val projection = SuspectedDuplicateProjection.project(
+                records, day, 1, zone, cut.clock, factEndExclusive = cut.factEnd,
+            )
+            assertThat(projection.openGroups.map { it.memberClientUuids.toSet() })
+                .containsExactly(setOf("feed-a", "feed-b"), setOf("pee-a", "pee-b"), setOf("temp-a", "temp-b"))
+            val interpretations = exhaustiveInterpretations(records, projection.openGroups)
+            assertThat(interpretations).hasSize(27)
+            val eligible = interpretations.map { choice ->
+                choice.filter { it.timestamp >= dayStart && it.timestamp < cut.factEnd && it.timestamp <= cut.clock }
+            }
+            fun count(type: RecordType): IntBound {
+                val counts = eligible.map { choice -> choice.count { it.type == type } }
+                return IntBound(counts.min(), counts.max())
+            }
+            val bounds = projection.bounds
+            assertThat(bounds.feedCount).isEqualTo(count(RecordType.FORMULA))
+            assertThat(bounds.peeCount).isEqualTo(count(RecordType.PEE))
+            assertThat(bounds.temperatureCount).isEqualTo(count(RecordType.TEMPERATURE))
+            val volumes = eligible.map { choice -> choice.fold(0) { total, record ->
+                total + when (record.clientUuid) { "feed-a" -> 100; "feed-b" -> 120; else -> 0 }
+            } }
+            assertThat(bounds.formulaMl).isEqualTo(IntBound(volumes.min(), volumes.max()))
+            val temperatures = mapOf("temp-a" to 36.5, "temp-b" to 38.0, "fixed-temp" to 37.0)
+            val averages = eligible.mapNotNull { choice ->
+                choice.mapNotNull { temperatures[it.clientUuid] }.takeIf { it.isNotEmpty() }?.average()
+            }
+            val expectedAverage = averages.takeIf { it.isNotEmpty() }?.let { DoubleBound(it.min(), it.max()) }
+            assertThat(bounds.temperatureAverage).isEqualTo(expectedAverage)
+        }
+    }
+
+    @Test
     fun oneHundredTwentyGroupsFinishInsideFixedTimeoutWithoutCartesianMaterialization() = runTest {
         val records = buildList {
             repeat(120) { group ->

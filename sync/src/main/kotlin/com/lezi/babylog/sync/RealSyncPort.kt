@@ -648,6 +648,7 @@ class RealSyncPort @Inject constructor(
     override fun lastServerHealthyAt(): Flow<Long?> = preferences.lastServerHealthyAt
     override fun sessionPresentation(): Flow<SyncSessionPresentation> =
         preferences.session.map(SyncSession::toPresentation).distinctUntilChanged()
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<SyncSession> = preferences.session
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun pendingPublishCount(): Flow<Int> = preferences.session.flatMapLatest { session ->

@@ -38,7 +38,7 @@ class LayoutConfigurationRecreationDeviceTest {
     fun idleRecreationKeepsEditorContextPrefsAndCatalogPosition() {
         val store = openSession()
         val restoration = StateRestorationTester(compose)
-        restoration.setContent { retainedEditor(store) }
+        restoration.setContent { RetainedEditor(store) }
 
         compose.waitUntil(timeoutMillis = 5_000L) {
             (store.current?.catalogScroll?.maxValue ?: 0) > 0
@@ -70,7 +70,7 @@ class LayoutConfigurationRecreationDeviceTest {
             DeviceLayoutWriteState.Saving(snapshot),
         )
         val restoration = StateRestorationTester(compose)
-        restoration.setContent { retainedEditor(store, writeState) }
+        restoration.setContent { RetainedEditor(store, writeState) }
 
         compose.onNodeWithTag("layout_edit_save_feedback").assertTextEquals("正在保存布局")
         restoration.emulateSavedInstanceStateRestore()
@@ -95,7 +95,7 @@ class LayoutConfigurationRecreationDeviceTest {
         val emitted = CopyOnWriteArrayList<LayoutEditIntent>()
         var style by mutableStateOf("warm")
         compose.setContent {
-            retainedEditor(
+            RetainedEditor(
                 store = store,
                 onIntent = emitted::add,
                 visualStyle = style,
@@ -124,7 +124,7 @@ class LayoutConfigurationRecreationDeviceTest {
             if (coldStart.current == null) {
                 Text("普通记录页", Modifier.testTag("ordinary_log_screen"))
             } else {
-                retainedEditor(coldStart)
+                RetainedEditor(coldStart)
             }
         }
 
@@ -148,7 +148,7 @@ class LayoutConfigurationRecreationDeviceTest {
     }
 
     @androidx.compose.runtime.Composable
-    private fun retainedEditor(
+    private fun RetainedEditor(
         store: LayoutEditSessionStore,
         writeState: DeviceLayoutWriteState = DeviceLayoutWriteState.Saved(),
         onIntent: (LayoutEditIntent) -> Unit = {},

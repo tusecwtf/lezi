@@ -36,6 +36,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -353,7 +354,7 @@ fun CalendarRoute(
     var confirmConvertCandidate by remember { mutableStateOf<String?>(null) }
     var conflictError by remember { mutableStateOf<String?>(null) }
     var previewPhotos by remember { mutableStateOf<List<String>?>(null) }
-    var previewStartIndex by remember { mutableStateOf(0) }
+    var previewStartIndex by remember { mutableIntStateOf(0) }
     var scheduleError by remember { mutableStateOf<String?>(null) }
     val planableItems = remember(settings.hiddenItems, customItems) {
         calendarPlanableItems(settings.hiddenItems, customItems)

@@ -19,6 +19,9 @@ concurrency:
   group: android-test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  LEZI_EXPECTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -26,6 +29,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify exact source revision
+        run: |
+          test "$(git rev-parse HEAD)" = "$LEZI_EXPECTED_REVISION"
+          mkdir -p build/ci-evidence
+          git rev-parse HEAD HEAD^{tree} > build/ci-evidence/source-identity.txt
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -44,13 +55,19 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Workflow routing contracts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-yaml
+          python3 tools/testing/test_workflow_contracts.py
+
       - name: Grant gradlew
         run: chmod +x gradlew
 
       # Public debug/release JVM proof compiles release code without signing.
       # Normal assembleRelease still requires its signing and signature checks.
       - name: Unit tests
-        run: ./gradlew test -PleziFastUnitTests=true -x :app:validateReleaseSigning --stacktrace --no-daemon
+        run: ./gradlew test -PleziFastUnitTests=true -x :app:validateReleaseSigning --stacktrace --info --no-daemon
 
       - name: Public debug and lint gates
         run: ./gradlew :app:assembleDebug lintDebug --stacktrace --no-daemon
@@ -59,16 +76,34 @@ jobs:
       - name: Public release R8 gate (no signing secrets)
         run: ./gradlew :app:minifyReleaseWithR8 -x :app:validateReleaseSigning --stacktrace --no-daemon
 
+      - name: Public gate reports (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-gates-${{ env.LEZI_EXPECTED_REVISION }}
+          path: |
+            build/ci-evidence/
+            **/build/test-results/
+            **/build/reports/
+
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify exact source revision
+        run: |
+          test "$(git rev-parse HEAD)" = "$LEZI_EXPECTED_REVISION"
+          mkdir -p build/ci-evidence
+          git rev-parse HEAD HEAD^{tree} > build/ci-evidence/source-identity.txt
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-          cache: gradle
+      # Deliberately no Gradle/Cargo cache: this is the clean-bootstrap proof.
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
@@ -79,4 +114,17 @@ jobs:
           sudo apt-get install -y openssl curl sqlite3
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Current-checkout Rust x Android seam (no skips)
-        run: bash tools/testing/run-isolated-integration.sh
+        run: |
+          set -o pipefail
+          bash tools/testing/run-isolated-integration.sh --stacktrace --info 2>&1 | tee build/ci-evidence/isolated-integration.log
+      - name: Paired artifact identity and reports (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-proof-${{ env.LEZI_EXPECTED_REVISION }}
+          path: |
+            build/ci-evidence/
+            sync/build/test-results/
+            sync/build/reports/tests/
+            domain/build/test-results/
+            domain/build/reports/tests/

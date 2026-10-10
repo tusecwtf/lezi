@@ -2017,7 +2017,7 @@ class HttpSyncBackend internal constructor(
             if (familyAttempt != null) {
                 resolveFamilyHostIfNeeded(base, familyAttempt)
             }
-            val remainingMillis = listOfNotNull(
+            fun remainingMillis(): Long? = listOfNotNull(
                 retryAttempt?.remainingMillis(),
                 familyAttempt?.remainingMillis(),
                 cycleBudget?.remainingMillis(),
@@ -2043,25 +2043,32 @@ class HttpSyncBackend internal constructor(
                 extraHeaders,
                 resolvedEndpoint,
                 retryOperation,
-                remainingMillis,
+                remainingMillis(),
                 familyAttempt,
             )
-            if (readTimeoutMillis != null) {
-                connection.readTimeout = boundedHttpTimeout(readTimeoutMillis, remainingMillis)
+            val configuredReadTimeout = readTimeoutMillis ?: connection.readTimeout
+            fun refreshResponseDeadline() {
+                connection.readTimeout = boundedHttpTimeout(configuredReadTimeout, remainingMillis())
             }
-            prepareConnection(connection)
-            val deadlineWatchdog = remainingMillis?.let {
-                FamilyHttpDisconnectWatchdog(it) {
-                    connection.disconnect()
-                }
-            }
+            var deadlineWatchdog: FamilyHttpDisconnectWatchdog? = null
             val cancelHandle = currentCoroutineContext()[Job]?.cancelActiveIo { connection.disconnect() }
-            val scope = KeepAliveExchange(connection, token)
+            val scope = KeepAliveExchange(connection, token, ::refreshResponseDeadline)
             try {
+                prepareConnection(connection)
+                // Opening/configuring an exchange can consume time too. Never
+                // restart a relative watchdog from the pre-open snapshot.
+                val left = remainingMillis()
+                connection.connectTimeout = boundedHttpTimeout(connection.connectTimeout, left)
+                refreshResponseDeadline()
+                deadlineWatchdog = left?.let {
+                    FamilyHttpDisconnectWatchdog(it) { connection.disconnect() }
+                }
                 if (familyAttempt != null) {
                     connection.connectFamilyHttp()
                 }
-                exchange(scope)
+                // Connect/TLS (including platform DNS) shares the same deadline.
+                refreshResponseDeadline()
+                exchange(scope).also { remainingMillis() }
             } catch (error: IOException) {
                 currentCoroutineContext().ensureActive()
                 if (familyAttempt != null && !error.isFamilyTrustFailure()) {
@@ -2079,6 +2086,7 @@ class HttpSyncBackend internal constructor(
     private inner class KeepAliveExchange(
         val connection: HttpURLConnection,
         private val token: String?,
+        private val refreshResponseDeadline: () -> Unit,
     ) {
         var keepAlive: Boolean = false
             private set
@@ -2087,11 +2095,13 @@ class HttpSyncBackend internal constructor(
             successLimitBytes: Int,
             successResponseKind: String,
         ): BoundedHttpResponse {
+            refreshResponseDeadline()
             val response = readBoundedBody(
                 connection = connection,
                 successLimitBytes = successLimitBytes,
                 successResponseKind = successResponseKind,
             )
+            refreshResponseDeadline()
             keepAlive = shouldKeepAlive(token, response.code)
             return response
         }
@@ -2111,6 +2121,7 @@ class HttpSyncBackend internal constructor(
             successLimitBytes: Int,
             successResponseKind: String,
         ): AppUpdateApkDownload {
+            refreshResponseDeadline()
             val code = connection.responseCode
             val retryAfterHeader = connection.getHeaderField("Retry-After")
             if (code !in 200..299) {
@@ -2146,6 +2157,7 @@ class HttpSyncBackend internal constructor(
                     totalBytes += count
                 }
             }
+            refreshResponseDeadline()
             keepAlive = true
             return AppUpdateApkDownload(
                 sha256 = MediaContentDigest.finish(hasher),

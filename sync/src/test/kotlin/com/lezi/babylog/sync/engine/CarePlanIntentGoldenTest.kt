@@ -10,7 +10,7 @@ import org.junit.Test
 class CarePlanIntentGoldenTest {
     @Test
     fun planAndFactAcceptanceMatchesSharedCrossLanguageCorpus() {
-        val root = generateSequence(File(System.getProperty("user.dir"))) { it.parentFile }
+        val root = generateSequence(File(requireNotNull(System.getProperty("user.dir")))) { it.parentFile }
             .map { File(it, "config/care-plan-intent-v1-golden.json") }.first { it.isFile }
         val cases = Json.parseToJsonElement(root.readText()).jsonObject.getValue("cases").jsonArray
         for (entry in cases) {

@@ -414,7 +414,7 @@ internal class RestoreFileLifecycleOwner(
         return withContext(Dispatchers.IO) {
             val replacement = mediaFiles.readableFile(row.localUri) ?: return@withContext false
             // Any file inside this request is still this owner's responsibility, never its replacement.
-            if (replacement.canonicalFile.toPath().startsWith(owned.parentFile.canonicalFile.toPath())) return@withContext false
+            if (replacement.canonicalFile.toPath().startsWith(requireNotNull(owned.parentFile).canonicalFile.toPath())) return@withContext false
             if (replacement.length() != item.byteSize) return@withContext false
             val digest = MessageDigest.getInstance("SHA-256")
             replacement.inputStream().buffered().use { input ->

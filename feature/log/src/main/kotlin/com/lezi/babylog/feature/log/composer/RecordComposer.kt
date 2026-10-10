@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -258,7 +259,7 @@ fun RecordComposerHost(
     }
 
     // Reject / leave-timer-before-accept: unlock without reclaiming transferred paths.
-    var lastRejectEpoch by remember { mutableStateOf(0) }
+    var lastRejectEpoch by remember { mutableIntStateOf(0) }
     LaunchedEffect(timerHandoffRejectEpoch) {
         if (timerHandoffRejectEpoch > lastRejectEpoch) {
             lastRejectEpoch = timerHandoffRejectEpoch

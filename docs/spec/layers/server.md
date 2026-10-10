@@ -1,7 +1,7 @@
 # server 层规格（`tools/lezi-sync` crate）
 
-> 身份钉：crate 版本与 `Cargo.toml` 一致（当前 0.5.3）；server schema **13**
-> （`PRAGMA user_version`）；协议代 0.4.0。**权界**：本文权威 = 服务端路由清单、鉴权层、
+> 身份钉：crate 版本与 `Cargo.toml` 一致（当前 0.5.5）；server schema **13**
+> （`PRAGMA user_version`）；协议代以 `contracts/causal-sync-wire.md` 为准。**权界**：本文权威 = 服务端路由清单、鉴权层、
 > `Store` 因果图与合并算法、媒体/冲突/来源关系机制。**wire 字段、枚举与闭合键集唯一权威
 > = [`contracts/causal-sync-wire.md`](../contracts/causal-sync-wire.md)**；部署/CD/回滚唯一
 > runbook = [`tools/lezi-sync/deploy/DEPLOY.md`](../../../tools/lezi-sync/deploy/DEPLOY.md)
@@ -66,9 +66,16 @@ fail closed）**、限流 `create/member_request/heartbeat`（心跳默认 30 �
 | 鉴权层 | 机制 |
 |--------|------|
 | Bearer 会话 | `authenticate()`（`auth_cache` 60s last_used_at 去抖）；设备独立 opaque session |
-| Bootstrap secret | `X-Lezi-Bootstrap-Secret` 头仅在 `/v1/family/create`；owner 根密码 + `owner_root_fingerprint` 派生自 bootstrap secret；refresh token 历史轮换 |
+| Bootstrap secret / 根密码 | `X-Lezi-Bootstrap-Secret` 用于 `/v1/family/create`、`/v1/owner/login`、`/v1/owner/takeover`、`/v1/family/delete`、灾备 batches 创建与 `{id}/commit`；删除家庭先要求 Owner Bearer 会话，灾备 commit 先要求该批次 recovery token。根密码即配置的 bootstrap secret；`owner_root_fingerprint` 由服务端签名 secret 与根密码派生；refresh token 历史轮换 |
 | TOFU | 证书信任在**客户端**（SPKI pin）；服务端只出证书 |
-| 版本闸 | 受保护路由读 `X-Lezi-Client-Version-Code`；低于 `min_supported` 且更新通道已验证 → `client_update_required`（platform §4.2 诚实客户端闸） |
+| 版本闸 | 受保护路由读 `X-Lezi-Client-Version-Code`，协议硬 floor **35** 独立于更新通道；有效 floor 为 `max(35, 已验证通道 min_supported)`，并独立校验 `nursing_plan_intent_v1`。普通受保护路径版本不足 → `client_update_required`；causal commit 折叠为 409 `capability_mismatch`（platform §4.2 诚实客户端闸） |
+
+根密码校验入口共享 `create_rate_limit` 配置的进程内准入预算：按来源 IP 滚动窗口限流，
+另有进程总预算（单来源上限的 10 倍）。准入在口令比较前执行，正确口令也不能绕过已耗尽
+窗口；被限流请求不追加计数，旧计数随窗口到期释放，不设置永久账户锁。共享出口可能
+暂时互相限流，应等待窗口恢复。路由的前置状态/会话/能力/版本检查仍先行：已配置服务器
+拒绝建家/灾备 start，缺少有效批次凭据的 commit 不进入根密码校验。灾备 manifest、media、
+status、cancel 使用批次 recovery token，不额外要求根密码。
 
 ## 5. `Store` 因果图与合并算法（`src/store/`）
 

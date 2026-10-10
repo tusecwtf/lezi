@@ -118,10 +118,10 @@ fun LeziDetailTopBar(
 /** Shared brand strip with optional search and theme actions. */
 @Composable
 fun AppBrandBar(
+    modifier: Modifier = Modifier,
     onSearch: (() -> Unit)? = null,
     onToggleTheme: (() -> Unit)? = null,
     dark: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     // Mirrors the app-side top-bar chrome (leziTopBarBackground / LeziTopBarContainer in
     // app/AppHeader.kt): baby theme accent in light mode, surface in dark. Keep in sync.
@@ -204,9 +204,9 @@ fun AppBrandBar(
 fun PageHero(
     eyebrow: String,
     title: String,
+    modifier: Modifier = Modifier,
     subtitle: String? = null,
     trailing: (@Composable RowScope.() -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
     Column(
         modifier

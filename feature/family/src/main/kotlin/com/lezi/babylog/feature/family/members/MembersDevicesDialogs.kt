@@ -427,15 +427,18 @@ internal fun DeviceRemovedReceiptDialog(
     )
 }
 
+// Cache the pattern without capturing the device's mutable locale or time zone.
 private val REMOVED_RECEIPT_DATE_TIME =
-    java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.getDefault())
-        .withZone(java.time.ZoneId.systemDefault())
+    java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.ROOT)
 
 /** One-time loss receipt: when this device was removed and what it cost locally. */
-internal fun deviceRemovedReceiptCopy(receipt: DeviceRemovedCleanupReceipt): String {
-    val removedAt = REMOVED_RECEIPT_DATE_TIME.format(
-        Instant.ofEpochMilli(receipt.removedAtEpochMillis),
-    )
+internal fun deviceRemovedReceiptCopy(
+    receipt: DeviceRemovedCleanupReceipt,
+    zoneId: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
+): String {
+    val removedAt = REMOVED_RECEIPT_DATE_TIME.withLocale(locale)
+        .withZone(zoneId).format(Instant.ofEpochMilli(receipt.removedAtEpochMillis))
     return "该设备于 $removedAt 被家庭管理员移除，已清理 ${receipt.clearedPendingCount} 条未同步内容。"
 }
 

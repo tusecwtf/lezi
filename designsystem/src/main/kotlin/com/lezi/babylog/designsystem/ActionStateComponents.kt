@@ -512,11 +512,11 @@ fun LeziFilterChip(
  */
 @Composable
 fun SectionHeading(
+    modifier: Modifier = Modifier,
     eyebrow: String? = null,
     title: String,
     meta: String? = null,
     trailing: (@Composable RowScope.() -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
     Row(
         modifier.fillMaxWidth(),

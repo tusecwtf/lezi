@@ -27,7 +27,7 @@ import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import com.lezi.babylog.sync.session.UnacceptedFactPresentation
 import com.lezi.babylog.sync.session.BadGroupPresentation
 import com.lezi.babylog.sync.session.SkippedPullItem
-import com.lezi.babylog.sync.session.shallowSyncLineFlow
+import com.lezi.babylog.sync.session.shallowSyncLinePresentationFlow
 
 /**
  * Privacy-preserving family member projection from the home server.
@@ -473,9 +473,9 @@ interface SyncPort {
         kotlinx.coroutines.flow.flowOf(emptyList())
 
     /** Shared product-level sync line; never exposes endpoint, token, or wire details. */
-    fun shallowStatus(): Flow<ShallowSyncLine> = shallowSyncLineFlow(
+    fun shallowStatus(): Flow<ShallowSyncLine> = shallowSyncLinePresentationFlow(
         transportStatus = status(),
-        session = session(),
+        session = sessionPresentation(),
         pendingMemberLogin = pendingMemberLogin(),
         pendingPublishCount = pendingPublishCount(),
         pendingGenerationResync = pendingGenerationResync(),
@@ -852,6 +852,7 @@ class NoOpSyncPort : SyncPort {
     private val status = MutableStateFlow(SyncStatus.Disabled)
     private val session = MutableStateFlow(SyncSession())
     override fun status(): Flow<SyncStatus> = status
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<SyncSession> = session
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     override fun requestSync(trigger: SyncTrigger) = Unit

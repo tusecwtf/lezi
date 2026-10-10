@@ -87,7 +87,7 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
 
     fun commitForwards(): Int = proxy.commitForwards.get() - baselineCommitForwards
 
-    fun newEngine() = ReplicaSyncEngine(
+    fun newEngine(backend: com.lezi.babylog.sync.backend.SyncBackend = this.backend) = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
         recordDao = records,
@@ -113,6 +113,15 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
         conflictSnapshotCacheDao = conflictDetails,
         sourceRelationDao = sourceRelations,
     )
+
+    /** Independent local replica; shares only the real endpoint and authenticated identity. */
+    suspend fun freshReceiver(): RealServerMediaReceiptFaultFixture {
+        val freshSession = session.copy(pullCursor = 0)
+        val freshPreferences = MemorySyncPreferences(freshSession)
+        freshPreferences.rememberEndpoint(proxy.endpoint)
+        return RealServerMediaReceiptFaultFixture(server, proxy, backend, freshPreferences, freshSession)
+            .also { it.families.seed(FamilyEntity(ownerUserId = 1, createdAt = 0)) }
+    }
 
     data class SeededMedia(
         val recordUuid: String,
@@ -218,9 +227,9 @@ internal class RealServerMediaReceiptFaultFixture private constructor(
     }
 
     companion object {
-        suspend fun open(): RealServerMediaReceiptFaultFixture {
+        suspend fun open(controlledReceiptClock: Boolean = false): RealServerMediaReceiptFaultFixture {
             assumeToolsPresent()
-            val server = IsolatedLeziSyncServer.start()
+            val server = IsolatedLeziSyncServer.start(controlledReceiptClock)
             val proxy = try {
                 DeterministicHttpsFaultProxy.start(server)
             } catch (error: Throwable) {

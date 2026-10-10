@@ -264,10 +264,10 @@ private fun FamilyCardInfoRow(
 @Composable
 internal fun FamilyMemberRosterEntry(
     label: String,
+    modifier: Modifier = Modifier,
     isError: Boolean = false,
     loginRequestCount: Int = 0,
     onOpenMembers: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     Row(
         modifier = modifier

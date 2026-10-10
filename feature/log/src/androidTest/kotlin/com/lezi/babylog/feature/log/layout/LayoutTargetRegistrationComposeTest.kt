@@ -37,7 +37,7 @@ class LayoutTargetRegistrationComposeTest {
                 if (show.value) {
                     Box(
                         Modifier
-                            .offset(x = xOffset.value)
+                            .offset { androidx.compose.ui.unit.IntOffset(xOffset.value.roundToPx(), 0) }
                             .size(40.dp)
                             .layoutTargetRegistration(
                                 node = node,

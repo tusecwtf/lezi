@@ -11,6 +11,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SystemCalendarSetupCommandTest {
     @Test fun failedSaveRetainsItsSelectionAndAllowsExplicitRetry() = runTest {
         var fail = true

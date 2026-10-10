@@ -77,6 +77,7 @@ internal class CareLogRealServerSeamFixture private constructor(
     val server: IsolatedLeziSyncServer,
     val owner: SeamClient,
     val member: SeamClient,
+    private val mediaEnabled: Boolean = false,
     private val extraOwners: MutableList<SeamClient> = mutableListOf(),
     private val extraMembers: MutableList<SeamClient> = mutableListOf(),
 ) : AutoCloseable {
@@ -118,6 +119,7 @@ internal class CareLogRealServerSeamFixture private constructor(
             label = label,
             endpoint = endpoint,
             deviceId = deviceId,
+            mediaEnabled = mediaEnabled,
         )
         try {
             client.port.rememberEndpoint(endpoint).getOrThrow()
@@ -166,6 +168,7 @@ internal class CareLogRealServerSeamFixture private constructor(
             label = label,
             endpoint = endpoint,
             deviceId = deviceId,
+            mediaEnabled = mediaEnabled,
         )
         try {
             client.port.rememberEndpoint(endpoint).getOrThrow()
@@ -205,7 +208,7 @@ internal class CareLogRealServerSeamFixture private constructor(
                 }
                 error("unreachable")
             }
-            check(joined.session.isJoined)
+            check(joined.sessionPresentation.isJoined)
             client.awaitIdle()
             client.seedLocalFamilyAnchor()
             client.port.sync(SyncTrigger.Foreground).getOrThrow()
@@ -227,7 +230,7 @@ internal class CareLogRealServerSeamFixture private constructor(
 
 
     companion object {
-        suspend fun open(setupProbe: SetupProbe? = null): CareLogRealServerSeamFixture {
+        suspend fun open(setupProbe: SetupProbe? = null, mediaEnabled: Boolean = false): CareLogRealServerSeamFixture {
             assumeToolsPresent()
             val server = IsolatedLeziSyncServer.start()
             return try {
@@ -240,19 +243,21 @@ internal class CareLogRealServerSeamFixture private constructor(
                     endpoint = endpoint,
                     deviceId = "h31-owner-device",
                     setupProbeOverride = setupProbe,
+                    mediaEnabled = mediaEnabled,
                 )
                 val member = SeamClient.create(
                     label = "member",
                     endpoint = endpoint,
                     deviceId = "h31-member-device",
                     setupProbeOverride = setupProbe,
+                    mediaEnabled = mediaEnabled,
                 )
                 joinTwoClients(
                     server = server,
                     owner = owner,
                     member = member,
                 )
-                CareLogRealServerSeamFixture(server, owner, member)
+                CareLogRealServerSeamFixture(server, owner, member, mediaEnabled)
             } catch (error: Throwable) {
                 server.close()
                 throw error
@@ -345,7 +350,7 @@ internal class CareLogRealServerSeamFixture private constructor(
                     }
                     error("unreachable")
                 }
-                check(joined.session.isJoined)
+                check(joined.sessionPresentation.isJoined)
             } catch (error: Throwable) {
                 throw IllegalStateException(
                     "join failed during member flow; ownerJoined=${owner.currentSession().isJoined} " +
@@ -376,6 +381,7 @@ internal class SeamClient private constructor(
     val foreground: MutableForegroundState,
     val clock: MutablePolicyClock,
     private val appUpdateCacheDir: File,
+    val mediaFiles: SeamMediaFileStore?,
 ) {
     fun currentSession(): SyncSession = preferences.current()
 
@@ -449,6 +455,7 @@ internal class SeamClient private constructor(
 
     fun close() {
         appUpdateCacheDir.deleteRecursively()
+        mediaFiles?.root?.deleteRecursively()
     }
 
     companion object {
@@ -457,6 +464,7 @@ internal class SeamClient private constructor(
             endpoint: TrustedEndpointProfile,
             deviceId: String,
             setupProbeOverride: SetupProbe? = null,
+            mediaEnabled: Boolean = false,
         ): SeamClient {
             val preferences = InMemorySyncPreferences(
                 initial = SyncSession(deviceId = deviceId),
@@ -497,8 +505,18 @@ internal class SeamClient private constructor(
 
             val foreground = MutableForegroundState(foreground = true)
             val clock = MutablePolicyClock(now = System.currentTimeMillis())
-            val mediaFiles = EmptySyncMediaFileStore()
-            val mediaSpool = EmptyImmutableMediaSpool()
+            val fileStore = if (mediaEnabled) SeamMediaFileStore(FilesTempDir("lezi-media-$label")) else null
+            val mediaFiles: SyncMediaFileStore = fileStore ?: EmptySyncMediaFileStore()
+            val mediaSpool = if (fileStore != null) {
+                val delegate = RealServerMediaSpoolFactory.create(fileStore, File(fileStore.root, "spool"))
+                object : ImmutableMediaSpool by delegate {
+                    override suspend fun discardGroup(mutationId: String) {
+                        fileStore.onSpoolDiscard?.invoke(mutationId, false)
+                        delegate.discardGroup(mutationId)
+                        fileStore.onSpoolDiscard?.invoke(mutationId, true)
+                    }
+                }
+            } else EmptyImmutableMediaSpool()
             val pathGate = MediaLocalPathGate()
             val pendingPublish = object : PendingPublishDao {
                 override fun observeCount(): Flow<Int> = MutableStateFlow(0)
@@ -619,6 +637,7 @@ internal class SeamClient private constructor(
                 foreground = foreground,
                 clock = clock,
                 appUpdateCacheDir = appUpdateCacheDir,
+                mediaFiles = fileStore,
             )
         }
 

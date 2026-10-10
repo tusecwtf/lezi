@@ -1,7 +1,7 @@
 # 分层架构（architecture）
 
 > 当前开发代：**0.5.5** / versionCode **35** / Room **29** / 本地数据契约 **7** /
-> server schema **13** / wire **0.5.0** / paired-software floor **35**；未部署，真实渠道与NAS仍为0.5.4。
+> server schema **13** / wire **0.5.0** / paired-software floor **35**；本开发代未部署。仓库历史记录的渠道与 NAS 为 0.5.4，非本轮实时探测结论。
 > 新代规范和发布阻塞见 [ADR0026](../adr/0026-durable-restore-authority-generation.md)。以下0.5.4身份记录为历史：
 > **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
 > server schema **13** / 同步 floor **21**；协议代 0.4.0（conflict-v2）。2026-09-30
@@ -58,7 +58,7 @@ sideways seam（非分层违规；完整边表见 §4）。feature 之间无 `pr
 | `:feature:growth` | `core:common`、`core:datastore`、`core:model`、`designsystem`、`domain`、`sync` |
 | `:feature:export` | `core:common`、`core:model`、`core:ui`、`designsystem`、`domain` |
 | `:feature:search` | `core:model`、`core:ui`、`designsystem`、`domain`、`sync` |
-| `:feature:widget` | `core:common`、`core:model`、`core:ui`、`designsystem`、`domain` |
+| `:feature:widget` | `core:common`、`core:datastore`、`core:model`、`core:ui`、`designsystem`、`domain` |
 | `:app` | 以上全部 18 个模块 |
 
 `sync` 以 `api(core:database)` 暴露数据库，因此 `domain` 与全部（直接依赖 `:sync` 的）

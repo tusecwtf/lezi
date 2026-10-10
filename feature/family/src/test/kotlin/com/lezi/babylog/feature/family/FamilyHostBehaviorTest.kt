@@ -52,6 +52,7 @@ import org.junit.runner.Description
  * Behavior contracts for ticket-24 hosts (not reflection-only surface lists).
  * Uses [SyncPort] fakes for roster refresh / approval and wizard QR thin-delegate path.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class FamilyHostBehaviorTest {
     @get:Rule
     val mainDispatcherRule = FamilyMainDispatcherRule()

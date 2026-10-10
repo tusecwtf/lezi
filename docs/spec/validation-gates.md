@@ -16,6 +16,10 @@ Historical prototypes are visual references, never product acceptance evidence.
 
 ## Public clean-checkout gates
 
+- Public workflows check out the PR head SHA explicitly (or the event SHA for
+  push/manual runs), verify `git rev-parse HEAD`, and retain commit/tree identity
+  with reports even on failure. A green older SHA or a default PR merge ref is
+  not evidence for the final head.
 - Android workflow: `./gradlew test -PleziFastUnitTests=true -x :app:validateReleaseSigning`,
   `./gradlew :app:assembleDebug lintDebug`. The explicit fast property excludes
   real-server tests only in this job; normal `test` retains them. The task-scoped
@@ -38,13 +42,33 @@ Historical prototypes are visual references, never product acceptance evidence.
   tools/artifact, digest/revision mismatch or test failure is fatal. No mtime,
   home-cache or executable-size fallback. Prerequisites: JDK 21, Android SDK 35,
   Cargo/Rust, openssl, curl, sqlite3 and normal Android build dependencies.
+  The integration job intentionally restores no Gradle/Cargo cache. Its uploaded
+  log retains the built executable path, SHA-256, revision and both seam results;
+  XML/reports accompany it. The launcher forces the fast-unit exclusion off and
+  rejects callers trying to override it. Missing reports or a failed bootstrap
+  are not a pass.
 - Rust: fmt, locked tests, all-target/all-feature clippy with warnings denied.
   Shared config and contract docs trigger Rust proof; server-only edits trigger
   current Android integration. Conservative Android routing includes docs rather
-  than accidentally omitting wire inputs.
+  than accidentally omitting wire inputs. `app/build.gradle.kts` also triggers
+  Rust/release fixtures because it defines the metadata validator. The existing
+  `validateAndroidAppUpdateMetadataCompatibility`, release-catalog and local-data
+  validators are prerequisites of both `preDebugBuild` and `preReleaseBuild`;
+  therefore debug assembly and release R8 must traverse those checks.
+- Routing regression proof: `python3 tools/testing/test_workflow_contracts.py`
+  (requires PyYAML, installed as `python3-yaml` in CI). The changed-path matrix
+  covers golden/schema JSON, shared markers, compatibility catalogs, Room/server
+  schema, closed codecs, contract docs, metadata and validator implementation.
+  It exercises push/PR and mixed changed-file sets without dispatching workflows.
+  `config/**`, `docs/spec/contracts/**`, current wire consumers and server inputs
+  require both workflows. Narrative README/testing/ADR edits retain conservative
+  Android routing but do not trigger Rust solely by being documentation.
+  `.scratch/**`, `design/**` and `prototype/**` remain excluded references.
 - Deployment shell fixtures use temp roots and fake adapters. CI runs every
   tracked deployment smoke, including current-package TLS/stdin-secret proof.
-  Fixture proof is not a real Docker build, deployment or credential-backup proof.
+  The fixture job installs openssl/curl/sqlite3 and ripgrep before any smoke,
+  rather than assuming runner-image tools. Fixture proof is not a real Docker
+  build, deployment or credential-backup proof.
 - `bash tools/lezi-sync/docker/test-version-contract.sh` rejects absent/stale
   image versions. Ordinary Docker/Compose builds must explicitly supply the Cargo
   version; `build-image.sh` is the supported version-derived entry.
@@ -56,8 +80,9 @@ instrumentation suites on API 26 (minimum) and API 35, with XML/reports retained
 on failure. The two export parent-death methods and three installer process-death
 methods require their separate host drivers and supplied nonces; ordinary workflow
 runs skip those methods and cannot establish their process-death acceptance.
-Preserve the host-driver results separately before claiming those contracts pass. It is path-triggered for Kotlin/Gradle, resource, manifest and shared config
-changes and may be manually dispatched. A queued/skipped job or merely
+Preserve the host-driver results separately before claiming those contracts pass.
+The device workflow is `workflow_dispatch`-only and requires explicit device
+execution authorization; push/PR changes never start ADB or emulators. A queued/skipped job or merely
 having test files is not device evidence. Flows without instrumentation coverage still require a recorded manual device run.
 
 Before distributing a release, the reviewer must attach evidence for:

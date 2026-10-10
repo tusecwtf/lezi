@@ -880,3 +880,327 @@ async fn new_member_cannot_overwrite_a_restored_record_by_claiming_it_is_new() {
         before_receipts
     );
 }
+
+// US-030: separate publication paths; each cell closes every Router before reopening
+// the durable TempDir. This does not exercise family deletion or retirement races.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WakeRestartCase {
+    Text,
+    Photo,
+    Withdrawn,
+    MediaTombstone,
+}
+
+async fn accepted_wake_unit(
+    server: &Router,
+    access: &str,
+    row: &Value,
+    base: Value,
+    media: Value,
+) -> Value {
+    let mut root = row["payload"].clone();
+    root["updated_at"] = row["updated_at"].clone();
+    let (status, result) = send(
+        server,
+        Method::POST,
+        "/v1/causal/commit",
+        Some(access),
+        json!({
+            "generation":"reconstructed-generation",
+            "units":[{"mutation_id":Uuid::new_v4(),"base_version":base,
+              "entity_type":row["type"],"client_uuid":row["client_uuid"],
+              "root":root,"media":media,"deleted":false}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["results"][0]["status"], "accepted", "{result}");
+    result["results"][0]["stable"]["version_id"].clone()
+}
+
+async fn check_wake_restart_matrix(restoring: bool) {
+    for case in [
+        WakeRestartCase::Text,
+        WakeRestartCase::Photo,
+        WakeRestartCase::Withdrawn,
+        WakeRestartCase::MediaTombstone,
+    ] {
+        let dir = TempDir::new().unwrap();
+        let server = app(dir.path());
+        let baby_id = Uuid::new_v4().to_string();
+        let sleep_id = Uuid::new_v4().to_string();
+        let wake_id = Uuid::new_v4().to_string();
+        let media_id = Uuid::new_v4().to_string();
+        let bytes = b"synthetic-wake-restart-original";
+        let hash = hex::encode(Sha256::digest(bytes));
+        let with_photo = case != WakeRestartCase::Text;
+        let tombstone = case == WakeRestartCase::MediaTombstone;
+        let sleep = json!({"type":"record","client_uuid":sleep_id,"updated_at":1000,"payload":{
+            "baby_client_uuid":baby_id,"type":"sleep","custom_item_client_uuid":null,
+            "timestamp":100,"note":null,"payload_json":{"anomaly_flag":false,"is_nap":false},
+            "schema_version":2,"effective_wake_observation_client_uuid":null}});
+        let mut wake = json!({"type":"wake_observation","client_uuid":wake_id,"updated_at":1001,"payload":{
+            "sleep_record_client_uuid":sleep_id,"wake_timestamp":200,"note":"restart evidence",
+            "withdrawn":case == WakeRestartCase::Withdrawn}});
+        let photo = json!({"type":"media","client_uuid":media_id,"updated_at":1002,
+            "deleted_at":null, "payload":{
+            "kind":"wake","record_client_uuid":wake_id,"baby_client_uuid":null,"care_plan_client_uuid":null,
+            "mime":"image/jpeg","width":1,"height":1,"byte_size":bytes.len()}});
+        let (access, family, owner) = if restoring {
+            let family = Uuid::new_v4().to_string();
+            let (batch, token) = start(&server, &family).await;
+            let mut rows = vec![baby(&baby_id), sleep, wake.clone()];
+            if with_photo {
+                rows.push(photo);
+            }
+            let media = if with_photo {
+                json!([{"client_uuid":media_id,"byte_size":bytes.len(),"sha256":hash}])
+            } else {
+                json!([])
+            };
+            let (status, result) = manifest(&server, &batch, &token, rows, json!([]), media).await;
+            assert_eq!(status, StatusCode::OK, "restore {case:?}: {result}");
+            if with_photo {
+                let (status, result) = upload(&server, &batch, &token, &media_id, bytes).await;
+                assert_eq!(status, StatusCode::OK, "{result}");
+            }
+            let (status, receipt) = commit(&server, &batch, &token).await;
+            assert_eq!(status, StatusCode::OK, "restore {case:?}: {receipt}");
+            if tombstone {
+                // Direct media tombstone import is deliberately unsupported. Establish
+                // the restored baseline, then remove its photo through ordinary CAS.
+                let access = receipt["access_token"].as_str().unwrap();
+                let (status, pulled) = send(
+                    &server,
+                    Method::GET,
+                    "/v1/pull?cursor=0&page_index=0&generation=reconstructed-generation",
+                    Some(access),
+                    Value::Null,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{pulled}");
+                let mut restored = pulled["entities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["client_uuid"] == wake_id)
+                    .unwrap()
+                    .clone();
+                restored["updated_at"] = json!(1003);
+                accepted_wake_unit(
+                    &server,
+                    access,
+                    &restored,
+                    restored["version_id"].clone(),
+                    json!([]),
+                )
+                .await;
+            }
+            (
+                receipt["access_token"].as_str().unwrap().to_owned(),
+                family,
+                receipt["membership_id"].clone(),
+            )
+        } else {
+            let (status, session) = send(
+                &server,
+                Method::POST,
+                "/v1/family/create",
+                None,
+                json!({
+                "create_request_id":Uuid::new_v4(),"display_name":"Owner",
+                "device_name":"synthetic restart","family_name":"synthetic restart"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{session}");
+            let access = session["access_token"].as_str().unwrap().to_owned();
+            accepted_wake_unit(&server, &access, &baby(&baby_id), Value::Null, json!([])).await;
+            accepted_wake_unit(&server, &access, &sleep, Value::Null, json!([])).await;
+            let mut attachments = json!([]);
+            if with_photo {
+                let mut request = Request::builder()
+                    .method(Method::PUT)
+                    .uri(format!("/v1/causal/media/{media_id}"))
+                    .header("authorization", format!("Bearer {access}"))
+                    .header("x-lezi-client-version-code", "35")
+                    .header(
+                        "x-lezi-sync-capabilities",
+                        "nursing_plan_intent_v1,restore_authority_v1",
+                    )
+                    .header("x-lezi-media-sha256", &hash)
+                    .body(Body::from(bytes.to_vec()))
+                    .unwrap();
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(SocketAddr::from((Ipv4Addr::LOCALHOST, 32111))));
+                let response = server.clone().oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+                attachments = json!([{"media_uuid":media_id,"role":"wake","sha256":hash,
+                    "byte_size":bytes.len(),"mime":"image/jpeg","width":1,"height":1}]);
+            }
+            let mut initial_wake = wake.clone();
+            initial_wake["payload"]["withdrawn"] = json!(false);
+            let base = accepted_wake_unit(
+                &server,
+                &access,
+                &initial_wake,
+                Value::Null,
+                attachments.clone(),
+            )
+            .await;
+            if tombstone || case == WakeRestartCase::Withdrawn {
+                wake["updated_at"] = json!(1002);
+                accepted_wake_unit(
+                    &server,
+                    &access,
+                    &wake,
+                    base,
+                    if tombstone { json!([]) } else { attachments },
+                )
+                .await;
+            }
+            (
+                access,
+                session["family_id"].as_str().unwrap().to_owned(),
+                session["membership_id"].clone(),
+            )
+        };
+        drop(server);
+        let reopened = app(dir.path());
+        let (status, ready) = send(&reopened, Method::GET, "/ready", None, Value::Null).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "restore={restoring} {case:?}: {ready}"
+        );
+        let (status, pulled) = send(
+            &reopened,
+            Method::GET,
+            "/v1/pull?cursor=0&page_index=0&generation=reconstructed-generation",
+            Some(&access),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{pulled}");
+        let entities = pulled["entities"].as_array().unwrap();
+        let row = entities
+            .iter()
+            .find(|row| row["client_uuid"] == wake_id)
+            .unwrap();
+        assert_eq!(row["payload"]["sleep_record_client_uuid"], sleep_id);
+        assert_eq!(row["payload"]["note"], "restart evidence");
+        assert_eq!(
+            row["payload"]["withdrawn"],
+            case == WakeRestartCase::Withdrawn
+        );
+        assert_eq!(row["payload"]["observer_membership_id"], owner);
+        assert!(row["version_id"].is_string());
+        if with_photo {
+            let photo = entities
+                .iter()
+                .find(|row| row["client_uuid"] == media_id)
+                .unwrap();
+            assert_eq!(photo["payload"]["kind"], "wake");
+            assert_eq!(photo["payload"]["record_client_uuid"], wake_id);
+            assert_eq!(photo["deleted_at"].is_number(), tombstone);
+            if !tombstone {
+                assert_eq!(
+                    photo["media_identity"],
+                    json!({"media_uuid":media_id,"role":"wake","sha256":hash,"byte_size":bytes.len()})
+                );
+                assert_eq!(
+                    fs::read(dir.path().join("media").join(&family).join(&media_id)).unwrap(),
+                    bytes
+                );
+            }
+        }
+        if case == WakeRestartCase::Photo {
+            // Corrupt only this synthetic persisted projection after proving its
+            // legal owner succeeds. Startup must still reject unknown/wrong owners.
+            drop(reopened);
+            let db = rusqlite::Connection::open(dir.path().join("lezi.db")).unwrap();
+            let original: String = db.query_row(
+                "SELECT payload_json FROM entities WHERE entity_type='media' AND client_uuid=?1",
+                [&media_id], |row| row.get(0)).unwrap();
+            for invalid in ["unknown_kind", "wrong_parent_type", "missing_parent"] {
+                let mut payload: Value = serde_json::from_str(&original).unwrap();
+                match invalid {
+                    "unknown_kind" => payload["kind"] = json!("unknown"),
+                    "wrong_parent_type" => payload["record_client_uuid"] = json!(sleep_id),
+                    "missing_parent" => payload["record_client_uuid"] = json!(Uuid::new_v4()),
+                    _ => unreachable!(),
+                }
+                db.execute("UPDATE entities SET payload_json=?1 WHERE entity_type='media' AND client_uuid=?2",
+                    rusqlite::params![payload.to_string(), media_id]).unwrap();
+                let mut config = ServerConfig::new(dir.path());
+                config.bootstrap_secret = Some(ROOT.to_owned());
+                config.generation = Some("reconstructed-generation".to_owned());
+                assert!(
+                    build_app(config).is_err(),
+                    "restore={restoring}: {invalid} admitted at startup"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_wake_text_photo_withdrawal_and_media_tombstone_restart_ready_pull() {
+    check_wake_restart_matrix(false).await;
+}
+
+#[tokio::test]
+async fn restored_wake_text_photo_withdrawal_and_media_tombstone_restart_ready_pull() {
+    check_wake_restart_matrix(true).await;
+}
+
+#[tokio::test]
+async fn direct_restore_media_tombstones_fail_historical_context_validation() {
+    let dir = TempDir::new().unwrap();
+    let server = app(dir.path());
+    let baby_id = Uuid::new_v4().to_string();
+    let sleep_id = Uuid::new_v4().to_string();
+    let wake_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let (batch, token) = start(&server, &Uuid::new_v4().to_string()).await;
+    let sleep = json!({"type":"record","client_uuid":sleep_id,"updated_at":1000,"payload":{
+        "baby_client_uuid":baby_id,"type":"sleep","custom_item_client_uuid":null,
+        "timestamp":100,"note":null,"payload_json":{"anomaly_flag":false,"is_nap":false},
+        "schema_version":2,"effective_wake_observation_client_uuid":null}});
+    let wake = json!({"type":"wake_observation","client_uuid":wake_id,"updated_at":1001,"payload":{
+        "sleep_record_client_uuid":sleep_id,"wake_timestamp":200,"note":null,"withdrawn":false}});
+    let media = json!({"type":"media","client_uuid":media_id,"updated_at":1002,"deleted_at":1002,"payload":{
+        "kind":"wake","record_client_uuid":wake_id,"baby_client_uuid":null,"care_plan_client_uuid":null,
+        "mime":"image/jpeg","width":1,"height":1,"byte_size":32}});
+    let (status, error) = manifest(
+        &server,
+        &batch,
+        &token,
+        vec![baby(&baby_id), sleep, wake, media],
+        json!([]),
+        json!([]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(
+        error["detail"],
+        "restore tombstone is not retained source-relation history"
+    );
+    assert!(error.get("code").is_none());
+    assert!(!dir
+        .path()
+        .join("disaster-restore")
+        .join(batch)
+        .join("manifest.json")
+        .exists());
+    drop(server);
+    let reopened = app(dir.path());
+    assert_eq!(
+        send(&reopened, Method::GET, "/ready", None, Value::Null)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}

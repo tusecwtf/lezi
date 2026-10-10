@@ -9,6 +9,15 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+// Explicitly separate test Application/DI assembly; ordinary and startup runners stay unchanged.
+val uiHostAcceptance = providers.gradleProperty("leziUiHostAcceptance").orNull
+check(uiHostAcceptance == null || uiHostAcceptance in setOf("widget", "calendar")) {
+    "leziUiHostAcceptance must select exactly widget or calendar"
+}
+check(!(uiHostAcceptance != null && providers.gradleProperty("leziStartupReadinessAcceptance").orNull == "true")) {
+    "UI host test-DI acceptance and production startup acceptance require separate test APKs"
+}
+
 // Local release signing (keystore.properties is gitignored). Required for
 // installable APKs on Chinese OEM ROMs — unsigned packages parse as PackageInfo null.
 val keystorePropertiesFile = providers.gradleProperty("leziReleaseKeystoreProperties")
@@ -68,7 +77,9 @@ android {
         versionName = "0.5.5"
 
         // Select the dedicated startup test APK without changing ordinary instrumentation.
-        testInstrumentationRunner = if (
+        testInstrumentationRunner = if (uiHostAcceptance != null) {
+            "com.lezi.babylog.validation.host.IsolatedUiHostTestRunner"
+        } else if (
             providers.gradleProperty("leziStartupReadinessAcceptance").orNull == "true"
         ) {
             "com.lezi.babylog.validation.ProductionStartupTestRunner"
@@ -154,6 +165,15 @@ android {
     }
 
     sourceSets {
+        if (uiHostAcceptance != null) {
+            getByName("androidTest").java.srcDir("src/uiHostAcceptance/kotlin")
+            val groupSource = when (uiHostAcceptance) {
+                "widget" -> "src/widgetConfigureAcceptance"
+                "calendar" -> "src/calendarConversionAcceptance"
+                else -> error("Unknown isolated UI host test group")
+            }
+            getByName("androidTest").java.srcDirs("$groupSource/kotlin", "$groupSource/java")
+        }
         getByName("androidTest").assets.srcDir(
             rootProject.file("core/database/schemas"),
         )
@@ -444,6 +464,11 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.espresso.intents)
+    if (uiHostAcceptance != null) {
+        androidTestImplementation(libs.hilt.android.testing)
+        add("kspAndroidTest", libs.hilt.compiler)
+    }
     androidTestImplementation(libs.androidx.room.testing)
     androidTestImplementation(libs.truth)
     testImplementation(libs.junit)

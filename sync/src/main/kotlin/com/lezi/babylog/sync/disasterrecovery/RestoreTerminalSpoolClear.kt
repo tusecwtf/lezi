@@ -6,6 +6,7 @@ import com.lezi.babylog.core.database.causal.ConflictSnapshotCacheDao
 import com.lezi.babylog.sync.media.CausalMediaRole
 import kotlinx.serialization.json.*
 
+@ConsistentCopyVisibility
 internal data class TerminalSpoolClearCapture internal constructor(
     val scope: LocalDataClearScope,
     internal val seals: List<RestoreTerminalSpoolSeal>,

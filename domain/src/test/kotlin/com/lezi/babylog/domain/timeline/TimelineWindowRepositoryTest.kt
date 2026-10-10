@@ -1150,6 +1150,7 @@ private class TimelineSyncPort(
 
     override fun sessionPresentation() = session().map { it.toPresentation() }
 
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<SyncSession> = sessionFlow
     override fun familyMemberDirectory(): Flow<List<FamilyMember>> = memberDirectoryFlow
 

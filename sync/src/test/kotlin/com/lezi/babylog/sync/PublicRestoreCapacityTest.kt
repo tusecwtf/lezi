@@ -44,7 +44,7 @@ class PublicRestoreCapacityTest {
         check(System.getProperty("lezi.publicRestoreCapacity") == "true") {
             "Run :sync:publicRestoreCapacityTest explicitly; this test must not be a skipped pass"
         }
-        val parent = File(System.getProperty("lezi.restoreCapacityTmpDir", System.getProperty("java.io.tmpdir"))).canonicalFile
+        val parent = File(requireNotNull(System.getProperty("lezi.restoreCapacityTmpDir", System.getProperty("java.io.tmpdir")))).canonicalFile
         check(parent.isDirectory && parent.canWrite()) { "Capacity fixture parent must be an existing writable directory: $parent" }
         val directory = Files.createTempDirectory(parent.toPath(), "public-restore-capacity-").toFile()
         val counters = CapacityCounters()
@@ -183,7 +183,7 @@ class PublicRestoreCapacityTest {
             assertThat(recording.disasterRestoreCommitRootPasswords).containsExactly("fixture-root")
             assertThat(rig.preferences.current().copy(lastSuccessAt = activated.session.lastSuccessAt))
                 .isEqualTo(activated.session)
-            assertThat(activated.session.membershipId).isEqualTo("restored-owner-membership")
+            assertThat(activated.sessionPresentation.membershipId).isEqualTo("restored-owner-membership")
             assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(ENDPOINT)
             assertThat(rig.preferences.disasterRestoreCheckpoint.first()).isNull()
             assertThat(rig.preferences.disasterRestoreToken()).isEmpty()

@@ -45,10 +45,22 @@ internal class DeterministicHttpsFaultProxy private constructor(
     @Volatile
     var afterPrepareForward: (() -> Unit)? = null
 
+    @Volatile
+    var beforePrepareForward: ((String) -> Unit)? = null
+
+    /** Persistent transport break, so HTTP retries cannot turn the failure into success. */
+    @Volatile
+    var truncateMediaDownloads: Boolean = false
+    @Volatile
+    var disconnectBeforeCommitForward: Boolean = false
+    val pullBodies = ConcurrentLinkedQueue<String>()
+
     val prepareForwards = AtomicInteger(0)
     val commitForwards = AtomicInteger(0)
     val droppedResponses = AtomicInteger(0)
     val forwardedPaths = ConcurrentLinkedQueue<String>()
+    val commitBodies = ConcurrentLinkedQueue<String>()
+    val commitStatuses = ConcurrentLinkedQueue<Int>()
 
     private val running = AtomicBoolean(true)
 
@@ -83,17 +95,39 @@ internal class DeterministicHttpsFaultProxy private constructor(
         val isPrepare = method == "PUT" && path.startsWith("/v1/causal/media/")
         val isCommit = method == "POST" && path == "/v1/causal/commit"
         if (isPrepare) prepareForwards.incrementAndGet()
-        if (isCommit) commitForwards.incrementAndGet()
+        if (isCommit) {
+            commitForwards.incrementAndGet()
+            commitBodies.add(request.body.toString(Charsets.UTF_8))
+        }
         forwardedPaths.add("$method $path")
 
+        if (isCommit && disconnectBeforeCommitForward) {
+            client.getOutputStream().write(
+                "HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n"
+                    .toByteArray(Charsets.ISO_8859_1),
+            )
+            client.getOutputStream().flush()
+            return
+        }
+        if (isPrepare) beforePrepareForward?.invoke(path)
         val backend = openBackend()
         try {
             writeHttpMessage(backend.getOutputStream(), request)
             val response = readHttpMessage(backend.getInputStream()) ?: return
+            if (isCommit) commitStatuses.add(response.requestLine.substringAfter(' ').substringBefore(' ').toInt())
             if (isPrepare && response.isSuccessful) {
                 afterPrepareForward?.invoke()
             }
+            if (method == "GET" && path.startsWith("/v1/pull?")) {
+                val bytes = if (response.headers.any {
+                        it.equals("Content-Encoding: gzip", ignoreCase = true)
+                    }) {
+                    java.util.zip.GZIPInputStream(response.body.inputStream()).use { it.readBytes() }
+                } else response.body
+                pullBodies.add(bytes.toString(Charsets.UTF_8))
+            }
             val drop = when {
+                truncateMediaDownloads && method == "GET" && path.startsWith("/v1/media/") -> true
                 isPrepare &&
                     dropAfterDurable == DropAfterDurable.NextPrepareResponse &&
                     response.isSuccessful -> {

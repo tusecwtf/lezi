@@ -45,10 +45,10 @@ internal fun AccountPageContent(
     members: MembersDevicesUi,
     primary: FamilyPrimarySurface,
     endpointConfigured: Boolean,
+    modifier: Modifier = Modifier,
     babyActions: AccountBabyActions = AccountBabyActions(),
     familyActions: AccountFamilySectionActions = AccountFamilySectionActions(),
     bottomActions: AccountBottomActions = AccountBottomActions(),
-    modifier: Modifier = Modifier,
 ) {
     Column(
         modifier = modifier,

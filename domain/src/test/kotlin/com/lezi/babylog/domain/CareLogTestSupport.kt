@@ -850,6 +850,7 @@ internal class RecordingSyncPort(
 
     override fun sessionPresentation() = sessionState.map { it.toPresentation() }
 
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<com.lezi.babylog.sync.session.SyncSession> = sessionState
 
     fun currentSession(): com.lezi.babylog.sync.session.SyncSession = sessionState.value

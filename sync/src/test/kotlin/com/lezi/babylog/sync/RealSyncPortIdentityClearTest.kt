@@ -122,6 +122,7 @@ import com.lezi.babylog.sync.backend.FakeSyncBackend
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RealSyncPortIdentityClearTest {
     @Test
     fun terminalResponseForOldCredentialsCannotClearANewerHealthyGeneration() = runTest {
@@ -471,7 +472,7 @@ class RealSyncPortIdentityClearTest {
         assertThat(rig.preferences.current().familyId).isEqualTo("family-a")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(retained.pullCursor)
         // Credentials gone: reauth surface, not a joined sync session.
-        assertThat(rig.port.session().first().isJoined).isFalse()
+        assertThat(rig.port.sessionPresentation().first().isJoined).isFalse()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.ReauthRequired)
     }
 

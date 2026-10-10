@@ -352,6 +352,7 @@ internal class RecordingClearSyncPort(
 
     override fun sessionPresentation() = session().map { it.toPresentation() }
 
+    @Deprecated("Use sessionPresentation() outside sync internals")
     override fun session(): Flow<SyncSession> = session
 
     override suspend fun clearLocalData(

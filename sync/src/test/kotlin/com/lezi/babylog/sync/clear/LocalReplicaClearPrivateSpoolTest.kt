@@ -19,7 +19,7 @@ class LocalReplicaClearPrivateSpoolTest {
         try {
             val bytes = byteArrayOf(1, 2, 3)
             val owned = File(directory, "causal-media-spool/group/photo").apply {
-                parentFile.mkdirs(); writeBytes(bytes)
+                requireNotNull(parentFile).mkdirs(); writeBytes(bytes)
             }
             val deleted = mutableListOf<String>()
             val files = object : TestMediaFileStore() {

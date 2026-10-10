@@ -586,7 +586,8 @@ class ExpiredRestoreArtifactRetirementTest {
         val request get() = checkpoint.startRequestId
         val key get() = RestoreSnapshotJournal.key(request)
         val media get() = snapshot.ownedPath(snapshot.media.single())
-        val directory get() = media.parentFile
+        // Captured media always lives inside this fixture's dedicated request directory.
+        val directory: File get() = requireNotNull(media.parentFile)
     }
 
     private suspend fun capture(rig: SyncRig, directory: File): Captured {

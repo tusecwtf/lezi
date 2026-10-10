@@ -173,24 +173,14 @@ internal class AndroidPackageInstallerPlatform(
             )
         }
 
-    override fun canRequestPackageInstalls(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.packageManager.canRequestPackageInstalls()
-        } else {
-            true
-        }
-    }
+    override fun canRequestPackageInstalls(): Boolean =
+        context.packageManager.canRequestPackageInstalls()
 
-    override fun createManageUnknownSourcesIntent(): Intent {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:${context.packageName}"),
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        } else {
-            Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-    }
+    override fun createManageUnknownSourcesIntent(): Intent =
+        Intent(
+            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+            Uri.parse("package:${context.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     override fun createSession(expectedPackageName: String): Int {
         val packageInstaller = context.packageManager.packageInstaller

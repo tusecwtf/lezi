@@ -33,10 +33,12 @@ All ordinary production session consumers have migrated:
 - Feature family: `AccountFamilyWizardHost`, `AccountOverviewHost`, `MembersDevicesHost`,
   `FamilyNetworkSettingsHost`, `ConflictResolverHost`, and `LocalFamilyIdentityReload`
 - Other features: `LogViewModel`, `SettingsViewModel`, `SearchRepository`, `OnboardingViewModel`
+- Sync product status: the default `SyncPort.shallowStatus()` consumes `sessionPresentation()`;
+  the legacy `shallowSyncLineFlow(Flow<SyncSession>)` entry remains a compatibility adapter
 
 Residual credential-bearing production reads are intentionally inside `sync`: preference owner,
 authentication/refresh/backend and replica/session engines, credential-aware lifecycle commands,
-legacy result adapters, and the existing shallow-status projector. The app composition root still
+legacy result adapters, and the legacy shallow-status input adapter. The app composition root still
 wires credential storage; it does not publish it into ordinary state. No ordinary app/domain/feature
 source imports `SyncSession`, calls the legacy `session()`, or reads a legacy command-result session.
 
@@ -73,6 +75,7 @@ New targeted tests:
 
 - `:sync:testDebugUnitTest --tests com.lezi.babylog.sync.session.SyncSessionPresentationTest`
 - `:sync:testDebugUnitTest --tests com.lezi.babylog.sync.RealSyncPortSessionPresentationTest`
+- `:sync:testDebugUnitTest --tests com.lezi.babylog.sync.SyncPortShallowPresentationTest`
 - `:sync:testDebugUnitTest --tests com.lezi.babylog.sync.session.SyncPreferencesCredentialProjectionTest`
 - `:domain:testDebugUnitTest --tests com.lezi.babylog.domain.family.FamilyWizardSessionPresentationTest`
 

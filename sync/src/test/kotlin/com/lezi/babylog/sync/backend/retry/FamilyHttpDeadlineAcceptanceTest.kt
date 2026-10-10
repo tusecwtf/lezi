@@ -159,6 +159,73 @@ class FamilyHttpDeadlineAcceptanceTest {
     }
 
     @Test
+    fun dnsConnectAndWriteEachConsumeTheSameAbsoluteResponseDeadline() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        var timeoutAtResponse = 0
+        lateinit var response: JsonDeadlineConnection
+        response = JsonDeadlineConnection(
+            status = 201, body = ownerLoginBody(),
+            onConnect = { clock.elapsedMillis = 5_900 },
+            onWrite = { clock.elapsedMillis = 11_900 },
+            onResponse = { timeoutAtResponse = response.readTimeout },
+        )
+        val backend = familyHttpBackend(ArrayDeque(listOf(response)),
+            nameResolver = FamilyHttpNameResolver {
+                clock.elapsedMillis = 2_900
+                arrayOf(InetAddress.getLoopbackAddress())
+            }, familyHttpClock = clock)
+        assertThat(ownerLogin(backend).accessToken).isEqualTo("owner-access")
+        assertThat(timeoutAtResponse).isEqualTo(100)
+        assertThat(response.sentBody()).isNotEmpty()
+    }
+
+    @Test
+    fun lateConnectWriteAndBodySuccessAreRejectedAtTheirOwnPhaseBoundary() = runBlocking {
+        for (phase in listOf("connect", "write", "body")) {
+            val clock = MutableElapsedClock(0)
+            var responseReads = 0
+            val response = JsonDeadlineConnection(
+                status = 201, body = ownerLoginBody(),
+                onConnect = { if (phase == "connect") clock.elapsedMillis = 12_001 },
+                onWrite = { if (phase == "write") clock.elapsedMillis = 12_001 },
+                onBodyComplete = { if (phase == "body") clock.elapsedMillis = 12_001 },
+                onResponse = { responseReads++ },
+            )
+            val backend = familyHttpBackend(ArrayDeque(listOf(response)),
+                nameResolver = FamilyHttpNameResolver {
+                    clock.elapsedMillis = 2_900
+                    arrayOf(InetAddress.getLoopbackAddress())
+                }, familyHttpClock = clock)
+            val failure = runCatching { ownerLogin(backend) }.exceptionOrNull()
+            assertThat(failure).isInstanceOf(FamilyHttpException::class.java)
+            assertThat((failure as FamilyHttpException).kind).isEqualTo(FamilyHttpFailureKind.ResponseTimedOut)
+            assertThat(response.disconnected.get()).isTrue()
+            if (phase == "connect") assertThat(response.sentBody()).isEmpty()
+            if (phase != "body") assertThat(responseReads).isEqualTo(0)
+        }
+    }
+
+    @Test
+    fun connectionFactoryCannotRestartTheBudgetAlreadySpentAfterDns() = runBlocking {
+        val clock = MutableElapsedClock(0)
+        val response = JsonDeadlineConnection(status = 201, body = ownerLoginBody())
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory {
+                clock.elapsedMillis = 12_001
+                response
+            },
+            nameResolver = FamilyHttpNameResolver {
+                clock.elapsedMillis = 2_900
+                arrayOf(InetAddress.getLoopbackAddress())
+            }, familyHttpClock = clock,
+        )
+        assertThat(runCatching { ownerLogin(backend) }.exceptionOrNull())
+            .isInstanceOf(FamilyHttpException::class.java)
+        assertThat(response.sentBody()).isEmpty()
+        assertThat(response.disconnected.get()).isTrue()
+    }
+
+    @Test
     fun ownerLoginConnectTimeoutUsesSessionBudgetDisconnectsAndNextLoginCanStart() = runBlocking {
         val firstTimeout = JsonDeadlineConnection(
             connectFailure = SocketTimeoutException("connect timed out"),
@@ -613,15 +680,24 @@ private class JsonDeadlineConnection(
     private val writeBlocksUntilDisconnect: Boolean = false,
     private val slowResponseBytes: Boolean = false,
     private val onResponse: () -> Unit = {},
+    private val onConnect: () -> Unit = {},
+    private val onWrite: () -> Unit = {},
+    private val onBodyComplete: () -> Unit = {},
 ) : HttpURLConnection(URL("https://family.example.com:8765/test")) {
     private val bytes = body.toByteArray(Charsets.UTF_8)
-    private val requestBytes = ByteArrayOutputStream()
+    private val requestBytes = object : ByteArrayOutputStream() {
+        override fun write(bytes: ByteArray, offset: Int, length: Int) {
+            onWrite()
+            super.write(bytes, offset, length)
+        }
+    }
     private val released = CountDownLatch(1)
     val opened = AtomicBoolean(false)
     val disconnected = AtomicBoolean(false)
     val writeReleasedByDisconnect = AtomicBoolean(false)
 
     override fun connect() {
+        onConnect()
         connectFailure?.let { throw it }
     }
 
@@ -653,7 +729,12 @@ private class JsonDeadlineConnection(
                 }
             }
         }
-        return ByteArrayInputStream(bytes)
+        return object : ByteArrayInputStream(bytes) {
+            override fun close() {
+                onBodyComplete()
+                super.close()
+            }
+        }
     }
 
     override fun getErrorStream(): InputStream = ByteArrayInputStream(bytes)

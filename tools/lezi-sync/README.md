@@ -113,6 +113,8 @@ SSH 命令显式提供 `NAS_SSH` / `NAS_SSH_PORT`，数据相关命令显式提�
 ```bash
 cd tools/lezi-sync
 release_id="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+export LEZI_SYNC_VERSION="${release_id}"
+sh docker/validate-version.sh Cargo.toml "${LEZI_SYNC_VERSION}"
 ./build-image.sh
 
 # 数据目录需可被 uid 10001 写；示例：
@@ -132,6 +134,14 @@ docker compose ps
 curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:8765/health
 curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:8765/ready
 ```
+
+Compose 的 `LEZI_SYNC_VERSION` 必须显式设置为当前 `Cargo.toml` package version；未设置或
+空值在 Compose 配置解析时拒绝，不能默默使用历史镜像 tag。默认镜像 tag 与 build arg
+共用这一输入；`LEZI_SYNC_IMAGE` 仅覆盖镜像引用，仍不能免除版本输入。直接 Docker build
+也必须传匹配的 `--build-arg LEZI_SYNC_VERSION`，Dockerfile 在编译前检查精确相等。
+`build-image.sh` 可从 Cargo 自动推导。自定义镜像引用须由操作者核实其实际构建身份；
+配置/helper fixture 不等同于真实容器证明。隔离 Docker 验证须另外核对 image version label、
+镜像内版本环境值与实际 `/health.version`，不得使用真实 NAS 或家庭数据根做版本测试。
 
 ### 端口发布覆盖
 
@@ -225,7 +235,7 @@ docker buildx build \
 | `LEZI_INTERNAL_PORT` | `8766` | 仅监听 `127.0.0.1` 的容器内 HTTP readiness 端口，不发布到宿主 |
 | `LEZI_TLS_CERTFILE` | 必填 | PEM certificate；NAS 包固定为 `/data/tls/server.crt` |
 | `LEZI_TLS_KEYFILE` | 必填 | PEM private key；NAS 包固定为 `/data/tls/server.key` |
-| `LEZI_SYNC_VERSION` | `Cargo.toml` package version | `/health` 返回的发布标识；生产构建默认自动推导 |
+| `LEZI_SYNC_VERSION` | `build-image.sh` 从 Cargo 推导；Compose / 直接 Docker build 必填 | 必须等于 `Cargo.toml` package version；镜像 label/env 与 `/health` 使用同一构建身份 |
 | `LEZI_LAN_APK_DOWNLOAD_ORIGIN` | 未设置 | 可选 `http://<同一 IPv4 或解析到 IPv4 的 DNS 主机>:8767`；设置后成员登录 QR 包装为邀请安装页 URL，本版不支持 IPv6 分发；不可与 `LEZI_INVITE_INSTALL_ORIGIN` 同时设置 |
 | `LEZI_INVITE_INSTALL_ORIGIN` | 未设置 | 可选且仅接受 `https://invite.example.invalid`（端口空或 443）；设置后 HTTPS public 面提供 `/join` 与 `/download/lezi.apk`，不创建 8767 监听 |
 | `LEZI_LAN_APK_DOWNLOAD_PUBLISH` | `127.0.0.1:8767` | local compose 宿主侧发布地址；NAS 包固定 LAN `0.0.0.0:8767` |

@@ -1,7 +1,7 @@
 # 平台规格（platform）
 
 > 当前开发代：**0.5.5** / versionCode **35** / Room **29** / 本地数据契约 **7** /
-> server schema **13** / wire **0.5.0** / paired-software floor **35**；未部署，真实渠道与NAS仍为0.5.4。
+> server schema **13** / wire **0.5.0** / paired-software floor **35**；本开发代未部署。仓库历史记录的渠道与 NAS 为 0.5.4，非本轮实时探测结论。
 > 新代规范和发布阻塞见 [ADR0026](../adr/0026-durable-restore-authority-generation.md)。以下0.5.4身份记录为历史：
 > **0.5.4** / versionCode **34** / Room **29** / 本地数据契约 **6** /
 > server schema **13** / floor **21**；协议代 0.4.0（conflict-v2）。家庭 NAS 与
@@ -32,7 +32,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前 tree 0.5.4**（协议代 0.4.0）：ADR-0022 commit-first + ConflictSnapshot v2，只协商 `causal_sync_v2`，mixed generation 在 mutation 前 fail closed |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | **当前候选 0.5.5**（wire 0.5.0）：保留 ADR-0022 commit-first + ConflictSnapshot v2；护理计划意图及恢复能力、floor 35 的配套升级边界以 [`causal-sync-wire.md`](./contracts/causal-sync-wire.md) 为准，mixed generation 在 mutation 前 fail closed |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media）；层规格见 [`layers/server.md`](./layers/server.md) |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -45,11 +45,12 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.5.4 / versionCode **34**）；家庭 NAS 是否已切到该代以 live health 为准（2026-09-30 协同 CD 后停 0.5.4） |
+| versionName | **当前 tree** 以 `app/build.gradle.kts` + `config/android-release-compatibility.json` 为准（0.5.5 / versionCode **35**）；本轮未部署或探测家庭 NAS，2026-09-30 的 0.5.4 协同 CD 记录仅作历史参考 |
 | versionCode | 同上；安装分发单调版本；本地兼容范围由 APK Manifest 的数据契约声明 |
-| 本地数据契约 | 当前 tree `v6` / Room **v29**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
+| 本地数据契约 | 当前 tree `v7` / Room **v29**（最低可迁移与永久基线仍为 `v1`：0.3.0 / versionCode 6 / Room v24） |
 | **0.3.13 升级源** | versionName `0.3.13`、versionCode **20**、Room **27**、历史 server schema **12** |
-| **0.5.4 当前 tree** | versionName `0.5.4`、versionCode **34**、Room **29**、local-data contract **6**、server schema **13**、floor **21**；协议代仍是 0.4.0 conflict-v2。0.5.3 / versionCode **33** 及更早（0.5.2–0.4.0）已发布为升级源。0.5.4 不抬 schema、wire 或 floor。客户端修复随 0.5.4/34 APK。服务端 store 修复（损坏载荷返回 `invalid_stored_payload`、bundles 入口冻结已完成履行、多图一次发布、唤醒恢复校验）随 crate **0.5.4** 于 2026-09-30 与 APK/渠道协同上 NAS |
+| **0.5.5 当前候选** | versionName `0.5.5`、versionCode **35**、Room **29**、local-data contract **7**、server schema **13**、wire **0.5.0**、floor **35**；本轮未部署，配套升级要求见 ADR0026 与 Wire 合同 |
+| **0.5.4 历史发布** | versionName `0.5.4`、versionCode **34**、Room **29**、local-data contract **6**、server schema **13**、floor **21**；协议代仍是 0.4.0 conflict-v2。0.5.3 / versionCode **33** 及更早（0.5.2–0.4.0）已发布为升级源。0.5.4 不抬 schema、wire 或 floor。客户端修复随 0.5.4/34 APK。服务端 store 修复（损坏载荷返回 `invalid_stored_payload`、bundles 入口冻结已完成履行、多图一次发布、唤醒恢复校验）随 crate **0.5.4** 于 2026-09-30 与 APK/渠道协同上 NAS |
 
 | 应用名 | 乐记 |
 
@@ -107,7 +108,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 双档 | `local < latest` → 可选；`local < minSupportedVersionCode` → 强制全屏（无「稍后」绕过主功能） |
 | 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
 | 服务端 API | 鉴权 `GET /v1/app-update`（JSON）与 `GET /v1/app-update/apk`（APK 字节）；与同步共用会话与 TLS/信任。**两者**仅在元数据 + APK sha256 已验证时返回成功体：半通道（仅元数据 / 哈希不符）对元数据路由诚实 404/5xx，避免客户端 dual-tier 把无包可装的 `min_supported` 当成强制升级 floor |
-| 门槛 | 仅当已验证更新通道（元数据 + APK sha256）存在时生效：头缺失或 `< minSupported` 时权威 sync 写/拉（pull / bundle / media 等）**以及灾难恢复写路径**（restore start / manifest / media / commit）返回 `code=client_update_required`。`POST /v1/causal/commit` 是例外：同一门槛折叠成 409 终态 `capability_mismatch`，客户端 `FamilySyncError` 仍把它映射成强制升级，不重试。**仍放行**已验证通道上的更新元数据与 APK 下载。从未验证过、元数据缺失、或通道文件消失时同步/restore fail-open。原子 promote 中途（新 APK + 旧元数据哈希暂不符）保留 **last-known-good** floor 直至新 pair 验证成功，避免短暂降级到零门槛；负向 stamp 缓存避免半部署下每请求重哈希 APK |
+| 门槛 | 协议硬下限 **35** 独立于更新通道是否存在/有效；有效门槛为 `max(35, 已验证通道 minSupported)`，并独立要求当前协议 capability。头缺失或低于有效门槛时权威 sync 写/拉（pull / bundle / media 等）**以及灾难恢复写路径**（restore start / manifest / media / commit）返回 `code=client_update_required`。`POST /v1/causal/commit` 是例外：同一门槛折叠成 409 终态 `capability_mismatch`，客户端 `FamilySyncError` 仍把它映射成强制升级，不重试。**仍放行**已验证通道上的更新元数据与 APK 下载。从未验证过、元数据缺失或通道文件消失时，协议硬下限及 capability 检查仍然生效。原子 promote 中途（新 APK + 旧元数据哈希暂不符）保留 **last-known-good** floor 直至新 pair 验证成功，避免通道要求的更高门槛在替换期间下降；负向 stamp 缓存避免半部署下每请求重哈希 APK |
 | 诚实客户端闸 | `X-Lezi-Client-Version-Code` / `minSupported` 是对**诚实官方 App** 的兼容闸：阻止半兼容旧客户端脏写，**不是**防篡改安全根。头可被非官方客户端伪造；**真协议硬闸**仍靠 setup-status **capabilities**、wire schema/payload 校验与已验证会话。服务端不对「伪造高 version 头」做强绑定证明（权威叙述；同步合同见 [sync-trusted-endpoint.md §7.5](./contracts/sync-trusted-endpoint.md)） |
 | 强制壳兜底 | `client_update_required` 后：元数据成功且 **versionCode &gt; local** → `ForcedAppUpdateState.WithPackage`（可安装 CTA，即使双档会判 optional）；元数据/通道失败或无更高 versionCode → **`PackageUnknown` 强制壳**（说明 +「重试检查更新」），`SyncStatus` 保持 Idle，**不得**呈现为泛同步/NAS 故障或「假正常」无强制层。已有强制态时，手动 `checkAppUpdate` 与同步 CUR 恢复共用：`versionCode &gt; local` 一律升为可安装 Forced；否则不得拆壳/刷 optional 横幅；`checkAppUpdate` **Result** 在壳保留时返回 `ForcedUpdate`/`ForcedPackageUnknown`（不得 bare UpToDate/Optional）；失败非 CUR 同步 **不** piggyback 拆壳；权威同步成功后的 piggyback 才可清壳；未加入家庭才清 surface。壳内可恢复会话（reauth）与 401 下载单次 refresh 重试；鉴权更新不可用且 origin 已知时给出 **8767** 局域网邀请安装引导；**无**「稍后」绕过主功能 |
 | wire 破坏纪律 | 封闭 wire / `schema_version` / allowlist 的破坏性变更 **必须先** 抬 `min_supported_version_code` 并发布已验证可安装包，再让新 shape 入站；**不**做 dual-read / skip-unknown 协议。当前 floor 与「支持范围内 wire 冻结」关系见下方 §4.2.1 与 [DEPLOY.md](../../tools/lezi-sync/deploy/DEPLOY.md) wire-break checklist |

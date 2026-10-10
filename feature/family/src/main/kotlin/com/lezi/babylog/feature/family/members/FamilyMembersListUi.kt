@@ -611,11 +611,11 @@ internal fun formatPendingRequestTime(epochSeconds: Long): String =
 @Composable
 internal fun FamilyMemberRow(
     member: FamilyMember,
+    modifier: Modifier = Modifier,
     onEditSelf: (() -> Unit)? = null,
     onRemove: (() -> Unit)? = null,
     onCreateLoginQr: (() -> Unit)? = null,
     onRenameMember: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
     Row(
         modifier = modifier
@@ -838,6 +838,8 @@ private fun FamilyRowOverflowMenu(
 internal fun formatFamilyDeviceLastUsed(
     epochSeconds: Long,
     nowEpochSeconds: Long = System.currentTimeMillis() / 1_000L,
+    zoneId: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: Locale = Locale.getDefault(),
 ): String {
     val then = epochSeconds.coerceAtLeast(0)
     val delta = (nowEpochSeconds - then).coerceAtLeast(0)
@@ -847,15 +849,14 @@ internal fun formatFamilyDeviceLastUsed(
         delta < 86_400 -> "${delta / 3_600} 小时前"
         delta < 172_800 -> "昨天"
         delta < 7 * 86_400 -> "${delta / 86_400} 天前"
-        else -> DEVICE_LAST_SYNC_MONTH_DAY.format(Instant.ofEpochMilli(then * 1_000L))
+        else -> DEVICE_LAST_SYNC_MONTH_DAY.withLocale(locale)
+            .withZone(zoneId).format(Instant.ofEpochMilli(then * 1_000L))
     }
 }
 
-// SimpleDateFormat is neither immutable nor thread-safe; the java.time
-// formatter is hoisted once and formats in the default zone like before.
+// Cache only the immutable pattern; resolve device locale and zone on every call.
 private val DEVICE_LAST_SYNC_MONTH_DAY =
-    java.time.format.DateTimeFormatter.ofPattern("MM-dd", Locale.getDefault())
-        .withZone(java.time.ZoneId.systemDefault())
+    java.time.format.DateTimeFormatter.ofPattern("MM-dd", Locale.ROOT)
 
 /** Member-level last sync summary; empty when no active device has connected. */
 internal fun formatMemberLastSync(

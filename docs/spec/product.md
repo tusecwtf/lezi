@@ -2,9 +2,9 @@
 
 > **个人/家庭使用** · Android · 无商业化
 > 决策日：2026-07-25 · **tree 发布线**以 `config/android-release-compatibility.json` 为准
-> 当前 tree 已激活 **0.5.4** / code **34** / Room **29** / local-data contract **6** /
-> server schema **13** / floor **21** / `causal_sync_v2`。0.5.3/code 33、0.5.2/code 32、0.5.1/code 31、0.5.0/code 30、0.4.8/code 29、0.4.7/code 28、0.4.6/code 27、0.4.5/code 26、0.4.4/code 25、0.4.3/code 24、0.4.2/code 23、0.4.1/code 22、0.4.0/code 21 与 0.3.13/code 20
-> 仍是升级源；协议代仍是 0.4.0 conflict-v2。
+> 当前开发候选 **0.5.5** / code **35** / Room **29** / local-data contract **7** /
+> server schema **13** / wire **0.5.0** / floor **35**，本轮未部署。0.5.4/code 34、0.5.3/code 33、0.5.2/code 32、0.5.1/code 31、0.5.0/code 30、0.4.8/code 29、0.4.7/code 28、0.4.6/code 27、0.4.5/code 26、0.4.4/code 25、0.4.3/code 24、0.4.2/code 23、0.4.1/code 22、0.4.0/code 21 与 0.3.13/code 20
+> 仍是升级源；历史发布的 wire 身份不表示能够与当前候选混合同步，配套升级边界见 Wire 合同。
 
 > Wire 权威：[`contracts/causal-sync-wire.md`](./contracts/causal-sync-wire.md)。
 
@@ -18,8 +18,9 @@
 | 数据 | Room 为本地真相源；Android 自本地数据契约 v1 永久支持原地升级保留，家庭服务器与 wire 仍只支持 fresh-current；NAS schema 11/12 → 13 仅允许已授权 `offline-migrate` 离线准备 + 维护窗切割；更早 schema（含 v3）不属于当前 CLI 支持输入（[ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)；权威 runbook [`copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)），非启动自动迁移 |
 
 当前发布线以 [sync-trusted-endpoint.md](./contracts/sync-trusted-endpoint.md) 为唯一家庭同步合同：
-用户确认可信 HTTPS endpoint，管理员根密码只用于建家/管理员登录，普通成员经审批或管理员
-签发的单次登录授权取得独立设备会话；同步只在 App 前台触发。旧网络身份、承载家庭 API/凭证的明文协议、
+用户确认可信 HTTPS endpoint，管理员根密码用于建家、管理员登录/接管、删除家庭及灾备
+创建/提交；具体会话和恢复凭据前置要求见 [server 层鉴权](./layers/server.md#4-配置与鉴权)。
+普通成员经审批或管理员签发的单次登录授权取得独立设备会话；同步只在 App 前台触发。旧网络身份、承载家庭 API/凭证的明文协议、
 旧邀请加入和长期家庭凭证已整体退役且无兼容旁路；ADR-0015 另行隔离了仅用于首装的 LAN HTTP 页面。
 已加入设备可在「家庭网络设置」验证候选地址并重新加入同一 family。旧 Owner
 设备可按 ADR-0014 把本机完整护理副本恢复到空服务器；不支持两个已配置家庭合并。
@@ -33,7 +34,7 @@
 | [contracts/ui.md](./contracts/ui.md) | 画风、设计原则、页面与组件、失败文案 |
 | [contracts/data-model.md](./contracts/data-model.md) | 实体、字段、本地优先、SyncPort 契约；SleepStart / WakeObservation 与疑似重复汇总 |
 | [contracts/sync-trusted-endpoint.md](./contracts/sync-trusted-endpoint.md) | **当前已交付合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
-| [contracts/causal-sync-wire.md](./contracts/causal-sync-wire.md) | **0.4.0 conflict-v2 runtime 合同**：commit-first、N-way ConflictSnapshot、choice-only resolution 与升级边界 |
+| [contracts/causal-sync-wire.md](./contracts/causal-sync-wire.md) | **当前因果同步 runtime 合同**：commit-first、N-way ConflictSnapshot、choice-only resolution 与升级边界 |
 | [contracts/local-photo-loading.md](./contracts/local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
 | [contracts/assets-notes.md](./contracts/assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 | [platform.md](./platform.md) | Android 技术栈、构建身份、权限、自托管更新、质量门、合规（原 tech.md §1/§4-§9） |

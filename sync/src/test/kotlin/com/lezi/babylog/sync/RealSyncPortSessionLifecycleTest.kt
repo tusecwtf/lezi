@@ -127,6 +127,7 @@ import com.lezi.babylog.sync.backend.deadline.FamilyHttpFailureKind
 import com.lezi.babylog.sync.backend.testPreparedMedia
 
 // Split from RealSyncPortTest kitchen sink by contract cluster (ticket 05).
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RealSyncPortSessionLifecycleTest {
     @Test
     fun mediaCleanupLeavesPendingMarkerWhenReplicaBarrierIsHeld() = runTest {
@@ -632,12 +633,12 @@ class RealSyncPortSessionLifecycleTest {
 
         val result = rig.port.claimMemberLoginQr(payload, "Pixel Tablet").getOrThrow()
 
-        assertThat(result.session.isJoined).isTrue()
+        assertThat(result.sessionPresentation.isJoined).isTrue()
         assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.NotRequired)
         assertThat(rig.backend.pullCursors).isEmpty()
         rig.foreground.setForeground(true)
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
-        assertThat(rig.port.session().first().isJoined).isTrue()
+        assertThat(rig.port.sessionPresentation().first().isJoined).isTrue()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
         assertThat(rig.backend.memberLoginGrantClaims)
             .containsExactly(Triple(endpoint, payload.grant, "Pixel Tablet"))
@@ -708,7 +709,7 @@ class RealSyncPortSessionLifecycleTest {
         assertThat(blocked).isInstanceOf(DifferentFamilyServerException::class.java)
         assertThat(rig.preferences.current().serverHost).isEqualTo("192.168.1.20")
         assertThat(rig.preferences.current().isJoined).isTrue()
-        assertThat(rig.preferences.current().familyId).isEqualTo(created.session.familyId)
+        assertThat(rig.preferences.current().familyId).isEqualTo(created.sessionPresentation.familyId)
     }
 
     @Test

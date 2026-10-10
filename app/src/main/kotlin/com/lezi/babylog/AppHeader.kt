@@ -170,9 +170,9 @@ internal fun AppHeaderBar(
     onOpenDatePicker: () -> Unit,
     onSearch: () -> Unit,
     /** Secondary shallow-sync line after data-page content chrome collapses (0.3.10). */
+    modifier: Modifier = Modifier,
     collapsedSyncText: String? = null,
     collapsedSyncIsError: Boolean = false,
-    modifier: Modifier = Modifier,
 ) {
     val background = leziTopBarBackground(dark)
     val content = leziTopBarContentColor(dark)

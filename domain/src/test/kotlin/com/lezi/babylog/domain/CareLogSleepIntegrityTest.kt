@@ -10,6 +10,114 @@ class CareLogSleepIntegrityTest {
     private val hour = 3_600_000L
     private val start = 1_700_000_000_000L
 
+    @get:org.junit.Rule
+    val photoFiles = org.junit.rules.TemporaryFolder()
+
+    @Test
+    fun movingAcrossMidnightAndOriginalWakePreservesOneObservationInBothProjectionBranches() = runTest {
+        val midnight = java.time.LocalDate.of(2024, 6, 2)
+            .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()
+        for (effective in listOf(false, true)) {
+            val care = Fakes().careLog()
+            val baby = care.createBaby(CreateBabyInput(nickname = "测试宝宝", birthdayEpochDay = 1))
+            val id = care.confirmSleep(baby, null, midnight - 2 * hour, midnight - hour,
+                null, payload, nowMillis = midnight + 6 * hour)
+            val original = care.projectSleepRecord(id)!!.observations.single().clientUuid
+            if (effective) care.selectEffectiveWakeObservation(care.getRecord(id)!!.clientUuid, original)
+            for ((from, to) in listOf(
+                midnight + hour to midnight + 2 * hour,
+                midnight - hour to midnight + hour,
+                midnight - 3 * hour to midnight - 2 * hour,
+            )) {
+                care.updateRecord(id, from, to, "移动区间", payload, nowMillis = midnight + 6 * hour)
+                val projection = care.projectSleepRecord(id)!!
+                assertThat(projection.interval.startTimestamp).isEqualTo(from)
+                assertThat(projection.interval.endTimestamp).isEqualTo(to)
+                assertThat(projection.observations.map { it.clientUuid }).containsExactly(original)
+                assertThat(projection.observations.single().wakeTimestamp).isEqualTo(to)
+            }
+        }
+    }
+
+    @Test
+    fun rootNoteAndPhotoEditsPreserveWholeWakeRevisionAndMediaAcrossOwnershipBranches() = runTest {
+        for (foreign in listOf(false, true)) for (effective in listOf(false, true)) {
+            val fakes = Fakes()
+            fakes.wireTransactionalSnapshots()
+            val care = fakes.careLog()
+            val baby = care.createBaby(CreateBabyInput(nickname = "测试宝宝", birthdayEpochDay = 1))
+            val id = care.sleepDown(baby, start, nowMillis = start)
+            val wakePhoto = photoFiles.syntheticPhoto("wake-$foreign-$effective.png")
+            val rootPhoto = photoFiles.syntheticPhoto("root-$foreign-$effective.png")
+            care.recordWakeObservation(babyId = baby, at = start + hour, note = "观察备注",
+                photoLocalPaths = listOf(wakePhoto), sleepRecordId = id,
+                clientUuid = "wake", nowMillis = start + hour)
+            if (effective) care.selectEffectiveWakeObservation(care.getRecord(id)!!.clientUuid, "wake")
+            if (foreign) fakes.wakeObservations.update(
+                fakes.wakeObservations.getByClientUuid("wake")!!.copy(
+                    observerMembershipId = "other-observer", syncDirty = false,
+                ),
+            )
+            val wakeBefore = fakes.wakeObservations.itemsSnapshot()
+            val mediaBefore = fakes.media.listAllIncludingDeleted().filter { it.wakeObservationId != null }
+            for (photos in listOf(null, listOf(rootPhoto))) {
+                care.updateRecord(id, start, start + hour, "根备注", payload,
+                    photoLocalPaths = photos, nowMillis = start + 2 * hour)
+                assertThat(care.getRecord(id)!!.note).isEqualTo("根备注")
+                assertThat(care.listRecordPhotoPaths(id)).containsExactlyElementsIn(photos.orEmpty())
+                assertThat(fakes.wakeObservations.itemsSnapshot()).containsExactlyElementsIn(wakeBefore)
+                assertThat(fakes.media.listAllIncludingDeleted().filter { it.wakeObservationId != null })
+                    .containsExactlyElementsIn(mediaBefore)
+            }
+            assertThat(care.canEditWakeObservation("wake")).isEqualTo(!foreign)
+            if (foreign) {
+                assertThat(runCatching {
+                    care.updateWakeObservation("wake", start + 2 * hour, "不允许", nowMillis = start + 2 * hour)
+                }.exceptionOrNull()).isInstanceOf(RecordPermissionException::class.java)
+                assertThat(fakes.wakeObservations.itemsSnapshot()).containsExactlyElementsIn(wakeBefore)
+                assertThat(fakes.media.listAllIncludingDeleted().filter { it.wakeObservationId != null })
+                    .containsExactlyElementsIn(mediaBefore)
+            }
+        }
+    }
+
+    @Test
+    fun searchTracksOpenWithdrawnAndSelectedWakeAndHidesSourceRoots() = runTest {
+        for (source in listOf(false, true)) {
+            val fakes = Fakes()
+            val care = fakes.careLog()
+            val baby = care.createBaby(CreateBabyInput(nickname = "测试宝宝", birthdayEpochDay = 1))
+            val id = care.sleepDown(baby, start, nowMillis = start)
+            val uuid = care.getRecord(id)!!.clientUuid
+            if (source) fakes.sourceRelations.applyPullSummary(
+                relationId = "source-relation", recordClientUuid = uuid, role = "source",
+                peerIds = listOf("display-root"), observedAt = start,
+            )
+            suspend fun assertSearch(ongoing: Boolean, duration: String?) {
+                assertThat(care.search(baby, "进行中").map { it.id })
+                    .containsExactlyElementsIn(if (ongoing && !source) listOf(id) else emptyList<Long>())
+                for (term in listOf("1h", "2h")) {
+                    assertThat(care.search(baby, term).map { it.id })
+                        .containsExactlyElementsIn(if (duration == term && !source) listOf(id) else emptyList<Long>())
+                }
+            }
+            assertSearch(true, null)
+            care.recordWakeObservation(babyId = baby, at = start + hour,
+                sleepRecordId = id, clientUuid = "first-wake", nowMillis = start + 2 * hour)
+            assertSearch(false, "1h")
+            care.withdrawWakeObservation("first-wake")
+            assertSearch(true, null)
+            care.recordWakeObservation(babyId = baby, at = start + hour,
+                sleepRecordId = id, clientUuid = "one-hour", nowMillis = start + 2 * hour)
+            care.recordWakeObservation(babyId = baby, at = start + 2 * hour,
+                sleepRecordId = id, clientUuid = "two-hours", nowMillis = start + 2 * hour)
+            care.selectEffectiveWakeObservation(uuid, "two-hours")
+            assertSearch(false, "2h")
+            care.selectEffectiveWakeObservation(uuid, "one-hour")
+            assertSearch(false, "1h")
+        }
+    }
+
     @Test
     fun movingClosedSleepLaterThenEarlierKeepsRequestedIntervalAndObservationIdentity() = runTest {
         val care = Fakes().careLog()

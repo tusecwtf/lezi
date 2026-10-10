@@ -424,12 +424,12 @@ class LocalDataContractMigrationDeviceTest {
         migrationHelper.createDatabase(DATABASE_NAME, 27).apply {
             execSQL(
                 "INSERT INTO conflict_detail_cache VALUES(?, '{}', NULL, ?, '[]', ?)",
-                arrayOf(canonicalConflictId, "canonical-snapshot", 100L),
+                arrayOf<Any>(canonicalConflictId, "canonical-snapshot", 100L),
             )
             transportKeys.forEachIndexed { index, key ->
                 execSQL(
                     "INSERT INTO conflict_detail_cache VALUES(?, '{}', NULL, ?, '[]', ?)",
-                    arrayOf(key, "journal-$index", 200L + index),
+                    arrayOf<Any>(key, "journal-$index", 200L + index),
                 )
             }
             close()

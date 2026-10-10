@@ -45,7 +45,7 @@ import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.designsystem.leziChipMetricWellModifier
+import com.lezi.babylog.designsystem.leziChipMetricWell
 import com.lezi.babylog.designsystem.leziHairlineColor
 import com.lezi.babylog.designsystem.leziRecordColor
 import androidx.compose.material3.Text
@@ -388,7 +388,7 @@ private fun RecordSummaryStripCell(
         }
         val chipMetric = LeziThemeExt.typography.ChipMetric
         Box(
-            leziChipMetricWellModifier(),
+            Modifier.leziChipMetricWell(),
             contentAlignment = Alignment.BottomCenter,
         ) {
             Text(

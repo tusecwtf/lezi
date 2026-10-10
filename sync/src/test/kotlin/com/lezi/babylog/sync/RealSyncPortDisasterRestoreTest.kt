@@ -280,8 +280,8 @@ class RealSyncPortDisasterRestoreTest {
         )
         val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
 
-        assertThat(committed.session.familyId).isEqualTo(oldSession.familyId)
-        assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
+        assertThat(committed.sessionPresentation.familyId).isEqualTo(oldSession.familyId)
+        assertThat(committed.sessionPresentation.membershipId).isEqualTo("restored-owner-membership")
         assertThat(rig.preferences.current().copy(lastSuccessAt = committed.session.lastSuccessAt))
             .isEqualTo(committed.session)
         assertThat(rig.preferences.verifiedEndpoint.first()).isEqualTo(candidate)
@@ -703,7 +703,7 @@ class RealSyncPortDisasterRestoreTest {
 
         val committed = rig.port.commitDisasterRecovery("commit-root-secret").getOrThrow()
 
-        assertThat(committed.session.membershipId).isEqualTo("restored-owner-membership")
+        assertThat(committed.sessionPresentation.membershipId).isEqualTo("restored-owner-membership")
         with(requireNotNull(rig.wakeObservations.getByClientUuid("c65fa5ee-3b53-5feb-ae81-f9db4abc8589"))) {
             assertThat(syncDirty).isFalse()
             assertThat(observerMembershipId).isEqualTo("restored-owner-membership")

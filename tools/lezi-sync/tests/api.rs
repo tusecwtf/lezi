@@ -10099,6 +10099,163 @@ async fn root_password_admission_is_shared_and_cannot_be_bypassed_by_valid_passw
 }
 
 #[tokio::test]
+async fn disaster_restore_start_and_commit_share_root_password_admission() {
+    let root = "synthetic-restore-admission-password";
+    let verifications = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::with_config(|config| {
+        config.bootstrap_secret = Some(root.to_owned());
+        let calls = verifications.clone();
+        config.root_password_verification_hook = Some(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }));
+        config.create_rate_limit = RateLimitConfig {
+            max_attempts: 3,
+            window_seconds: 60,
+        };
+    });
+    let family_id = Uuid::new_v4().to_string();
+    let start_uri = "/v1/disaster-restore/batches";
+    let start_body = json!({
+        "request_id": "restore-admission-start-request-0001",
+        "family_id": family_id,
+        "family_name": "恢复测试家庭",
+        "owner_display_name": "测试管理员",
+        "device_name": "restore-admission-device",
+    });
+    // Empty-server create, owner login, and restore start consume one shared window.
+    for (uri, request_body) in [
+        (
+            "/v1/family/create",
+            json!({
+                "create_request_id": "restore-admission-create-request-001",
+                "display_name": "测试管理员",
+                "device_name": "create-admission-device",
+                "family_name": "测试家庭",
+            }),
+        ),
+        (
+            "/v1/owner/login",
+            json!({
+                "login_request_id": "restore-admission-login-request-0001",
+                "device_name": "login-admission-device",
+            }),
+        ),
+        (start_uri, start_body.clone()),
+    ] {
+        let (status, body) = json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            uri,
+            None,
+            request_body,
+            &[("x-lezi-bootstrap-secret", "wrong-root-password")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}: {body}");
+    }
+    for password in [root, "wrong-root-password"] {
+        let (status, body) = json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            start_uri,
+            None,
+            start_body.clone(),
+            &[("x-lezi-bootstrap-secret", password)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+    assert_eq!(verifications.load(Ordering::SeqCst), 3);
+    rig.now.fetch_add(61, Ordering::SeqCst);
+    let (status, started) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        start_uri,
+        None,
+        start_body,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{started}");
+    assert_eq!(verifications.load(Ordering::SeqCst), 4);
+    let batch_id = started["batch_id"].as_str().unwrap();
+    let recovery = started["recovery_token"].as_str().unwrap();
+    let commit_uri = format!("{start_uri}/{batch_id}/commit");
+    let commit_body = json!({"request_id": "restore-admission-commit-request-0001"});
+    let (status, manifest) = json_request(
+        &rig.app,
+        Method::PUT,
+        &format!("{start_uri}/{batch_id}/manifest"),
+        Some(recovery),
+        json!({
+            "request_id": "restore-admission-manifest-request-01",
+            "entities": [{
+                "type": "baby",
+                "client_uuid": Uuid::new_v4(),
+                "updated_at": 1000,
+                "payload": baby_payload("测试宝宝", None),
+            }],
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{manifest}");
+    // Start used the first slot; takeover and authenticated commit use the other two.
+    for (uri, token, request_body) in [
+        (
+            "/v1/owner/takeover",
+            None,
+            json!({
+                "login_request_id": "restore-admission-takeover-request-01",
+                "device_name": "takeover-admission-device",
+            }),
+        ),
+        (commit_uri.as_str(), Some(recovery), commit_body.clone()),
+    ] {
+        let (status, body) = json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            uri,
+            token,
+            request_body,
+            &[("x-lezi-bootstrap-secret", "wrong-root-password")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}: {body}");
+    }
+    for password in [root, "wrong-root-password"] {
+        let (status, body) = json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            &commit_uri,
+            Some(recovery),
+            commit_body.clone(),
+            &[("x-lezi-bootstrap-secret", password)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+    assert_eq!(verifications.load(Ordering::SeqCst), 6);
+    assert_eq!(
+        get_json(&rig.app, "/v1/setup-status", None).await.1["family_state"],
+        "empty"
+    );
+    rig.now.fetch_add(61, Ordering::SeqCst);
+    let (status, committed) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        &commit_uri,
+        Some(recovery),
+        commit_body,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{committed}");
+    assert_eq!(verifications.load(Ordering::SeqCst), 7);
+    assert_eq!(committed["family_id"], family_id);
+}
+
+#[tokio::test]
 async fn create_limit_is_scoped_without_losing_global_protection() {
     let rig = Rig::with_config(|config| {
         config.create_rate_limit = RateLimitConfig {
