@@ -79,6 +79,15 @@ assembly is documented in `ui-calendar-test-di-preparation.md`. Those additions
 supersede only the corresponding "unprepared" design notes below, not their
 execution gaps or the default production-host evidence.
 
+The shared optional `routes` group subsequently adds prepared source for
+delayed full-host composer ownership (`ui-composer-delayed-read-preparation.md`),
+Calendar detail close/new-target late reads (`ui-calendar-stale-read-preparation.md`),
+and successful export files/failure retry/stubbed share return
+(`ui-export-route-files-preparation.md`). These supersede the associated source
+design gaps below. They remain unexecuted platform acceptance, do not duplicate
+the existing empty-range Activity-recreation slice, and do not touch blocked
+process/renderer observation experiments.
+
 
 The existing VM tests in `ExternalPlanNavigationHostTest`,
 `LayoutCustomSaveHostTest`, and `CalendarConversionHostTest` remain useful

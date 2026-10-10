@@ -14,9 +14,16 @@ class IsolatedUiHostTestRunner : AndroidJUnitRunner() {
         val selector = arguments.getString("class").orEmpty()
         val allowed = when (arguments.getString("leziUiHostAcceptance")) {
             "widget" -> setOf("$WIDGET_TEST#$WIDGET_METHOD")
-            "calendar" -> setOf(
+            "routes" -> setOf(
                 "$CALENDAR_TEST#listRefreshFailureStaysCommittedAcrossActivityRecreation",
                 "$CALENDAR_TEST#detailRefreshFailureStaysCommittedAcrossActivityRecreation",
+                "$CALENDAR_TEST#closingDetailWhilePostCommitReadIsPendingDoesNotReopenIt",
+                "$CALENDAR_TEST#newerDetailOwnsTheScreenWhenAnOlderPostCommitReadReturns",
+                "$COMPOSER_TEST#latePlanLookupCannotReplaceOwnedDraftAfterActivityRecreation",
+                "$COMPOSER_TEST#closedAndNewerComposerRequestsRejectLatePlanLookups",
+                "$EXPORT_TEST#historicalPdfRequestsFreezeOptionsAndKeepDistinctFiles",
+                "$EXPORT_TEST#readFailurePreservesDraftAndExplicitRetryGeneratesFile",
+                "$EXPORT_TEST#stubbedChooserReturnKeepsRouteUsableAndTxtReadable",
             )
             else -> emptySet()
         }
@@ -46,5 +53,7 @@ class IsolatedUiHostTestRunner : AndroidJUnitRunner() {
         const val WIDGET_TEST = "com.lezi.babylog.validation.widget.CountingWidgetConfigurationDeviceTest"
         const val WIDGET_METHOD = "failedSaveThenOneRetrySurvivesRealActivityRecreationWithoutDuplicateWrites"
         const val CALENDAR_TEST = "com.lezi.babylog.validation.calendar.CalendarConversionRouteDeviceTest"
+        const val COMPOSER_TEST = "com.lezi.babylog.validation.composer.DelayedComposerNavigationDeviceTest"
+        const val EXPORT_TEST = "com.lezi.babylog.validation.export.ExportRouteFilesDeviceTest"
     }
 }

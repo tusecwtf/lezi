@@ -13,7 +13,7 @@ public final class SpoolHashCounter implements AutoCloseable {
     private final Provider provider;
 
     SpoolHashCounter() {
-        provider = new Provider(NAME, "1.0", "isolated test spool hash observation") {};
+        provider = new Provider(NAME, 1.0, "isolated test spool hash observation") {};
         provider.put("MessageDigest.SHA-256", Digest.class.getName());
         if (Security.insertProviderAt(provider, 1) != 1) {
             throw new IllegalStateException("Could not install isolated test digest observer");

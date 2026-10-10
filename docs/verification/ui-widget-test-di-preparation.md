@@ -29,7 +29,7 @@ Default builds do not add the optional source directories, Hilt testing
 library, androidTest compiler or replacement module. They keep the ordinary
 runner unchanged. The startup-acceptance property and this property are
 mutually exclusive. The same optional selector accepts exactly `widget` or
-`calendar`, including only that group's replacement module; the two test
+`routes`, including only that group's replacement module; the two test
 assemblies cannot be silently combined.
 
 ## Prepared selector and assertions

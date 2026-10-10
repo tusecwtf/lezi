@@ -2,12 +2,14 @@ package com.lezi.babylog.validation.calendar
 
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
+import com.lezi.babylog.validation.host.HeldRouteRead
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** Faults only a selected audit's postcommit reads; all Room data and writes stay real. */
+/** Faults or holds only a selected audit's postcommit reads; Room data and writes stay real. */
 @Singleton
 class CalendarReadFaults @Inject constructor() {
     enum class Mode { None, List, Detail }
@@ -16,6 +18,18 @@ class CalendarReadFaults @Inject constructor() {
     val detailReads = AtomicInteger()
     val listFailures = AtomicInteger()
     val detailFailures = AtomicInteger()
+    private val heldDetailRead = AtomicReference<HeldRouteRead?>()
+
+    fun holdNextPostCommitDetailRead(): HeldRouteRead {
+        check(candidateUuid.isNotBlank() && mode == Mode.None)
+        return HeldRouteRead().also {
+            check(heldDetailRead.compareAndSet(null, it)) { "An audit detail read is already armed" }
+        }
+    }
+
+    fun clearHeldRead() {
+        heldDetailRead.getAndSet(null)?.release()
+    }
 
     fun wrap(delegate: FulfillmentCandidateDao): FulfillmentCandidateDao =
         object : FulfillmentCandidateDao by delegate {
@@ -37,6 +51,12 @@ class CalendarReadFaults @Inject constructor() {
                     if (mode == Mode.Detail && row?.convertedRecordClientUuid?.isNotBlank() == true) {
                         detailFailures.incrementAndGet()
                         throw IOException("synthetic postcommit audit detail read failure")
+                    }
+                    // Capture the real Room result, then hold just this selected
+                    // postcommit detail read. Unconverted prechecks and newer
+                    // candidate detail reads cannot consume the gate.
+                    if (row?.convertedRecordClientUuid?.isNotBlank() == true) {
+                        heldDetailRead.getAndSet(null)?.pause()
                     }
                 }
                 return row

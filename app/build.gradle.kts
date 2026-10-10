@@ -11,8 +11,8 @@ plugins {
 
 // Explicitly separate test Application/DI assembly; ordinary and startup runners stay unchanged.
 val uiHostAcceptance = providers.gradleProperty("leziUiHostAcceptance").orNull
-check(uiHostAcceptance == null || uiHostAcceptance in setOf("widget", "calendar")) {
-    "leziUiHostAcceptance must select exactly widget or calendar"
+check(uiHostAcceptance == null || uiHostAcceptance in setOf("widget", "routes")) {
+    "leziUiHostAcceptance must select exactly widget or routes"
 }
 check(!(uiHostAcceptance != null && providers.gradleProperty("leziStartupReadinessAcceptance").orNull == "true")) {
     "UI host test-DI acceptance and production startup acceptance require separate test APKs"
@@ -169,7 +169,7 @@ android {
             getByName("androidTest").java.srcDir("src/uiHostAcceptance/kotlin")
             val groupSource = when (uiHostAcceptance) {
                 "widget" -> "src/widgetConfigureAcceptance"
-                "calendar" -> "src/calendarConversionAcceptance"
+                "routes" -> "src/routeHostAcceptance"
                 else -> error("Unknown isolated UI host test group")
             }
             getByName("androidTest").java.srcDirs("$groupSource/kotlin", "$groupSource/java")

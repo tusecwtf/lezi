@@ -24,6 +24,7 @@ internal class CustomItemCatalog(
     private val syncPort: SyncPort,
     private val resolveFamilyId: suspend () -> Long,
     private val requestLocalSync: () -> Unit,
+    private val nowMillis: () -> Long,
 ) {
     fun observeCustomItems(): Flow<List<CustomRecordItem>> =
         customItemDao.observeAll().map { items -> items.map { it.toModel() } }
@@ -33,7 +34,7 @@ internal class CustomItemCatalog(
         require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
         require(iconSlot in 0..7) { "图标槽必须在 0..7" }
         val familyId = resolveFamilyId()
-        val now = System.currentTimeMillis()
+        val now = nowMillis()
         val creatorMembership = currentMembershipActorId()
         // Limit/uniqueness check and insert share one DB transaction so concurrent
         // adds cannot both pass the pre-check and create an 11th item / duplicate.
@@ -76,7 +77,7 @@ internal class CustomItemCatalog(
                     iconSlot = item.iconSlot,
                     sortOrder = item.sortOrder.coerceAtLeast(0),
                     updatedAt = if (changed) {
-                        System.currentTimeMillis().coerceAtLeast(existing.updatedAt + 1)
+                        nowMillis().coerceAtLeast(existing.updatedAt + 1)
                     } else {
                         existing.updatedAt
                     },
@@ -120,7 +121,7 @@ internal class CustomItemCatalog(
             val existing = customItemDao.getById(id) ?: return@run false
             if (existing.deletedAt != null) return@run false
             requireCanManageCustomItem(existing)
-            val revision = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
+            val revision = nextSyncUpdatedAt(existing.updatedAt, nowMillis())
             customItemDao.update(
                 existing.copy(deletedAt = revision, updatedAt = revision, syncDirty = true),
             )

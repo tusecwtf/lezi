@@ -5,7 +5,7 @@ executed. It does not establish a story PASS, device result or LeziApp startup.
 
 ## One optional test-DI mechanism, separated groups
 
-`-PleziUiHostAcceptance=calendar` selects the calendar source set, the existing
+`-PleziUiHostAcceptance=routes` selects the shared route-host source set, the existing
 Hilt-version androidTest dependencies/compiler and the shared
 `com.lezi.babylog.validation.host.IsolatedUiHostTestRunner`.
 `-PleziUiHostAcceptance=widget` instead selects only the counting-store group.
@@ -18,9 +18,11 @@ installation. The runner rejects unknown/mixed selectors and preserves existing
 persistent data by refusing to start. This is separate from the normal
 production-Application fixtures.
 
-The calendar group's explicit test CareLog constructor binding preserves all
+The route group's explicit test CareLog constructor binding preserves all
 real injected guarded DAOs, transactions, mutation epoch and media path gate.
-Only its FulfillmentCandidateDao is a narrow delegate. A local, credential-free
+Its FulfillmentCandidateDao is a narrow delegate. The shared route assembly also
+contains target-only CarePlanDao and RecordWakeProjectionDao read controls for
+the composer/export cases; these are inactive in calendar cases. A local, credential-free
 NoOpSyncPort owner presentation supplies the synthetic admin permission input
 for that CareLog; no real session, credential, endpoint or permission gate is
 modified. Other app bindings, including the process's real SyncPort, remain
@@ -67,10 +69,10 @@ is not compiled into this group. There is no table rename/drop, fake UI state,
 private reflection, replacement ViewModel, fallback insert or altered conversion
 rule.
 
-Still open: a held postcommit read completing after detail close/newer selection,
-precommit failure rendered through this route, process death, photo variants,
-and the user's API26/API35 device executions. Earlier JVM host tests cover some
-narrower ordering controls but cannot substitute for these remaining UI cases.
+The separate [late-read preparation](ui-calendar-stale-read-preparation.md)
+adds source for detail close/newer-selection ordering. Device execution remains
+open for all prepared cases. Precommit failure, process death and photo variants
+are outside this source slice; they are not silently marked covered.
 US-065/086 blocked process/restore observation groups were untouched.
 
 ## Parent-controlled compilation and user-only execution
@@ -78,11 +80,11 @@ US-065/086 blocked process/restore observation groups were untouched.
 Compile separately from the default and widget test-DI artifacts:
 
 ```sh
-./gradlew -PleziUiHostAcceptance=calendar :app:compileDebugAndroidTestKotlin
+./gradlew -PleziUiHostAcceptance=routes :app:compileDebugAndroidTestKotlin
 ```
 
 This selector does not authorize running it or a device. The user's eventual
-manual execution must supply `leziUiHostAcceptance=calendar` and exactly one
+manual execution must supply `leziUiHostAcceptance=routes` and exactly one
 `class#method` selector above to the shared runner. Whole-class and multiple-method
 selectors are rejected. Execute each method in a separate fresh isolated
 instrumentation process and disposable installation. Hilt rebuilds the singleton

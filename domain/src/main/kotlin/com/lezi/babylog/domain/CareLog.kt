@@ -340,6 +340,7 @@ class CareLog internal constructor(
                 ?: error("请先添加宝宝")
         },
         requestLocalSync = ::requestLocalSync,
+        nowMillis = clock::nowMillis,
     )
 
     private lateinit var carePlans: CarePlanCoordinator

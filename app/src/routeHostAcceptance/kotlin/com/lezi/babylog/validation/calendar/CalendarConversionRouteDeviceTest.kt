@@ -12,6 +12,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.validation.host.HeldRouteRead
 import dagger.Lazy
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -48,25 +49,20 @@ class CalendarConversionRouteDeviceTest {
     @Test fun detailRefreshFailureStaysCommittedAcrossActivityRecreation() =
         conversionSurvives(CalendarReadFaults.Mode.Detail)
 
+    @Test fun closingDetailWhilePostCommitReadIsPendingDoesNotReopenIt() =
+        latePostCommitReadRespectsCurrentDetail(openNewer = false)
+
+    @Test fun newerDetailOwnsTheScreenWhenAnOlderPostCommitReadReturns() =
+        latePostCommitReadRespectsCurrentDetail(openNewer = true)
+
     private fun conversionSurvives(mode: CalendarReadFaults.Mode) {
         val fixture = seed()
         faults.candidateUuid = fixture.candidate.clientUuid
         faults.mode = mode
         try {
             ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-                awaitText("菜单")
-                compose.onNode(hasText("菜单") and hasClickAction()).performClick()
-                awaitText("日程")
-                compose.onNodeWithText("日程").performScrollTo().performClick()
-                awaitTag("calendar_plan_conflict_${fixture.plan.id}", useUnmergedTree = true)
-                compose.onNodeWithTag("calendar_plan_${fixture.plan.id}").performScrollTo().performClick()
-                awaitTag("conflict_audit_${fixture.candidate.clientUuid}")
-                compose.onNodeWithTag("conflict_audit_${fixture.candidate.clientUuid}").performClick()
-                awaitTag("conflict_convert_button")
-                compose.onNodeWithTag("conflict_convert_button").assertIsDisplayed().performClick()
-                awaitTag("conflict_convert_confirm")
-                compose.onNodeWithTag("conflict_convert_confirm").assertIsDisplayed().performClick()
-                awaitText(WARNING)
+                openCalendarDetail(fixture)
+                convertAndAwaitWarning()
                 assertCommittedUi()
                 val converted = committedRecord(fixture)
                 assertEquals(if (mode == CalendarReadFaults.Mode.List) 1 else 0, faults.listFailures.get())
@@ -103,6 +99,126 @@ class CalendarConversionRouteDeviceTest {
         }
     }
 
+    private fun latePostCommitReadRespectsCurrentDetail(openNewer: Boolean) {
+        val fixture = seed(includeNewerCandidate = openNewer)
+        faults.candidateUuid = fixture.candidate.clientUuid
+        faults.mode = CalendarReadFaults.Mode.Detail
+        var held: HeldRouteRead? = null
+        try {
+            ActivityScenario.launch(MainActivity::class.java).use {
+                openCalendarDetail(fixture)
+                convertAndAwaitWarning()
+                assertCommittedUi()
+                val converted = committedRecord(fixture)
+                assertEquals(1, faults.detailFailures.get())
+                assertEquals(0, faults.listFailures.get())
+
+                // The first conversion's confirmation is modal until refresh
+                // returns. Its real warning/retry action starts a postcommit
+                // read without that modal, so close/new selection are genuine
+                // user actions while the retained Calendar owner is awaiting it.
+                faults.mode = CalendarReadFaults.Mode.None
+                val beforeRetryReads = faults.detailReads.get()
+                val lateRead = faults.holdNextPostCommitDetailRead().also { held = it }
+                compose.onNodeWithText("重试刷新详情").performScrollTo().performClick()
+                runBlocking { withTimeout(15_000) { lateRead.entered.await() } }
+                assertFalse(lateRead.completed.isCompleted)
+                assertEquals(beforeRetryReads + 1, faults.detailReads.get())
+                assertCommittedUi()
+                closeConvertedDetail()
+                compose.onNodeWithTag("conflict_audit_detail").assertDoesNotExist()
+
+                val newer = fixture.newer
+                if (openNewer) {
+                    requireNotNull(newer)
+                    awaitTag("conflict_audit_${newer.candidate.clientUuid}")
+                    compose.onNodeWithTag("conflict_audit_${newer.candidate.clientUuid}")
+                        .performScrollTo().performClick()
+                    awaitTag("conflict_audit_detail")
+                    assertNewerDetail(newer)
+                    // The old refresh is still running; the unconverted new
+                    // target is visible but conversion remains serialized.
+                    compose.onNodeWithTag("conflict_convert_button").assertIsNotEnabled()
+                } else {
+                    compose.onNodeWithTag("conflict_audit_${fixture.candidate.clientUuid}")
+                        .assertIsDisplayed()
+                }
+                assertFalse(lateRead.completed.isCompleted)
+
+                lateRead.release()
+                // DAO delivery alone is too early: its caller still has real
+                // domain reads and the ViewModel ownership check to complete.
+                // Wait for that actual CalendarViewModel launch to finish.
+                val completion = runBlocking { withTimeout(15_000) { lateRead.completed.await() } }
+                assertNull("The original refresh must return, not be cancelled", completion)
+                compose.waitForIdle()
+                assertEquals(beforeRetryReads + 1, faults.detailReads.get())
+                assertEquals(1, faults.detailFailures.get())
+                assertEquals(converted, committedRecord(fixture))
+                compose.onNodeWithText(WARNING).assertDoesNotExist()
+                compose.onNodeWithText("转换没有完成，这条记录保持原样，可重试").assertDoesNotExist()
+
+                if (openNewer) {
+                    assertNewerDetail(requireNotNull(newer))
+                    compose.onNodeWithTag("conflict_convert_button").assertIsEnabled()
+                } else {
+                    compose.onNodeWithTag("conflict_audit_detail").assertDoesNotExist()
+                    compose.onNodeWithText("未核对记录详情").assertDoesNotExist()
+                    compose.onNodeWithTag("conflict_convert_button").assertDoesNotExist()
+                    // Only an explicit new tap may open the committed old
+                    // detail after its dismissed request finished.
+                    compose.onNodeWithTag("conflict_audit_${fixture.candidate.clientUuid}").performClick()
+                    awaitTag("conflict_audit_detail")
+                    assertCommittedUi()
+                    assertEquals(converted, committedRecord(fixture))
+                }
+            }
+        } finally {
+            held?.release()
+            faults.clearHeldRead()
+            faults.mode = CalendarReadFaults.Mode.None
+            faults.candidateUuid = ""
+        }
+    }
+
+    private fun openCalendarDetail(fixture: Fixture) {
+        awaitText("菜单")
+        compose.onNode(hasText("菜单") and hasClickAction()).performClick()
+        awaitText("日程")
+        compose.onNodeWithText("日程").performScrollTo().performClick()
+        awaitTag("calendar_plan_conflict_${fixture.plan.id}", useUnmergedTree = true)
+        compose.onNodeWithTag("calendar_plan_${fixture.plan.id}").performScrollTo().performClick()
+        awaitTag("conflict_audit_${fixture.candidate.clientUuid}")
+        compose.onNodeWithTag("conflict_audit_${fixture.candidate.clientUuid}").performClick()
+        awaitTag("conflict_convert_button")
+    }
+
+    private fun convertAndAwaitWarning() {
+        compose.onNodeWithTag("conflict_convert_button").assertIsDisplayed().performClick()
+        awaitTag("conflict_convert_confirm")
+        compose.onNodeWithTag("conflict_convert_confirm").assertIsDisplayed().performClick()
+        awaitText(WARNING)
+    }
+
+    private fun closeConvertedDetail() {
+        compose.onNode(
+            hasText("关闭") and hasAnyAncestor(
+                isDialog() and hasAnyDescendant(hasTestTag("conflict_audit_detail")),
+            ),
+        ).assertIsDisplayed().performClick()
+    }
+
+    private fun assertNewerDetail(newer: CandidateFixture) {
+        compose.onNode(
+            hasText("备注 ${newer.source.note}") and hasAnyAncestor(hasTestTag("conflict_audit_detail")),
+        ).assertExists()
+        compose.onNodeWithText("备注 AppGuard-loser").assertDoesNotExist()
+        compose.onNode(
+            hasText("已转为独立护理记录") and hasAnyAncestor(hasTestTag("conflict_audit_detail")),
+        ).assertDoesNotExist()
+        compose.onNodeWithTag("conflict_convert_confirm").assertDoesNotExist()
+    }
+
     private fun assertCommittedUi() {
         compose.onNode(hasText("已转为独立护理记录") and hasAnyAncestor(hasTestTag("conflict_audit_detail")))
             .assertExists()
@@ -123,12 +239,16 @@ class CalendarConversionRouteDeviceTest {
         assertEquals(fixture.source.timestamp, converted.timestamp)
         assertEquals(fixture.source, database.recordDao().getByClientUuid(fixture.source.clientUuid))
         assertEquals(fixture.plan, database.carePlanDao().get(fixture.plan.id))
+        fixture.newer?.let { newer ->
+            assertEquals(newer.source, database.recordDao().getByClientUuid(newer.source.clientUuid))
+            assertEquals(newer.candidate, database.fulfillmentCandidateDao().getByClientUuid(newer.candidate.clientUuid))
+        }
         val ids = database.recordDao().listForBaby(fixture.plan.babyId).map { it.id }.toSet()
         assertEquals(fixture.originalRecordIds + converted.id, ids)
         converted
     }
 
-    private fun seed(): Fixture = runBlocking {
+    private fun seed(includeNewerCandidate: Boolean = false): Fixture = runBlocking {
         assertTrue(withTimeout(15_000) { gate.ensureReady() })
         // Verify the actual process sync owner is unjoined and endpoint-free.
         // Only the test CareLog's local presentation supplies synthetic admin role.
@@ -163,13 +283,30 @@ class CalendarConversionRouteDeviceTest {
             adoptionStatus = FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED, updatedAt = now + 1,
         )
         val candidateId = database.fulfillmentCandidateDao().upsert(candidate)
-        Fixture(plan, source, candidate.copy(id = candidateId), database.recordDao().listForBaby(baby).map { it.id }.toSet())
+        val newer = if (includeNewerCandidate) {
+            val newerSourceId = log.addRecord(
+                baby, RecordType.BATH, timestamp = now + 2, note = "AppGuard-newer-loser", nowMillis = now + 2,
+            )
+            val newerSource = requireNotNull(database.recordDao().get(newerSourceId))
+            val newerCandidate = candidate.copy(
+                clientUuid = UUID.randomUUID().toString(), recordClientUuid = newerSource.clientUuid,
+                actualTimestamp = newerSource.timestamp, confirmedAt = now + 2, updatedAt = now + 2,
+            )
+            val newerId = database.fulfillmentCandidateDao().upsert(newerCandidate)
+            CandidateFixture(newerSource, newerCandidate.copy(id = newerId))
+        } else null
+        Fixture(
+            plan, source, candidate.copy(id = candidateId),
+            database.recordDao().listForBaby(baby).map { it.id }.toSet(), newer,
+        )
     }
 
     private data class Fixture(
         val plan: CarePlanEntity, val source: RecordEntity,
         val candidate: FulfillmentCandidateEntity, val originalRecordIds: Set<Long>,
+        val newer: CandidateFixture?,
     )
+    private data class CandidateFixture(val source: RecordEntity, val candidate: FulfillmentCandidateEntity)
     private fun awaitText(text: String) = compose.waitUntil(15_000) {
         compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
     }

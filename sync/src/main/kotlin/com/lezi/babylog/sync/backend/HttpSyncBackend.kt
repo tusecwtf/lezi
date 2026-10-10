@@ -2071,7 +2071,13 @@ class HttpSyncBackend internal constructor(
                 exchange(scope).also { remainingMillis() }
             } catch (error: IOException) {
                 currentCoroutineContext().ensureActive()
-                if (familyAttempt != null && !error.isFamilyTrustFailure()) {
+                if (error.isFamilyTrustFailure()) throw error
+                // A deadline watchdog can surface as an ordinary socket I/O
+                // failure. Preserve its existing absolute-budget owner before
+                // falling back to transport classification (including no-family
+                // APK/upload exchanges). Cancellation and trust failures win.
+                remainingMillis()
+                if (familyAttempt != null) {
                     error.asFamilyHttpFailure(familyAttempt.operation)
                 }
                 throw error

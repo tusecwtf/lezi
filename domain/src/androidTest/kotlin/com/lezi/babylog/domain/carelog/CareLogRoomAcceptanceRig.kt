@@ -35,7 +35,9 @@ import kotlinx.coroutines.*
  * is opened. Only notification/reminder observers and named persistence barriers differ.
  * Closing/reopening this rig is NOT an Android process-death simulation.
  */
-internal class CareLogRoomAcceptanceRig : AutoCloseable {
+internal class CareLogRoomAcceptanceRig(
+    private val beforePhotoDigest: (String) -> Unit = {},
+) : AutoCloseable {
     private val application = InstrumentationRegistry.getInstrumentation().targetContext
     val root: File = File(application.cacheDir, "carelog-room-${java.util.UUID.randomUUID()}")
         .apply { check(mkdirs()) }
@@ -178,6 +180,12 @@ internal class CareLogRoomAcceptanceRig : AutoCloseable {
             conflictSnapshotCacheDao = db.conflictSnapshotCacheDao(),
             sourceRelationDao = db.sourceRelationDao(),
             recordWakeProjectionDao = db.timelineWindowDao(),
+            systemCalendarWriteMaxElapsedMillis =
+                com.lezi.babylog.domain.calendar.SYSTEM_CALENDAR_WRITE_MAX_ELAPSED_MILLIS,
+            digestPhotoFile = { path ->
+                beforePhotoDigest(path)
+                com.lezi.babylog.core.common.MediaContentDigest.ofReadableFile(path)
+            },
         )
     }
 

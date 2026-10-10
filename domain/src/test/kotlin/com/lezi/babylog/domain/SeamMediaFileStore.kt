@@ -14,7 +14,7 @@ internal class SeamMediaFileStore(val root: File) : SyncMediaFileStore {
         .filter { it.isFile && it.name.endsWith(".media") }.toList()
 
     fun syntheticPhoto(): String = File(root, "source-${UUID.randomUUID()}.jpg").apply {
-        parentFile.mkdirs()
+        requireNotNull(parentFile).mkdirs()
         writeBytes(ByteArray(37) { (it * 7 + 3).toByte() })
     }.absolutePath
 
@@ -33,7 +33,7 @@ internal class SeamMediaFileStore(val root: File) : SyncMediaFileStore {
 
     override suspend fun saveDownloaded(clientUuid: String, kind: String, bytes: ByteArray, mime: String?): String =
         File(root, "$kind-$clientUuid.jpg").apply {
-            parentFile.mkdirs()
+            requireNotNull(parentFile).mkdirs()
             writeBytes(bytes)
         }.absolutePath
 
