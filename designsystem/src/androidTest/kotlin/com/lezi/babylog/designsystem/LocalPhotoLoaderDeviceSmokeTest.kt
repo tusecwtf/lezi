@@ -170,6 +170,18 @@ class LocalPhotoLoaderDeviceSmokeTest {
         val visiblePaths = mutableStateOf<List<String>>(emptyList())
         var observedWindow: Window? = null
         var listenerAttached = false
+        var choreographer: Choreographer? = null
+        var currentFrameTimeNanos = 0L
+        // Public frame callbacks run before traversal. Keep the current frame's
+        // timestamp for Ready's actual draw, rather than sampling a wall clock.
+        val frameCallback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (listenerAttached) {
+                    currentFrameTimeNanos = frameTimeNanos
+                    requireNotNull(choreographer).postFrameCallback(this)
+                }
+            }
+        }
         // Draw and FrameMetrics callbacks both run on Android Main. Publication to
         // the instrumentation thread happens only after the terminal report arrives.
         val readyDrawFrames = LongArray(3)
@@ -187,6 +199,7 @@ class LocalPhotoLoaderDeviceSmokeTest {
                     // the platform dropped that report). No Loading-only snapshot.
                     window.removeOnFrameMetricsAvailableListener(listener)
                     listenerAttached = false
+                    choreographer?.removeFrameCallback(frameCallback)
                     completed.set(PhotoFrameWindow(
                         durations = samples.toList(),
                         droppedReports = droppedReports.get(),
@@ -217,6 +230,7 @@ class LocalPhotoLoaderDeviceSmokeTest {
                         if (observedWindow === window) {
                             if (listenerAttached) window.removeOnFrameMetricsAvailableListener(listener)
                             listenerAttached = false
+                            choreographer?.removeFrameCallback(frameCallback)
                             observedWindow = null
                         }
                     }
@@ -231,7 +245,10 @@ class LocalPhotoLoaderDeviceSmokeTest {
                                     modifier = Modifier.size(72.dp).drawWithContent {
                                         drawContent()
                                         if (readyDrawFrames[index] == 0L) {
-                                            readyDrawFrames[index] = Choreographer.getInstance().frameTimeNanos
+                                            check(currentFrameTimeNanos > 0L) {
+                                                "Ready image drew before the public frame callback"
+                                            }
+                                            readyDrawFrames[index] = currentFrameTimeNanos
                                             if (readyDrawFrames.all { it > 0L }) {
                                                 readyDrawFenceNanos = readyDrawFrames.max()
                                             }
@@ -252,6 +269,9 @@ class LocalPhotoLoaderDeviceSmokeTest {
                     listener, Handler(Looper.getMainLooper()),
                 )
                 listenerAttached = true
+                choreographer = Choreographer.getInstance().also {
+                    it.postFrameCallback(frameCallback)
+                }
                 // Unique paths have never entered the application image cache. This
                 // does not assert that the operating-system page cache was flushed.
                 visiblePaths.value = paths
@@ -285,6 +305,8 @@ class LocalPhotoLoaderDeviceSmokeTest {
             instrumentation.runOnMainSync {
                 if (listenerAttached) observedWindow?.removeOnFrameMetricsAvailableListener(listener)
                 listenerAttached = false
+                choreographer?.removeFrameCallback(frameCallback)
+                choreographer = null
                 observedWindow = null
                 visiblePaths.value = emptyList()
             }

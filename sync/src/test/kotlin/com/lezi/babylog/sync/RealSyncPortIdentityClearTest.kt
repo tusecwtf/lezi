@@ -408,16 +408,23 @@ class RealSyncPortIdentityClearTest {
         assertThat(preferences.pendingDeviceRemovalClear).isTrue()
 
         val resumedGate = TestRemovedDeviceLocalClearGate()
-        val resumedRig = SyncRig(
+        val deviceMarkerRetired = CompletableDeferred<Unit>()
+        SyncRig(
             session = original,
             syncPreferences = preferences,
+            ownedPreferences = object : SyncPreferences by preferences {
+                override suspend fun clearPendingDeviceRemovalClear() {
+                    preferences.clearPendingDeviceRemovalClear()
+                    deviceMarkerRetired.complete(Unit)
+                }
+            },
             removedDeviceLocalClearGate = resumedGate,
         )
         resumedGate.firstCall.await()
-        withTimeout(2_000) { preferences.session.filter { !it.isJoined }.first() }
-        // The durable marker retires strictly after the session flip inside the
-        // same recovery: await the recovery instead of racing its edits.
-        resumedRig.awaitStartupRecovery()
+        // Empty session is published before the terminal marker retires. The
+        // startup first-load signal precedes both and cannot fence this phase.
+        // Await the actual marker write, without virtual time or IO timing guesses.
+        deviceMarkerRetired.await()
         assertThat(preferences.current()).isEqualTo(SyncSession())
         assertThat(preferences.pendingDeviceRemovalClear).isFalse()
     }

@@ -412,14 +412,14 @@ class CareLogRealServerSeamResourceSaturationTest {
      *  terminal shape (branches and pending markers compacted, durable
      *  resolution evidence kept) with a bounded deadline. */
     private fun awaitRetentionSweep(db: File, conflictId: String): ResourceCounts {
-        val deadline = System.currentTimeMillis() + 10_000L
-        var counts = queryResourceCounts(db, conflictId)
+        val deadline = System.nanoTime() + 10_000_000_000L
+        var counts = queryResourceCounts(db, conflictId, deadline)
         while (
-            System.currentTimeMillis() < deadline &&
+            System.nanoTime() < deadline &&
             (counts.branchRows != 0L || counts.pendingMarkers != 0L)
         ) {
             Thread.sleep(50L)
-            counts = queryResourceCounts(db, conflictId)
+            counts = queryResourceCounts(db, conflictId, deadline)
         }
         return counts
     }
@@ -434,10 +434,22 @@ class CareLogRealServerSeamResourceSaturationTest {
         val completeMarkers: Long,
     )
 
-    private fun queryResourceCounts(db: File, conflictId: String): ResourceCounts {
+    private fun queryResourceCounts(
+        db: File,
+        conflictId: String,
+        deadlineNanos: Long = System.nanoTime() + 10_000_000_000L,
+    ): ResourceCounts {
         fun scalar(sql: String): Long {
+            // The production retention sweep may hold SQLite's writer/schema
+            // lock. Use SQLite's own busy handler, bounded by the existing probe
+            // deadline; do not discard errors or fabricate an empty snapshot.
+            val busyMillis = ((deadlineNanos - System.nanoTime()) / 1_000_000L)
+                .coerceAtMost(5_000L)
+            check(busyMillis > 0) { "retention observation deadline exhausted" }
             val process = ProcessBuilder(
                 "sqlite3",
+                "-batch",
+                "-cmd", ".timeout $busyMillis",
                 db.absolutePath,
                 sql,
             ).redirectErrorStream(true).start()

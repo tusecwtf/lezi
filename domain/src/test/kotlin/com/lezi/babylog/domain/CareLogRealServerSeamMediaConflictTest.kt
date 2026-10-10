@@ -20,7 +20,7 @@ class CareLogRealServerSeamMediaConflictTest {
             CareLogRealServerSeamFixture.open(mediaEnabled = true).use { fixture ->
                 val peer = fixture.joinExtraOwner("media-branch")
                 val babyId = fixture.owner.careLog.createBaby(CreateBabyInput(
-                    "Synthetic conflict history", birthdayEpochDay = 20_000L,
+                    "Conflict history", birthdayEpochDay = 20_000L,
                 ))
                 fixture.owner.settleLocalWrite()
                 val resolvedHistory = mutableListOf<String>()
@@ -55,7 +55,7 @@ class CareLogRealServerSeamMediaConflictTest {
         CareLogRealServerSeamFixture.open(mediaEnabled = true).use { fixture ->
             val otherOwner = fixture.joinExtraOwner("remaining-branch")
             val babyId = fixture.owner.careLog.createBaby(CreateBabyInput(
-                "Synthetic withdrawals", birthdayEpochDay = 20_000L,
+                "Withdrawals", birthdayEpochDay = 20_000L,
             ))
             fixture.owner.settleLocalWrite()
             val uuid = seedAndBranch(
@@ -105,7 +105,7 @@ class CareLogRealServerSeamMediaConflictTest {
                     val other = fixture.joinExtraOwner("window-branch")
                     val target = fixture.member
                     val babyId = fixture.owner.careLog.createBaby(CreateBabyInput(
-                        "Synthetic cleanup window", birthdayEpochDay = 20_000L,
+                        "Cleanup window", birthdayEpochDay = 20_000L,
                     ))
                     fixture.owner.settleLocalWrite()
                     val uuid = seedAndBranch(

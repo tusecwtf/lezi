@@ -18,7 +18,7 @@ class CareLogRealServerSeamWakeWithdrawalTest {
                         val observer = if (ownSleep) author else fixture.joinExtraMember("wake-observer")
                         val selector = if (ownerSelects) fixture.owner else author
                         val babyId = fixture.owner.careLog.createBaby(CreateBabyInput(
-                            nickname = "Synthetic wake matrix", birthdayEpochDay = 20_000L,
+                            nickname = "Wake matrix", birthdayEpochDay = 20_000L,
                         ))
                         fixture.owner.settleLocalWrite()
                         fixture.pullAll()
