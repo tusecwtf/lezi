@@ -2,14 +2,20 @@
 
 ## Public GitHub mirror (snapshot only)
 
-GitHub holds a privacy-filtered snapshot of `master` — never real history. The
-only supported path is the untracked `.scratch/github-snapshot-push.sh`, which
-excludes `.scratch/`, rewrites known local identifiers (account numbers, home
-paths, LAN hosts) to synthetic values, and fail-closes on a privacy scan before
-pushing. Direct `git push github` is disabled at the remote push URL. Real
-operator values never live in tracked files — they sit in untracked
-`tools/lezi-sync/deploy/env.local`. Local history and the private Gitea remote
-keep full fidelity.
+GitHub holds a privacy-filtered snapshot of `master` — never real history.
+Publishing is automatic and needs no extra command: pushing `master` to
+`origin` (Gitea) triggers the local `pre-push` hook, which runs the untracked
+`.scratch/github-snapshot-push.sh` — drop `.scratch/`, rewrite known local
+identifiers (account numbers, home paths, LAN hosts) to synthetic values, run
+the fail-closed privacy scan, then push one synthetic commit via an explicit
+URL. A scan failure aborts the push itself (bypass once with
+`LEZI_SKIP_PUBLIC_SNAPSHOT=1`); a GitHub network failure only warns and the
+mirror catches up on the next push. Manual runs still work:
+`.scratch/github-snapshot-push.sh [--check]`. Direct `git push github` stays
+disabled at the remote push URL — the histories share no ancestor, so a normal
+push would publish full history. Real operator values never live in tracked
+files — they sit in untracked `tools/lezi-sync/deploy/env.local`. Local
+history and the private Gitea remote keep full fidelity.
 
 ## Project Structure & Module Organization
 
