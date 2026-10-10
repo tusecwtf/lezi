@@ -32,10 +32,37 @@ internal class SeamMediaFileStore(val root: File) : SyncMediaFileStore {
     }
 
     override suspend fun saveDownloaded(clientUuid: String, kind: String, bytes: ByteArray, mime: String?): String =
-        File(root, "$kind-$clientUuid.jpg").apply {
-            requireNotNull(parentFile).mkdirs()
-            writeBytes(bytes)
-        }.absolutePath
+        saveDownloadedOwned(clientUuid, kind, bytes, mime) {}
+
+    override suspend fun saveDownloadedOwned(
+        clientUuid: String,
+        kind: String,
+        bytes: ByteArray,
+        mime: String?,
+        reserve: suspend (String) -> Unit,
+    ): String {
+        require(bytes.isNotEmpty())
+        val safeUuid = UUID.fromString(clientUuid).toString()
+        val target = File(root, "$kind-$safeUuid.jpg")
+        require(target.canonicalFile.parentFile == root.canonicalFile)
+        val localUri = target.absolutePath
+        // The production engine owns this reservation. No downloaded bytes or
+        // temporary file may be created before its callback succeeds.
+        reserve(localUri)
+        check(root.exists() || root.mkdirs())
+        val temporary = File.createTempFile(".download-", ".tmp", root)
+        try {
+            temporary.outputStream().use { output -> output.write(bytes); output.fd.sync() }
+            java.nio.file.Files.move(temporary.toPath(), target.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            java.nio.channels.FileChannel.open(root.toPath(), java.nio.file.StandardOpenOption.READ)
+                .use { it.force(true) }
+        } finally {
+            temporary.delete()
+        }
+        return localUri
+    }
 
     override suspend fun delete(localUri: String) {
         val file = File(localUri).canonicalFile

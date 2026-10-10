@@ -103,7 +103,11 @@ class CareLogRealServerSeamMediaConflictTest {
             for (afterUnlink in listOf(false, true)) {
                 CareLogRealServerSeamFixture.open(mediaEnabled = true).use { fixture ->
                     val other = fixture.joinExtraOwner("window-branch")
-                    val target = fixture.member
+                    // Active conflict resolution requires an Owner even when
+                    // the branch was authored locally. Keep partial withdrawal
+                    // on the ordinary Member to preserve its ACL coverage.
+                    val target = if (action == "local-resolve") fixture.joinExtraOwner("local-window")
+                        else fixture.member
                     val babyId = fixture.owner.careLog.createBaby(CreateBabyInput(
                         "Cleanup window", birthdayEpochDay = 20_000L,
                     ))
@@ -142,19 +146,23 @@ class CareLogRealServerSeamMediaConflictTest {
                     // verified below after the normal recovery round.
                     runCatching {
                         if (action.endsWith("resolve")) {
-                            actor.resolveOpenConflict(conflictId)
+                            val (_, outcome) = actor.resolveOpenConflict(conflictId)
+                            assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Accepted::class.java)
                         } else {
                             val snapshot = actor.loadConflict(conflictId).snapshot
-                            actor.careLog.withdrawConflictBranches(conflictId, ConflictWithdrawRequest(
+                            val outcome = actor.careLog.withdrawConflictBranches(conflictId, ConflictWithdrawRequest(
                                 withdrawalMutationId = UUID.randomUUID().toString(),
                                 expectedStableVersionId = snapshot.stable.versionId,
                                 expectedBranchVersionIds = snapshot.branches.map { it.versionId }.sorted(),
                             ))
+                            assertThat(outcome).isInstanceOf(ConflictResolveOutcome.Withdrawn::class.java)
                         }
-                    }
+                    }.exceptionOrNull()?.let(::rethrowUnlessInjectedUnlinkFailure)
                     target.foreground.setForeground(true)
                     runCatching { target.pullForeground() }
-                    assertThat(observedWindow).isTrue()
+                        .exceptionOrNull()?.let(::rethrowUnlessInjectedUnlinkFailure)
+                    com.google.common.truth.Truth.assertWithMessage("action=$action afterUnlink=$afterUnlink")
+                        .that(observedWindow).isTrue()
                     target.pullForeground()
                     assertThat(files.spoolMediaFiles()).isEmpty()
                     assertThat(target.fakes.conflictSnapshotCache.listFrozenMediaSpoolManifests()).isEmpty()
@@ -172,6 +180,13 @@ class CareLogRealServerSeamMediaConflictTest {
                 }
             }
         }
+    }
+
+    private fun rethrowUnlessInjectedUnlinkFailure(failure: Throwable) {
+        val injected = generateSequence(failure) { it.cause }.any {
+            it is java.io.IOException && it.message == "synthetic ordinary branch unlink interruption"
+        }
+        if (!injected) throw failure
     }
 
     private fun branchVersion(manifest: String): String = Json.parseToJsonElement(manifest)

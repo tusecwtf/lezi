@@ -408,7 +408,8 @@ internal class SeamClient private constructor(
                         idleStreak = 0
                         val drained = port.sync(SyncTrigger.Foreground)
                         if (drained.isFailure) {
-                            error("$label sync error: ${drained.exceptionOrNull()}")
+                            throw IllegalStateException("$label sync error: ${drained.exceptionOrNull()}",
+                                drained.exceptionOrNull())
                         }
                     }
                     else -> idleStreak = 0
@@ -428,7 +429,9 @@ internal class SeamClient private constructor(
 
     suspend fun pullForeground() {
         val result = port.sync(SyncTrigger.Foreground)
-        check(result.isSuccess) { "$label Foreground pull failed: ${result.exceptionOrNull()}" }
+        result.exceptionOrNull()?.let { failure ->
+            throw IllegalStateException("$label Foreground pull failed: $failure", failure)
+        }
         awaitIdle()
     }
 
