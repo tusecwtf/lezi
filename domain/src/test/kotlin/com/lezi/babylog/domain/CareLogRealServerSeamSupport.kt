@@ -423,7 +423,9 @@ internal class SeamClient private constructor(
         // notifyLocalChanges is async via the process actor; drive the same LocalWrite plan
         // explicitly so the acceptance fixture is deterministic under JVM unit tests.
         val result = port.sync(SyncTrigger.LocalWrite)
-        check(result.isSuccess) { "$label LocalWrite failed: ${result.exceptionOrNull()}" }
+        result.exceptionOrNull()?.let { failure ->
+            throw IllegalStateException("$label LocalWrite failed: $failure", failure)
+        }
         awaitIdle()
     }
 

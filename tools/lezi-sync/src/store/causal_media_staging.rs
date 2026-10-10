@@ -460,7 +460,10 @@ fn replay_empty_existing_row(
     if row.sha256 != expected_sha256 || row.byte_size == 0 {
         return Err(StoreError::CausalMediaPreimageConflict);
     }
-    if row.membership_id != principal.membership_id {
+    // Consumed media is already family authority (the same rule as claim_manifest).
+    // Replaying its immutable receipt does not transfer ownership or accept bytes.
+    // Unconsumed staging remains private to the original preparing membership.
+    if row.status != StagingStatus::Consumed && row.membership_id != principal.membership_id {
         return Err(StoreError::CausalMediaMembershipMismatch);
     }
     readable_receipt_blob(

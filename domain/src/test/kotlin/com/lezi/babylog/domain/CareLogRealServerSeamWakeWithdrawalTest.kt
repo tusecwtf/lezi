@@ -13,6 +13,7 @@ class CareLogRealServerSeamWakeWithdrawalTest {
         for (photos in listOf(false, true)) {
             for (ownSleep in listOf(false, true)) {
                 for (ownerSelects in listOf(false, true)) {
+                    println("SEAM[wake-withdrawal] photos=$photos ownSleep=$ownSleep ownerSelects=$ownerSelects")
                     CareLogRealServerSeamFixture.open(mediaEnabled = true).use { fixture ->
                         val author = fixture.member
                         val observer = if (ownSleep) author else fixture.joinExtraMember("wake-observer")

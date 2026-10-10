@@ -69,6 +69,15 @@ android {
     namespace = "com.lezi.babylog"
     compileSdk = 35
 
+    // The app selects Chinese independently of the device locale. Keep the
+    // configured zh/en resources together if an AAB is built; APK packaging
+    // and the resourceConfigurations filter below remain unchanged.
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
     defaultConfig {
         applicationId = "com.lezi.babylog"
         minSdk = 26

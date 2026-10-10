@@ -16,6 +16,7 @@ import org.junit.Test
 class CareLogRealServerSeamMediaConflictTest {
     @Test(timeout = 600_000)
     fun hundredResolvedMediaGroupsDoNotHashHistoricalSpoolsOnQuietRounds() = runBlocking {
+        val deadlineNanos = System.nanoTime() + 550_000_000_000L
         SpoolHashCounter().use { hashes ->
             CareLogRealServerSeamFixture.open(mediaEnabled = true).use { fixture ->
                 val peer = fixture.joinExtraOwner("media-branch")
@@ -25,7 +26,8 @@ class CareLogRealServerSeamMediaConflictTest {
                 fixture.owner.settleLocalWrite()
                 val resolvedHistory = mutableListOf<String>()
                 repeat(100) { index ->
-                    val uuid = seedAndBranch(fixture, babyId, fixture.owner, listOf(peer), index)
+                    val uuid = seedAndBranch(fixture, babyId, fixture.owner, listOf(peer), index,
+                        settleWrite = { client -> settleAfterAdmissionWindow(client, index, deadlineNanos) })
                     val conflictId = requireNotNull(peer.openConflictIdForRecord(uuid))
                     // Alternate resolver location: branch's own device and remote stable device.
                     val resolver = if (index % 2 == 0) peer else fixture.owner
@@ -182,6 +184,41 @@ class CareLogRealServerSeamMediaConflictTest {
         }
     }
 
+    private suspend fun settleAfterAdmissionWindow(client: SeamClient, index: Int, deadlineNanos: Long) {
+        while (true) {
+            val remainingMillis = (deadlineNanos - System.nanoTime()) / 1_000_000L
+            check(remainingMillis > 0) { "100-group history setup exceeded its total budget" }
+            val result = runCatching {
+                kotlinx.coroutines.withTimeout(remainingMillis) { client.settleLocalWrite() }
+            }
+            val failure = result.exceptionOrNull()
+            if (failure == null) {
+                check(System.nanoTime() < deadlineNanos) { "100-group history setup returned after deadline" }
+                return
+            }
+            generateSequence(failure) { it.cause }
+                .filterIsInstance<kotlinx.coroutines.CancellationException>()
+                .firstOrNull()?.let { throw it }
+            if (RealServerHttpFailure.statusCode(failure) != 429) throw failure
+            val code = runCatching {
+                Json.parseToJsonElement(RealServerHttpFailure.responseBody(failure))
+                    .jsonObject["code"]?.jsonPrimitive?.content
+            }.getOrNull()
+            if (code !in setOf("causal_commit_principal_rate_limited", "causal_commit_family_rate_limited")) {
+                throw failure
+            }
+            val waitMillis = RealServerHttpFailure.retryAfterMillis(failure)
+            check(waitMillis != null && waitMillis > 0 &&
+                waitMillis < (deadlineNanos - System.nanoTime()) / 1_000_000L) {
+                "group=$index admission=$code has no usable Retry-After within setup budget"
+            }
+            println("SEAM[100-history] group=$index admission=$code Retry-After-ms=$waitMillis")
+            // A new public sync round resumes its existing frozen journal after
+            // the real server's delay. No new CareLog edit or mutation is created.
+            kotlinx.coroutines.delay(waitMillis)
+        }
+    }
+
     private fun rethrowUnlessInjectedUnlinkFailure(failure: Throwable) {
         val injected = generateSequence(failure) { it.cause }.any {
             it is java.io.IOException && it.message == "synthetic ordinary branch unlink interruption"
@@ -202,6 +239,7 @@ class CareLogRealServerSeamMediaConflictTest {
         branches: List<SeamClient>,
         index: Int,
         author: SeamClient = stable,
+        settleWrite: suspend (SeamClient) -> Unit = { it.settleLocalWrite() },
     ): String {
         fixture.pullAll()
         val babyUuid = requireNotNull(fixture.owner.fakes.babies.get(babyId)).clientUuid
@@ -215,7 +253,7 @@ class CareLogRealServerSeamMediaConflictTest {
             payloadJson = formulaPayloadJson(90),
             clientUuid = uuid,
         )
-        author.settleLocalWrite()
+        settleWrite(author)
         fixture.pullAll()
         val writers = listOf(stable) + branches
         writers.forEach { it.foreground.setForeground(false) }
@@ -231,7 +269,7 @@ class CareLogRealServerSeamMediaConflictTest {
         }
         writers.forEach {
             it.foreground.setForeground(true)
-            it.settleLocalWrite()
+            settleWrite(it)
         }
         fixture.pullAll()
         branches.forEach { assertThat(it.openConflictIdForRecord(uuid)).isNotNull() }
